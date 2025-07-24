@@ -1,0 +1,108 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+venv313/
+venv-py313/
+env/
+ENV/
+.env
+
+# Virtual environments
+bin/
+lib/
+lib64/
+include/
+pyvenv.cfg
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+meeting_sessions.db
+
+# Audio files and recordings
+*.wav
+*.mp3
+*.m4a
+*.flac
+recordings/
+audio_files/
+
+# ML Models (large files)
+*.onnx
+*.pt
+*.pth
+*.bin
+*.npubin
+whisper_models/
+whisper_onnx_cache/
+npu_kernels/
+*.xclbin
+
+# Node/Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+.npm
+.yarn
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+.dockerignore.local
+
+# Secrets and credentials
+secrets/
+credentials/
+*.key
+*.pem
+*.cert
+.env.local
+.env.production
+
+# Test files
+test_recording_*.wav
+test_audio.wav
+test_speech.wav
+pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+tmp/
+temp/
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Project specific
+data/
+storage/
+whisperx_py313/
+*.whl
+shafen_call*.txt
+shafen_call*.json
+
+# But DO track
+!.gitkeep
+!requirements*.txt
+!package*.json

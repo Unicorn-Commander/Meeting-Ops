@@ -1,0 +1,274 @@
+from datetime import datetime, timedelta
+from typing import Optional, List
+from sqlalchemy.orm import Session
+from sqlalchemy import or_
+import logging
+
+from auth.models import User, Organization, UserOrganization, AuditLog
+from auth.utils import (
+    get_password_hash, verify_password, validate_password,
+    create_access_token, create_refresh_token, generate_api_key,
+    sanitize_email, sanitize_username
+)
+from auth.config import auth_config
+
+logger = logging.getLogger(__name__)
+
+class AuthService:
+    """Service for authentication and user management"""
+    
+    @staticmethod
+    def create_user(
+        db: Session,
+        email: str,
+        username: str,
+        password: str,
+        full_name: Optional[str] = None,
+        organization_id: Optional[int] = None,
+        role: str = "user",
+        created_by_id: Optional[int] = None
+    ) -> User:
+        """Create a new user"""
+        # Validate inputs
+        email = sanitize_email(email)
+        username = sanitize_username(username)
+        
+        # Check if user already exists
+        if db.query(User).filter(or_(User.email == email, User.username == username)).first():
+            raise ValueError("User with this email or username already exists")
+        
+        # Validate password
+        valid, errors = validate_password(password)
+        if not valid:
+            raise ValueError(f"Invalid password: {', '.join(errors)}")
+        
+        # Create user
+        user = User(
+            email=email,
+            username=username,
+            hashed_password=get_password_hash(password),
+            full_name=full_name,
+            is_active=True,
+            is_verified=False
+        )
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        # Add to organization if specified
+        if organization_id:
+            user_org = UserOrganization(
+                user_id=user.id,
+                organization_id=organization_id,
+                role=role,
+                invited_by=created_by_id
+            )
+            db.add(user_org)
+            db.commit()
+        
+        # Log user creation
+        AuthService.log_action(
+            db, user.id, "user_created", "user", str(user.id),
+            details={"email": email, "username": username}
+        )
+        
+        logger.info(f"Created new user: {username} ({email})")
+        return user
+    
+    @staticmethod
+    def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
+        """Authenticate a user with username/email and password"""
+        # Try to find user by username or email
+        user = db.query(User).filter(
+            or_(User.username == username.lower(), User.email == username.lower())
+        ).first()
+        
+        if not user:
+            return None
+        
+        # Check if account is locked
+        if user.locked_until and user.locked_until > datetime.utcnow():
+            logger.warning(f"Login attempt for locked account: {username}")
+            return None
+        
+        # Verify password
+        if not verify_password(password, user.hashed_password):
+            # Increment failed login attempts
+            user.failed_login_attempts += 1
+            
+            # Lock account if too many failed attempts
+            if user.failed_login_attempts >= auth_config.MAX_LOGIN_ATTEMPTS:
+                user.locked_until = datetime.utcnow() + timedelta(
+                    minutes=auth_config.LOCKOUT_DURATION_MINUTES
+                )
+                logger.warning(f"Account locked due to failed login attempts: {username}")
+            
+            db.commit()
+            return None
+        
+        # Reset failed login attempts on successful login
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        user.last_login = datetime.utcnow()
+        db.commit()
+        
+        # Log successful login
+        AuthService.log_action(db, user.id, "login", "user", str(user.id))
+        
+        return user
+    
+    @staticmethod
+    def create_tokens(user: User, organization_id: Optional[int] = None) -> dict:
+        """Create access and refresh tokens for a user"""
+        # Get user's primary organization if not specified
+        if not organization_id and user.organizations:
+            organization_id = user.organizations[0].organization_id
+        
+        token_data = {
+            "sub": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "org_id": organization_id
+        }
+        
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+    
+    @staticmethod
+    def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
+        """Get user by ID"""
+        return db.query(User).filter(User.id == user_id).first()
+    
+    @staticmethod
+    def get_user_by_email(db: Session, email: str) -> Optional[User]:
+        """Get user by email"""
+        return db.query(User).filter(User.email == email.lower()).first()
+    
+    @staticmethod
+    def get_user_by_api_key(db: Session, api_key: str) -> Optional[User]:
+        """Get user by API key"""
+        return db.query(User).filter(User.api_key == api_key).first()
+    
+    @staticmethod
+    def update_user(
+        db: Session,
+        user_id: int,
+        full_name: Optional[str] = None,
+        department: Optional[str] = None,
+        phone: Optional[str] = None,
+        avatar_url: Optional[str] = None
+    ) -> User:
+        """Update user profile"""
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("User not found")
+        
+        if full_name is not None:
+            user.full_name = full_name
+        if department is not None:
+            user.department = department
+        if phone is not None:
+            user.phone = phone
+        if avatar_url is not None:
+            user.avatar_url = avatar_url
+        
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(user)
+        
+        return user
+    
+    @staticmethod
+    def change_password(db: Session, user_id: int, old_password: str, new_password: str) -> bool:
+        """Change user password"""
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False
+        
+        # Verify old password
+        if not verify_password(old_password, user.hashed_password):
+            return False
+        
+        # Validate new password
+        valid, errors = validate_password(new_password)
+        if not valid:
+            raise ValueError(f"Invalid password: {', '.join(errors)}")
+        
+        # Update password
+        user.hashed_password = get_password_hash(new_password)
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        
+        # Log password change
+        AuthService.log_action(db, user_id, "password_changed", "user", str(user_id))
+        
+        return True
+    
+    @staticmethod
+    def generate_user_api_key(db: Session, user_id: int) -> str:
+        """Generate a new API key for a user"""
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("User not found")
+        
+        # Generate new API key
+        api_key = generate_api_key()
+        user.api_key = api_key
+        user.api_key_created_at = datetime.utcnow()
+        db.commit()
+        
+        # Log API key generation
+        AuthService.log_action(db, user_id, "api_key_generated", "user", str(user_id))
+        
+        return api_key
+    
+    @staticmethod
+    def get_user_role(db: Session, user_id: int, organization_id: int) -> Optional[str]:
+        """Get user's role in an organization"""
+        user_org = db.query(UserOrganization).filter(
+            UserOrganization.user_id == user_id,
+            UserOrganization.organization_id == organization_id
+        ).first()
+        
+        if user_org:
+            return user_org.role
+        
+        # Check if user is superuser
+        user = db.query(User).filter(User.id == user_id).first()
+        if user and user.is_superuser:
+            return "superuser"
+        
+        return None
+    
+    @staticmethod
+    def log_action(
+        db: Session,
+        user_id: int,
+        action: str,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        details: Optional[dict] = None,
+        organization_id: Optional[int] = None
+    ):
+        """Log an audit action"""
+        audit_log = AuditLog(
+            user_id=user_id,
+            organization_id=organization_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details
+        )
+        db.add(audit_log)
+        db.commit()

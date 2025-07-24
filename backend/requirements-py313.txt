@@ -1,0 +1,66 @@
+# Core Web Framework
+fastapi==0.115.14
+uvicorn==0.35.0
+websockets==12.0
+aiofiles==24.1.0
+
+# Database
+sqlalchemy==2.0.32
+
+# Audio Processing
+pyaudio==0.2.14
+soundfile==0.13.1
+
+# Authentication & Security
+bcrypt==4.2.1
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.12
+passlib[bcrypt]==1.7.4
+pyjwt==2.8.0
+cryptography==42.0.0
+
+# ML & AI Core (Python 3.13 compatible!)
+numpy==2.3.1
+torch==2.7.1
+torchaudio==2.7.1
+onnxruntime==1.22.0
+
+# Speech Recognition & Diarization
+pyannote.audio==3.3.2
+faster-whisper==1.1.1
+# Note: whisperx replaced with our Python 3.13 compatible version
+
+# NLP & Transformers
+transformers==4.53.2
+sentence-transformers==5.0.0
+nltk==3.9.1
+
+# LLM APIs
+openai==1.54.4
+anthropic==0.40.0
+
+# HTTP & Networking
+httpx==0.28.1
+requests==2.32.4
+
+# Data Processing
+pandas==2.3.1
+networkx==3.3
+
+# Utilities
+psutil==5.9.8
+pydantic==2.11.7
+pydantic_core==2.33.2
+jinja2==3.1.4
+reportlab==4.0.4
+librosa==0.10.2
+
+# Monitoring & Logging
+tensorboardX==2.6.4
+
+# Development dependencies (optional)
+pytest==8.0.0
+black==24.0.0
+isort==5.13.0
+mypy==1.8.0
+flake8==7.0.0

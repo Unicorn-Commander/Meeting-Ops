@@ -1,0 +1,457 @@
+"""
+Unified Transcription Service
+Manages dynamic model switching and unified transcription interface
+"""
+import logging
+import asyncio
+import time
+from typing import Dict, List, Optional, Any, Union
+from datetime import datetime
+import numpy as np
+
+from services.settings_manager import settings_manager
+from services.stt_model_manager import stt_model_manager
+
+from npu_runtime import NPURuntime
+from services.performance_metrics_service import performance_metrics_service
+
+logger = logging.getLogger(__name__)
+
+class TranscriptionResult:
+    """Standardized transcription result"""
+    
+    def __init__(self, 
+                 text: str, 
+                 confidence: float = 0.0,
+                 start_time: Optional[float] = None,
+                 end_time: Optional[float] = None,
+                 speaker_id: Optional[str] = None,
+                 language: Optional[str] = None,
+                 segments: Optional[List[Dict]] = None):
+        self.text = text
+        self.confidence = confidence
+        self.start_time = start_time
+        self.end_time = end_time
+        self.speaker_id = speaker_id
+        self.language = language
+        self.segments = segments or []
+        
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text": self.text,
+            "confidence": self.confidence,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "speaker_id": self.speaker_id,
+            "language": self.language,
+            "segments": self.segments
+        }
+
+class TranscriptionService:
+    """Unified transcription service with dynamic model switching"""
+    
+    def __init__(self):
+        self.current_engine = None
+        self.current_model_id = None
+        self.is_ready = False
+        self._models = {}
+        
+        # Initialize with default model
+        logger.info("Attempting to initialize default model...")
+        self._initialize_default_model()
+        logger.info(f"Default model initialization complete. is_ready: {self.is_ready}, current_model_id: {self.current_model_id}")
+    
+    def _initialize_default_model(self):
+        """Initialize with the default STT model"""
+        try:
+            current_model = settings_manager.get_setting("ai.whisper_model")
+            if not current_model:
+                current_model = "whisperx-npu-unified"
+            self.switch_model(current_model)
+        except Exception as e:
+            logger.error(f"Failed to initialize default model: {e}")
+            # Fall back to basic ONNX model
+            self._initialize_fallback_model()
+    
+    def _initialize_fallback_model(self):
+        """Initialize basic ONNX fallback model"""
+        try:
+            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
+            self.current_engine = ONNXWhisperNPUTranscriber()
+            if self.current_engine.initialize(model_size="base"):
+                self.current_model_id = "whisper-base"
+                self.is_ready = True
+                logger.info("✅ Fallback ONNX transcriber initialized")
+            else:
+                logger.error("❌ Failed to initialize fallback transcriber")
+        except Exception as e:
+            logger.error(f"Failed to initialize fallback model: {e}")
+    
+    def _initialize_npu_runtime(self):
+        """Initialize custom NPURuntime"""
+        try:
+            engine = NPURuntime(device_path='/dev/accel/accel0')
+            if engine.open_device():
+                # Load whisper model (will use downloaded ONNX models)
+                if engine.load_model("whisper-base"):
+                    logger.info("✅ NPURuntime engine initialized and model loaded")
+                    return engine
+                else:
+                    logger.error("❌ Failed to load Whisper model in NPURuntime")
+                    return None
+            else:
+                logger.error("❌ Failed to open NPU device")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to initialize NPURuntime: {e}")
+            return None
+    
+    def switch_model(self, model_id: str) -> bool:
+        """Switch to a different STT model"""
+        try:
+            if model_id == self.current_model_id and self.is_ready:
+                logger.info(f"Model {model_id} already active")
+                return True
+            
+            logger.info(f"Attempting to switch to model: {model_id}")
+            
+            # Get model info
+            model_info = stt_model_manager.NPU_MODELS.get(model_id)
+            if not model_info:
+                logger.error(f"Unknown model: {model_id}")
+                return False
+            
+            # Clean up current engine
+            if self.current_engine:
+                logger.info("Cleaning up current engine...")
+                try:
+                    if hasattr(self.current_engine, 'cleanup'):
+                        self.current_engine.cleanup()
+                    self.current_engine = None # Ensure it's set to None after cleanup
+                except Exception as e:
+                    logger.warning(f"Error cleaning up previous engine: {e}")
+            
+            # Initialize new engine based on model type
+            engine_type = model_info.get("source", "")
+            logger.info(f"Initializing new engine for model type: {engine_type}")
+            if model_id == "npu-runtime":
+                self.current_engine = self._initialize_npu_runtime()
+            elif model_id == "whisperx-npu-unified":
+                self.current_engine = self._initialize_whisperx_unified()
+            elif model_id == "whisperx-npu":
+                self.current_engine = self._initialize_whisperx_npu()
+            elif model_id == "whisper-onnx-npu":
+                self.current_engine = self._initialize_onnx_npu()
+            elif model_id == "diarization-npu":
+                self.current_engine = self._initialize_diarization_npu()
+            elif model_id in ["whisper-base", "whisper-small", "whisper-medium"]:
+                self.current_engine = self._initialize_onnx_cpu(model_id)
+            elif model_id == "pyannote-diarization":
+                self.current_engine = self._initialize_pyannote()
+            else:
+                logger.error(f"Unsupported model: {model_id}")
+                return False
+            
+            if self.current_engine:
+                self.current_model_id = model_id
+                self.is_ready = True
+                logger.info(f"New engine initialized. is_ready: {self.is_ready}, current_model_id: {self.current_model_id}")
+                
+                # Update settings
+                settings_manager.update_setting("ai.whisper_model", model_id)
+                
+                logger.info(f"✅ Successfully switched to {model_info['name']}")
+                return True
+            else:
+                logger.error(f"Failed to initialize {model_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error switching to model {model_id}: {e}")
+            return False
+    
+    def _initialize_whisperx_unified(self):
+        """Initialize WhisperX unified transcription + diarization"""
+        try:
+            from npu_optimization.whisperx_npu_engine_real import WhisperXNPUEngine
+            engine = WhisperXNPUEngine()
+            if engine.initialize():
+                logger.info("✅ WhisperX NPU Unified engine initialized")
+                return engine
+        except ImportError:
+            logger.warning("WhisperX NPU engine not available, falling back to ONNX")
+            return self._initialize_onnx_npu()
+        except Exception as e:
+            logger.error(f"Failed to initialize WhisperX unified: {e}")
+        return None
+    
+    def _initialize_whisperx_npu(self):
+        """Initialize WhisperX NPU transcription only"""
+        try:
+            from npu_optimization.whisperx_npu_engine_real import WhisperXNPUEngine
+            engine = WhisperXNPUEngine(enable_diarization=False)
+            if engine.initialize():
+                logger.info("✅ WhisperX NPU engine initialized")
+                return engine
+        except ImportError:
+            logger.warning("WhisperX NPU engine not available, falling back to ONNX")
+            return self._initialize_onnx_npu()
+        except Exception as e:
+            logger.error(f"Failed to initialize WhisperX NPU: {e}")
+        return None
+    
+    def _initialize_onnx_npu(self):
+        """Initialize ONNX NPU transcriber"""
+        try:
+            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
+            engine = ONNXWhisperNPUTranscriber()
+            if engine.initialize(model_size="base"):
+                logger.info("✅ ONNX NPU transcriber initialized")
+                return engine
+        except Exception as e:
+            logger.error(f"Failed to initialize ONNX NPU: {e}")
+        return None
+    
+    def _initialize_diarization_npu(self):
+        """Initialize NPU speaker diarization"""
+        try:
+            from stt_engine.speaker_diarization import SpeakerDiarizer
+            engine = SpeakerDiarizer()
+            if engine.initialize():
+                logger.info("✅ NPU diarization engine initialized")
+                return engine
+        except Exception as e:
+            logger.error(f"Failed to initialize diarization NPU: {e}")
+        return None
+    
+    def _initialize_onnx_cpu(self, model_id: str):
+        """Initialize ONNX CPU transcriber"""
+        try:
+            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
+            engine = ONNXWhisperNPUTranscriber()
+            
+            # Map model ID to size
+            model_size_map = {
+                "whisper-base": "base",
+                "whisper-small": "small", 
+                "whisper-medium": "medium"
+            }
+            model_size = model_size_map.get(model_id, "base")
+            
+            if engine.initialize(model_size=model_size):
+                logger.info(f"✅ ONNX CPU transcriber initialized ({model_size})")
+                return engine
+        except Exception as e:
+            logger.error(f"Failed to initialize ONNX CPU {model_id}: {e}")
+        return None
+    
+    def _initialize_pyannote(self):
+        """Initialize Pyannote speaker diarization"""
+        try:
+            from stt_engine.speaker_diarization import SpeakerDiarizer
+            engine = SpeakerDiarizer(use_pyannote=True)
+            if engine.initialize():
+                logger.info("✅ Pyannote diarization engine initialized")
+                return engine
+        except Exception as e:
+            logger.error(f"Failed to initialize Pyannote: {e}")
+        return None
+    
+    def process_audio_chunk(self, audio_data: bytes, session_id: Optional[str] = None) -> Optional[TranscriptionResult]:
+        """Process audio chunk and return transcription"""
+        if not self.is_ready or not self.current_engine:
+            logger.warning("Transcription service not ready")
+            return None
+        
+        # Performance tracking
+        start_time = time.time()
+        audio_duration = 0
+        words_transcribed = 0
+        speakers_detected = 0
+        confidence_avg = 0.0
+        
+        try:
+            # Convert bytes to numpy array if needed
+            if isinstance(audio_data, bytes):
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                audio_array = audio_data
+            
+            logger.debug(f"Processing audio chunk: shape={audio_array.shape}, dtype={audio_array.dtype}")
+
+            # Calculate audio duration
+            audio_duration = len(audio_array) / 16000  # Assuming 16kHz sample rate
+            logger.debug(f"Audio duration: {audio_duration:.3f}s")
+            
+            # Call the appropriate transcription method based on engine type
+            if hasattr(self.current_engine, 'transcribe_chunk'):
+                logger.debug("Calling transcribe_chunk on current_engine")
+                result = self.current_engine.transcribe_chunk(audio_array, session_id)
+            elif hasattr(self.current_engine, 'transcribe'):
+                logger.debug("Calling transcribe on current_engine")
+                result = self.current_engine.transcribe(audio_array)
+            else:
+                logger.error("Current engine doesn't support transcription")
+                return None
+            
+            logger.debug(f"Raw transcription result: {result}")
+
+            # Process result and extract metrics
+            if result:
+                standardized_result = self._standardize_result(result)
+                logger.debug(f"Standardized result: {standardized_result.to_dict()}")
+                
+                # Extract performance metrics
+                if standardized_result.text:
+                    words_transcribed = len(standardized_result.text.split())
+                confidence_avg = standardized_result.confidence
+                
+                # Count speakers if segments available
+                if standardized_result.segments:
+                    unique_speakers = set()
+                    for segment in standardized_result.segments:
+                        if isinstance(segment, dict) and 'speaker' in segment:
+                            unique_speakers.add(segment['speaker'])
+                        elif hasattr(segment, 'get') and segment.get('speaker_id'):
+                            unique_speakers.add(segment.get('speaker_id'))
+                    speakers_detected = len(unique_speakers)
+                
+                # Record performance metrics
+                processing_time = time.time() - start_time
+                model_info = self.get_current_model_info()
+                
+                performance_metrics_service.record_model_performance(
+                    session_id=session_id or "unknown",
+                    model_id=self.current_model_id or "unknown",
+                    model_name=model_info.get("name", "Unknown Model"),
+                    audio_duration=audio_duration,
+                    processing_time=processing_time,
+                    npu_accelerated="npu" in (self.current_model_id or "").lower(),
+                    confidence_avg=confidence_avg,
+                    words_transcribed=words_transcribed,
+                    speakers_detected=speakers_detected
+                )
+                
+                logger.debug(f"📊 Metrics recorded: {words_transcribed} words, {processing_time:.3f}s processing, RTF: {processing_time/audio_duration:.3f}")
+                
+                return standardized_result
+            
+        except Exception as e:
+            logger.error(f"Error processing audio chunk: {e}")
+            
+            # Record failed performance metric
+            processing_time = time.time() - start_time
+            if self.current_model_id and audio_duration > 0:
+                model_info = self.get_current_model_info()
+                performance_metrics_service.record_model_performance(
+                    session_id=session_id or "unknown",
+                    model_id=self.current_model_id,
+                    model_name=model_info.get("name", "Unknown Model"),
+                    audio_duration=audio_duration,
+                    processing_time=processing_time,
+                    npu_accelerated="npu" in self.current_model_id.lower(),
+                    confidence_avg=0.0,  # Failed transcription
+                    words_transcribed=0,
+                    speakers_detected=0
+                )
+        
+        return None
+    
+    def process_audio_file(self, file_path: str) -> Optional[TranscriptionResult]:
+        """Process complete audio file"""
+        if not self.is_ready or not self.current_engine:
+            logger.warning("Transcription service not ready")
+            return None
+        
+        try:
+            if hasattr(self.current_engine, 'transcribe_file'):
+                result = self.current_engine.transcribe_file(file_path)
+            elif hasattr(self.current_engine, 'transcribe'):
+                # Load audio file and process
+                import librosa
+                audio, sr = librosa.load(file_path, sr=16000)
+                result = self.current_engine.transcribe(audio)
+            else:
+                logger.error("Current engine doesn't support file transcription")
+                return None
+            
+            if result:
+                return self._standardize_result(result)
+                
+        except Exception as e:
+            logger.error(f"Error processing audio file {file_path}: {e}")
+        
+        return None
+    
+    def _standardize_result(self, raw_result: Any) -> TranscriptionResult:
+        """Convert engine-specific result to standardized format"""
+        try:
+            # Handle different result formats from different engines
+            if isinstance(raw_result, dict):
+                return TranscriptionResult(
+                    text=raw_result.get("text", ""),
+                    confidence=raw_result.get("confidence", 0.0),
+                    start_time=raw_result.get("start_time"),
+                    end_time=raw_result.get("end_time"),
+                    speaker_id=raw_result.get("speaker_id"),
+                    language=raw_result.get("language", "en"),
+                    segments=raw_result.get("segments", [])
+                )
+            elif isinstance(raw_result, str):
+                return TranscriptionResult(text=raw_result, confidence=0.9)
+            elif hasattr(raw_result, 'text'):
+                # Handle Whisper result objects
+                return TranscriptionResult(
+                    text=getattr(raw_result, 'text', ""),
+                    confidence=0.9,  # Default confidence for Whisper
+                    segments=getattr(raw_result, 'segments', [])
+                )
+            else:
+                logger.warning(f"Unknown result format: {type(raw_result)}")
+                return TranscriptionResult(text=str(raw_result), confidence=0.5)
+                
+        except Exception as e:
+            logger.error(f"Error standardizing result: {e}")
+            return TranscriptionResult(text="", confidence=0.0)
+    
+    def get_current_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model"""
+        if not self.current_model_id:
+            return {}
+        
+        model_info = stt_model_manager.NPU_MODELS.get(self.current_model_id, {})
+        return {
+            "model_id": self.current_model_id,
+            "name": model_info.get("name", "Unknown"),
+            "description": model_info.get("description", ""),
+            "speed": model_info.get("speed", "Unknown"),
+            "accuracy": model_info.get("accuracy", "Unknown"),
+            "is_ready": self.is_ready,
+            "engine_type": type(self.current_engine).__name__ if self.current_engine else None
+        }
+    
+    def get_available_models(self) -> List[Dict[str, Any]]:
+        """Get list of available models"""
+        return stt_model_manager.list_available_models()
+    
+    def benchmark_current_model(self) -> Dict[str, Any]:
+        """Benchmark the current model"""
+        if not self.is_ready or not self.current_model_id:
+            return {"error": "No model active"}
+        
+        return stt_model_manager.benchmark_model(self.current_model_id)
+    
+    def cleanup(self):
+        """Clean up resources"""
+        if self.current_engine and hasattr(self.current_engine, 'cleanup'):
+            try:
+                self.current_engine.cleanup()
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
+        
+        self.current_engine = None
+        self.current_model_id = None
+        self.is_ready = False
+
+# Global transcription service instance
+transcription_service = TranscriptionService()
