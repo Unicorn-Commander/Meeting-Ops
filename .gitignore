@@ -102,6 +102,15 @@ whisperx_py313/
 shafen_call*.txt
 shafen_call*.json
 
+# AI Assistant Files
+CLAUDE.md
+GEMINI_PROMPT.md
+GEMINI_TASKS.md
+AI_HANDOFF_PROMPT.md
+backend/AI_HANDOFF_PROMPT.md
+**/AI_HANDOFF_PROMPT.md
+**/*_PROMPT.md
+
 # But DO track
 !.gitkeep
 !requirements*.txt
