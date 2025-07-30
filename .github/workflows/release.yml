@@ -1,0 +1,60 @@
+name: Create Release with NPU Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Create NPU binaries archive
+      run: |
+        mkdir -p release-assets
+        cd backend
+        tar -czf ../release-assets/npu-binaries.tar.gz \
+          whisperx_npu.bin \
+          whisperx_aie2_emulation.xclbin \
+          models/whisper-base.npubin
+        cd ..
+        
+    - name: Create release
+      uses: ncipollo/release-action@v1
+      with:
+        artifacts: "release-assets/npu-binaries.tar.gz"
+        body: |
+          # Meeting-Ops Release
+          
+          Part of the Unicorn Commander Suite by Magic Unicorn Unconventional Technology & Stuff Inc.
+          
+          ## NPU Binary Files
+          
+          This release includes pre-compiled NPU binaries for AMD Phoenix NPU (AIE v1.1):
+          - `whisperx_npu.bin` - Main NPU inference binary
+          - `whisperx_aie2_emulation.xclbin` - AIE2 emulation binary
+          - `models/whisper-base.npubin` - Quantized Whisper model
+          
+          ## Installation
+          
+          1. Clone the repository
+          2. Run the automated setup script: `sudo ./setup-ubuntu.sh`
+          3. NPU binaries will be automatically extracted
+          
+          ## Requirements
+          
+          - AMD Ryzen AI CPU with NPU (16 TOPS INT8)
+          - Ubuntu 24.04 LTS or newer
+          - Linux kernel 6.14+ (for amdxdna driver)
+          
+          See INSTALL.md for detailed instructions.
+        draft: false
+        prerelease: false
+        generateReleaseNotes: true
