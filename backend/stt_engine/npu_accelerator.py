@@ -20,7 +20,7 @@ class NPUAccelerator:
     def __init__(self):
         self.npu_binary_path = Path("whisperx_npu.bin")
         self.is_initialized = False
-        self.use_emulation = True  # For now, always use emulation
+        self.use_emulation = False  # Start with hardware, fall back if needed
         
         # NPU specifications for AMD Phoenix
         self.specs = {
@@ -38,35 +38,52 @@ class NPUAccelerator:
     def _initialize(self):
         """Initialize NPU accelerator"""
         try:
-            # Check if NPU binary exists
-            if not self.npu_binary_path.exists():
-                logger.warning(f"NPU binary not found at {self.npu_binary_path}")
-                # Generate it
-                from npu_optimization.npu_machine_code import NPUMachineCodeGenerator
-                generator = NPUMachineCodeGenerator()
-                binary = generator.generate_full_whisperx_binary()
-                with open(self.npu_binary_path, "wb") as f:
-                    f.write(binary)
-                logger.info(f"✅ Generated NPU binary: {self.npu_binary_path}")
+            # Check for NPU device access - NO FALLBACK TO EMULATION
+            if not os.path.exists('/dev/accel/accel0'):
+                logger.error("❌ NPU device not found at /dev/accel/accel0")
+                logger.error("❌ NPU hardware is REQUIRED - cannot proceed")
+                raise RuntimeError("NPU device not found - transcription requires NPU hardware")
             
-            # Check XRT availability
+            # Check permissions
+            if not os.access('/dev/accel/accel0', os.R_OK | os.W_OK):
+                logger.error("❌ No permission to access NPU device")
+                logger.error("❌ Add user to 'render' group: sudo usermod -a -G render $USER")
+                raise RuntimeError("NPU device permission denied - add user to render group")
+            
+            logger.info("✅ NPU device accessible at /dev/accel/accel0")
+            
+            # Use REAL NPU implementation from our existing npu_runtime
             try:
-                import sys
-                sys.path.insert(0, '/opt/xilinx/xrt/python')
-                import xrt_binding as xrt
-                device_count = xrt.xclProbe() if hasattr(xrt, 'xclProbe') else 0
-                if device_count > 0:
-                    logger.info(f"✅ Found {device_count} NPU devices")
+                from npu_runtime import SimplifiedNPURuntime
+                self.npu_runtime = SimplifiedNPURuntime()
+                
+                if not self.npu_runtime.open_device():
+                    raise RuntimeError("Failed to open NPU device")
+                
+                logger.info("✅ NPU device opened successfully")
+                
+                # Load Whisper model on NPU
+                if self.npu_runtime.load_model("whisper-base"):
+                    logger.info("✅ Whisper model loaded on NPU")
                     self.use_emulation = False
-            except:
-                logger.info("⚠️ XRT not available, using emulation mode")
+                    self.is_initialized = True
+                else:
+                    raise RuntimeError("Failed to load Whisper model on NPU")
+                    
+            except ImportError as e:
+                logger.error(f"❌ Failed to import SimplifiedNPURuntime: {e}")
+                raise RuntimeError("NPU runtime module not available")
+            except Exception as e:
+                logger.error(f"❌ NPU initialization failed: {e}")
+                raise RuntimeError(f"NPU initialization failed: {e}")
             
-            self.is_initialized = True
-            logger.info(f"✅ NPU Accelerator ready (emulation={self.use_emulation})")
+            logger.info("✅ NPU Accelerator ready - HARDWARE MODE ONLY")
             
         except Exception as e:
-            logger.error(f"Failed to initialize NPU: {e}")
+            logger.error(f"❌ CRITICAL: NPU initialization failed: {e}")
+            logger.error("❌ NPU hardware is REQUIRED for transcription")
             self.is_initialized = False
+            raise
     
     def is_available(self) -> bool:
         """Check if NPU is available"""
@@ -134,10 +151,31 @@ class NPUAccelerator:
     
     def _execute_hardware(self, kernel_name: str, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """Execute kernel on actual NPU hardware"""
-        # This would use XRT to load and execute the binary
-        # For now, fall back to emulation
-        logger.warning("Hardware execution not implemented, using emulation")
-        return self._execute_emulated(kernel_name, inputs)
+        if not hasattr(self, 'npu_runtime') or not self.npu_runtime:
+            raise RuntimeError("NPU runtime not available - hardware required")
+        
+        try:
+            # Use real NPU runtime - NO EMULATION
+            if kernel_name == "whisper_transcribe":
+                audio_data = inputs.get("audio", np.array([]))
+                
+                # Run REAL inference on NPU hardware
+                result = self.npu_runtime.transcribe(audio_data)
+                
+                return {
+                    "transcription": result.get("text", ""),
+                    "segments": [],  # TODO: Add segment support
+                    "processing_time": result.get("processing_time", 0),
+                    "npu_accelerated": True,
+                    "hardware_info": result.get("device_info", {})
+                }
+            else:
+                # Other kernels must also use NPU
+                raise NotImplementedError(f"NPU kernel '{kernel_name}' not implemented")
+                
+        except Exception as e:
+            logger.error(f"❌ NPU hardware execution failed: {e}")
+            raise RuntimeError(f"NPU hardware execution failed: {e}")
     
     def benchmark(self) -> Dict[str, float]:
         """Benchmark NPU performance"""

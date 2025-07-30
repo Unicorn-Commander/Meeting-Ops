@@ -25,7 +25,11 @@ class Token(BaseModel):
     user: dict = None
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    try:
+        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    except Exception as e:
+        print(f"Password verification error: {e}")
+        return False
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -37,7 +41,7 @@ def create_access_token(data: dict):
 @router.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
     """Login endpoint"""
-    conn = sqlite3.connect("/app/data/meeting_sessions.db")
+    conn = sqlite3.connect("meeting_sessions.db")
     cursor = conn.cursor()
     
     # Get user
@@ -102,7 +106,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise HTTPException(status_code=401, detail="Invalid token")
         
         # Get full user details from database
-        conn = sqlite3.connect("/app/data/meeting_sessions.db")
+        conn = sqlite3.connect("meeting_sessions.db")
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, username, email, full_name, is_active, is_superuser FROM users WHERE username = ?",

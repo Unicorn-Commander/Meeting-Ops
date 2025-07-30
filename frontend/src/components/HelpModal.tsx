@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { X, Book, Zap, Brain, Mic, Globe, FileText, HelpCircle, Keyboard } from 'lucide-react';
-import { Button } from './ui/button';
 
 interface HelpModalProps {
   isOpen: boolean;

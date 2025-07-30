@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 
 from database.database import get_db
-from database.models import AudioFile, Session as RecordingSession
+from database.models import AudioFile, RecordingSession
 from services.file_storage_service import file_storage_service
 from auth.dependencies import get_current_user, require_permission
 from auth.models import User

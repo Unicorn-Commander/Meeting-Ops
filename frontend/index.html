@@ -4,10 +4,26 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React + TS</title>
+    <title>Unicorn Commander: Meeting Ops</title>
   </head>
-  <body>
-    <div id="root"></div>
+  <body class="bg-gray-900">
+    <div id="root">
+      <!-- Fallback content - if you see this, React failed to mount -->
+      <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white; font-family: Arial, sans-serif;">
+        <h1 style="font-size: 24px; margin-bottom: 16px;">Loading Unicorn Commander...</h1>
+        <p style="color: #aaa;">If this message persists, React may have failed to mount.</p>
+        <noscript>
+          <p style="color: #f87171; margin-top: 20px;">JavaScript is required to run this application.</p>
+        </noscript>
+      </div>
+    </div>
+    <script>
+      console.log('index.html: Script tag executing');
+      console.log('index.html: User Agent:', navigator.userAgent);
+      window.addEventListener('error', function(e) {
+        console.error('index.html: Global error:', e.message, e.filename, e.lineno, e.colno);
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

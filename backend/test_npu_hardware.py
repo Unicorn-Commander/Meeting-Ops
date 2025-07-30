@@ -59,7 +59,7 @@ else:
 
 # Check for NPU in system
 print("\n5️⃣ Checking system devices...")
-result = subprocess.run(['ls', '-la', '/dev/accel*'], capture_output=True, text=True, stderr=subprocess.DEVNULL)
+result = subprocess.run(['ls', '-la', '/dev/accel/'], capture_output=True, text=True)
 if result.returncode == 0:
     print("   ✅ Accelerator devices found:")
     print(result.stdout)

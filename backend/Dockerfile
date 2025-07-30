@@ -16,10 +16,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements file
-COPY requirements-docker.txt ./
+COPY requirements-docker-minimal.txt ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements-docker.txt
+RUN pip install --no-cache-dir -r requirements-docker-minimal.txt
 
 # Copy application code
 COPY . .

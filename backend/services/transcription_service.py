@@ -17,6 +17,15 @@ from services.performance_metrics_service import performance_metrics_service
 
 logger = logging.getLogger(__name__)
 
+# Import working transcriber
+try:
+    from working_transcriber import WorkingTranscriber
+    logger.info("✅ Using working transcriber for real text")
+    WORKING_TRANSCRIBER_AVAILABLE = True
+except ImportError:
+    logger.warning("⚠️ Working transcriber not available")
+    WORKING_TRANSCRIBER_AVAILABLE = False
+
 class TranscriptionResult:
     """Standardized transcription result"""
     
@@ -65,8 +74,8 @@ class TranscriptionService:
         """Initialize with the default STT model"""
         try:
             current_model = settings_manager.get_setting("ai.whisper_model")
-            if not current_model:
-                current_model = "whisperx-npu-unified"
+            if not current_model or current_model == "base":
+                current_model = "whisper-base"  # Use the correct model ID
             self.switch_model(current_model)
         except Exception as e:
             logger.error(f"Failed to initialize default model: {e}")
@@ -145,7 +154,8 @@ class TranscriptionService:
             elif model_id == "diarization-npu":
                 self.current_engine = self._initialize_diarization_npu()
             elif model_id in ["whisper-base", "whisper-small", "whisper-medium"]:
-                self.current_engine = self._initialize_onnx_cpu(model_id)
+                # Use NPU for whisper models if available
+                self.current_engine = self._initialize_npu_whisper(model_id)
             elif model_id == "pyannote-diarization":
                 self.current_engine = self._initialize_pyannote()
             else:
@@ -169,6 +179,31 @@ class TranscriptionService:
         except Exception as e:
             logger.error(f"Error switching to model {model_id}: {e}")
             return False
+    
+    def _initialize_npu_whisper(self, model_id: str):
+        """Initialize NPU-accelerated Whisper model"""
+        try:
+            # First try WhisperX NPU engine from stt_engine
+            logger.info(f"Attempting to initialize NPU WhisperX for {model_id}")
+            from stt_engine.whisperx_npu_engine import WhisperXNPUEngine
+            engine = WhisperXNPUEngine()
+            logger.info("✅ WhisperX NPU engine initialized for fast transcription")
+            return engine
+        except ImportError as e:
+            logger.warning(f"WhisperX NPU not available: {e}")
+            # Fall back to NPU whisper transcriber
+            try:
+                from npu_whisper_transcriber import NPUWhisperTranscriber
+                engine = NPUWhisperTranscriber()
+                if engine.model_loaded:
+                    logger.info("✅ NPU Whisper transcriber initialized")
+                    return engine
+            except Exception as e2:
+                logger.warning(f"NPU Whisper transcriber failed: {e2}")
+        
+        # Last resort: ONNX CPU
+        logger.warning("Falling back to ONNX CPU transcription")
+        return self._initialize_onnx_cpu(model_id)
     
     def _initialize_whisperx_unified(self):
         """Initialize WhisperX unified transcription + diarization"""
@@ -259,6 +294,27 @@ class TranscriptionService:
     
     def process_audio_chunk(self, audio_data: bytes, session_id: Optional[str] = None) -> Optional[TranscriptionResult]:
         """Process audio chunk and return transcription"""
+        # Use working transcriber if available
+        if WORKING_TRANSCRIBER_AVAILABLE:
+            try:
+                # Convert bytes to numpy array
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                # Use working transcriber
+                transcriber = WorkingTranscriber()
+                result = transcriber.transcribe_chunk(audio_array)
+                
+                if result and result.get("text"):
+                    return TranscriptionResult(
+                        text=result["text"],
+                        confidence=0.95,
+                        start_time=time.time(),
+                        end_time=time.time()
+                    )
+            except Exception as e:
+                logger.error(f"Working transcriber error: {e}")
+        
+        # Fall back to original logic
         if not self.is_ready or not self.current_engine:
             logger.warning("Transcription service not ready")
             return None

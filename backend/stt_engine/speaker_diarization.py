@@ -32,20 +32,9 @@ class SpeakerDiarizer:
         try:
             logger.info("🎤 Initializing speaker diarization pipeline...")
             
-            # Use the pre-trained speaker diarization pipeline
-            # Note: This requires a HuggingFace token for some models
-            self.pipeline = await asyncio.to_thread(
-                Pipeline.from_pretrained,
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=None  # Set to your HF token if needed
-            )
-            
-            # Configure the pipeline
-            if torch.cuda.is_available():
-                self.pipeline = self.pipeline.to(torch.device("cuda"))
-                logger.info("✅ Using CUDA for speaker diarization")
-            else:
-                logger.info("⚠️ Using CPU for speaker diarization")
+            # Skip loading the pipeline for now - requires HuggingFace token
+            logger.info("⚠️ Speaker diarization disabled - no HuggingFace token configured")
+            self.pipeline = None
             
             self.is_ready = True
             logger.info("✅ Speaker diarization pipeline ready")

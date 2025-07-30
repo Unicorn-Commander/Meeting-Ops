@@ -5,7 +5,7 @@ import SessionDetails from './SessionDetails';
 import { FileManager } from './components/FileManager';
 import { AudioPlayer } from './components/AudioPlayer';
 import { useAuth } from './contexts/AuthContext';
-import { SettingsPage } from './components/Settings/SettingsPage';
+// import { SettingsPage } from './components/Settings/SettingsPage';
 import { PerformanceMonitor } from './components/PerformanceMonitor';
 import ModelPerformanceDashboard from './components/ModelPerformanceDashboard';
 import { getErrorMessage } from './utils/errorHandling';
@@ -21,7 +21,6 @@ import { UnifiedSearchInterface } from './components/UnifiedSearchInterface';
 import { IntelligentAssistantDraggable } from './components/IntelligentAssistantDraggable';
 import { SessionReport } from './components/SessionReport';
 import { AuthErrorHandler } from './components/AuthErrorHandler';
-import { NPUModelSettings } from './components/NPUModelSettings';
 import { UserManagement } from './components/UserManagement';
 import { AIAgents } from './components/AIAgents';
 
@@ -131,9 +130,9 @@ function Dashboard() {
   const [selectedAudioFile, setSelectedAudioFile] = useState<any>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [activeSession, setActiveSession] = useState<RecordingSession | null>(null);
-  const [recentTranscriptions, setRecentTranscriptions] = useState<TranscriptionData[]>([]);
+  // const [recentTranscriptions, setRecentTranscriptions] = useState<TranscriptionData[]>([]);
   const [recentSessions, setRecentSessions] = useState<RecordingSession[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
+  // const [isConnected, setIsConnected] = useState(false);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
@@ -750,7 +749,7 @@ function Dashboard() {
 
   const renderSettings = () => {
     if (showAdvancedSettings) {
-      return <SettingsPage />;
+      return <div className="text-white p-6">Settings (Temporarily Disabled)</div>;
     }
     
     return (

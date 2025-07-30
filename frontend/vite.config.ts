@@ -13,14 +13,25 @@ export default defineConfig({
   server: {
     port: 7777,
     host: '0.0.0.0',
+    cors: true,
     proxy: {
       '/api': {
         target: 'http://localhost:9050',
         changeOrigin: true,
+        secure: false,
+        configure: (proxy, options) => {
+          proxy.on('error', (err) => {
+            console.log('proxy error', err);
+          });
+          proxy.on('proxyReq', (_proxyReq, req) => {
+            console.log('Proxying:', req.method, req.url, '→', options.target);
+          });
+        },
       },
       '/ws': {
         target: 'ws://localhost:9050',
         ws: true,
+        changeOrigin: true,
       },
     },
   },

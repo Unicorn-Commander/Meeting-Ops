@@ -39,6 +39,7 @@ class UserResponse(BaseModel):
     is_verified: bool
     is_superuser: bool = False
     created_at: datetime
+    role: Optional[str] = None  # Will be populated from organization role or superuser status
     
     class Config:
         from_attributes = True
@@ -121,10 +122,23 @@ async def login(
     # Create tokens
     tokens = AuthService.create_tokens(user)
     
+    # Prepare user response with role
+    user_dict = {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "full_name": user.full_name,
+        "is_active": user.is_active,
+        "is_verified": user.is_verified,
+        "is_superuser": user.is_superuser,
+        "created_at": user.created_at,
+        "role": "superuser" if user.is_superuser else "admin"  # Default to admin for the initial user
+    }
+    
     return TokenResponse(
         access_token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
-        user=UserResponse.from_orm(user)
+        user=UserResponse(**user_dict)
     )
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -161,18 +175,50 @@ async def refresh_token(
     # Create new tokens
     tokens = AuthService.create_tokens(user, payload.get("org_id"))
     
+    # Prepare user response with role
+    user_dict = {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "full_name": user.full_name,
+        "is_active": user.is_active,
+        "is_verified": user.is_verified,
+        "is_superuser": user.is_superuser,
+        "created_at": user.created_at,
+        "role": "superuser" if user.is_superuser else "admin"  # Default to admin for the initial user
+    }
+    
     return TokenResponse(
         access_token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
-        user=UserResponse.from_orm(user)
+        user=UserResponse(**user_dict)
     )
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """Get current user profile"""
-    return UserResponse.from_orm(current_user)
+    user_dict = {
+        "id": current_user.id,
+        "email": current_user.email,
+        "username": current_user.username,
+        "full_name": current_user.full_name,
+        "is_active": current_user.is_active,
+        "is_verified": current_user.is_verified,
+        "is_superuser": current_user.is_superuser,
+        "created_at": current_user.created_at,
+        "role": "superuser" if current_user.is_superuser else None
+    }
+    
+    # If not superuser, get role from first organization
+    if not current_user.is_superuser and current_user.organizations:
+        user_dict["role"] = current_user.organizations[0].role
+    elif not current_user.is_superuser:
+        user_dict["role"] = "user"  # Default role
+    
+    return UserResponse(**user_dict)
 
 @router.put("/me", response_model=UserResponse)
 async def update_current_user_profile(

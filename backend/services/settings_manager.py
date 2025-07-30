@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import json
 import logging
+import os
 
 # Try to import pyaudio, but handle gracefully if not available
 try:
@@ -24,9 +25,9 @@ class SettingsManager:
     # Default settings structure
     DEFAULT_SETTINGS = {
         "audio": {
-            "input_source": "default",
-            "sample_rate": 16000,
-            "channels": 1,
+            "input_source": os.getenv("AUDIO_DEVICE", "usb"),
+            "sample_rate": int(os.getenv("AUDIO_SAMPLE_RATE", "44100")),
+            "channels": int(os.getenv("AUDIO_CHANNELS", "1")),
             "input_gain": 70,
             "noise_reduction": True,
             "auto_gain_control": True

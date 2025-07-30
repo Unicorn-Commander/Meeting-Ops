@@ -1,8 +1,16 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON, Float
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from database.database import Base
+import os
+
+# Use JSONB for PostgreSQL, JSON for others
+def get_json_type():
+    if "postgresql" in os.getenv("DATABASE_URL", ""):
+        return JSONB
+    return JSON
 
 class Organization(Base):
     __tablename__ = "organizations"
@@ -21,7 +29,7 @@ class Organization(Base):
     max_monthly_hours = Column(Integer, default=100)
     
     # Settings
-    settings = Column(JSON, default={})
+    settings = Column(get_json_type(), default={})
     is_active = Column(Boolean, default=True)
     
     # Relationships
@@ -76,7 +84,7 @@ class UserOrganization(Base):
     invited_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     # Permissions override (optional)
-    custom_permissions = Column(JSON, nullable=True)
+    custom_permissions = Column(get_json_type(), nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="organizations", foreign_keys=[user_id])
@@ -98,7 +106,7 @@ class AuditLog(Base):
     # Additional data
     ip_address = Column(String, nullable=True)
     user_agent = Column(String, nullable=True)
-    details = Column(JSON, nullable=True)
+    details = Column(get_json_type(), nullable=True)
     
     # Timestamp
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import tempfile
 from jinja2 import Template
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +21,71 @@ class EmailService:
     """Service for sending meeting summary emails"""
     
     def __init__(self):
-        self.smtp_host = os.getenv('SMTP_HOST', 'localhost')
-        self.smtp_port = int(os.getenv('SMTP_PORT', 587))
-        self.smtp_username = os.getenv('SMTP_USERNAME')
-        self.smtp_password = os.getenv('SMTP_PASSWORD')
-        self.smtp_use_tls = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
-        self.from_email = os.getenv('FROM_EMAIL', self.smtp_username or 'noreply@unicorn-commander.local')
-        self.from_name = os.getenv('FROM_NAME', 'Unicorn Commander Meeting Ops')
+        self.smtp_host = ''
+        self.smtp_port = 587
+        self.smtp_username = ''
+        self.smtp_password = ''
+        self.smtp_use_tls = True
+        self.from_email = 'noreply@unicorn-commander.local'
+        self.from_name = 'Unicorn Commander Meeting Ops'
         
+        self._load_smtp_config()
         self.email_templates = self._load_email_templates()
+
+    def _get_config_path(self):
+        return os.path.join(os.path.dirname(__file__), 'email_config.json')
+
+    def _load_smtp_config(self):
+        config_path = self._get_config_path()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    self.smtp_host = config.get('smtp_host', '')
+                    self.smtp_port = config.get('smtp_port', 587)
+                    self.smtp_username = config.get('smtp_username', '')
+                    self.smtp_password = config.get('smtp_password', '')
+                    self.smtp_use_tls = config.get('smtp_use_tls', True)
+                    self.from_email = config.get('from_email', self.smtp_username or 'noreply@unicorn-commander.local')
+                    self.from_name = config.get('from_name', 'Unicorn Commander Meeting Ops')
+            except Exception as e:
+                logger.error(f"Error loading email config: {e}")
+
+    def update_smtp_config(self, host: str, port: int, username: str, password: str):
+        self.smtp_host = host
+        self.smtp_port = port
+        self.smtp_username = username
+        self.smtp_password = password
+        # Always use TLS for security
+        self.smtp_use_tls = True 
+
+        config = {
+            'smtp_host': self.smtp_host,
+            'smtp_port': self.smtp_port,
+            'smtp_username': self.smtp_username,
+            'smtp_password': self.smtp_password,
+            'smtp_use_tls': self.smtp_use_tls,
+            'from_email': self.from_email,
+            'from_name': self.from_name,
+        }
+        config_path = self._get_config_path()
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+            logger.info("SMTP configuration updated and saved.")
+        except Exception as e:
+            logger.error(f"Error saving email config: {e}")
+
+    def get_smtp_config(self) -> Dict[str, Any]:
+        return {
+            'smtp_host': self.smtp_host,
+            'smtp_port': self.smtp_port,
+            'smtp_username': self.smtp_username,
+            'smtp_password': self.smtp_password, # This should ideally not be sent to frontend
+            'smtp_use_tls': self.smtp_use_tls,
+            'from_email': self.from_email,
+            'from_name': self.from_name,
+        }
     
     def _load_email_templates(self) -> Dict[str, Template]:
         """Load email templates"""
@@ -413,12 +470,11 @@ NPU-Accelerated AI Transcription & Analysis
                 return f"{hours}h {minutes}m"
             return f"{hours}h"
     
-    async def send_test_email(self, recipient: str) -> bool:
+    async def send_test_email(self, host: str, port: int, username: str, password: str) -> Dict[str, Any]:
         """Send a test email to verify configuration"""
         try:
-            if not self.smtp_username or not self.smtp_password:
-                logger.warning("SMTP credentials not configured")
-                return False
+            if not username or not password:
+                return {"status": "error", "message": "SMTP username and password are required.", "required_env_vars": ["SMTP_USERNAME", "SMTP_PASSWORD"]}
             
             msg = MIMEText(
                 "This is a test email from Unicorn Commander Meeting Ops.\n\n"
@@ -429,24 +485,26 @@ NPU-Accelerated AI Transcription & Analysis
             
             msg['Subject'] = "Test Email - Unicorn Commander Meeting Ops"
             msg['From'] = f"{self.from_name} <{self.from_email}>"
-            msg['To'] = recipient
+            msg['To'] = username # Send test email to the configured username
             msg['Date'] = formatdate(localtime=True)
             
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                if self.smtp_use_tls:
-                    server.starttls()
-                
-                if self.smtp_username and self.smtp_password:
-                    server.login(self.smtp_username, self.smtp_password)
-                
+            with smtplib.SMTP(host, port) as server:
+                server.starttls()
+                server.login(username, password)
                 server.send_message(msg)
             
-            logger.info(f"✅ Test email sent to {recipient}")
-            return True
+            logger.info(f"✅ Test email sent to {username}")
+            return {"status": "configured", "message": "Email service configured and test email sent.", "smtp_host": host, "smtp_port": port}
             
+        except smtplib.SMTPAuthenticationError:
+            logger.error("❌ SMTP Authentication Error: Invalid username or password.")
+            return {"status": "error", "message": "SMTP Authentication Error: Invalid username or password.", "required_env_vars": ["SMTP_USERNAME", "SMTP_PASSWORD"]}
+        except smtplib.SMTPConnectError:
+            logger.error(f"❌ SMTP Connection Error: Could not connect to {host}:{port}.")
+            return {"status": "error", "message": f"SMTP Connection Error: Could not connect to {host}:{port}. Please check host and port.", "required_env_vars": ["SMTP_HOST", "SMTP_PORT"]}
         except Exception as e:
             logger.error(f"❌ Failed to send test email: {e}")
-            return False
+            return {"status": "error", "message": f"Failed to send test email: {e}"}
     
     def is_configured(self) -> bool:
         """Check if email service is properly configured"""

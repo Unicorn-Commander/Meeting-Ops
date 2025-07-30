@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Brain, RefreshCw, FileText, Users, Target, Clock, Loader2 } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
 interface SummaryData {
   executive_summary?: string;
   key_points?: string[];
@@ -65,7 +67,7 @@ export const LiveSummarization: React.FC<LiveSummarizationProps> = ({
 
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`/api/recording-sessions/${sessionId}/summary?template=${templateType || 'general'}`, {
+      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${sessionId}/summary?template=${templateType || 'general'}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 

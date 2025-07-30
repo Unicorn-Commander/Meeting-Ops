@@ -1,4 +1,6 @@
 venv/
+venv313/
+venv-py313/
 __pycache__/
 *.pyc
 *.pyo
@@ -18,3 +20,11 @@ ENV/
 recordings/
 whisper_onnx_cache/
 meeting_sessions.db
+*.bin
+*.whl
+*.npubin
+*.xclbin
+models/
+npu_stt_models/
+storage/
+benchmark_samples/

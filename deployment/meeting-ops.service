@@ -1,0 +1,62 @@
+[Unit]
+Description=Meeting-Ops Recording Appliance (Part of Unicorn Commander Suite)
+Documentation=https://unicorn-commander.com/meeting-ops
+After=network.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=meeting-ops
+Group=meeting-ops
+WorkingDirectory=/opt/meeting-ops/backend
+Environment="PATH=/opt/meeting-ops/backend/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="DATABASE_URL=sqlite:////var/lib/meeting-ops/meeting_sessions.db"
+Environment="RECORDINGS_PATH=/var/lib/meeting-ops/recordings"
+Environment="EXPORTS_PATH=/var/lib/meeting-ops/exports"
+Environment="LOG_LEVEL=INFO"
+Environment="DEVICE_MODE=appliance"
+
+# NPU access permissions
+SupplementaryGroups=render video audio
+DeviceAllow=/dev/accel/accel0 rw
+DevicePolicy=closed
+
+# Audio device access
+PrivateDevices=no
+DeviceAllow=/dev/snd/* rw
+
+# Start command
+ExecStartPre=/opt/meeting-ops/backend/venv/bin/python -m check_npu
+ExecStart=/opt/meeting-ops/backend/venv/bin/python -m uvicorn main_docker:app --host 0.0.0.0 --port 9050 --workers 1
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=false  # Need access to /tmp/recordings during migration
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/meeting-ops /var/log/meeting-ops /tmp/recordings
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=4G
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meeting-ops
+
+[Install]
+WantedBy=multi-user.target
+Alias=unicorn-meeting-ops.service

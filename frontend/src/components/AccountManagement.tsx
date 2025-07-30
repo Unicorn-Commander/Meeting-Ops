@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { User, Mail, Lock, Shield, Calendar, Save, AlertCircle, CheckCircle, Key, Trash2 } from 'lucide-react';
+import { User, Lock, Shield, Calendar, Save, AlertCircle, CheckCircle, Key, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { Tooltip } from './Tooltip';
 
 interface UserProfile {
   id: number;

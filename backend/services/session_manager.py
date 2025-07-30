@@ -4,9 +4,12 @@ from datetime import datetime, timedelta
 import uuid
 import os
 import json
+import logging
 
-from database.models import Session as SessionModel, Transcription, Speaker, AudioSegment
+from database.models import RecordingSession as SessionModel, Transcription, Speaker
 from database.database import get_db
+
+logger = logging.getLogger(__name__)
 
 class SessionManager:
     """Manages meeting sessions, transcriptions, and storage"""
@@ -22,12 +25,17 @@ class SessionManager:
         try:
             session_id = f"session_{int(datetime.now().timestamp())}_{str(uuid.uuid4())[:8]}"
             
+            # Store description and meeting_type in extra_data JSON field
+            extra_data = {}
+            if description:
+                extra_data['description'] = description
+            if meeting_type:
+                extra_data['meeting_type'] = meeting_type
+            
             session = SessionModel(
                 session_id=session_id,
                 name=name,
-                description=description,
-                meeting_type=meeting_type,
-                start_time=datetime.utcnow(),
+                extra_data=extra_data,
                 status="active"
             )
             
@@ -58,8 +66,9 @@ class SessionManager:
             if session:
                 session.status = status
                 if status == "completed":
-                    session.end_time = datetime.utcnow()
-                    session.duration_seconds = int((session.end_time - session.start_time).total_seconds())
+                    # Calculate duration from created_at to now
+                    end_time = datetime.utcnow()
+                    session.duration = (end_time - session.created_at).total_seconds()
                     # Remove from active sessions
                     self.active_sessions.pop(session_id, None)
                 
@@ -105,6 +114,34 @@ class SessionManager:
             
             db.commit()
             db.refresh(transcription)
+            
+            # Index transcription in vector search if available
+            try:
+                from services.vector_search import get_vector_search_service
+                vector_service = get_vector_search_service()
+                
+                # Generate unique segment ID
+                segment_id = f"{session_id}_{transcription.id}"
+                
+                # Index the segment
+                vector_service.index_transcription_segment(
+                    segment_id=segment_id,
+                    text=text,
+                    session_id=session_id,
+                    speaker=speaker_id,
+                    timestamp=int(datetime.utcnow().timestamp()),
+                    metadata={
+                        "transcription_id": transcription.id,
+                        "confidence": confidence,
+                        "start_time": start_time_seconds,
+                        "end_time": end_time_seconds,
+                        "npu_accelerated": npu_accelerated
+                    }
+                )
+                logger.info(f"Indexed transcription {transcription.id} in vector search")
+            except Exception as e:
+                logger.warning(f"Failed to index transcription in vector search: {e}")
+                # Don't fail the transcription if vector indexing fails
             
             # Add or update speaker if provided (after committing transcription)
             if speaker_id:
@@ -184,7 +221,7 @@ class SessionManager:
             if status:
                 query = query.filter(SessionModel.status == status)
             
-            return query.order_by(SessionModel.start_time.desc()).offset(offset).limit(limit).all()
+            return query.order_by(SessionModel.created_at.desc()).offset(offset).limit(limit).all()
         finally:
             db.close()
     
@@ -238,8 +275,8 @@ class SessionManager:
             if format == "txt":
                 # Convert to text format
                 text_content = f"Meeting: {session.name}\n"
-                text_content += f"Date: {session.start_time}\n"
-                text_content += f"Duration: {session.duration_seconds}s\n\n"
+                text_content += f"Date: {session.created_at}\n"
+                text_content += f"Duration: {session.duration}s\n\n"
                 
                 for transcription in transcriptions:
                     speaker_info = f"[{transcription.speaker_id}] " if transcription.speaker_id else ""

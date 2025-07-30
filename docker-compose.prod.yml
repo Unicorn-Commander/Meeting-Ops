@@ -114,5 +114,5 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data:
+#   postgres_data:
   redis_data:

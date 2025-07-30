@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
 interface AudioFile {
   id: number;
   file_id: string;
@@ -46,7 +48,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ sessionId, onFileSelec
         params.append('session_id', sessionId);
       }
 
-      const response = await fetch(`/api/files?${params}`, {
+      const response = await fetch(`${API_BASE_URL}/api/files?${params}`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -85,7 +87,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ sessionId, onFileSelec
 
   const handleDownload = async (file: AudioFile) => {
     try {
-      const response = await fetch(`/api/files/${file.file_id}/download`, {
+      const response = await fetch(`${API_BASE_URL}/api/files/${file.file_id}/download`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -125,7 +127,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ sessionId, onFileSelec
     }
 
     try {
-      const response = await fetch(`/api/files/${file.file_id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/files/${file.file_id}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,

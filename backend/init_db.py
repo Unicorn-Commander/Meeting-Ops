@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-"""Initialize missing database tables"""
+from database.database import Base as AppBase
+from auth.models import Base as AuthBase
+from database.database import engine
 
-from database.database import init_database
-
-if __name__ == "__main__":
-    print("Initializing database tables...")
-    init_database()
-    print("✅ Database initialization complete!")
+print("Creating all tables...")
+AuthBase.metadata.create_all(bind=engine)
+AppBase.metadata.create_all(bind=engine)
+print("All tables created successfully.")

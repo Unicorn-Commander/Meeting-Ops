@@ -10,7 +10,7 @@ from datetime import datetime
 
 from database.database import get_db
 from auth.models import User
-from database.models import Session as RecordingSession
+from database.models import RecordingSession
 from auth.dependencies import get_current_user, require_permission
 from services.audio_session_manager import AudioSessionManager
 from services.session_manager import SessionManager
@@ -111,6 +111,7 @@ async def start_recording_v2(
         )
         
         success = audio_recording_service.start_recording(
+            session_id=session_id,
             file_path=audio_file_path,
             sample_rate=16000,
             channels=1

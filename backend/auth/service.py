@@ -228,6 +228,28 @@ class AuthService:
         AuthService.log_action(db, user_id, "api_key_generated", "user", str(user_id))
         
         return api_key
+
+    @staticmethod
+    def reset_user_password(db: Session, username: str, new_password: str) -> bool:
+        """Reset a user's password without the old password (admin action)"""
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            return False
+
+        # Validate new password
+        valid, errors = validate_password(new_password)
+        if not valid:
+            raise ValueError(f"Invalid password: {', '.join(errors)}")
+
+        # Update password
+        user.hashed_password = get_password_hash(new_password)
+        user.updated_at = datetime.utcnow()
+        db.commit()
+
+        # Log password reset
+        AuthService.log_action(db, user.id, "password_reset", "user", str(user.id))
+
+        return True
     
     @staticmethod
     def get_user_role(db: Session, user_id: int, organization_id: int) -> Optional[str]:

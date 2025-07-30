@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Calendar, Clock, Users, MapPin, CheckCircle, AlertCircle, Plus, Settings } from 'lucide-react';
+import { Calendar, MapPin, CheckCircle, AlertCircle, Plus } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
@@ -57,7 +57,7 @@ export function CalendarManager() {
     calendar_integration: 'not_configured'
   });
 
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  // const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [showScheduleForm, setShowScheduleForm] = useState(false);
   const [newMeeting, setNewMeeting] = useState({
     title: '',
@@ -167,7 +167,7 @@ export function CalendarManager() {
           });
           fetchRoomStatus(); // Refresh room status
         } else if (result.status === 'conflict') {
-          alert(`❌ Meeting conflicts detected:\n${result.conflicts.map(c => 
+          alert(`❌ Meeting conflicts detected:\n${result.conflicts.map((c: any) => 
             `${c.attendee}: ${c.conflicting_event} (${new Date(c.start_time).toLocaleString()})`
           ).join('\n')}`);
         }
@@ -391,7 +391,7 @@ export function CalendarManager() {
       {!isLoading && !error && (
         <>
           {/* Configuration Notice */}
-          {calendarStatus.calendar_integration === 'not_configured' && (
+          {(calendarStatus as any).calendar_integration === 'not_configured' && (
         <Card className="bg-gray-800 border-gray-700 p-6">
           <div className="flex items-center gap-3">
             <AlertCircle className="w-6 h-6 text-yellow-400" />

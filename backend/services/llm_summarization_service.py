@@ -35,8 +35,12 @@ class LLMSummarizationService:
             logger.info("✅ OpenAI client initialized")
         
         if anthropic_key:
-            self.anthropic_client = Anthropic(api_key=anthropic_key)
-            logger.info("✅ Anthropic client initialized")
+            try:
+                self.anthropic_client = Anthropic(api_key=anthropic_key)
+                logger.info("✅ Anthropic client initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Anthropic client: {e}")
+                self.anthropic_client = None
         
         # Check Ollama availability
         try:

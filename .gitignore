@@ -103,15 +103,33 @@ shafen_call*.txt
 shafen_call*.json
 
 # AI Assistant Files
-CLAUDE.md
-GEMINI_PROMPT.md
-GEMINI_TASKS.md
-AI_HANDOFF_PROMPT.md
-backend/AI_HANDOFF_PROMPT.md
-**/AI_HANDOFF_PROMPT.md
-**/*_PROMPT.md
+AI_HANDOFF*.md
+*_PROMPT*.md
+GEMINI*.md
+DEEPSEEK.md
+Open-Interpreter-Status.md
 
 # But DO track
 !.gitkeep
 !requirements*.txt
 !package*.json
+
+# Development tracking files
+.duckversions/
+.postgres-initialized
+
+# Status and planning docs
+*STATUS*.md
+*CHECKLIST*.md
+*PLAN*.md
+*COMPLETION*.md
+
+# Temporary test scripts
+FIX_*.py
+test_*.html
+test-*.cjs
+test-*.sh
+
+# Misc project files
+Meeting-Ops_Client_Summary.md
+GUI-menu-layout.md

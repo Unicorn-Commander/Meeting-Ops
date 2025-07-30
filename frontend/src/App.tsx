@@ -5,8 +5,11 @@ import { LoginRegister } from './components/LoginRegister';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AccountManagement } from './components/AccountManagement';
 import ModelPerformanceDashboard from './components/ModelPerformanceDashboard';
-import { DashboardRouter } from './components/DashboardRouter';
-import Dashboard from './Dashboard';
+import { UnifiedDashboard } from './components/UnifiedDashboard';
+import { QuickLogin } from './components/QuickLogin';
+import { RecordingDashboard } from './components/RecordingDashboard';
+import { AdminDashboard } from './components/AdminDashboard';
+import { SystemAdminDashboard } from './components/SystemAdminDashboard';
 import { getErrorMessage } from './utils/errorHandling';
 
 function App() {
@@ -36,15 +39,16 @@ function App() {
   return (
     <AuthProvider>
       <Router>
+        <QuickLogin />
         <Routes>
           <Route path="/login" element={<LoginRegister />} />
           <Route element={<ProtectedRoute />}>
-            <Route path="/" element={<DashboardRouter />} />
-            <Route path="/user" element={<DashboardRouter defaultView="user" />} />
-            <Route path="/admin" element={<DashboardRouter defaultView="admin" />} />
-            <Route path="/legacy" element={<DashboardRouter defaultView="legacy" />} />
+            <Route path="/" element={<UnifiedDashboard />} />
             <Route path="/account" element={<AccountManagement />} />
             <Route path="/performance" element={<ModelPerformanceDashboard />} />
+            <Route path="/recording" element={<RecordingDashboard />} />
+            <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/system-admin" element={<SystemAdminDashboard />} />
           </Route>
         </Routes>
       </Router>

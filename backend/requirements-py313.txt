@@ -20,7 +20,7 @@ pyjwt==2.8.0
 cryptography==42.0.0
 
 # ML & AI Core (Python 3.13 compatible!)
-numpy==2.3.1
+numpy==2.2.0
 torch==2.7.1
 torchaudio==2.7.1
 onnxruntime==1.22.0
@@ -54,13 +54,14 @@ pydantic_core==2.33.2
 jinja2==3.1.4
 reportlab==4.0.4
 librosa==0.10.2
+numba>=0.61.0
 
 # Monitoring & Logging
 tensorboardX==2.6.4
 
 # Development dependencies (optional)
 pytest==8.0.0
-black==24.0.0
+
 isort==5.13.0
 mypy==1.8.0
 flake8==7.0.0

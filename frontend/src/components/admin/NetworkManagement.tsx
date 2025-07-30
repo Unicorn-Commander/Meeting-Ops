@@ -1,4 +1,7 @@
 import React, { useState, useEffect } from 'react';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
 import {
   Network,
   Wifi,
@@ -71,7 +74,7 @@ export const NetworkManagement: React.FC = () => {
   const fetchNetworkStatus = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/network/status');
+      const response = await fetch(`${API_BASE_URL}/api/network/status`);
       if (response.ok) {
         const data = await response.json();
         setNetworkStatus(data);
@@ -85,7 +88,7 @@ export const NetworkManagement: React.FC = () => {
 
   const testConnectivity = async (target: string = '8.8.8.8') => {
     try {
-      const response = await fetch(`/api/network/connectivity/test?target=${target}`);
+      const response = await fetch(`${API_BASE_URL}/api/network/connectivity/test?target=${target}`);
       if (response.ok) {
         const data = await response.json();
         setConnectivityTest(data);
@@ -97,7 +100,7 @@ export const NetworkManagement: React.FC = () => {
 
   const toggleFirewall = async (enable: boolean) => {
     try {
-      const endpoint = enable ? '/api/network/firewall/enable' : '/api/network/firewall/disable';
+      const endpoint = enable ? `${API_BASE_URL}/api/network/firewall/enable` : `${API_BASE_URL}/api/network/firewall/disable`;
       const response = await fetch(endpoint, { method: 'POST' });
       if (response.ok) {
         fetchNetworkStatus(); // Refresh status
@@ -332,7 +335,7 @@ export const NetworkManagement: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <h4 className="font-medium mb-2">DNS Servers</h4>
-                  {networkStatus?.dns?.nameservers?.length > 0 ? (
+                  {networkStatus?.dns?.nameservers && networkStatus.dns.nameservers.length > 0 ? (
                     <ul className="space-y-1">
                       {networkStatus?.dns?.nameservers?.map((server, idx) => (
                         <li key={idx} className="text-sm font-mono bg-gray-900 px-2 py-1 rounded">
@@ -346,7 +349,7 @@ export const NetworkManagement: React.FC = () => {
                 </div>
                 <div>
                   <h4 className="font-medium mb-2">Search Domains</h4>
-                  {networkStatus?.dns?.search_domains?.length > 0 ? (
+                  {networkStatus?.dns?.search_domains && networkStatus.dns.search_domains.length > 0 ? (
                     <ul className="space-y-1">
                       {networkStatus?.dns?.search_domains?.map((domain, idx) => (
                         <li key={idx} className="text-sm font-mono bg-gray-900 px-2 py-1 rounded">
@@ -398,7 +401,7 @@ export const NetworkManagement: React.FC = () => {
                 </div>
               </div>
 
-              {networkStatus?.firewall?.rules?.length > 0 && (
+              {networkStatus?.firewall?.rules && networkStatus.firewall.rules.length > 0 && (
                 <div>
                   <h5 className="font-medium mb-2">Active Rules</h5>
                   <div className="space-y-2">

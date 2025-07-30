@@ -302,14 +302,16 @@ ws.onmessage = (event) => {
 };
 ```
 
-## Database Schema
+## Database Architecture
 
-### Core Models
+### PostgreSQL Schema
+
+**Core Models**
 
 ```sql
--- Sessions table
+-- Sessions table (PostgreSQL)
 CREATE TABLE recording_sessions (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     session_id VARCHAR(255) UNIQUE NOT NULL,
     title VARCHAR(255),
     description TEXT,
@@ -317,6 +319,9 @@ CREATE TABLE recording_sessions (
     start_time TIMESTAMP,
     end_time TIMESTAMP,
     created_by INTEGER REFERENCES users(id),
+    -- JSONB columns for flexible metadata
+    key_points JSONB,
+    action_items JSONB,
     organization_id INTEGER REFERENCES organizations(id),
     settings JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -379,10 +384,42 @@ CREATE TABLE user_organizations (
     user_id INTEGER REFERENCES users(id),
     organization_id INTEGER REFERENCES organizations(id),
     role VARCHAR(50) NOT NULL,
-    permissions JSON,
+    permissions JSONB,  -- PostgreSQL JSONB for better performance
     PRIMARY KEY (user_id, organization_id)
 );
+
+-- PostgreSQL-specific indexes for performance
+CREATE INDEX idx_transcriptions_text_fts 
+  ON transcriptions USING gin(to_tsvector('english', text));
+CREATE INDEX idx_sessions_created_at ON sessions(created_at DESC);
+CREATE INDEX idx_speakers_name ON speakers(name);
 ```
+
+### Qdrant Vector Database
+
+**Collection Schema**:
+```json
+{
+  "name": "meeting_transcripts",
+  "vectors": {
+    "size": 384,  // all-MiniLM-L6-v2 embedding size
+    "distance": "Cosine"
+  },
+  "payload_schema": {
+    "session_id": "keyword",
+    "speaker": "keyword",
+    "timestamp": "integer",
+    "text": "text",
+    "confidence": "float"
+  }
+}
+```
+
+**Search Pipeline**:
+1. Text → Sentence Transformer → 384-dim embedding
+2. Qdrant similarity search with metadata filters
+3. Ranked results with similarity scores
+4. Real-time indexing as transcriptions are created
 
 ## NPU Integration Details
 

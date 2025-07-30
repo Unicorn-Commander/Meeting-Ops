@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   Settings, 
   Network, 
@@ -6,20 +6,19 @@ import {
   Brain, 
   HardDrive, 
   Shield, 
-  Activity,
-  Server,
-  Wifi,
   Monitor,
-  Database,
-  Lock,
   FileText,
-  Zap
+  Upload,
+  Lock
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { NetworkManagement } from './admin/NetworkManagement';
 import { SystemDashboard } from './admin/SystemDashboard';
 import { AIConfiguration } from './admin/AIConfiguration';
 import { UserManagement } from '../components/UserManagement';
+import { LogViewer } from './LogViewer';
+import { BackupManager } from './BackupManager';
+import { SSLManager } from './SSLManager';
 
 interface AdminPanelProps {
   onClose?: () => void;
@@ -28,7 +27,7 @@ interface AdminPanelProps {
 export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const { user } = useAuth();
   const [currentSection, setCurrentSection] = useState('dashboard');
-  const [systemStatus, setSystemStatus] = useState<any>(null);
+  // const [systemStatus, setSystemStatus] = useState<any>(null);
 
   // Check if user has admin access
   const isAdmin = user?.role === 'admin' || user?.role === 'superuser';
@@ -77,10 +76,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
       description: 'File management, storage, backup, archive'
     },
     {
+      id: 'backup',
+      name: 'Backup & Restore',
+      icon: Upload,
+      description: 'Create, list, and restore system backups'
+    },
+    {
       id: 'security',
       name: 'Security & Logging',
       icon: Shield,
       description: 'Security settings, audit logs, monitoring'
+    },
+    {
+      id: 'ssl',
+      name: 'SSL/HTTPS',
+      icon: Lock,
+      description: 'Manage SSL certificates and HTTPS configuration'
+    },
+    {
+      id: 'logs',
+      name: 'Log Management',
+      icon: FileText,
+      description: 'View and manage system logs'
     },
     {
       id: 'advanced',
@@ -102,8 +119,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
         return <UserManagement />;
       case 'storage':
         return <div className="p-6"><h2 className="text-2xl font-bold">Storage Management</h2><p className="text-gray-400 mt-2">Coming soon...</p></div>;
+      case 'backup':
+        return <BackupManager />;
       case 'security':
         return <div className="p-6"><h2 className="text-2xl font-bold">Security & Logging</h2><p className="text-gray-400 mt-2">Coming soon...</p></div>;
+      case 'ssl':
+        return <SSLManager />;
+      case 'logs':
+        return <LogViewer />;
       case 'advanced':
         return <div className="p-6"><h2 className="text-2xl font-bold">Advanced Settings</h2><p className="text-gray-400 mt-2">Coming soon...</p></div>;
       default:

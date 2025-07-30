@@ -1,0 +1,50 @@
+[Unit]
+Description=Unicorn Commander Meeting Ops Backend
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=unicorn
+Group=unicorn
+WorkingDirectory=/opt/unicorn-commander/backend
+Environment="PATH=/opt/unicorn-commander/backend/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="DATABASE_URL=sqlite:////var/lib/unicorn-commander/meeting_sessions.db"
+Environment="RECORDINGS_PATH=/var/lib/unicorn-commander/recordings"
+Environment="LOG_LEVEL=INFO"
+
+# NPU access permissions
+SupplementaryGroups=render video
+DeviceAllow=/dev/accel/accel0 rw
+
+# Start command
+ExecStart=/opt/unicorn-commander/backend/venv/bin/python -m uvicorn main_docker:app --host 0.0.0.0 --port 9050 --workers 1
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/unicorn-commander /var/log/unicorn-commander
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unicorn-commander
+
+[Install]
+WantedBy=multi-user.target

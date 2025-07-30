@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Mic, Download, Trash2, Zap, Cpu, Activity, Battery, Info, CheckCircle, ChevronDown, ChevronUp, Loader2, HardDrive } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
 interface STTModel {
   id: string;
   name: string;
@@ -44,7 +46,7 @@ export const STTModelManager: React.FC = () => {
   const loadModels = async () => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch('/api/ai/stt/models', {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/models`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       
@@ -60,7 +62,7 @@ export const STTModelManager: React.FC = () => {
   const loadCurrentModel = async () => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch('/api/ai/stt/current', {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/current`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       
@@ -79,7 +81,7 @@ export const STTModelManager: React.FC = () => {
 
     try {
       const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/ai/stt/models/${modelId}/download`, {
+            const response = await fetch(`${API_BASE_URL}/api/ai/stt/models/${modelId}/download`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -110,7 +112,7 @@ export const STTModelManager: React.FC = () => {
 
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`/api/ai/stt/models/${modelId}`, {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/models/${modelId}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -126,7 +128,7 @@ export const STTModelManager: React.FC = () => {
   const setActiveModel = async (modelId: string) => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`/api/ai/stt/model`, {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/model`, {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_id: modelId })
@@ -144,7 +146,7 @@ export const STTModelManager: React.FC = () => {
   const testModel = async (modelId: string) => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`/api/ai/stt/test`, {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/test`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_id: modelId })
@@ -163,7 +165,7 @@ export const STTModelManager: React.FC = () => {
   const benchmarkModel = async (modelId: string) => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`/api/ai/stt/benchmark/${modelId}`, {
+      const response = await fetch(`${API_BASE_URL}/api/ai/stt/benchmark/${modelId}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 
