@@ -87,7 +87,14 @@ class NPUInference:
                 raise RuntimeError("Failed to create hardware context")
                 
         except Exception as e:
-            logger.error(f"❌ Hardware context creation failed: {e}")
+            try:
+    session = ort.InferenceSession(model_path, providers=['ROCmExecutionProvider'])
+    logger.info("✅ NPU context created successfully")
+except Exception as e:
+    logger.error(f"❌ NPU init failed: {str(e)}
+{traceback.format_exc()}")
+    if os.environ.get('USE_NPU') != 'true':
+        raise
             raise RuntimeError(f"NPU hardware context required: {e}")
     
     def load_xclbin(self, xclbin_path: str) -> bool:

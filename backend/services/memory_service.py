@@ -16,7 +16,7 @@ import pickle
 from pathlib import Path
 
 from database.database import get_db
-from database.models import Session as RecordingSession, Transcription
+from database.models import RecordingSession, Transcription
 from sqlalchemy.orm import Session as DBSession
 from auth.models import User
 from services.knowledge_graph_service import knowledge_graph

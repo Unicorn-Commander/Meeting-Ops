@@ -10,9 +10,13 @@ import {
   Clock,
   Cpu,
   HardDrive,
-  Zap
+  Zap,
+  Settings,
+  Users,
+  BarChart
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 interface SessionData {
   session_id: string;
@@ -25,6 +29,7 @@ interface SessionData {
 
 export const ProductionDashboard: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [currentSession, setCurrentSession] = useState<SessionData | null>(null);
@@ -81,7 +86,7 @@ export const ProductionDashboard: React.FC = () => {
   const connectAudioLevelWS = () => {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//localhost:1950/ws/audio-levels`;
+      const wsUrl = `${protocol}//localhost:8000/ws/audio-levels`;
       
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -253,7 +258,7 @@ export const ProductionDashboard: React.FC = () => {
   const connectTranscriptionWS = (sessionId: string) => {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//localhost:1950/ws/stream/${sessionId}`;
+      const wsUrl = `${protocol}//localhost:8000/ws/stream/${sessionId}`;
       
       const ws = new WebSocket(wsUrl);
       transcriptionWsRef.current = ws;
@@ -261,8 +266,15 @@ export const ProductionDashboard: React.FC = () => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log('Transcription WS received:', data);
           if (data.type === 'transcription' && data.data?.text) {
             setLiveTranscript(prev => prev + ' ' + data.data.text);
+          } else if (data.transcription) {
+            // Handle alternative format
+            setLiveTranscript(prev => prev + ' ' + data.transcription);
+          } else if (data.text) {
+            // Handle direct text format
+            setLiveTranscript(prev => prev + ' ' + data.text);
           }
         } catch (e) {
           console.error('Error parsing transcription:', e);
@@ -320,6 +332,31 @@ export const ProductionDashboard: React.FC = () => {
         <p className="text-gray-400">
           Start recording to capture and transcribe your audio with NPU acceleration
         </p>
+        
+        {/* Navigation Buttons */}
+        <div className="mt-6 flex gap-4">
+          <button
+            onClick={() => navigate('/admin')}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
+          >
+            <Users className="w-4 h-4" />
+            Admin Dashboard
+          </button>
+          <button
+            onClick={() => navigate('/recording')}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
+          >
+            <Mic className="w-4 h-4" />
+            Recording Dashboard
+          </button>
+          <button
+            onClick={() => navigate('/performance')}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
+          >
+            <BarChart className="w-4 h-4" />
+            Analytics
+          </button>
+        </div>
       </div>
 
       {/* Main Recording Interface */}
@@ -428,7 +465,7 @@ export const ProductionDashboard: React.FC = () => {
           </div>
 
           {/* Live Transcript Preview */}
-          {isRecording && liveTranscript && (
+          {isRecording && (
             <div className="mt-6 p-4 bg-gray-700 rounded-lg">
               <h3 className="text-sm font-medium text-gray-400 mb-2">Live Transcription</h3>
               <p className="text-white">{liveTranscript || 'Waiting for speech...'}</p>

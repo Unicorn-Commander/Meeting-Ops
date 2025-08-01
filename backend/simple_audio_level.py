@@ -57,17 +57,23 @@ class SimpleAudioMonitor:
                 if dev['max_input_channels'] > 0:
                     logger.info(f"  {i}: {dev['name']} ({dev['max_input_channels']} ch)")
             
-            # Try to find USB microphone
+            # Try to find USB microphone or use default
             usb_device = None
             for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0 and 'usb' in dev['name'].lower():
-                    usb_device = i
-                    logger.info(f"Found USB device: {i}: {dev['name']}")
-                    break
+                if dev['max_input_channels'] > 0:
+                    name_lower = dev['name'].lower()
+                    if any(keyword in name_lower for keyword in ['usb', 'device', 'pnp']):
+                        usb_device = i
+                        logger.info(f"Found USB/PnP device: {i}: {dev['name']}")
+                        break
+            
+            # Use default device if USB not found (default often maps to the right device)
+            if usb_device is None:
+                logger.info("No USB device found, using default input device")
             
             # Start audio stream
             self.stream = sd.InputStream(
-                device=usb_device,  # Use USB if found, otherwise default
+                device=usb_device,  # Use USB if found, otherwise default (None)
                 channels=1,
                 samplerate=44100,
                 callback=self.audio_callback,
@@ -94,9 +100,9 @@ class SimpleAudioMonitor:
         """Get current audio level"""
         return {
             "type": "audio_level",
-            "level": self.current_level,
-            "db": self.current_db,
-            "peak": self.peak_level
+            "level": float(self.current_level),
+            "db": float(self.current_db),
+            "peak": float(self.peak_level)
         }
 
 # Global monitor instance

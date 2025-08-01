@@ -70,9 +70,15 @@ class SettingsManager:
                     existing = db.query(Settings).filter(Settings.key == full_key).first()
                     
                     if not existing:
+                        # Special handling for list values (e.g., allowed_origins)
+                        if isinstance(value, list):
+                            stored_value = json.dumps(value)
+                        else:
+                            stored_value = value
+
                         setting = Settings(
                             key=full_key,
-                            value=value,
+                            value=stored_value,
                             category=category,
                             description=self._get_setting_description(full_key)
                         )
@@ -127,8 +133,18 @@ class SettingsManager:
                 
                 # Extract the key name without category prefix
                 key_name = setting.key.split('.', 1)[1] if '.' in setting.key else setting.key
+                
+                # Special handling for list values (e.g., allowed_origins)
+                display_value = setting.value
+                if setting.key == "network.allowed_origins" and isinstance(setting.value, str):
+                    try:
+                        display_value = json.loads(setting.value)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Could not decode JSON for {setting.key}: {setting.value}")
+                        display_value = [] # Default to empty list on error
+
                 result[setting.category][key_name] = {
-                    "value": setting.value,
+                    "value": display_value,
                     "description": setting.description,
                     "updated_at": setting.updated_at.isoformat() if setting.updated_at else None
                 }
@@ -160,15 +176,18 @@ class SettingsManager:
         try:
             setting = db.query(Settings).filter(Settings.key == key).first()
             
+            # Serialize list values to JSON string
+            stored_value = json.dumps(value) if isinstance(value, list) else value
+
             if setting:
-                setting.value = value
+                setting.value = stored_value
                 setting.updated_at = datetime.utcnow()
             else:
                 # Create new setting if it doesn't exist
                 category = key.split('.')[0] if '.' in key else 'general'
                 setting = Settings(
                     key=key,
-                    value=value,
+                    value=stored_value,
                     category=category,
                     description=self._get_setting_description(key)
                 )
@@ -197,13 +216,16 @@ class SettingsManager:
                 full_key = f"{category}.{key}"
                 setting = db.query(Settings).filter(Settings.key == full_key).first()
                 
+                # Serialize list values to JSON string
+                stored_value = json.dumps(value) if isinstance(value, list) else value
+
                 if setting:
-                    setting.value = value
+                    setting.value = stored_value
                     setting.updated_at = datetime.utcnow()
                 else:
                     setting = Settings(
                         key=full_key,
-                        value=value,
+                        value=stored_value,
                         category=category,
                         description=self._get_setting_description(full_key)
                     )

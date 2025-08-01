@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -328,9 +331,9 @@ async def startup_handler():
     # Initialize audio input service with settings
     logger.info("🔧 Initializing audio input service...")
     audio_settings = settings_manager.get_all_settings().get('audio', {})
-    audio_device = audio_settings.get('input_source', {}).get('value', 'default')
-    sample_rate = audio_settings.get('sample_rate', {}).get('value', 16000)
-    channels = audio_settings.get('channels', {}).get('value', 1)
+    audio_device = 0  # Hardcoded to USB PnP Sound Device (Device 0)
+    sample_rate = 44100  # Hardcoded to USB PnP Sound Device default sample rate
+    channels = 1
     
     logger.info(f"🎤 Audio settings: device={audio_device}, rate={sample_rate}, channels={channels}")
     
@@ -702,17 +705,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
     active_connections[session_id] = websocket
     
-    logger.info(f"New WebSocket connection established for session: {session_id}")
+    logger.info(f"WebSocket connected for session: {session_id}")
     
     # Send initial status
-    await websocket.send_text(json.dumps({
+    await websocket.send_json({
         "type": "status",
         "message": "Connected to Unicorn Commander: Meeting Ops",
         "session_id": session_id,
-        "transcriber_ready": transcriber.is_ready,
-        "npu_available": ("npu" in (transcriber.current_model_id or "").lower()) if transcriber.is_ready else False,
-        "speaker_diarization_ready": diarizer.is_ready
-    }))
+        "transcriber_ready": transcription_service.is_ready
+    })
     
     try:
         while True:
@@ -723,82 +724,68 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if message["type"] == "audio_chunk":
                 # Decode base64 audio data
                 audio_data = base64.b64decode(message["audio_data"])
-                
-                # Convert to numpy array (assuming 16-bit PCM)
-                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32767.0
-                
-                # Decode base64 audio data
-                decoded_audio_data = base64.b64decode(message["audio_data"])
+                logger.info(f"WS handler: Received audio chunk size {len(audio_data)} for session {session_id}")
                 
                 # Process audio chunk with unified transcription service
                 try:
-                    transcription_result = transcription_service.process_audio_chunk(decoded_audio_data, session_id=session_id)
-                    logger.info(f"Transcription result: {transcription_result}")
+                    transcription_result = transcription_service.process_audio_chunk(audio_data, session_id=session_id)
+                    logger.info(f"WS handler: Transcription result: {transcription_result}")
                 except Exception as e:
-                    logger.error(f"Error during transcription_service.process_audio_chunk: {e}", exc_info=True)
-                    await websocket.send_text(json.dumps({"type": "error", "message": f"Transcription error: {e}"}))
+                    logger.error(f"WS handler: Error during transcription: {e}", exc_info=True)
+                    await websocket.send_json({"type": "error", "message": f"Transcription error: {e}"})
                     continue
                 
                 if transcription_result:
+                    # Store transcription in database
                     try:
-                        # Get enhanced transcription data
-                        model_info = transcription_service.get_current_model_info()
-                        transcription = transcription_result.to_dict()
-                        transcription.update({
-                            "model_used": model_info.get("model_id", "unknown"),
-                            "engine_type": model_info.get("engine_type", "Unknown"),
-                            "npu_accelerated": "npu" in model_info.get("model_id", "").lower(),
-                            "timestamp": datetime.now().isoformat()
-                        })
+                        from database.database import SessionLocal
+                        from database.models import Transcription, RecordingSession
                         
-                        # Add to stream manager for session tracking
-                        if session_id in stream_manager.sessions:
-                            stream_manager.sessions[session_id]['transcript'].append(transcription)
-                        
-                        # Send transcription result with enhanced metadata
-                        await websocket.send_text(json.dumps({
-                            "type": "transcription",
-                            "data": transcription
-                        }))
-                        
-                        logger.info(f"Sent transcription for session {session_id}: {transcription['text']}")
+                        db = SessionLocal()
+                        try:
+                            # Find the recording session
+                            recording_session = db.query(RecordingSession).filter_by(session_id=session_id).first()
+                            if recording_session:
+                                # Create transcription record
+                                transcription = Transcription(
+                                    session_id=recording_session.id,
+                                    text=transcription_result.text,
+                                    confidence=transcription_result.confidence,
+                                    start_time_seconds=transcription_result.start_time,
+                                    end_time_seconds=transcription_result.end_time,
+                                    speaker_id=transcription_result.speaker_id,
+                                    npu_accelerated=True,
+                                    model_used="whisper-base"
+                                )
+                                db.add(transcription)
+                                db.commit()
+                                logger.info(f"WS handler: Saved transcription to database for session {session_id}")
+                            else:
+                                logger.warning(f"WS handler: Recording session {session_id} not found in database")
+                        finally:
+                            db.close()
                     except Exception as e:
-                        logger.error(f"Error processing transcription result or sending to WebSocket: {e}", exc_info=True)
-                        await websocket.send_text(json.dumps({"type": "error", "message": f"Result processing error: {e}"}))
-                        continue
-                
-                # Send audio level feedback
-                audio_level = np.max(np.abs(audio_array))
-                await websocket.send_text(json.dumps({
-                    "type": "audio_level",
-                    "level": float(audio_level)
-                }))
-                
-            elif message["type"] == "get_transcript":
-                # Send full transcript
-                transcript = stream_manager.get_session_transcript(session_id)
-                await websocket.send_text(json.dumps({
-                    "type": "full_transcript",
-                    "transcript": transcript
-                }))
+                        logger.error(f"WS handler: Error saving transcription to database: {e}")
+                    
+                    # Send to WebSocket client
+                    await websocket.send_json({
+                        "type": "transcription",
+                        "data": transcription_result.to_dict()
+                    })
+                    logger.info(f"WS handler: Sent transcription for session {session_id}: {transcription_result.text}")
+                else:
+                    logger.warning(f"WS handler: Empty transcription result for session {session_id}")
                 
             elif message["type"] == "ping":
-                # Respond to ping
-                await websocket.send_text(json.dumps({
-                    "type": "pong",
-                    "timestamp": datetime.now().isoformat()
-                }))
+                await websocket.send_json({"type": "pong"})
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session: {session_id}")
-        if session_id in active_connections:
-            del active_connections[session_id]
-        stream_manager.close_session(session_id)
     except Exception as e:
-        logger.error(f"Error in WebSocket connection {session_id}: {e}")
+        logger.error(f"WebSocket error for session {session_id}: {e}")
+    finally:
         if session_id in active_connections:
             del active_connections[session_id]
-        stream_manager.close_session(session_id)
 
 @app.websocket("/ws/audio-levels")
 async def websocket_audio_levels(websocket: WebSocket):
@@ -1939,3 +1926,17 @@ async def check_meeting_conflicts(
 @app.get("/api/test")
 async def test_endpoint():
     return {"status": "ok"}
+
+
+@app.post("/api/test-transcription")
+def test_transcription(audio_path: str = "", current_user: User = Depends(get_current_user)):
+    """Test transcription with a known audio file"""
+    try:
+        if not audio_path:
+            raise ValueError("Audio path required")
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+        result = transcription_service.process_audio_chunk(audio_data, session_id='test')
+        return {"transcription": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

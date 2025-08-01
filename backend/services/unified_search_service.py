@@ -13,7 +13,7 @@ from collections import defaultdict
 import re
 
 from database.database import get_db
-from database.models import Session as RecordingSession, Transcription
+from database.models import RecordingSession, Transcription
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import text
 from services.embedding_service import embedding_service

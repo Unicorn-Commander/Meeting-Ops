@@ -310,7 +310,7 @@ export const LoginRegister: React.FC = () => {
               <p>Default admin credentials:</p>
               <p className="font-mono mt-1">
                 Username: <span className="text-gray-400">admin</span> | 
-                Password: <span className="text-gray-400">admin123</span>
+                Password: <span className="text-gray-400">changeme123!</span>
               </p>
               <p className="text-yellow-400 mt-1">Change immediately after first login!</p>
             </div>

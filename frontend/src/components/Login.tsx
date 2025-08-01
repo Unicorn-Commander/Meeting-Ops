@@ -117,7 +117,7 @@ export const Login: React.FC = () => {
               <br />
               Username: <span className="font-mono text-gray-900">admin</span>
               <br />
-              Password: <span className="font-mono text-gray-900">admin123</span>
+              Password: <span className="font-mono text-gray-900">changeme123!</span>
             </p>
             <p className="mt-2 text-red-600 font-semibold">
               Change the default password immediately!

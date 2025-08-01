@@ -17,7 +17,7 @@ from pathlib import Path
 import json
 import sqlite3
 from database.database import get_db
-from database.models import Session as RecordingSession, Transcription
+from database.models import RecordingSession, Transcription
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import text
 from transformers import AutoTokenizer

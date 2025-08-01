@@ -85,14 +85,36 @@ class TranscriptionService:
     def _initialize_fallback_model(self):
         """Initialize basic ONNX fallback model"""
         try:
-            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-            self.current_engine = ONNXWhisperNPUTranscriber()
-            if self.current_engine.initialize(model_size="base"):
-                self.current_model_id = "whisper-base"
-                self.is_ready = True
-                logger.info("✅ Fallback ONNX transcriber initialized")
-            else:
-                logger.error("❌ Failed to initialize fallback transcriber")
+            # First try NPU transcriber
+            try:
+                from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
+                self.current_engine = ONNXWhisperNPUTranscriber()
+                if self.current_engine.initialize(model_size="base"):
+                    self.current_model_id = "whisper-base"
+                    self.is_ready = True
+                    logger.info("✅ Fallback ONNX NPU transcriber initialized")
+                    return
+            except Exception as npu_error:
+                logger.warning(f"NPU transcriber failed: {npu_error}")
+            
+            # Fall back to CPU ONNX
+            try:
+                from cpu_onnx_transcriber import get_cpu_transcriber
+                self.current_engine = get_cpu_transcriber("base")
+                if self.current_engine.is_ready:
+                    self.current_model_id = "whisper-base-cpu"
+                    self.is_ready = True
+                    logger.info("✅ CPU ONNX transcriber initialized")
+                    return
+            except Exception as cpu_error:
+                logger.warning(f"CPU ONNX transcriber failed: {cpu_error}")
+            
+            # Final fallback to hybrid transcriber
+            from hybrid_transcriber import get_hybrid_transcriber
+            self.current_engine = get_hybrid_transcriber("base")
+            self.current_model_id = "whisper-hybrid"
+            self.is_ready = True
+            logger.info("✅ Hybrid transcriber initialized as final fallback")
         except Exception as e:
             logger.error(f"Failed to initialize fallback model: {e}")
     
@@ -342,10 +364,10 @@ class TranscriptionService:
             # Call the appropriate transcription method based on engine type
             if hasattr(self.current_engine, 'transcribe_chunk'):
                 logger.debug("Calling transcribe_chunk on current_engine")
-                result = self.current_engine.transcribe_chunk(audio_array, session_id)
-            elif hasattr(self.current_engine, 'transcribe'):
+                result = self.current_engine.transcribe_chunk(audio_array)
+            elif hasattr(self.current_engine, 'transcribe_chunk'):
                 logger.debug("Calling transcribe on current_engine")
-                result = self.current_engine.transcribe(audio_array)
+                result = self.current_engine.transcribe_chunk(audio_array)
             else:
                 logger.error("Current engine doesn't support transcription")
                 return None
@@ -422,7 +444,7 @@ class TranscriptionService:
         try:
             if hasattr(self.current_engine, 'transcribe_file'):
                 result = self.current_engine.transcribe_file(file_path)
-            elif hasattr(self.current_engine, 'transcribe'):
+            elif hasattr(self.current_engine, 'transcribe_chunk'):
                 # Load audio file and process
                 import librosa
                 audio, sr = librosa.load(file_path, sr=16000)

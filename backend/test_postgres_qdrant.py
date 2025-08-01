@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Import our services
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from database.database import init_database, get_db
-from database.models import Session as RecordingSession, Transcription
+from database.models import RecordingSession, Transcription
 from services.vector_search import get_vector_search_service
 from auth.models import User
 

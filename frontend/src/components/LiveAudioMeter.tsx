@@ -1,30 +1,27 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Volume2, VolumeX, Activity, Mic } from 'lucide-react';
+import { Mic } from 'lucide-react';
 
 export const LiveAudioMeter: React.FC = () => {
   const [level, setLevel] = useState(0);
   const [peak, setPeak] = useState(0);
-  const [db, setDb] = useState(-60);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const peakDecayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const peakHoldTime = useRef(0);
+  const peakDecayRef = useRef<number | null>(null);
 
   useEffect(() => {
+    let reconnectTimeout: NodeJS.Timeout;
+    
     const connect = () => {
       try {
-        // Use relative URL for better proxy support
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//localhost:1950/ws/audio-levels`;
-        
-        console.log('Connecting to audio levels WebSocket:', wsUrl);
-        const ws = new WebSocket(wsUrl);
+        // Direct connection to backend WebSocket
+        const ws = new WebSocket('ws://localhost:8000/ws/audio-levels');
         wsRef.current = ws;
 
         ws.onopen = () => {
-          console.log('Audio levels WebSocket connected');
+          console.log('[LiveAudioMeter] WebSocket connected');
           setIsConnected(true);
           setError(null);
         };
@@ -32,69 +29,68 @@ export const LiveAudioMeter: React.FC = () => {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            
             if (data.type === 'audio_level') {
               const newLevel = data.level || 0;
-              const newDb = data.db || -60;
-              
               setLevel(newLevel);
-              setDb(newDb);
               
-              // Update peak with decay
+              // Update peak
               if (newLevel > peak) {
                 setPeak(newLevel);
-                // Clear existing decay timeout
-                if (peakDecayTimeoutRef.current) {
-                  clearTimeout(peakDecayTimeoutRef.current);
-                }
-                // Start peak decay after 1 second
-                peakDecayTimeoutRef.current = setTimeout(() => {
-                  setPeak(0);
-                }, 1000);
+                peakHoldTime.current = Date.now();
               }
-            } else if (data.type === 'error') {
-              setError(data.message);
             }
           } catch (e) {
-            console.error('Error parsing audio level data:', e);
+            console.error('[LiveAudioMeter] Error parsing message:', e);
           }
         };
 
         ws.onerror = (error) => {
-          console.error('Audio levels WebSocket error:', error);
+          console.error('[LiveAudioMeter] WebSocket error:', error);
           setError('Connection error');
+          setIsConnected(false);
         };
 
         ws.onclose = () => {
-          console.log('Audio levels WebSocket disconnected');
+          console.log('[LiveAudioMeter] WebSocket closed');
           setIsConnected(false);
-          wsRef.current = null;
-          
-          // Reconnect after 2 seconds
-          reconnectTimeoutRef.current = setTimeout(connect, 2000);
+          // Reconnect after 3 seconds
+          reconnectTimeout = setTimeout(connect, 3000);
         };
-      } catch (error) {
-        console.error('Failed to create WebSocket:', error);
+
+      } catch (err) {
+        console.error('[LiveAudioMeter] Failed to connect:', err);
         setError('Failed to connect');
-        // Retry connection
-        reconnectTimeoutRef.current = setTimeout(connect, 2000);
+        reconnectTimeout = setTimeout(connect, 3000);
       }
     };
 
     connect();
 
+    // Peak decay animation
+    const animatePeakDecay = () => {
+      const now = Date.now();
+      const holdDuration = 1000; // Hold peak for 1 second
+      const decayRate = 0.02;
+      
+      if (now - peakHoldTime.current > holdDuration && peak > level) {
+        setPeak(prev => Math.max(level, prev - decayRate));
+      }
+      
+      peakDecayRef.current = requestAnimationFrame(animatePeakDecay);
+    };
+    
+    peakDecayRef.current = requestAnimationFrame(animatePeakDecay);
+
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (peakDecayTimeoutRef.current) {
-        clearTimeout(peakDecayTimeoutRef.current);
-      }
+      clearTimeout(reconnectTimeout);
       if (wsRef.current) {
         wsRef.current.close();
       }
+      if (peakDecayRef.current) {
+        cancelAnimationFrame(peakDecayRef.current);
+      }
     };
-  }, []);
+  }, [peak, level]);
 
   // Convert level (0-1) to percentage
   const levelPercent = Math.min(100, level * 100);
@@ -106,6 +102,9 @@ export const LiveAudioMeter: React.FC = () => {
     if (value > 0.6) return 'bg-yellow-500';
     return 'bg-green-500';
   };
+
+  // Show peak indicator
+  const showPeak = true;
 
   return (
     <div className="fixed top-20 right-6 bg-gray-900 border border-gray-700 rounded-lg p-4 shadow-lg">
@@ -148,27 +147,11 @@ export const LiveAudioMeter: React.FC = () => {
               style={{ left: `${peakPercent}%` }}
             />
           )}
-        </div>
 
-        {/* dB readout */}
-        <div className="flex justify-between items-center mt-2">
-          <div className="text-xs text-gray-400">
-            {isConnected ? (
-              <>
-                <span className="font-mono">{db.toFixed(1)} dB</span>
-                <span className="ml-2">({(levelPercent).toFixed(0)}%)</span>
-              </>
-            ) : (
-              <span>--.- dB</span>
-            )}
-          </div>
-          <div className="flex items-center gap-1">
-            <Activity className="w-3 h-3 text-gray-400" />
-            {level > 0.01 ? (
-              <Volume2 className="w-3 h-3 text-green-400" />
-            ) : (
-              <VolumeX className="w-3 h-3 text-gray-600" />
-            )}
+          {/* dB scale labels */}
+          <div className="absolute inset-0 flex items-center justify-between px-1">
+            <span className="text-xs text-gray-400">-60</span>
+            <span className="text-xs text-gray-400">0 dB</span>
           </div>
         </div>
 
@@ -176,7 +159,7 @@ export const LiveAudioMeter: React.FC = () => {
         <div className="flex gap-1 mt-2">
           {[...Array(20)].map((_, i) => {
             const threshold = i / 20;
-            const active = level > threshold;
+            const active = level >= threshold;
             let color = 'bg-gray-700';
             if (active) {
               if (threshold > 0.8) color = 'bg-red-500';
@@ -197,12 +180,9 @@ export const LiveAudioMeter: React.FC = () => {
       {!isConnected && (
         <div className="mt-3 text-xs text-gray-500">
           <p>Trying to connect to WebSocket...</p>
-          <p className="font-mono">ws://localhost:1950/ws/audio-levels</p>
+          <p className="font-mono">ws://localhost:9050/ws/audio-levels</p>
         </div>
       )}
     </div>
   );
 };
-
-// Show peak indicator
-const showPeak = true;

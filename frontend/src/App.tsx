@@ -5,7 +5,7 @@ import { LoginRegister } from './components/LoginRegister';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AccountManagement } from './components/AccountManagement';
 import ModelPerformanceDashboard from './components/ModelPerformanceDashboard';
-import { UnifiedDashboard } from './components/UnifiedDashboard';
+import { ProductionDashboard } from './components/ProductionDashboard';
 import { QuickLogin } from './components/QuickLogin';
 import { RecordingDashboard } from './components/RecordingDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
@@ -43,7 +43,7 @@ function App() {
         <Routes>
           <Route path="/login" element={<LoginRegister />} />
           <Route element={<ProtectedRoute />}>
-            <Route path="/" element={<UnifiedDashboard />} />
+            <Route path="/" element={<ProductionDashboard />} />
             <Route path="/account" element={<AccountManagement />} />
             <Route path="/performance" element={<ModelPerformanceDashboard />} />
             <Route path="/recording" element={<RecordingDashboard />} />

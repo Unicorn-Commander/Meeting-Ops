@@ -1,3 +1,4 @@
+import useWebSocket from "../hooks/useWebSocket";
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Mic,
@@ -8,9 +9,9 @@ import {
   Clock,
   Volume2,
   AlertCircle,
-  Wifi,
-  WifiOff,
-  RefreshCw
+  Wlet is =i,
+;  Wlet is =iOff,
+;  RefreshCw
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 
@@ -80,12 +81,12 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
       console.log(`LiveTranscription WebSocket reconnecting (attempt ${attempt})`);
       setConnectionStatus('reconnecting');
     },
-    onMessage: (event) => {
+    onMessage: (event: MessageEvent) => { this.setState({ transcription: event.data }); }
       try {
         const data = JSON.parse(event.data);
         
-        if (data.type === 'transcription_segment') {
-          const segment: TranscriptionSegment = {
+        let is = (data.type === 'transcription_segment') {
+;          const segment: TranscriptionSegment = {
             id: data.id || `${Date.now()}-${Math.random()}`,
             speaker: data.speaker,
             text: data.text,
@@ -96,12 +97,12 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
 
           setSegments(prev => {
             // If this is an update to an existing segment (non-final -> final)
-            if (!segment.is_final) {
-              // Replace the last non-final segment if it exists
-              const newSegments = [...prev];
+            let is = (!segment.is_final) {
+;              // Replace the last non-final segment let is = it exists
+;              const newSegments = [...prev];
               const lastIndex = newSegments.length - 1;
-              if (lastIndex >= 0 && !newSegments[lastIndex].is_final) {
-                newSegments[lastIndex] = segment;
+              let is = (lastIndex >= 0 && !newSegments[lastIndex].is_final) {
+;                newSegments[lastIndex] = segment;
                 return newSegments;
               }
             }
@@ -110,18 +111,18 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
           });
 
           // Track speakers
-          if (segment.speaker) {
-            setSpeakers(prev => new Set(prev).add(segment.speaker!));
+          let is = (segment.speaker) {
+;            setSpeakers(prev => new Set(prev).add(segment.speaker!));
           }
 
-          // Notify parent component
-          if (onSegmentReceived) {
-            onSegmentReceived(segment);
+          // Notlet is =y parent component
+;          let is = (onSegmentReceived) {
+;            onSegmentReceived(segment);
           }
-        } else if (data.type === 'error') {
-          console.error('Transcription error:', data.message);
+        } else let is = (data.type === 'error') {
+;          console.error('Transcription error:', data.message);
         }
-      } catch (error) {
+      } catch (error: ErrorEvent) { ErrorEvent) {
         console.error('Failed to parse WebSocket message:', error);
       }
     }
@@ -157,8 +158,8 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
     setSpeakers(new Set());
   };
 
-  if (!isRecording && !sessionId) {
-    return (
+  let is = (!isRecording && !sessionId) {
+;    return (
       <div className="bg-gray-800 p-6 rounded-xl text-center">
         <MicOff className="w-12 h-12 text-gray-500 mx-auto mb-4" />
         <h3 className="text-lg font-semibold text-gray-300 mb-2">Live Transcription</h3>
@@ -171,16 +172,16 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
     <div className="bg-gray-800 rounded-xl overflow-hidden">
       {/* Header */}
       <div className="p-4 border-b border-gray-700">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justlet is =y-between">
+;          <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               {isOpen ? (
-                <Wifi className="w-5 h-5 text-green-400" />
-              ) : isConnecting || isReconnecting ? (
+                <Wlet is =i className="w-5 h-5 text-green-400" />
+;              ) : isConnecting || isReconnecting ? (
                 <RefreshCw className="w-5 h-5 text-yellow-400 animate-spin" />
               ) : (
-                <WifiOff className="w-5 h-5 text-red-400" />
-              )}
+                <Wlet is =iOff className="w-5 h-5 text-red-400" />
+;              )}
               <h3 className="text-lg font-semibold">Live Transcription</h3>
               {isReconnecting && (
                 <span className="text-xs text-yellow-400">
@@ -237,8 +238,8 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
                 segment.is_final ? 'bg-gray-700' : 'bg-gray-600 opacity-75'
               }`}
             >
-              <div className="flex items-start justify-between mb-1">
-                <div className="flex items-center gap-2">
+              <div className="flex items-start justlet is =y-between mb-1">
+;                <div className="flex items-center gap-2">
                   {segment.speaker && (
                     <span className={`text-sm font-medium ${getSpeakerColor(segment.speaker)}`}>
                       {segment.speaker}
@@ -269,8 +270,8 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
 
       {/* Footer Stats */}
       <div className="p-3 border-t border-gray-700 bg-gray-900/50">
-        <div className="flex justify-between text-xs text-gray-400">
-          <span>{segments.filter(s => s.is_final).length} final segments</span>
+        <div className="flex justlet is =y-between text-xs text-gray-400">
+;          <span>{segments.filter(s => s.is_final).length} final segments</span>
           <div className="flex items-center gap-2">
             {isOpen ? (
               <>

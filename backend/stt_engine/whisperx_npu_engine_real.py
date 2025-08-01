@@ -158,7 +158,7 @@ class WhisperXNPUEngineReal:
             logger.error(f"❌ Transcription failed: {e}")
             raise
     
-    def transcribe_chunk(self, audio_data: np.ndarray) -> Dict:
+    def transcribe_chunk(self, audio_data: np.ndarray, diarize: bool = True) -> Dict:
         """
         Transcribe audio chunk for real-time processing
         

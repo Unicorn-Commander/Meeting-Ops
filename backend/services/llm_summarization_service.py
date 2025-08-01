@@ -31,16 +31,14 @@ class LLMSummarizationService:
         ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3n:latest')
         
         if openai_key:
-            self.openai_client = OpenAI(api_key=openai_key)
-            logger.info("✅ OpenAI client initialized")
-        
-        if anthropic_key:
             try:
-                self.anthropic_client = Anthropic(api_key=anthropic_key)
-                logger.info("✅ Anthropic client initialized")
+                self.openai_client = OpenAI(api_key=openai_key)
+                logger.info("✅ OpenAI client initialized")
             except Exception as e:
-                logger.warning(f"Failed to initialize Anthropic client: {e}")
-                self.anthropic_client = None
+                logger.warning(f"⚠️ Could not initialize OpenAI client: {e}")
+                self.openai_client = None
+        
+        
         
         # Check Ollama availability
         try:
@@ -226,13 +224,7 @@ class LLMSummarizationService:
                 )
                 return response.choices[0].message.content.strip()
             
-            elif self.anthropic_client:
-                response = self.anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.content[0].text.strip()
+            
             
             elif self.ollama_url:
                 return await self._call_ollama(prompt, max_tokens=500)

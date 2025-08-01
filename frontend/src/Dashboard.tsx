@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { NpuStatusIndicator } from './components/NpuStatusIndicator';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { User, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import SessionDetails from './SessionDetails';

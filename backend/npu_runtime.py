@@ -16,6 +16,9 @@ import wave
 
 logger = logging.getLogger(__name__)
 
+# Check for CPU-only mode
+CPU_ONLY_MODE = os.environ.get('CPU_ONLY_MODE', '').lower() in ('1', 'true', 'yes')
+
 # Working IOCTL commands
 DRM_IOCTL_AMDXDNA_CREATE_BO = 0xC0206443
 DRM_IOCTL_AMDXDNA_GET_INFO = 0xC0106447
@@ -24,19 +27,48 @@ DRM_IOCTL_AMDXDNA_GET_INFO = 0xC0106447
 AMDXDNA_BO_SHMEM = 1
 AMDXDNA_BO_DEV_HEAP = 2
 
+class NPURuntime:
+    """Main NPURuntime class for compatibility"""
+    
+    def __init__(self):
+        if CPU_ONLY_MODE:
+            logger.info("🖥️ NPURuntime: Running in CPU-only mode")
+            self.available = False
+        else:
+            # Try to use the simplified runtime
+            self._runtime = SimplifiedNPURuntime()
+            self.available = self._runtime.open_device()
+            
+    def is_available(self) -> bool:
+        return self.available
+        
+    def load_model(self, model_path: str) -> bool:
+        if not self.available:
+            return False
+        return self._runtime.load_model(model_path)
+        
+    def transcribe(self, audio_data) -> Dict[str, Any]:
+        if not self.available:
+            return {"error": "NPU not available", "text": "", "npu_accelerated": False}
+        return self._runtime.transcribe(audio_data)
+
 class SimplifiedNPURuntime:
     """
     Simplified NPU Runtime that focuses on what works
     """
     
     def __init__(self, device_path='/dev/accel/accel0'):
-        self.device_path = device_path
+        self.device_path = "/dev/accel/accel0"
         self.fd = None
         self.model_loaded = False
         self.aie_version = None
         
     def open_device(self) -> bool:
         """Open NPU device and verify it's working"""
+        if CPU_ONLY_MODE:
+            logger.info("🖥️ Running in CPU-only mode (CPU_ONLY_MODE=1)")
+            return False
+            
         try:
             self.fd = os.open(self.device_path, os.O_RDWR)
             logger.info(f"✅ Opened NPU device: {self.device_path}")

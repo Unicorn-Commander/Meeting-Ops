@@ -39,7 +39,7 @@ export const AuthDebug: React.FC = () => {
         ok: meRes.ok,
         data: meRes.ok ? await meRes.json() : await meRes.text()
       };
-    } catch (err) {
+    } catch (err: any) {
       results.authMe = { error: err.toString() };
     }
 
@@ -51,7 +51,7 @@ export const AuthDebug: React.FC = () => {
         ok: statusRes.ok,
         data: statusRes.ok ? await statusRes.json() : null
       };
-    } catch (err) {
+    } catch (err: any) {
       results.apiStatus = { error: err.toString() };
     }
 

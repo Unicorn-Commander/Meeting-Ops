@@ -155,7 +155,7 @@ export const UserDashboardSimple: React.FC<UserDashboardSimpleProps> = ({ onSwit
       
       // Refresh recordings list
       refreshRecordings();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to start recording:', error);
       alert(`Failed to start recording: ${error.message || error}`);
     }
@@ -178,7 +178,7 @@ export const UserDashboardSimple: React.FC<UserDashboardSimpleProps> = ({ onSwit
       
       // Refresh recordings list
       refreshRecordings();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to stop recording:', error);
       alert('Failed to stop recording. Please try again.');
     }
@@ -198,7 +198,7 @@ export const UserDashboardSimple: React.FC<UserDashboardSimpleProps> = ({ onSwit
       
       const data = await response.json();
       setSummary(data);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to generate summary:', error);
       // Try mock data as fallback
       setSummary({
@@ -232,7 +232,7 @@ export const UserDashboardSimple: React.FC<UserDashboardSimpleProps> = ({ onSwit
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to download transcript:', error);
       alert('Failed to download transcript. Please try again.');
     }

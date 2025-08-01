@@ -2,13 +2,26 @@
 WhisperX NPU Engine - Routes to real NPU implementation
 """
 
-try:
-    # Try to import the real NPU engine
-    from .whisperx_npu_engine_real import WhisperXNPUEngineReal as WhisperXNPUEngine
-    print("✅ Using REAL WhisperX NPU Engine with hardware acceleration")
-except ImportError as e:
-    print(f"⚠️ Real NPU engine not available: {e}")
-    print("⚠️ Falling back to mock implementation")
+import os
+
+# Check for CPU-only mode
+CPU_ONLY_MODE = os.environ.get('CPU_ONLY_MODE', '').lower() in ('1', 'true', 'yes')
+
+if CPU_ONLY_MODE:
+    print("🖥️ CPU_ONLY_MODE enabled - using mock WhisperX implementation")
+    USE_MOCK = True
+else:
+    try:
+        # Try to import the real NPU engine
+        from .whisperx_npu_engine_real import WhisperXNPUEngineReal as WhisperXNPUEngine
+        print("✅ Using REAL WhisperX NPU Engine with hardware acceleration")
+        USE_MOCK = False
+    except ImportError as e:
+        print(f"⚠️ Real NPU engine not available: {e}")
+        print("⚠️ Falling back to mock implementation")
+        USE_MOCK = True
+
+if USE_MOCK:
     
     # Fallback mock implementation
     import numpy as np

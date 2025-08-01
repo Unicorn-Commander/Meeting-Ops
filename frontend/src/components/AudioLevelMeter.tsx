@@ -9,10 +9,24 @@ interface AudioLevelMeterProps {
   orientation?: 'horizontal' | 'vertical';
 }
 
-const WS_BASE_URL = (import.meta.env.VITE_API_URL || 'ws://localhost:1950').replace('http', 'ws');
+// In development, use the proxy. In production, use the API URL
+const getWebSocketUrl = () => {
+  // For now, connect directly to the backend WebSocket
+  return `ws://localhost:8000/ws/audio-levels`;
+  
+  // Original code for reference:
+  // if (import.meta.env.DEV) {
+  //   // Development mode - use proxy through the dev server
+  //   return `ws://localhost:7777/ws/audio-levels`;
+  // } else {
+  //   // Production mode - use the API URL
+  //   const apiUrl = import.meta.env.VITE_API_URL || 'ws://localhost:9051';
+  //   return apiUrl.replace('http', 'ws') + '/ws/audio-levels';
+  // }
+};
 
 export const AudioLevelMeter: React.FC<AudioLevelMeterProps> = ({
-  wsUrl = `${WS_BASE_URL}/ws/audio-levels`,
+  wsUrl = getWebSocketUrl(),
   height = 20,
   showDb = true,
   showPeak = true,
@@ -35,12 +49,14 @@ export const AudioLevelMeter: React.FC<AudioLevelMeterProps> = ({
         wsRef.current = ws;
 
         ws.onopen = () => {
+          console.log("[AudioLevelMeter] WebSocket connected");
           setIsConnected(true);
           setError(null);
         };
 
         ws.onmessage = (event) => {
           const data = JSON.parse(event.data);
+          console.log("[AudioLevelMeter] Received data:", data);
           
           if (data.type === 'audio_level') {
             setLevel(data.level || 0);
@@ -98,7 +114,7 @@ export const AudioLevelMeter: React.FC<AudioLevelMeterProps> = ({
         cancelAnimationFrame(peakDecayRef.current);
       }
     };
-  }, [wsUrl]);
+  }, [wsUrl, peak, level]);
 
   // Calculate colors based on level
   const getColor = (value: number) => {
