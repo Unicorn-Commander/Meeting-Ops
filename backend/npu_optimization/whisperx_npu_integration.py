@@ -6,7 +6,8 @@ Connects WhisperX pipeline to MLIR-AIE2 NPU kernels
 """
 
 import numpy as np
-import torch
+# torch not needed for direct NPU hardware acceleration
+# import torch
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple

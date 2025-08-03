@@ -12,7 +12,7 @@ export const QuickLogin: React.FC = () => {
     setError('');
     
     try {
-      await login('admin', 'changeme123!'); // Default admin password
+      await login('admin', 'admin'); // Default admin password
       setStatus('success');
       setTimeout(() => {
         window.location.reload(); // Refresh to apply auth
@@ -20,7 +20,7 @@ export const QuickLogin: React.FC = () => {
     } catch (err: any) {
       // Try alternate password
       try {
-        await login('admin', 'changeme123!');
+        await login('admin', 'admin');
         setStatus('success');
         setTimeout(() => {
           window.location.reload();

@@ -17,14 +17,8 @@ from services.performance_metrics_service import performance_metrics_service
 
 logger = logging.getLogger(__name__)
 
-# Import working transcriber
-try:
-    from working_transcriber import WorkingTranscriber
-    logger.info("✅ Using working transcriber for real text")
-    WORKING_TRANSCRIBER_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️ Working transcriber not available")
-    WORKING_TRANSCRIBER_AVAILABLE = False
+# Working transcriber not needed - NPU transcription is available
+WORKING_TRANSCRIBER_AVAILABLE = False
 
 class TranscriptionResult:
     """Standardized transcription result"""

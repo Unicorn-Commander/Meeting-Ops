@@ -33,9 +33,9 @@ DRM_AMDXDNA_SET_STATE = 8
 def DRM_IOWR(cmd, size):
     return (0x40000000 | (size << 16) | (ord('d') << 8) | cmd)
 
-DRM_IOCTL_AMDXDNA_CREATE_HWCTX = DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDXDNA_CREATE_HWCTX, 64)
+DRM_IOCTL_AMDXDNA_CREATE_HWCTX = 0xC0386440  # Correct value for 56-byte struct
 DRM_IOCTL_AMDXDNA_DESTROY_HWCTX = DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDXDNA_DESTROY_HWCTX, 8)
-DRM_IOCTL_AMDXDNA_CREATE_BO = DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDXDNA_CREATE_BO, 32)
+DRM_IOCTL_AMDXDNA_CREATE_BO = 0xC0206443  # Correct value from debug_hwctx.py
 DRM_IOCTL_AMDXDNA_EXEC_CMD = DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDXDNA_EXEC_CMD, 48)
 DRM_IOCTL_AMDXDNA_GET_INFO = DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDXDNA_GET_INFO, 16)
 
@@ -132,24 +132,28 @@ class RealNPURuntime:
                 return False
             
             # Pack real hardware context creation structure
-            # struct amdxdna_drm_create_hwctx
-            hwctx_data = struct.pack('QQIIIIIII', 
-                                   0,        # ext
-                                   0,        # ext_flags  
-                                   0,        # qos_p (null)
-                                   umq_bo,   # umq_bo
-                                   log_bo,   # log_buf_bo
-                                   16,       # max_opc
-                                   4,        # num_tiles
-                                   65536,    # mem_size
-                                   0)        # umq_doorbell (output)
+            # struct amdxdna_drm_create_hwctx - 56 bytes total
+            hwctx_data = bytearray(56)
+            struct.pack_into('QQQ', hwctx_data, 0,
+                           0,  # ext
+                           0,  # ext_flags
+                           0)  # qos_p
+            struct.pack_into('IIIIIIII', hwctx_data, 24,
+                           umq_bo,      # umq_bo
+                           log_bo,      # log_buf_bo
+                           16,          # max_opc
+                           4,           # num_tiles
+                           65536,       # mem_size
+                           0,           # umq_doorbell (output)
+                           0,           # handle (output)
+                           0)           # syncobj_handle (output)
             
             # Send real IOCTL command
-            result = fcntl.ioctl(self.fd, DRM_IOCTL_AMDXDNA_CREATE_HWCTX, hwctx_data)
+            fcntl.ioctl(self.fd, DRM_IOCTL_AMDXDNA_CREATE_HWCTX, hwctx_data)
             
             # Unpack result to get handles
-            unpacked = struct.unpack('QQIIIIIII', result)
-            self.hw_context_handle = unpacked[8]  # handle field
+            values = struct.unpack_from('IIIIIIII', hwctx_data, 24)
+            self.hw_context_handle = values[6]  # handle field
             
             if self.hw_context_handle != 0:
                 logger.info(f"✅ Created real NPU hardware context: {self.hw_context_handle}")
@@ -170,19 +174,20 @@ class RealNPURuntime:
         """Create real buffer object using driver API"""
         try:
             # Pack real buffer creation structure
-            # struct amdxdna_drm_create_bo
-            bo_data = struct.pack('QQQI', 
-                                0,        # flags
-                                0,        # vaddr
-                                size,     # size
-                                bo_type)  # type
+            # struct amdxdna_drm_create_bo - 32 bytes total
+            bo_data = bytearray(32)
+            struct.pack_into('QQQII', bo_data, 0, 
+                           0,        # flags
+                           0,        # vaddr
+                           size,     # size
+                           bo_type,  # type
+                           0)        # handle (output)
             
             # Send real IOCTL command
-            result = fcntl.ioctl(self.fd, DRM_IOCTL_AMDXDNA_CREATE_BO, bo_data)
+            fcntl.ioctl(self.fd, DRM_IOCTL_AMDXDNA_CREATE_BO, bo_data)
             
             # Unpack to get buffer handle
-            unpacked = struct.unpack('QQQI', result)
-            bo_handle = unpacked[3]  # handle field
+            _, _, _, _, bo_handle = struct.unpack_from('QQQII', bo_data, 0)
             
             if bo_handle != 0:
                 logger.debug(f"✅ Created real buffer object: handle={bo_handle}, size={size}, type={bo_type}")

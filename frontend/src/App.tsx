@@ -11,8 +11,18 @@ import { RecordingDashboard } from './components/RecordingDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { SystemAdminDashboard } from './components/SystemAdminDashboard';
 import { getErrorMessage } from './utils/errorHandling';
+import { fixUrlRedirect } from './utils/fixUrlRedirect';
 
 function App() {
+  // Fix URL redirect issues
+  useEffect(() => {
+    // Check and fix www. prefix on IP addresses
+    if (fixUrlRedirect()) {
+      // Page will redirect, no need to continue
+      return;
+    }
+  }, []);
+
   // Global error handler for unhandled promise rejections
   useEffect(() => {
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {

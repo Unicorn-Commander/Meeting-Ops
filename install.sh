@@ -456,6 +456,27 @@ except ImportError as e:
     print('   You can create one manually after first startup')
 " 2>/dev/null || print_warning "Admin user setup will be handled on first startup"
 
+# NPU Setup (for AMD Ryzen AI systems)
+print_status "Checking for AMD NPU hardware..."
+if [ -e "/dev/accel/accel0" ]; then
+    print_success "AMD NPU detected - setting up hardware acceleration"
+    
+    # Run NPU setup script
+    if [ -f "$BACKEND_DIR/scripts/setup_npu.sh" ]; then
+        print_status "Running NPU setup..."
+        cd "$BACKEND_DIR"
+        if bash scripts/setup_npu.sh; then
+            print_success "NPU setup completed"
+        else
+            print_warning "NPU setup encountered issues (see logs for details)"
+        fi
+    else
+        print_warning "NPU setup script not found, skipping NPU configuration"
+    fi
+else
+    print_status "No AMD NPU detected - will use CPU for transcription"
+fi
+
 # Final status check
 print_status "Performing final status check..."
 

@@ -34,10 +34,12 @@ class NPURuntime:
         if CPU_ONLY_MODE:
             logger.info("🖥️ NPURuntime: Running in CPU-only mode")
             self.available = False
+            self._runtime = None
         else:
             # Try to use the simplified runtime
             self._runtime = SimplifiedNPURuntime()
-            self.available = self._runtime.open_device()
+            self._runtime.open_device()
+            self.available = self._runtime.is_available()
             
     def is_available(self) -> bool:
         return self.available
@@ -51,6 +53,11 @@ class NPURuntime:
         if not self.available:
             return {"error": "NPU not available", "text": "", "npu_accelerated": False}
         return self._runtime.transcribe(audio_data)
+    
+    def get_device_info(self) -> Dict[str, Any]:
+        if not self.available or not self._runtime:
+            return {"status": "not available"}
+        return self._runtime.get_device_info()
 
 class SimplifiedNPURuntime:
     """
@@ -62,6 +69,7 @@ class SimplifiedNPURuntime:
         self.fd = None
         self.model_loaded = False
         self.aie_version = None
+        self.available = False
         
     def open_device(self) -> bool:
         """Open NPU device and verify it's working"""
@@ -76,9 +84,11 @@ class SimplifiedNPURuntime:
             # Query AIE version to verify device is working
             if self._query_aie_version():
                 logger.info(f"✅ NPU AIE Version: {self.aie_version}")
+                self.available = True
                 return True
             else:
                 logger.error("❌ Failed to query AIE version")
+                self.available = False
                 return False
                 
         except PermissionError:
@@ -90,6 +100,10 @@ class SimplifiedNPURuntime:
         except Exception as e:
             logger.error(f"❌ Failed to open NPU device: {e}")
             return False
+    
+    def is_available(self) -> bool:
+        """Check if NPU is available"""
+        return self.available
     
     def _query_aie_version(self) -> bool:
         """Query AIE version using working method"""
@@ -367,7 +381,6 @@ class SimplifiedNPURuntime:
 
 # Alias for compatibility
 RealNPURuntime = SimplifiedNPURuntime
-NPURuntime = SimplifiedNPURuntime  # Old name compatibility
 
 if __name__ == "__main__":
     print("🔥 Testing Simplified NPU Runtime")

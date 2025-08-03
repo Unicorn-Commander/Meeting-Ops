@@ -1,67 +1,35 @@
-# Core Web Framework
-fastapi==0.115.14
-uvicorn==0.35.0
-websockets==12.0
-aiofiles==24.1.0
+# Core web framework - Python 3.13 compatible versions
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
 
 # Database
-sqlalchemy==2.0.32
+sqlalchemy>=2.0.23
+psycopg2-binary>=2.9.10  # 2.9.10 adds Python 3.13 support
 
-# Audio Processing
-pyaudio==0.2.14
-soundfile==0.13.1
+# Redis
+redis>=5.0.1
 
-# Authentication & Security
-bcrypt==4.2.1
-python-jose[cryptography]==3.3.0
-python-multipart==0.0.12
-passlib[bcrypt]==1.7.4
-pyjwt==2.8.0
-cryptography==42.0.0
+# Audio processing
+sounddevice>=0.4.6
+numpy>=1.26.2
+scipy>=1.11.4
+librosa>=0.10.1
 
-# ML & AI Core (Python 3.13 compatible!)
-numpy==2.2.0
-torch==2.7.1
-torchaudio==2.7.1
-onnxruntime==1.22.0
-
-# Speech Recognition & Diarization
-pyannote.audio==3.3.2
-faster-whisper==1.1.1
-# Note: whisperx replaced with our Python 3.13 compatible version
-
-# NLP & Transformers
-transformers==4.53.2
-sentence-transformers==5.0.0
-nltk==3.9.1
-
-# LLM APIs
-openai==1.54.4
-anthropic==0.40.0
-
-# HTTP & Networking
-httpx==0.28.1
-requests==2.32.4
-
-# Data Processing
-pandas==2.3.1
-networkx==3.3
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
 
 # Utilities
-psutil==5.9.8
-pydantic==2.11.7
-pydantic_core==2.33.2
-jinja2==3.1.4
-reportlab==4.0.4
-librosa==0.10.2
-numba>=0.61.0
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.25.2
 
-# Monitoring & Logging
-tensorboardX==2.6.4
+# Additional dependencies that were missing
+qdrant-client>=1.7.0
+bcrypt>=4.0.1
 
-# Development dependencies (optional)
-pytest==8.0.0
-
-isort==5.13.0
-mypy==1.8.0
-flake8==7.0.0
+# Optional but recommended
+python-dateutil>=2.8.2
+pytz>=2023.3
