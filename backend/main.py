@@ -13,9 +13,14 @@ from typing import Dict
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Global audio monitoring task
+audio_monitor_task = None
+
 # Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global audio_monitor_task
+    
     # Startup
     logger.info("🚀 Starting Unicorn Commander (Docker Mode)...")
     
@@ -27,10 +32,32 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
     
+    # Start audio monitoring service with Redis
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        from audio_level_redis import AudioLevelRedisService
+        
+        audio_service = AudioLevelRedisService(redis_url)
+        if await audio_service.connect():
+            logger.info("🎤 Starting audio level monitoring service with Redis...")
+            audio_monitor_task = asyncio.create_task(audio_service.start_audio_monitoring())
+        else:
+            logger.warning("⚠️ Audio monitoring disabled - Redis not available")
+    except Exception as e:
+        logger.warning(f"⚠️ Audio monitoring failed to start: {e}")
+    
     yield
     
     # Shutdown
     logger.info("👋 Shutting down...")
+    
+    # Stop audio monitoring
+    if audio_monitor_task and not audio_monitor_task.done():
+        audio_monitor_task.cancel()
+        try:
+            await audio_monitor_task
+        except asyncio.CancelledError:
+            pass
 
 # Create FastAPI app
 app = FastAPI(
@@ -51,7 +78,7 @@ app.add_middleware(
 
 # Import simplified auth for Docker
 try:
-    from auth_docker import router as auth_router
+    from auth.routes import router as auth_router
     app.include_router(auth_router)
     logger.info("✅ Auth router loaded")
 except Exception as e:
@@ -64,6 +91,14 @@ try:
     logger.info("✅ Recording router loaded")
 except Exception as e:
     logger.warning(f"⚠️ Recording router failed to load: {e}")
+
+# Import sessions router
+try:
+    from api.sessions import router as sessions_router
+    app.include_router(sessions_router, prefix="/api")
+    logger.info("✅ Sessions router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Sessions router failed to load: {e}")
 
 # Try to import Gemini's new routers
 try:
@@ -640,57 +675,38 @@ async def websocket_transcription(websocket: WebSocket):
 async def websocket_audio_levels(websocket: WebSocket):
     """WebSocket endpoint for real-time audio level monitoring"""
     await websocket.accept()
-    from audio_level_monitor import AudioLevelMonitor
     
-    monitor = AudioLevelMonitor()
+    # Use Redis for scalable WebSocket broadcasting
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    use_redis = True  # Enable Redis-based broadcasting
     
     try:
-        # Get device configuration from query params or use default
-        device_index = None  # Use default device
-        
-        # Start monitoring
-        if not monitor.start_monitoring():
-            await websocket.send_json({
-                "type": "error",
-                "message": "Failed to start audio monitoring"
-            })
-            await websocket.close()
+        if use_redis:
+            # Use Redis pub/sub for audio levels
+            from audio_level_redis import AudioLevelWebSocketHandler
+            handler = AudioLevelWebSocketHandler(redis_url)
+            await handler.handle_websocket(websocket)
+        else:
+            # Use direct USB monitoring for real audio
+            from audio_level_direct_usb import DirectUSBAudioMonitor, handle_direct_usb_websocket
+            
+            logger.info("🎤 Starting DIRECT USB audio monitoring (Texas Instruments PCM2902)")
+            
+            # Use the direct USB handler
+            await handle_direct_usb_websocket(websocket)
             return
-        
-        # Send initial status
-        await websocket.send_json({
-            "type": "status",
-            "message": "Audio monitoring started",
-            "sample_rate": monitor.sample_rate
-        })
-        
-        # Stream audio levels
-        while True:
-            try:
-                # Get audio level
-                level_data = monitor.get_audio_level()
-                
-                # Send to client
-                await websocket.send_json({
-                    "type": "audio_level",
-                    **level_data
-                })
-                
-                # Small delay to control update rate (20 updates per second)
-                await asyncio.sleep(0.05)
-                
-            except Exception as e:
-                logger.error(f"Audio monitoring error: {e}")
-                await websocket.send_json({
-                    "type": "error",
-                    "message": str(e)
-                })
-                break
-                
+                    
     except WebSocketDisconnect:
         logger.info("Audio level WebSocket disconnected")
-    finally:
-        monitor.stop_monitoring()
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error", 
+                "message": str(e)
+            })
+        except:
+            pass
 @app.post("/api/session/create")
 async def create_session_with_recording():
     """Create a new session and start recording"""
@@ -1045,6 +1061,14 @@ async def get_system_info():
                 cpu_temp = temps['coretemp'][0].current if temps['coretemp'] else None
         except:
             cpu_temp = None
+        
+        # Check NPU availability
+        npu_available = False
+        try:
+            if os.path.exists("/dev/accel/accel0"):
+                npu_available = True
+        except:
+            pass
         
         # NPU info (mock for now)
         npu_info = {

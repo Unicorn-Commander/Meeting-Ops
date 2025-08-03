@@ -42,15 +42,57 @@ git clone https://github.com/Unicorn-Commander/Meeting-Ops.git
 cd Meeting-Ops
 ```
 
-2. Start the PostgreSQL stack:
+2. Set up the backend environment:
 ```bash
-./start-postgres-stack.sh
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-3. Access the application:
+3. Configure environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your database credentials
+```
+
+4. Start the services:
+```bash
+# Terminal 1: Start PostgreSQL, Redis, Qdrant
+cd ~/Meeting-Ops
+docker compose -f docker-compose-services.yml up -d
+
+# Terminal 2: Start backend
+cd ~/Meeting-Ops/backend
+./venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 9050 --reload
+
+# Terminal 3: Start frontend
+cd ~/Meeting-Ops/frontend
+npm install
+npm run dev
+```
+
+5. Access the application:
 - Frontend: http://localhost:7777
 - API Documentation: http://localhost:9050/docs
-- Default credentials: admin / admin123
+- Default credentials: admin / admin
+
+### USB Microphone Setup
+
+The system automatically detects USB microphones. For the Texas Instruments PCM2902:
+
+1. Plug in your USB microphone
+2. Verify detection:
+```bash
+arecord -l | grep USB
+```
+
+3. The backend will automatically use the USB microphone for:
+   - Real-time audio level monitoring
+   - Recording sessions
+   - Live transcription
+
+Note: If you have multiple audio devices, the system prioritizes USB devices.
 
 ### Development Setup
 

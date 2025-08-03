@@ -11,18 +11,10 @@ interface AudioLevelMeterProps {
 
 // In development, use the proxy. In production, use the API URL
 const getWebSocketUrl = () => {
-  // For now, connect directly to the backend WebSocket
-  return `ws://localhost:8000/ws/audio-levels`;
-  
-  // Original code for reference:
-  // if (import.meta.env.DEV) {
-  //   // Development mode - use proxy through the dev server
-  //   return `ws://localhost:7777/ws/audio-levels`;
-  // } else {
-  //   // Production mode - use the API URL
-  //   const apiUrl = import.meta.env.VITE_API_URL || 'ws://localhost:9051';
-  //   return apiUrl.replace('http', 'ws') + '/ws/audio-levels';
-  // }
+  // Use relative URL to work with Vite proxy
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  return `${protocol}//${host}/ws/audio-levels`;
 };
 
 export const AudioLevelMeter: React.FC<AudioLevelMeterProps> = ({
