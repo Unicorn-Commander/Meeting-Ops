@@ -21,6 +21,7 @@ class LLMSummarizationService:
         self.anthropic_client = None
         self.ollama_url = None
         self.ollama_model = None
+        self.llama_cpp_service = None
         self.setup_clients()
     
     def setup_clients(self):
@@ -40,21 +41,31 @@ class LLMSummarizationService:
         
         
         
-        # Check Ollama availability
+        # Check llama.cpp availability first (preferred for local inference)
         try:
-            import httpx
-            with httpx.Client(timeout=5.0) as client:
-                response = client.get(f"{ollama_url}/api/tags")
-                if response.status_code == 200:
-                    self.ollama_url = ollama_url
-                    self.ollama_model = ollama_model
-                    logger.info(f"✅ Ollama client initialized at {ollama_url} with model {ollama_model}")
-                else:
-                    logger.warning(f"⚠️ Ollama server at {ollama_url} not responding properly")
+            from .llama_cpp_service import llama_service
+            if llama_service.is_available():
+                self.llama_cpp_service = llama_service
+                logger.info("✅ LLaMA.cpp service initialized with Vulkan acceleration")
         except Exception as e:
-            logger.warning(f"⚠️ Could not connect to Ollama at {ollama_url}: {e}")
+            logger.warning(f"⚠️ Could not initialize llama.cpp service: {e}")
         
-        if not (openai_key or anthropic_key or self.ollama_url):
+        # Check Ollama availability as fallback
+        if not self.llama_cpp_service:
+            try:
+                import httpx
+                with httpx.Client(timeout=5.0) as client:
+                    response = client.get(f"{ollama_url}/api/tags")
+                    if response.status_code == 200:
+                        self.ollama_url = ollama_url
+                        self.ollama_model = ollama_model
+                        logger.info(f"✅ Ollama client initialized at {ollama_url} with model {ollama_model}")
+                    else:
+                        logger.warning(f"⚠️ Ollama server at {ollama_url} not responding properly")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not connect to Ollama at {ollama_url}: {e}")
+        
+        if not (openai_key or anthropic_key or self.ollama_url or self.llama_cpp_service):
             logger.warning("⚠️ No LLM services available. Summarization will use fallback mode.")
     
     async def generate_comprehensive_summary(
@@ -226,6 +237,8 @@ class LLMSummarizationService:
             
             
             
+            elif self.llama_cpp_service:
+                return await self.llama_cpp_service.summarize_transcript(full_transcript, session_data)
             elif self.ollama_url:
                 return await self._call_ollama(prompt, max_tokens=500)
             
@@ -631,6 +644,8 @@ class LLMSummarizationService:
             providers.append('openai')
         if self.anthropic_client:
             providers.append('anthropic')
+        if self.llama_cpp_service:
+            providers.append('llama_cpp')
         if self.ollama_url:
             providers.append('ollama')
         return providers
@@ -640,6 +655,7 @@ class LLMSummarizationService:
         return {
             'openai_available': bool(self.openai_client),
             'anthropic_available': bool(self.anthropic_client),
+            'llama_cpp_available': bool(self.llama_cpp_service),
             'ollama_available': bool(self.ollama_url),
             'ollama_url': self.ollama_url,
             'ollama_model': self.ollama_model,

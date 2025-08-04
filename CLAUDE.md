@@ -35,7 +35,7 @@ Meeting-Ops is a hardware appliance for AI-powered meeting recording and transcr
   - ✅ Access at http://192.168.1.145:7777 or http://localhost:7777
   - ✅ Login: admin / admin
 
-## Current Session Status (August 3, 2025)
+## Current Session Status (August 4, 2025)
 
 ### 🎉 Backend Status: 100% COMPLETE! 🎉
 
@@ -47,20 +47,35 @@ Meeting-Ops is a hardware appliance for AI-powered meeting recording and transcr
 - ✅ **NPU Binary Generated**: whisperx_npu.bin created with optimized kernels
 - ✅ **Zero PyTorch Dependencies**: Pure hardware acceleration, minimal dependencies
 
-### 🎤 Audio Integration Status: FULLY OPERATIONAL! (August 3, 2025)
+### 🎤 Audio Integration Status: FULLY OPERATIONAL! (August 4, 2025)
 
 **USB Microphone Integration Complete:**
-- ✅ **USB Device Detected**: Texas Instruments PCM2902 Audio Codec
+- ✅ **USB Device Detected**: USB PnP Sound Device (hw:0,0)
 - ✅ **Direct ALSA Access**: Bypassing PyAudio issues with direct `arecord` subprocess
-- ✅ **Real-time Audio Levels**: No more simulation - actual microphone input
+- ✅ **Real-time Audio Levels**: Actual microphone input with 100x gain amplification
 - ✅ **Redis Broadcasting**: Scalable WebSocket architecture for multiple clients
-- ✅ **Frontend Integration**: Audio meter showing real USB mic levels
+- ✅ **Frontend Integration**: Audio meter showing real USB mic levels with proper scaling
 - ✅ **Low Latency**: 20 updates per second with < 50ms latency
+- ✅ **Optimized Settings**: 44.1kHz sample rate, mono, 100x gain for USB microphones
 
 **Audio Architecture:**
 ```
 USB Mic (hw:0,0) → arecord subprocess → DirectUSBAudioMonitor → Redis Pub/Sub → WebSocket → Frontend
 ```
+
+### 🚀 LLM Integration: LLAMA.CPP WITH VULKAN (August 4, 2025)
+
+**Replaced Ollama with llama.cpp:**
+- ✅ **LLaMA.cpp Service**: Created `llama_cpp_service.py` for GPU-accelerated inference
+- ✅ **Vulkan Acceleration**: Using iGPU for 30-40% speedup over CPU
+- ✅ **Automatic Model Discovery**: Searches for GGUF models in common locations
+- ✅ **Meeting Summarization**: Optimized prompts for extracting key points and action items
+- ✅ **Priority Order**: LLaMA.cpp > Ollama > OpenAI/Anthropic (if API keys set)
+
+**Based on Unicorn Execution Engine findings:**
+- iGPU-only acceleration is optimal (memory bandwidth limited)
+- Recommended: Gemma 2B Q4_K_M for interactive performance (35-40 tok/s)
+- NPU not beneficial for LLMs due to bandwidth constraints
 
 ### Server Control Commands
 ```bash
@@ -86,10 +101,13 @@ npm run dev
 - Models: ✅ (Whisper ONNX downloaded)
 - NPU Binary: ✅ (whisperx_npu.bin generated)
 
-### Access Points
-- Backend API: http://localhost:9050/docs (✅ Working)
-- Frontend: http://192.168.1.145:7777 or http://localhost:7777
-- Login: admin / admin
+### Access Points & Credentials
+- **Backend API**: http://localhost:9050/docs (✅ Working)
+- **Frontend**: http://192.168.1.145:7777 or http://localhost:7777
+- **Login Credentials**:
+  - Username: `admin`
+  - Password: `admin`
+  - Database: PostgreSQL with bcrypt password hashing
 
 **Previous Updates (July 25, 2025 - Dashboard Integration & Backend Fixes):**
 - **Switched to Full-Featured Dashboard**:

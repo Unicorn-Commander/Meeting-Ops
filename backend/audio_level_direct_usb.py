@@ -21,8 +21,8 @@ class DirectUSBAudioMonitor:
         self.process = None
         self.monitoring = False
         self.device = "hw:0,0"  # USB PnP Sound Device
-        self.sample_rate = 48000  # PCM2902 native rate
-        self.channels = 1
+        self.sample_rate = 44100  # Common USB mic rate
+        self.channels = 1  # Mono for USB device
         
     async def start_monitoring(self):
         """Start monitoring using arecord subprocess"""
@@ -47,8 +47,10 @@ class DirectUSBAudioMonitor:
             )
             self.monitoring = True
             logger.info(f"✅ Started direct USB audio monitoring on {self.device}")
-            logger.info(f"   Device: Texas Instruments PCM2902")
-            logger.info(f"   Sample rate: {self.sample_rate} Hz")
+            logger.info(f"   Device: USB PnP Sound Device")
+            logger.info(f"   Sample rate: {self.sample_rate} Hz (USB standard)")
+            logger.info(f"   Channels: {self.channels} (mono)")
+            logger.info(f"   Gain: 100x amplification applied")
             return True
         except Exception as e:
             logger.error(f"Failed to start arecord: {e}")
@@ -86,19 +88,33 @@ class DirectUSBAudioMonitor:
             # Convert to numpy array
             audio_array = np.frombuffer(data, dtype=np.int16)
             
-            # Calculate RMS level
+            # Debug: check if we're getting any non-zero data
+            non_zero = np.count_nonzero(audio_array)
+            max_val = np.max(np.abs(audio_array))
+            
+            # Log every 100th frame with data
+            if hasattr(self, '_debug_counter'):
+                self._debug_counter += 1
+            else:
+                self._debug_counter = 0
+                
+            if self._debug_counter % 100 == 0 and max_val > 0:
+                logger.info(f"Audio stats: max={max_val}, non_zero={non_zero}/{len(audio_array)}, raw_max={np.max(audio_array)}, raw_min={np.min(audio_array)}")
+            
+            # Calculate RMS level with moderate sensitivity
             rms = np.sqrt(np.mean(audio_array**2))
-            level = rms / 32768.0  # Normalize to 0-1
+            level = min(1.0, (rms / 32768.0) * 100)  # Amplify by 100x for USB mic
             
-            # Calculate peak
-            peak = np.max(np.abs(audio_array)) / 32768.0
+            # Calculate peak with amplification
+            peak = min(1.0, (np.max(np.abs(audio_array)) / 32768.0) * 100)
             
-            # Calculate dB
-            db = 20 * np.log10(level + 1e-10)
+            # Calculate dB (with the original RMS for accurate dB)
+            db = 20 * np.log10(rms / 32768.0 + 1e-10)
             
-            # Add some debugging
-            if level > 0.0001:  # Log if we get any signal
-                logger.debug(f"Audio level: {level:.6f} ({db:.1f} dB)")
+            # Add some debugging - log every 20th frame with any signal
+            levelPercent = level * 100  # Calculate percentage
+            if self._debug_counter % 20 == 0 and level > 0.0001:
+                logger.info(f"Audio level: {level:.4f} ({levelPercent:.1f}%), peak: {peak:.4f}, dB: {db:.1f}")
             
             return {
                 "type": "audio_level",
@@ -106,7 +122,7 @@ class DirectUSBAudioMonitor:
                 "peak": peak,
                 "db": db,
                 "timestamp": datetime.now().isoformat(),
-                "device": "USB PCM2902",
+                "device": "USB PnP Sound Device",
                 "real": True  # This is real audio!
             }
             

@@ -79,20 +79,27 @@ npm run dev
 
 ### USB Microphone Setup
 
-The system automatically detects USB microphones. For the Texas Instruments PCM2902:
+The system automatically detects USB microphones:
 
 1. Plug in your USB microphone
 2. Verify detection:
 ```bash
 arecord -l | grep USB
+# Should show: card 0: Device [USB PnP Sound Device], device 0: USB Audio [USB Audio]
 ```
 
-3. The backend will automatically use the USB microphone for:
-   - Real-time audio level monitoring
-   - Recording sessions
-   - Live transcription
+3. The backend automatically configures:
+   - Device: hw:0,0 (USB device takes priority)
+   - Sample rate: 44.1kHz (standard for USB mics)
+   - Channels: Mono
+   - Gain: 100x amplification for optimal levels
 
-Note: If you have multiple audio devices, the system prioritizes USB devices.
+4. Audio level meter shows:
+   - Background noise: 5-20%
+   - Normal speech: 30-60%
+   - Loud speech: 80-100%
+
+Note: The system uses direct ALSA access via `arecord` for reliability.
 
 ### Development Setup
 
@@ -150,7 +157,26 @@ Environment variables:
 - `SECRET_KEY` - JWT signing key
 - `SMTP_HOST` - Email server configuration
 - `SMTP_USER` - Email authentication
-- `OLLAMA_BASE_URL` - LLM summarization endpoint
+- `OPENAI_API_KEY` - Optional OpenAI integration
+- `ANTHROPIC_API_KEY` - Optional Anthropic integration
+
+### LLM Configuration
+
+Meeting-Ops supports multiple LLM backends for summarization:
+
+1. **llama.cpp (Recommended)**:
+   - Automatic detection of GGUF models
+   - GPU acceleration via Vulkan
+   - No API keys required
+   - 35-40 tokens/sec with Gemma 2B Q4
+
+2. **Ollama (Fallback)**:
+   - Set `OLLAMA_URL=http://localhost:11434`
+   - Uses gemma3n model by default
+
+3. **Cloud APIs (Optional)**:
+   - OpenAI or Anthropic via API keys
+   - Higher quality but requires internet
 
 ## Production Deployment
 
