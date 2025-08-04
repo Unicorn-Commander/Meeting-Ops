@@ -36,7 +36,7 @@ class SettingsManager:
             "npu_acceleration": True,
             "speaker_diarization": True,
             "real_time_processing": True,
-            "whisper_model": "base",
+            "whisper_model": "whisper-onnx-npu",
             "language": "auto",
             "max_speakers": 10
         },
@@ -70,11 +70,15 @@ class SettingsManager:
                     existing = db.query(Settings).filter(Settings.key == full_key).first()
                     
                     if not existing:
-                        # Special handling for list values (e.g., allowed_origins)
+                        # Convert all values to strings for storage
                         if isinstance(value, list):
                             stored_value = json.dumps(value)
+                        elif isinstance(value, bool):
+                            stored_value = str(value).lower()  # "true" or "false"
+                        elif isinstance(value, (int, float)):
+                            stored_value = str(value)
                         else:
-                            stored_value = value
+                            stored_value = str(value)
 
                         setting = Settings(
                             key=full_key,
