@@ -8,7 +8,11 @@ import { SessionDetails } from './components/SessionDetails';
 import { SystemStatus } from './components/SystemStatus';
 import { ProductionDashboard } from './components/ProductionDashboard';
 import { LiveTranscription } from './components/LiveTranscription';
-import { Settings, LayoutDashboard, FileText, Home } from 'lucide-react';
+import { RecordingPage } from './pages/RecordingPage';
+import { MeetingManagement } from './pages/MeetingManagement';
+import { SummarizationTemplates } from './pages/SummarizationTemplates';
+import { TranscriptEditor } from './pages/TranscriptEditor';
+import { Settings, LayoutDashboard, FileText, Home, Mic, Users, Brain, Edit } from 'lucide-react';
 import { AuthProvider } from './contexts/AuthContext';
 import './index.css';
 
@@ -85,16 +89,28 @@ function App() {
                   Logout
                 </button>
               </div>
-              <nav className="mt-4 flex gap-2">
-                <Link to="/" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors`}>
+              <nav className="mt-4 flex gap-2 flex-wrap">
+                <Link to="/" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
                   <LayoutDashboard className="w-4 h-4" />
                   Dashboard
                 </Link>
-                <Link to="/sessions" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors`}>
+                <Link to="/recording" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
+                  <Mic className="w-4 h-4" />
+                  Recording
+                </Link>
+                <Link to="/meetings" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
+                  <Users className="w-4 h-4" />
+                  Meetings
+                </Link>
+                <Link to="/sessions" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
                   <FileText className="w-4 h-4" />
                   Sessions
                 </Link>
-                <Link to="/simple" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors`}>
+                <Link to="/templates" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
+                  <Brain className="w-4 h-4" />
+                  Templates
+                </Link>
+                <Link to="/simple" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
                   <Home className="w-4 h-4" />
                   Simple View
                 </Link>
@@ -104,8 +120,12 @@ function App() {
           <main className="container mx-auto px-4 py-8">
             <Routes>
               <Route path="/" element={<ProductionDashboard />} />
+              <Route path="/recording" element={<RecordingPage />} />
+              <Route path="/meetings" element={<MeetingManagement />} />
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:sessionId" element={<SessionDetails />} />
+              <Route path="/sessions/:sessionId/edit" element={<TranscriptEditor />} />
+              <Route path="/templates" element={<SummarizationTemplates />} />
               <Route path="/simple" element={
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-1">

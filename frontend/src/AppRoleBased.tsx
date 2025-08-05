@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { LoginWithAuth } from './components/LoginWithAuth';
+import { LoginRegister } from './components/LoginRegister';
 import { RoleBasedNavigation } from './components/RoleBasedNavigation';
 import { RoleGuard } from './components/RoleGuard';
 
@@ -22,7 +22,7 @@ import { CalendarIntegration } from './components/CalendarIntegration';
 import { LogViewer } from './components/LogViewer';
 import { SystemMonitor } from './components/SystemMonitor';
 import { FileManager } from './components/FileManager';
-import { HelpContent } from './components/HelpContent';
+import { HelpModal as HelpContent } from './components/HelpContent';
 import { AdminDashboard } from './components/AdminDashboard';
 import { UserDashboard } from './components/UserDashboard';
 
@@ -71,14 +71,14 @@ function AppContent() {
       case 'my-sessions':
         return (
           <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
-            <SessionList onSelectSession={() => {}} showUserSessionsOnly={true} />
+            <SessionList onSelectSession={() => {}} />
           </RoleGuard>
         );
       
       case 'team-sessions':
         return (
           <RoleGuard allowedRoles={['manager', 'admin', 'superuser']}>
-            <SessionList onSelectSession={() => {}} showAllSessions={true} />
+            <SessionList onSelectSession={() => {}} />
           </RoleGuard>
         );
       
@@ -199,7 +199,7 @@ function AppContent() {
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <LoginWithAuth />
+        <LoginRegister />
       </div>
     );
   }

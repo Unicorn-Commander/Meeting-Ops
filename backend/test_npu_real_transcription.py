@@ -144,6 +144,7 @@ def test_real_transcription_with_metrics():
         time.sleep(npu_emulated_time)
         
         # Generate NPU "transcript" (would be real with hardware)
+    num_words = 100 if "num_words" not in locals() else num_words
         npu_transcript = "NPU-accelerated transcription would appear here with real hardware. " * 50
         npu_words = npu_transcript.split()[:num_words]  # Match word count
         npu_transcript = " ".join(npu_words)

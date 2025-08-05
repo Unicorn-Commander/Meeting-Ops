@@ -47,7 +47,7 @@ export const LiveTranscriptionFeed: React.FC<LiveTranscriptionFeedProps> = ({ se
     const token = localStorage.getItem('access_token');
     if (!token || !sessionId) return;
 
-    const wsUrl = `ws://localhost:9050/ws/stream/${sessionId}?token=${token}`;
+    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream/${sessionId}?token=${token}`;
     
     try {
       wsRef.current = new WebSocket(wsUrl);

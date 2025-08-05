@@ -64,7 +64,7 @@ function App() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const response = await fetch('http://localhost:9050/api/status');
+        const response = await fetch('/api/status');
         const status = await response.json();
         setSystemStatus(status);
       } catch (error) {
@@ -81,7 +81,7 @@ function App() {
   const connectWebSocket = () => {
     if (wsRef.current) return;
     
-    const ws = new WebSocket(`ws://localhost:9050/ws/stream/${sessionId}`);
+    const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream/${sessionId}`);
     
     ws.onopen = () => {
       console.log('WebSocket connected');
