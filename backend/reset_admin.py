@@ -6,7 +6,7 @@ import sys
 from sqlalchemy.orm import Session
 from database.database import SessionLocal, init_database
 from auth.service import AuthService
-from auth.models import User
+from auth.models import User, AuditLog
 
 def check_admin():
     """Check if admin user exists and show details"""
@@ -40,6 +40,8 @@ def reset_admin():
         existing_admin = db.query(User).filter_by(username="admin").first()
         if existing_admin:
             print("Removing existing admin user...")
+            # Delete associated audit logs
+            db.query(AuditLog).filter_by(user_id=existing_admin.id).delete()
             db.delete(existing_admin)
             db.commit()
         

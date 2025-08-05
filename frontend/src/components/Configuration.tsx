@@ -32,6 +32,7 @@ interface STTModel {
   size: string;
   language: string;
   status: 'downloaded' | 'available' | 'downloading';
+  npu_compatible?: boolean;
 }
 
 interface ConfigurationSettings {
@@ -154,8 +155,14 @@ export const Configuration: React.FC = () => {
       });
       
       if (response.ok) {
-        const devices = await response.json();
-        setAudioDevices(devices);
+        const data = await response.json();
+        // Defensively check if the response is an array. The API might return an object.
+        const devicesArray = Array.isArray(data) ? data : (data.devices || data.audio_devices || []);
+        setAudioDevices(devicesArray);
+      } else {
+        console.error(`Failed to load audio devices: ${response.statusText}`);
+        // The catch block will handle network failures and provide mock data.
+        setAudioDevices([]);
       }
     } catch (error) {
       console.error('Failed to load audio devices:', error);
@@ -176,17 +183,21 @@ export const Configuration: React.FC = () => {
       });
       
       if (response.ok) {
-        const models = await response.json();
-        setSTTModels(models);
+        const data = await response.json();
+        const modelsArray = Array.isArray(data) ? data : (data.models || data.stt_models || []);
+        setSTTModels(modelsArray);
+      } else {
+        console.error(`Failed to load STT models: ${response.statusText}`);
+        setSTTModels([]);
       }
     } catch (error) {
       console.error('Failed to load STT models:', error);
       // Mock data for testing
       setSTTModels([
-        { id: 'whisper-tiny', name: 'Whisper Tiny', size: '39 MB', language: 'multilingual', status: 'downloaded' },
-        { id: 'whisper-base', name: 'Whisper Base', size: '142 MB', language: 'multilingual', status: 'downloaded' },
-        { id: 'whisper-small', name: 'Whisper Small', size: '461 MB', language: 'multilingual', status: 'available' },
-        { id: 'whisper-medium', name: 'Whisper Medium', size: '1.42 GB', language: 'multilingual', status: 'available' }
+        { id: 'whisper-tiny', name: 'Whisper Tiny', size: '39 MB', language: 'multilingual', status: 'downloaded', npu_compatible: false },
+        { id: 'whisper-base', name: 'Whisper Base', size: '142 MB', language: 'multilingual', status: 'downloaded', npu_compatible: true },
+        { id: 'whisper-small', name: 'Whisper Small', size: '461 MB', language: 'multilingual', status: 'available', npu_compatible: true },
+        { id: 'whisper-medium', name: 'Whisper Medium', size: '1.42 GB', language: 'multilingual', status: 'available', npu_compatible: false }
       ]);
     }
   };
@@ -387,7 +398,7 @@ export const Configuration: React.FC = () => {
                       onChange={(e) => updateSettings('audio', 'input_device', e.target.value)}
                       className="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2"
                     >
-                      {audioDevices.map((device) => (
+                      {Array.isArray(audioDevices) && audioDevices.map((device) => (
                         <option key={device.id} value={device.id}>
                           {device.name} ({device.channels} ch)
                         </option>
@@ -501,9 +512,9 @@ export const Configuration: React.FC = () => {
                     onChange={(e) => updateSettings('stt', 'model', e.target.value)}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2"
                   >
-                    {sttModels.map((model) => (
+                                      {Array.isArray(sttModels) && sttModels.map((model) => (
                       <option key={model.id} value={model.id} disabled={model.status !== 'downloaded'}>
-                        {model.name} ({model.size}) {model.status !== 'downloaded' && `- ${model.status}`}
+                        {model.name} ({model.size}) {model.status !== 'downloaded' && `- ${model.status}`} {model.npu_compatible && '(NPU Optimized)'}
                       </option>
                     ))}
                   </select>
@@ -583,7 +594,7 @@ export const Configuration: React.FC = () => {
                 <div className="bg-gray-700 rounded p-4">
                   <h4 className="font-medium mb-2">Available Models</h4>
                   <div className="space-y-2">
-                    {sttModels.map((model) => (
+                                      {Array.isArray(sttModels) && sttModels.map((model) => (
                       <div key={model.id} className="flex items-center justify-between text-sm">
                         <span>{model.name}</span>
                         <div className="flex items-center gap-2">
@@ -596,6 +607,29 @@ export const Configuration: React.FC = () => {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+
+                <div className="bg-gray-700 rounded p-4 border border-purple-500">
+                  <h4 className="font-medium mb-2 flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-purple-400" /> NPU Optimization
+                  </h4>
+                  <p className="text-sm text-gray-400 mb-3">
+                    Select NPU-optimized models for significantly faster transcription and diarization.
+                    These models leverage your dedicated NPU hardware.
+                  </p>
+                  <div className="space-y-2">
+                    {Array.isArray(sttModels) && sttModels.filter(model => model.npu_compatible).map(model => (
+                      <div key={model.id} className="flex items-center justify-between text-sm">
+                        <span>{model.name}</span>
+                        <span className="text-green-400">NPU Compatible</span>
+                      </div>
+                    ))}
+                    {Array.isArray(sttModels) && sttModels.filter(model => !model.npu_compatible).length > 0 && (
+                      <p className="text-xs text-gray-500 mt-2">
+                        Other models may run on CPU/GPU and will be slower.
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>

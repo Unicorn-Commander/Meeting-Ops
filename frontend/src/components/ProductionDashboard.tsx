@@ -16,7 +16,7 @@ import {
   BarChart
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { LiveTranscriptionViewer } from './LiveTranscriptionViewer';
 
 interface SessionData {
   session_id: string;
@@ -86,7 +86,8 @@ export const ProductionDashboard: React.FC = () => {
   const connectAudioLevelWS = () => {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//localhost:8000/ws/audio-levels`;
+      const host = window.location.host;
+      const wsUrl = `${protocol}//${host}/ws/audio-levels`;
       
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -258,7 +259,8 @@ export const ProductionDashboard: React.FC = () => {
   const connectTranscriptionWS = (sessionId: string) => {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//localhost:8000/ws/stream/${sessionId}`;
+      const host = window.location.host;
+      const wsUrl = `${protocol}//${host}/ws/stream/${sessionId}`;
       
       const ws = new WebSocket(wsUrl);
       transcriptionWsRef.current = ws;
@@ -333,30 +335,7 @@ export const ProductionDashboard: React.FC = () => {
           Start recording to capture and transcribe your audio with NPU acceleration
         </p>
         
-        {/* Navigation Buttons */}
-        <div className="mt-6 flex gap-4">
-          <button
-            onClick={() => navigate('/admin')}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
-          >
-            <Users className="w-4 h-4" />
-            Admin Dashboard
-          </button>
-          <button
-            onClick={() => navigate('/recording')}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
-          >
-            <Mic className="w-4 h-4" />
-            Recording Dashboard
-          </button>
-          <button
-            onClick={() => navigate('/performance')}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
-          >
-            <BarChart className="w-4 h-4" />
-            Analytics
-          </button>
-        </div>
+        
       </div>
 
       {/* Main Recording Interface */}
@@ -465,10 +444,9 @@ export const ProductionDashboard: React.FC = () => {
           </div>
 
           {/* Live Transcript Preview */}
-          {isRecording && (
-            <div className="mt-6 p-4 bg-gray-700 rounded-lg">
-              <h3 className="text-sm font-medium text-gray-400 mb-2">Live Transcription</h3>
-              <p className="text-white">{liveTranscript || 'Waiting for speech...'}</p>
+          {isRecording && currentSession && (
+            <div className="mt-6">
+              <LiveTranscriptionViewer sessionId={currentSession.session_id} isRecording={isRecording} />
             </div>
           )}
         </div>

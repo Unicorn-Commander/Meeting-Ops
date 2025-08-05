@@ -134,3 +134,17 @@ test-*.sh
 # Misc project files
 Meeting-Ops_Client_Summary.md
 GUI-menu-layout.md
+
+# Backup files
+*.bak
+*.bak[0-9]*
+*.bak1*
+*.bak2*
+install.sh.bak*
+Python-3.12.3.tgz
+Python-3.12.3/
+alembic.ini
+migrations/
+backend/src/
+FIX_FRONTEND_ERRORS.md
+GROK_FRONTEND_IMPLEMENTATION.md

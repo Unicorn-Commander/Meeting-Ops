@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   FileText,
   Search,
@@ -44,6 +45,7 @@ interface SessionListProps {
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => {
+  const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -149,28 +151,44 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
   };
 
   const handleViewTranscript = (session: Session) => {
-    setSelectedSession(session.session_id);
-    if (onSelectSession) {
-      onSelectSession(session);
-    }
+    navigate(`/sessions/${session.session_id}`);
   };
 
   const handleDownload = async (session: Session) => {
     try {
       const token = localStorage.getItem('access_token');
-      // First get the files for this session
-      const response = await fetch(`${API_BASE_URL}/api/files/session/${session.session_id}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
+      const response = await fetch(`${API_BASE_URL}/api/files/session/${session.session_id}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
       if (response.ok) {
         const data = await response.json();
         if (data.files && data.files.length > 0) {
-          // Download the first file
           const fileId = data.files[0].file_id;
-          window.location.href = `${API_BASE_URL}/api/files/${fileId}/download`;
+          const downloadUrl = `${API_BASE_URL}/api/files/${fileId}/download`;
+          
+          const downloadResponse = await fetch(downloadUrl, {
+            headers: {
+              'Authorization': `Bearer ${token}`
+            }
+          });
+
+          if(downloadResponse.ok) {
+            const blob = await downloadResponse.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = data.files[0].filename;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+          } else {
+            console.error('Failed to download file:', downloadResponse.statusText);
+          }
         } else {
           console.warn('No audio files found for session');
         }
