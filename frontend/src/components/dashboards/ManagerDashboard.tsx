@@ -241,7 +241,6 @@ export const ManagerDashboard: React.FC = () => {
           </div>
           <SessionList 
             onSelectSession={(session) => console.log('Selected:', session)}
-            showAllSessions={true}
           />
         </div>
       )}

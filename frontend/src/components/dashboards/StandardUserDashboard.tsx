@@ -302,7 +302,6 @@ export const StandardUserDashboard: React.FC = () => {
           </div>
           <SessionList 
             onSelectSession={(session) => console.log('Selected:', session)}
-            showUserSessionsOnly={true}
           />
         </div>
       )}
