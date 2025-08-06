@@ -58,16 +58,39 @@ export const MeetingManagement: React.FC = () => {
 
   const fetchMeetings = async () => {
     try {
-      const response = await fetch('/api/recording-sessions', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        }
-      });
+      // Try simple API first (no auth required)
+      const response = await fetch('/api/simple/recording-sessions');
       const data = await response.json();
-      setMeetings(data);
+      
+      // Convert simple API response to match expected format
+      const formattedMeetings = data.map(session => ({
+        id: session.id,
+        name: session.name || 'Untitled Meeting',
+        created_at: session.created_at,
+        duration: session.duration || 0,
+        status: session.status === 'completed' ? 'completed' : 
+                session.status === 'processing' ? 'processing' : 
+                session.status === 'recording' ? 'processing' : 'completed',
+        file_size: session.file_size || 0,
+        speaker_count: session.transcription?.segments ? 
+          new Set(session.transcription.segments.map(s => s.speaker)).size : 1,
+        word_count: session.transcription?.text ? 
+          session.transcription.text.split(' ').length : 0,
+        has_transcript: !!session.transcription,
+        has_summary: !!session.summary,
+        tags: [],
+        starred: false,
+        npu_processed: session.transcription?.model?.includes('whisper') || false,
+        processing_time: session.transcription?.processing_time || 0,
+        confidence_score: 0.95
+      }));
+      
+      setMeetings(formattedMeetings);
       setLoading(false);
     } catch (error) {
       console.error('Failed to fetch meetings:', error);
+      // Fallback to mock data for testing
+      setMeetings([]);
       setLoading(false);
     }
   };
@@ -158,19 +181,43 @@ export const MeetingManagement: React.FC = () => {
 
   const handleExport = async (id: string, format: 'txt' | 'json' | 'pdf' | 'docx' | 'srt') => {
     try {
-      const response = await fetch(`/api/recording-sessions/${id}/export?format=${format}`, {
+      // All export formats are now available through simple API
+      const endpoint = `/api/simple/recording-sessions/${id}/export/${format}`;
+        
+      const response = await fetch(endpoint, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         }
       });
+      
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.statusText}`);
+      }
+      
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `meeting-${id}.${format}`;
+      
+      // Get filename from content-disposition header if available
+      const contentDisposition = response.headers.get('content-disposition');
+      let filename = `meeting-${id}.${format}`;
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="(.+)"/);
+        if (match) {
+          filename = match[1];
+        }
+      }
+      
+      a.download = filename;
       a.click();
+      window.URL.revokeObjectURL(url);
+      
+      // Show success message
+      console.log(`Successfully exported meeting as ${format}`);
     } catch (error) {
       console.error('Failed to export meeting:', error);
+      alert(`Failed to export meeting: ${error.message}`);
     }
   };
 

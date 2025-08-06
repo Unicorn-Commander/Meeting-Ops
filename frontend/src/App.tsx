@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import { Login } from './components/Login';
 import { RecordingInterface } from './components/RecordingInterface';
@@ -8,10 +8,13 @@ import { SessionDetails } from './components/SessionDetails';
 import { SystemStatus } from './components/SystemStatus';
 import { ProductionDashboard } from './components/ProductionDashboard';
 import { LiveTranscription } from './components/LiveTranscription';
-import { RecordingPage } from './pages/RecordingPage';
-import { MeetingManagement } from './pages/MeetingManagement';
-import { SummarizationTemplates } from './pages/SummarizationTemplates';
-import { TranscriptEditor } from './pages/TranscriptEditor';
+import { 
+  RecordingPage, 
+  MeetingManagement, 
+  SummarizationTemplates, 
+  TranscriptEditor 
+} from './pages';
+import { TestPage } from './pages/TestPage';
 import { Settings, LayoutDashboard, FileText, Home, Mic, Users, Brain, Edit } from 'lucide-react';
 import { AuthProvider } from './contexts/AuthContext';
 import './index.css';
@@ -94,7 +97,7 @@ function App() {
                   <LayoutDashboard className="w-4 h-4" />
                   Dashboard
                 </Link>
-                <Link to="/recording" className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
+                <Link to="/recording" onClick={() => console.log('Recording clicked!')} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors hover:bg-gray-700`}>
                   <Mic className="w-4 h-4" />
                   Recording
                 </Link>
@@ -120,12 +123,28 @@ function App() {
           <main className="container mx-auto px-4 py-8">
             <Routes>
               <Route path="/" element={<ProductionDashboard />} />
-              <Route path="/recording" element={<RecordingPage />} />
-              <Route path="/meetings" element={<MeetingManagement />} />
+              <Route path="/test" element={<TestPage />} />
+              <Route path="/recording" element={
+                <div className="text-white">
+                  <h1 className="text-3xl mb-4">Recording Page</h1>
+                  <RecordingPage />
+                </div>
+              } />
+              <Route path="/meetings" element={
+                <div className="text-white">
+                  <h1 className="text-3xl mb-4">Meetings Management</h1>
+                  <MeetingManagement />
+                </div>
+              } />
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:sessionId" element={<SessionDetails />} />
               <Route path="/sessions/:sessionId/edit" element={<TranscriptEditor />} />
-              <Route path="/templates" element={<SummarizationTemplates />} />
+              <Route path="/templates" element={
+                <div className="text-white">
+                  <h1 className="text-3xl mb-4">Templates Page</h1>
+                  <SummarizationTemplates />
+                </div>
+              } />
               <Route path="/simple" element={
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-1">

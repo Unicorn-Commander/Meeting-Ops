@@ -26,6 +26,13 @@ import { HelpModal as HelpContent } from './components/HelpContent';
 import { AdminDashboard } from './components/AdminDashboard';
 import { UserDashboard } from './components/UserDashboard';
 
+// Import new pages
+import { RecordingPage } from './pages/RecordingPage';
+import { MeetingManagement } from './pages/MeetingManagement';
+import { SummarizationTemplates } from './pages/SummarizationTemplates';
+import { TranscriptEditor } from './pages/TranscriptEditor';
+import { SettingsPage } from './pages/SettingsPage';
+
 // Icons
 import { LogOut, User, Shield } from 'lucide-react';
 
@@ -120,6 +127,13 @@ function AppContent() {
           </RoleGuard>
         );
       
+      case 'ai-settings':
+        return (
+          <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
+            <SettingsPage />
+          </RoleGuard>
+        );
+      
       case 'integrations':
         return (
           <RoleGuard allowedRoles={['admin', 'superuser']}>
@@ -182,6 +196,35 @@ function AppContent() {
       
       case 'simple':
         return <UserDashboard />;
+      
+      // New pages
+      case 'recording-new':
+        return (
+          <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
+            <RecordingPage />
+          </RoleGuard>
+        );
+      
+      case 'meetings':
+        return (
+          <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
+            <MeetingManagement />
+          </RoleGuard>
+        );
+      
+      case 'templates':
+        return (
+          <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
+            <SummarizationTemplates />
+          </RoleGuard>
+        );
+      
+      case 'transcript-editor':
+        return (
+          <RoleGuard allowedRoles={['user', 'manager', 'admin', 'superuser']}>
+            <TranscriptEditor />
+          </RoleGuard>
+        );
       
       default:
         return getDashboardComponent();

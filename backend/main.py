@@ -100,6 +100,38 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Sessions router failed to load: {e}")
 
+# Import Meeting Management router (all new endpoints)
+try:
+    from api.meeting_management import router as meeting_router
+    app.include_router(meeting_router)
+    logger.info("✅ Meeting Management router loaded (Recording, Templates, Export)")
+except Exception as e:
+    logger.warning(f"⚠️ Meeting Management router failed to load: {e}")
+
+# Import AI Settings router
+try:
+    from api.ai_settings import router as ai_settings_router
+    app.include_router(ai_settings_router)
+    logger.info("✅ AI Settings router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ AI Settings router failed to load: {e}")
+
+# Import Simple Recording router (no auth required for testing)
+try:
+    from api.simple_recording import router as simple_recording_router
+    app.include_router(simple_recording_router)
+    logger.info("✅ Simple Recording router loaded (no auth)")
+except Exception as e:
+    logger.warning(f"⚠️ Simple Recording router failed to load: {e}")
+
+# Import WebSocket Transcription router
+try:
+    from api.websocket_transcription import router as ws_transcription_router
+    app.include_router(ws_transcription_router)
+    logger.info("✅ WebSocket Transcription router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ WebSocket Transcription router failed to load: {e}")
+
 # Try to import Gemini's new routers
 try:
     from routers.logs import router as logs_router

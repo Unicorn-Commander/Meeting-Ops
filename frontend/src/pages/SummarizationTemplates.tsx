@@ -16,7 +16,7 @@ interface SummarizationTemplate {
   extractFields: string[];
   maxLength: number;
   temperature: number;
-  model: 'whisper-large-v3' | 'llama3' | 'gemma2' | 'gpt-4' | 'claude-3';
+  model: 'llama3' | 'llama2' | 'gemma2' | 'mistral' | 'gpt-4' | 'gpt-3.5-turbo' | 'claude-3' | 'claude-2';
   isDefault: boolean;
   usageCount: number;
   lastUsed: string | null;
@@ -368,29 +368,27 @@ export const SummarizationTemplates: React.FC = () => {
                     >
                       <Copy className="w-4 h-4 text-gray-400" />
                     </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingTemplate(template);
+                        setIsEditing(true);
+                        setIsCreating(false);
+                      }}
+                      className="p-1 hover:bg-gray-700 rounded"
+                    >
+                      <Edit2 className="w-4 h-4 text-gray-400" />
+                    </button>
                     {!template.isDefault && (
-                      <>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingTemplate(template);
-                            setIsEditing(true);
-                            setIsCreating(false);
-                          }}
-                          className="p-1 hover:bg-gray-700 rounded"
-                        >
-                          <Edit2 className="w-4 h-4 text-gray-400" />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteTemplate(template.id);
-                          }}
-                          className="p-1 hover:bg-gray-700 rounded"
-                        >
-                          <Trash2 className="w-4 h-4 text-red-400" />
-                        </button>
-                      </>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteTemplate(template.id);
+                        }}
+                        className="p-1 hover:bg-gray-700 rounded"
+                      >
+                        <Trash2 className="w-4 h-4 text-red-400" />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -479,11 +477,15 @@ export const SummarizationTemplates: React.FC = () => {
                       onChange={(e) => setEditingTemplate({ ...editingTemplate, model: e.target.value as any })}
                       className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white"
                     >
-                      <option value="whisper-large-v3">Whisper Large v3 (NPU)</option>
-                      <option value="llama3">LLaMA 3 (Local)</option>
-                      <option value="gemma2">Gemma 2 (Local)</option>
+                      <option value="gemma3n:latest">Gemma 3N (Local - Recommended)</option>
+                      <option value="gemma3:27b">Gemma 3 27B (Local)</option>
+                      <option value="llama3.2:3b">LLaMA 3.2 3B (Local)</option>
+                      <option value="qwen2.5:14b">Qwen 2.5 14B (Local)</option>
+                      <option value="deepseek-r1:7b">DeepSeek R1 7B (Local)</option>
                       <option value="gpt-4">GPT-4 (API)</option>
-                      <option value="claude-3">Claude 3 (API)</option>
+                      <option value="gpt-3.5-turbo">GPT-3.5 Turbo (API)</option>
+                      <option value="claude-3">Claude 3 Opus (API)</option>
+                      <option value="claude-2">Claude 2.1 (API)</option>
                     </select>
                   </div>
 
@@ -561,10 +563,15 @@ export const SummarizationTemplates: React.FC = () => {
                       <div className="text-white flex items-center gap-2">
                         <Brain className="w-4 h-4 text-purple-400" />
                         {selectedTemplate.model}
-                        {selectedTemplate.model === 'whisper-large-v3' && (
-                          <span className="px-2 py-1 bg-green-900/50 text-green-400 text-xs rounded-full flex items-center gap-1">
-                            <Zap className="w-3 h-3" />
-                            NPU
+                        {(selectedTemplate.model === 'llama3' || selectedTemplate.model === 'llama2' || 
+                          selectedTemplate.model === 'gemma2' || selectedTemplate.model === 'mistral') && (
+                          <span className="px-2 py-1 bg-green-900/50 text-green-400 text-xs rounded-full">
+                            Local
+                          </span>
+                        )}
+                        {(selectedTemplate.model === 'gpt-4' || selectedTemplate.model === 'gpt-3.5-turbo') && (
+                          <span className="px-2 py-1 bg-blue-900/50 text-blue-400 text-xs rounded-full">
+                            API
                           </span>
                         )}
                       </div>

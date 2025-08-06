@@ -20,15 +20,26 @@ class RecordingSession(Base):
     """Recording session model"""
     __tablename__ = "recording_sessions"
     
-    id = Column(Integer, primary_key=True)
-    session_id = Column(String(100), unique=True, nullable=False)
+    id = Column(String(100), primary_key=True)  # Changed to String for UUID
+    session_id = Column(String(100), unique=True, nullable=True)  # Legacy field
     name = Column(String(200))
     description = Column(Text)
     meeting_type = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)
+    start_time = Column(DateTime)
+    end_time = Column(DateTime)
     duration = Column(Float, default=0)
     status = Column(String(50), default="active")
     extra_data = Column(JSON)
+    user_id = Column(Integer)  # Foreign key to User
+    audio_file_path = Column(String(500))
+    file_size = Column(Integer, default=0)
+    summary = Column(Text)
+    tags = Column(JSON)
+    starred = Column(Boolean, default=False)
+    npu_processed = Column(Boolean, default=False)
+    processing_time = Column(Float)
+    confidence_score = Column(Float)
     
     def to_dict(self):
         return {
@@ -48,16 +59,17 @@ class Transcription(Base):
     __tablename__ = "transcriptions"
     
     id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, nullable=False)
+    session_id = Column(String(100), nullable=False)  # Changed to match RecordingSession.id type
     text = Column(Text, nullable=False)
     confidence = Column(Float)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    start_time_seconds = Column(Float)
-    end_time_seconds = Column(Float)
+    start_time = Column(Float)  # Renamed for consistency
+    end_time = Column(Float)    # Renamed for consistency
     duration_seconds = Column(Float)
     processing_time_ms = Column(Float)
     npu_accelerated = Column(Boolean)
     model_used = Column(String(100))
+    speaker = Column(String(100))  # Added for speaker name
     speaker_id = Column(String(100))
     speaker_confidence = Column(Float)
     

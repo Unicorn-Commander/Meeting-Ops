@@ -33,47 +33,55 @@ const navigationItems: NavItem[] = [
     roles: ['viewer', 'user', 'manager', 'admin', 'superuser']
   },
   {
-    id: 'record',
-    label: 'Record',
+    id: 'recording-new',
+    label: '🎙️ Record Meeting',
     icon: <Mic className="w-5 h-5" />,
     roles: ['user', 'manager', 'admin', 'superuser']
   },
   {
-    id: 'sessions',
-    label: 'Sessions',
+    id: 'meetings',
+    label: '📊 Meetings',
     icon: <FileText className="w-5 h-5" />,
     roles: ['viewer', 'user', 'manager', 'admin', 'superuser'],
     children: [
       {
-        id: 'my-sessions',
-        label: 'My Sessions',
+        id: 'meetings',
+        label: 'All Meetings',
+        icon: <FileText className="w-4 h-4" />,
+        roles: ['viewer', 'user', 'manager', 'admin', 'superuser']
+      },
+      {
+        id: 'upload',
+        label: 'Upload Audio',
+        icon: <Upload className="w-4 h-4" />,
+        roles: ['user', 'manager', 'admin', 'superuser']
+      }
+    ]
+  },
+  {
+    id: 'ai-config',
+    label: '🤖 AI Configuration',
+    icon: <Brain className="w-5 h-5" />,
+    roles: ['user', 'manager', 'admin', 'superuser'],
+    children: [
+      {
+        id: 'templates',
+        label: 'Summarization Templates',
         icon: <FileText className="w-4 h-4" />,
         roles: ['user', 'manager', 'admin', 'superuser']
       },
       {
-        id: 'team-sessions',
-        label: 'Team Sessions',
-        icon: <FileText className="w-4 h-4" />,
+        id: 'ai-settings',
+        label: 'AI Provider Settings',
+        icon: <Settings className="w-4 h-4" />,
         roles: ['manager', 'admin', 'superuser']
       }
     ]
   },
   {
-    id: 'upload',
-    label: 'Upload',
-    icon: <Upload className="w-5 h-5" />,
-    roles: ['user', 'manager', 'admin', 'superuser']
-  },
-  {
     id: 'analytics',
-    label: 'Analytics',
+    label: '📈 Analytics',
     icon: <BarChart3 className="w-5 h-5" />,
-    roles: ['manager', 'admin', 'superuser']
-  },
-  {
-    id: 'ai-models',
-    label: 'AI Models',
-    icon: <Brain className="w-5 h-5" />,
     roles: ['manager', 'admin', 'superuser']
   },
   {

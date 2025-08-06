@@ -21,45 +21,49 @@ interface RecordingSession {
 }
 
 export const RecordingPage: React.FC = () => {
-  const { user } = useAuth();
   const navigate = useNavigate();
+  
+  // Safely get user - useAuth might not work in all contexts
+  let user = null;
+  try {
+    const auth = useAuth();
+    user = auth?.user;
+  } catch (e) {
+    console.log('Auth context not available');
+  }
   
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [currentSession, setCurrentSession] = useState<RecordingSession | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [sessionName, setSessionName] = useState('');
-  const [selectedDevice, setSelectedDevice] = useState('default');
-  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  
+  // Generate default meeting name with timestamp
+  const getDefaultMeetingName = () => {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    return `Meeting - ${dateStr} at ${timeStr}`;
+  };
+  
+  const [sessionName, setSessionName] = useState(getDefaultMeetingName());
   const [npuStatus, setNpuStatus] = useState<'active' | 'idle' | 'error'>('idle');
   const [processingSpeed, setProcessingSpeed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animationRef = useRef<number | null>(null);
   const durationIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const sessionIdRef = useRef<string | null>(null);
 
-  // Get audio devices on mount
+  // Check NPU status on mount
   useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then(devices => {
-      const audioInputs = devices.filter(device => device.kind === 'audioinput');
-      setAudioDevices(audioInputs);
-    });
-
     // Check NPU status
     checkNPUStatus();
     const npuInterval = setInterval(checkNPUStatus, 5000);
 
     return () => {
       clearInterval(npuInterval);
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
     };
   }, []);
 
@@ -81,12 +85,27 @@ export const RecordingPage: React.FC = () => {
     }
 
     try {
-      // Create session in backend
-      const response = await fetch('/api/recording-sessions', {
+      // Start countdown (3, 2, 1, Go!)
+      setCountdown(3);
+      await new Promise(resolve => {
+        let count = 3;
+        const countInterval = setInterval(() => {
+          count--;
+          if (count > 0) {
+            setCountdown(count);
+          } else {
+            setCountdown(null);
+            clearInterval(countInterval);
+            resolve(null);
+          }
+        }, 1000);
+      });
+      
+      // Create session in backend - using simple API for now to test audio recording
+      const response = await fetch('/api/simple/recording-sessions', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           name: sessionName,
@@ -100,36 +119,18 @@ export const RecordingPage: React.FC = () => {
       sessionIdRef.current = session.id;
 
       // Start recording
-      const startResponse = await fetch(`/api/recording-sessions/${session.id}/start`, {
+      const startResponse = await fetch(`/api/simple/recording-sessions/${session.id}/start`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          'Content-Type': 'application/json'
         }
       });
 
       if (!startResponse.ok) throw new Error('Failed to start recording');
 
-      // Get user media
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          deviceId: selectedDevice === 'default' ? undefined : selectedDevice,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
-      });
-
-      audioStreamRef.current = stream;
-
-      // Setup audio analysis
-      audioContextRef.current = new AudioContext();
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      source.connect(analyserRef.current);
-      analyserRef.current.fftSize = 256;
-
-      // Start audio level monitoring
-      monitorAudioLevel();
+      // We're recording on the server, not in the browser
+      // Start polling for audio levels from the server instead
+      startAudioLevelPolling();
 
       // Start duration timer
       const startTime = Date.now();
@@ -153,6 +154,7 @@ export const RecordingPage: React.FC = () => {
       setSuccess('Recording started successfully');
       setError(null);
     } catch (err) {
+      setCountdown(null); // Clear countdown on error
       setError(`Failed to start recording: ${err.message}`);
       console.error('Recording error:', err);
     }
@@ -162,24 +164,36 @@ export const RecordingPage: React.FC = () => {
     if (!sessionIdRef.current) return;
 
     try {
-      // Stop backend recording
-      await fetch(`/api/recording-sessions/${sessionIdRef.current}/stop`, {
+      // Stop backend recording - using simple API for now
+      const stopResponse = await fetch(`/api/simple/recording-sessions/${sessionIdRef.current}/stop`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          'Content-Type': 'application/json'
         }
       });
-
-      // Stop media stream
-      if (audioStreamRef.current) {
-        audioStreamRef.current.getTracks().forEach(track => track.stop());
-        audioStreamRef.current = null;
-      }
-
-      // Stop audio context
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-        audioContextRef.current = null;
+      
+      // Request LLM to generate a better name based on content
+      if (stopResponse.ok) {
+        setTimeout(async () => {
+          try {
+            const renameResponse = await fetch(`/api/simple/recording-sessions/${sessionIdRef.current}/auto-rename`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            });
+            
+            if (renameResponse.ok) {
+              const { newName } = await renameResponse.json();
+              setSuccess(`Recording saved as: "${newName}"`);
+              
+              // Reset for next recording with new default name
+              setSessionName(getDefaultMeetingName());
+            }
+          } catch (err) {
+            console.log('Auto-rename not available');
+          }
+        }, 2000); // Give it 2 seconds for processing to complete
       }
 
       // Stop timers
@@ -188,10 +202,8 @@ export const RecordingPage: React.FC = () => {
         durationIntervalRef.current = null;
       }
 
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
+      // Stop audio level polling
+      stopAudioLevelPolling();
 
       setIsRecording(false);
       setIsPaused(false);
@@ -212,10 +224,10 @@ export const RecordingPage: React.FC = () => {
     if (!sessionIdRef.current) return;
 
     try {
-      await fetch(`/api/recording-sessions/${sessionIdRef.current}/pause`, {
+      await fetch(`/api/simple/recording-sessions/${sessionIdRef.current}/pause`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          'Content-Type': 'application/json'
         }
       });
       setIsPaused(!isPaused);
@@ -224,17 +236,57 @@ export const RecordingPage: React.FC = () => {
     }
   };
 
-  const monitorAudioLevel = () => {
-    if (!analyserRef.current) return;
-
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-    analyserRef.current.getByteFrequencyData(dataArray);
-
-    // Calculate average volume
-    const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-    setAudioLevel(Math.min(100, (average / 128) * 100));
-
-    animationRef.current = requestAnimationFrame(monitorAudioLevel);
+  // WebSocket for real audio levels from USB mic
+  const audioWsRef = useRef<WebSocket | null>(null);
+  
+  const startAudioLevelPolling = () => {
+    // Connect to the real audio level WebSocket
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname;
+    const port = '9050'; // Backend port
+    const wsUrl = `${protocol}//${host}:${port}/ws/audio-levels`;
+    
+    console.log('Connecting to audio level WebSocket:', wsUrl);
+    
+    try {
+      const ws = new WebSocket(wsUrl);
+      audioWsRef.current = ws;
+      
+      ws.onopen = () => {
+        console.log('Audio level WebSocket connected');
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          // The WebSocket sends level in the format: {"level": value, "timestamp": ...}
+          if (data.level !== undefined) {
+            setAudioLevel(Math.min(100, Math.max(0, data.level)));
+          }
+        } catch (err) {
+          console.error('Error parsing audio level:', err);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('Audio level WebSocket error:', error);
+      };
+      
+      ws.onclose = () => {
+        console.log('Audio level WebSocket closed');
+        setAudioLevel(0);
+      };
+    } catch (err) {
+      console.error('Failed to connect to audio level WebSocket:', err);
+    }
+  };
+  
+  const stopAudioLevelPolling = () => {
+    if (audioWsRef.current) {
+      audioWsRef.current.close();
+      audioWsRef.current = null;
+    }
+    setAudioLevel(0);
   };
 
   const formatDuration = (seconds: number): string => {
@@ -247,6 +299,20 @@ export const RecordingPage: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-900 p-6">
       <div className="max-w-7xl mx-auto">
+        {/* Countdown Overlay */}
+        {countdown !== null && (
+          <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+            <div className="text-center">
+              <div className="text-9xl font-bold text-white animate-pulse">
+                {countdown}
+              </div>
+              <div className="text-2xl text-gray-300 mt-4">
+                Recording starting...
+              </div>
+            </div>
+          </div>
+        )}
+        
         {/* Header */}
         <div className="bg-gray-800 rounded-lg p-6 mb-6">
           <h1 className="text-3xl font-bold text-white mb-4">Recording Studio</h1>
@@ -297,24 +363,13 @@ export const RecordingPage: React.FC = () => {
               </div>
             )}
 
-            {/* Audio Device Selection */}
+            {/* Server Recording Info */}
             {!isRecording && (
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-300 mb-2">
-                  Audio Input Device
-                </label>
-                <select
-                  value={selectedDevice}
-                  onChange={(e) => setSelectedDevice(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
-                >
-                  <option value="default">Default Device</option>
-                  {audioDevices.map(device => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label || `Device ${device.deviceId.substring(0, 8)}`}
-                    </option>
-                  ))}
-                </select>
+              <div className="mb-6 p-3 bg-gray-700 rounded-lg">
+                <div className="flex items-center gap-2 text-sm text-gray-300">
+                  <Mic className="w-4 h-4" />
+                  <span>Recording from server microphone</span>
+                </div>
               </div>
             )}
 
@@ -346,6 +401,50 @@ export const RecordingPage: React.FC = () => {
                     />
                   </div>
                 </div>
+                
+                {/* Recording Quality Indicator */}
+                <div className="mt-3 flex items-center justify-between">
+                  <span className="text-xs text-gray-400">Recording Quality</span>
+                  <div className="flex items-center gap-2">
+                    {audioLevel < 10 ? (
+                      <>
+                        <div className="w-2 h-2 bg-red-500 rounded-full" />
+                        <span className="text-xs text-red-400">Poor - Check microphone</span>
+                      </>
+                    ) : audioLevel < 30 ? (
+                      <>
+                        <div className="w-2 h-2 bg-yellow-500 rounded-full" />
+                        <span className="text-xs text-yellow-400">Fair - Speak louder</span>
+                      </>
+                    ) : audioLevel < 70 ? (
+                      <>
+                        <div className="w-2 h-2 bg-green-500 rounded-full" />
+                        <span className="text-xs text-green-400">Good</span>
+                      </>
+                    ) : audioLevel < 90 ? (
+                      <>
+                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                        <span className="text-xs text-green-400">Excellent</span>
+                      </>
+                    ) : (
+                      <>
+                        <div className="w-2 h-2 bg-yellow-500 rounded-full" />
+                        <span className="text-xs text-yellow-400">Too loud</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                
+                {/* NPU Processing Indicator */}
+                {npuStatus === 'active' && (
+                  <div className="mt-2 flex items-center justify-between">
+                    <span className="text-xs text-gray-400">NPU Processing</span>
+                    <div className="flex items-center gap-1">
+                      <Zap className="w-3 h-3 text-green-400 animate-pulse" />
+                      <span className="text-xs text-green-400">Active</span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -438,40 +537,6 @@ export const RecordingPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Quick Actions */}
-        <div className="mt-6 bg-gray-800 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <button
-              onClick={() => navigate('/sessions')}
-              className="p-4 bg-gray-700 hover:bg-gray-600 rounded-lg text-center transition-colors"
-            >
-              <FileText className="w-6 h-6 text-blue-400 mx-auto mb-2" />
-              <span className="text-sm text-gray-300">View Sessions</span>
-            </button>
-            <button
-              onClick={() => navigate('/templates')}
-              className="p-4 bg-gray-700 hover:bg-gray-600 rounded-lg text-center transition-colors"
-            >
-              <Settings className="w-6 h-6 text-purple-400 mx-auto mb-2" />
-              <span className="text-sm text-gray-300">Templates</span>
-            </button>
-            <button
-              onClick={() => navigate('/analytics')}
-              className="p-4 bg-gray-700 hover:bg-gray-600 rounded-lg text-center transition-colors"
-            >
-              <Activity className="w-6 h-6 text-green-400 mx-auto mb-2" />
-              <span className="text-sm text-gray-300">Analytics</span>
-            </button>
-            <button
-              onClick={() => navigate('/settings')}
-              className="p-4 bg-gray-700 hover:bg-gray-600 rounded-lg text-center transition-colors"
-            >
-              <Settings className="w-6 h-6 text-gray-400 mx-auto mb-2" />
-              <span className="text-sm text-gray-300">Settings</span>
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   );
