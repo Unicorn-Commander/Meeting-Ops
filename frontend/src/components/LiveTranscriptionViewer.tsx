@@ -171,40 +171,35 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
     };
   }, [isRecording, sessionId, onSegmentReceived]);
 
-  // Auto-scroll to bottom
-  useEffect(() => {
-    segmentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [segments]);
+  // Text editor style scrolling - only scroll if user is near bottom
+  const [autoScroll, setAutoScroll] = useState(true);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-  // Mock data for testing when not recording
   useEffect(() => {
-    if (!isRecording && segments.length === 0) {
-      // Add some example segments
-      setSegments([
-        {
-          start: 0,
-          end: 5.2,
-          text: "Welcome to the Meeting-Ops transcription viewer.",
-          speaker: "SPEAKER_01",
-          confidence: 0.98
-        },
-        {
-          start: 5.5,
-          end: 10.3,
-          text: "This shows real-time transcription with speaker diarization.",
-          speaker: "SPEAKER_01",
-          confidence: 0.97
-        },
-        {
-          start: 10.8,
-          end: 15.5,
-          text: "The NPU acceleration provides 200x speedup for transcription.",
-          speaker: "SPEAKER_02",
-          confidence: 0.96
-        }
-      ]);
+    if (autoScroll && segmentsEndRef.current && scrollContainerRef.current) {
+      const container = scrollContainerRef.current;
+      const isNearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
+      
+      if (isNearBottom) {
+        segmentsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      }
     }
-  }, [isRecording, segments.length]);
+  }, [segments, autoScroll]);
+
+  // Handle scroll events to detect if user is manually scrolling
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    const isNearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
+    setAutoScroll(isNearBottom);
+  };
+
+  // Clear segments when not recording to avoid showing simulation data
+  useEffect(() => {
+    if (!isRecording) {
+      setSegments([]);
+      setSpeakers(new Map());
+    }
+  }, [isRecording]);
 
   return (
     <div className="h-full flex flex-col bg-gray-800 rounded-lg">
@@ -267,15 +262,30 @@ export const LiveTranscriptionViewer: React.FC<LiveTranscriptionViewerProps> = (
       </div>
 
       {/* Transcription Content */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div 
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto p-4 space-y-3 scroll-smooth"
+        onScroll={handleScroll}
+        style={{ scrollBehavior: 'smooth' }}
+      >
         {segments.length === 0 ? (
           <div className="text-center py-8">
-            <Mic className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-            <p className="text-gray-500">Waiting for transcription...</p>
-            {isRecording && (
-              <p className="text-xs text-gray-600 mt-2">
-                Speaking will appear here in real-time
-              </p>
+            {isRecording ? (
+              <>
+                <Mic className="w-12 h-12 text-green-500 mx-auto mb-3 animate-pulse" />
+                <p className="text-gray-300">Listening for speech...</p>
+                <p className="text-xs text-gray-500 mt-2">
+                  Real-time transcription will appear here
+                </p>
+              </>
+            ) : (
+              <>
+                <Mic className="w-12 h-12 text-gray-600 mx-auto mb-3" />
+                <p className="text-gray-500">Start recording to see live transcription</p>
+                <p className="text-xs text-gray-600 mt-2">
+                  No simulation data - only real audio transcription
+                </p>
+              </>
             )}
           </div>
         ) : (

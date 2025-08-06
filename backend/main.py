@@ -32,6 +32,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Database initialization failed: {e}")
     
+    # Initialize transcriber during startup
+    try:
+        logger.info("🎙️ Initializing NPU Whisper transcriber...")
+        transcriber = get_transcriber()
+        if transcriber:
+            logger.info("✅ NPU Whisper transcriber ready for use")
+        else:
+            logger.warning("⚠️ NPU Whisper transcriber initialization failed")
+    except Exception as e:
+        logger.warning(f"⚠️ Transcriber initialization failed: {e}")
+    
     # Start audio monitoring service with Redis
     try:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -76,7 +87,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import simplified auth for Docker
+# Import auth router from dev branch
 try:
     from auth.routes import router as auth_router
     app.include_router(auth_router)
@@ -131,6 +142,14 @@ try:
     logger.info("✅ WebSocket Transcription router loaded")
 except Exception as e:
     logger.warning(f"⚠️ WebSocket Transcription router failed to load: {e}")
+
+# Import Always-On Transcription router
+try:
+    from routers.always_on_transcription import router as always_on_router
+    app.include_router(always_on_router)
+    logger.info("✅ Always-On Transcription router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Always-On Transcription router failed to load: {e}")
 
 # Try to import Gemini's new routers
 try:

@@ -89,21 +89,37 @@ class SimpleAudioRecorder:
         filename = filename.replace(' ', '_')
         self.current_file_path = os.path.join(self.recordings_dir, filename)
         
+        # Kill any existing arecord processes to avoid conflicts
+        try:
+            subprocess.run(["pkill", "-f", "arecord"], capture_output=True)
+            time.sleep(0.5)  # Give it time to release the device
+        except:
+            pass  # Ignore if pkill fails
+            
         # Start recording with arecord
         try:
-            # Use the USB audio device (hw:2,0)
+            # Use the USB audio device (hw:0,0)
             self.current_process = subprocess.Popen([
                 "arecord",
-                "-D", "hw:2,0",   # Use USB PnP Sound Device
+                "-D", "hw:0,0",   # Use USB PnP Sound Device
                 "-f", "S16_LE",   # 16-bit signed little-endian
-                "-r", "16000",    # 16kHz sample rate (good for speech)
+                "-r", "44100",    # 44.1kHz sample rate (USB mic native rate)
                 "-c", "1",        # Mono
                 "-t", "wav",      # WAV format
                 self.current_file_path
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
+            # Check if process started successfully
+            time.sleep(0.5)  # Give it a moment to start
+            if self.current_process.poll() is not None:
+                # Process ended already, check stderr
+                stderr = self.current_process.stderr.read().decode()
+                print(f"ERROR: arecord failed to start: {stderr}")
+                raise Exception(f"arecord failed: {stderr}")
+            
             self.is_recording = True
             self.start_time = time.time()
+            print(f"Recording started: {self.current_file_path}")
             
             return self.current_file_path
             

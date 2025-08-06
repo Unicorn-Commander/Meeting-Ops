@@ -118,6 +118,25 @@ export const LoginRegister: React.FC = () => {
           </p>
         </div>
 
+        {/* Default Credentials Notice - Only show on login mode */}
+        {mode === 'login' && (
+          <div className="mb-6 rounded-md bg-blue-900/20 border border-blue-700 p-4">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <AlertCircle className="h-5 w-5 text-blue-400" />
+              </div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-blue-300">Default Credentials</h3>
+                <div className="mt-2 text-sm text-blue-200">
+                  <p>Username: <span className="font-mono font-bold">admin</span></p>
+                  <p>Password: <span className="font-mono font-bold">changeme123!</span></p>
+                  <p className="mt-2 text-xs text-blue-300">Please change the password after first login!</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4">
             {mode === 'register' && (
@@ -305,16 +324,6 @@ export const LoginRegister: React.FC = () => {
             )}
           </div>
 
-          {mode === 'login' && (
-            <div className="text-xs text-center text-gray-500 border-t border-gray-700 pt-4">
-              <p>Default admin credentials:</p>
-              <p className="font-mono mt-1">
-                Username: <span className="text-gray-400">admin</span> | 
-                Password: <span className="text-gray-400">changeme123!</span>
-              </p>
-              <p className="text-yellow-400 mt-1">Change immediately after first login!</p>
-            </div>
-          )}
         </form>
       </div>
     </div>

@@ -3,6 +3,8 @@ import { SystemMonitor } from '../SystemMonitor';
 import { NpuStatusIndicator } from '../NpuStatusIndicator';
 import { NetworkStatus } from '../NetworkStatus';
 import { LogViewer } from '../LogViewer';
+import { SimpleAlwaysOnTranscription } from '../SimpleAlwaysOnTranscription';
+import { TranscriptionSettings } from '../TranscriptionSettings';
 import { 
   Cpu, 
   HardDrive, 
@@ -43,7 +45,7 @@ export const SuperuserDashboard: React.FC = () => {
     services: []
   });
   const [organizations, setOrganizations] = useState<Organization[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'hardware' | 'organizations' | 'maintenance'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'hardware' | 'organizations' | 'maintenance' | 'settings'>('overview');
   const [selectedDevice, setSelectedDevice] = useState<string>('');
 
   useEffect(() => {
@@ -155,6 +157,19 @@ export const SuperuserDashboard: React.FC = () => {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-purple-400" />
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`pb-3 px-1 text-sm font-medium transition-colors relative ${
+            activeTab === 'settings'
+              ? 'text-purple-400'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          Settings
+          {activeTab === 'settings' && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-purple-400" />
+          )}
+        </button>
       </div>
 
       {/* Tab Content */}
@@ -261,6 +276,14 @@ export const SuperuserDashboard: React.FC = () => {
 
           {/* System Monitor */}
           <SystemMonitor />
+          
+          {/* Simple Always-On Live Transcription */}
+          <div className="mt-6">
+            <SimpleAlwaysOnTranscription 
+              userRole="superuser"
+              className="h-full"
+            />
+          </div>
         </div>
       )}
 
@@ -444,6 +467,23 @@ export const SuperuserDashboard: React.FC = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Settings Tab */}
+      {activeTab === 'settings' && (
+        <div className="space-y-6">
+          {/* Transcription Settings */}
+          <TranscriptionSettings 
+            userRole="superuser"
+            onSettingsChange={(settings) => {
+              console.log('Transcription settings updated:', settings);
+              // Force reload of AlwaysOnTranscription components
+              window.location.reload();
+            }}
+          />
+          
+          {/* Other Settings sections could go here */}
         </div>
       )}
     </div>

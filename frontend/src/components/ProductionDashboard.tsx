@@ -16,7 +16,7 @@ import {
   BarChart
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { LiveTranscriptionViewer } from './LiveTranscriptionViewer';
+import { AlwaysOnTranscription } from './AlwaysOnTranscription';
 
 interface SessionData {
   session_id: string;
@@ -443,12 +443,14 @@ export const ProductionDashboard: React.FC = () => {
             )}
           </div>
 
-          {/* Live Transcript Preview */}
-          {isRecording && currentSession && (
-            <div className="mt-6">
-              <LiveTranscriptionViewer sessionId={currentSession.session_id} isRecording={isRecording} />
-            </div>
-          )}
+          {/* Always-On Live Transcription */}
+          <div className="mt-6">
+            <AlwaysOnTranscription 
+              userRole="admin"
+              maxBufferMinutes={10}
+              className="h-full"
+            />
+          </div>
         </div>
 
         {/* System Status */}

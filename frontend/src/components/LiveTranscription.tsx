@@ -105,9 +105,15 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
     setCurrentSegment('');
     setIsProcessing(false);
 
-    // Auto-scroll to bottom
+    // Only auto-scroll if user is near bottom (text editor behavior)
     setTimeout(() => {
-      transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const container = document.querySelector('.transcription-container');
+      if (container) {
+        const isNearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
+        if (isNearBottom) {
+          transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }
+      }
     }, 100);
   };
 
@@ -170,7 +176,7 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
       </div>
 
       {/* Transcription Display */}
-      <div className="p-4 max-h-96 overflow-y-auto">
+      <div className="transcription-container p-4 max-h-96 overflow-y-auto scroll-smooth">
         {!isRecording ? (
           <div className="text-center py-12 text-gray-500">
             <MicOff className="w-12 h-12 mx-auto mb-4 text-gray-300" />

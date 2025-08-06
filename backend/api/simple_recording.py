@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.simple_audio_recorder import simple_audio_recorder
 from services.ollama_service import ollama_service
+from services.gemma_custom_service import gemma_service
 from services.whisperx_npu_service import whisperx_service
 from services.realtime_transcription import realtime_service
 from services.whisper_realtime import whisper_realtime_service
@@ -211,10 +212,10 @@ async def auto_rename(session_id: str):
             Target completion date is end of next month.
             """
         
-        # Generate a better title using Ollama
-        new_name = ollama_service.generate_meeting_title(transcript)
+        # Generate a better title using Gemma (custom engine or Ollama)
+        new_name = gemma_service.generate_meeting_title(transcript)
         
-        # Fallback if Ollama fails
+        # Fallback if generation fails
         if not new_name or new_name == "":
             new_name = f"Team Meeting - {datetime.now().strftime('%B %d')}"
         
@@ -275,8 +276,8 @@ async def summarize_session(session_id: str):
         Budget allocation was discussed but needs executive approval.
         """
         
-        # Generate summary using Ollama
-        summary_result = ollama_service.summarize_meeting(mock_transcript)
+        # Generate summary using Gemma (custom engine or Ollama)
+        summary_result = gemma_service.summarize_meeting(mock_transcript)
         
         # Store summary in session
         sessions[session_id]["summary"] = summary_result

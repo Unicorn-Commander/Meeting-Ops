@@ -4,7 +4,7 @@ import {
   Clock, Users, FileText, Settings, AlertCircle, CheckCircle,
   Cpu, Zap, Activity
 } from 'lucide-react';
-import { LiveTranscriptionViewer } from '../components/LiveTranscriptionViewer';
+import { AlwaysOnTranscription } from '../components/AlwaysOnTranscription';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
@@ -517,23 +517,14 @@ export const RecordingPage: React.FC = () => {
             )}
           </div>
 
-          {/* Live Transcription */}
+          {/* Always-On Live Transcription */}
           <div className="bg-gray-800 rounded-lg overflow-hidden">
-            <LiveTranscriptionViewer
-              sessionId={sessionIdRef.current}
-              isRecording={isRecording && !isPaused}
-              onSegmentReceived={(segment) => {
-                // Update word count and speaker count
-                if (currentSession) {
-                  const words = segment.text.split(' ').length;
-                  setCurrentSession(prev => ({
-                    ...prev!,
-                    wordCount: prev!.wordCount + words,
-                    speakerCount: segment.speaker ? Math.max(prev!.speakerCount, parseInt(segment.speaker.replace('Speaker ', ''), 10)) : prev!.speakerCount
-                  }));
-                }
-              }}
+            <AlwaysOnTranscription
+              userRole={user?.is_superuser ? 'superuser' : user?.role || 'user'}
+              maxBufferMinutes={user?.is_superuser ? 15 : 5}
+              className="h-full"
             />
+            {/* Segment processing handled internally by AlwaysOnTranscription */}
           </div>
         </div>
 

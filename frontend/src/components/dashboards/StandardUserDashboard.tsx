@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { RecordingControls } from '../RecordingControls';
 import { SessionList } from '../SessionList';
-import { LiveTranscription } from '../LiveTranscription';
+import { AlwaysOnTranscription } from '../AlwaysOnTranscription';
 import { AudioLevelMeter } from '../AudioLevelMeter';
 import { 
   Mic, 
@@ -273,19 +273,13 @@ export const StandardUserDashboard: React.FC = () => {
             </div>
           </div>
 
-          {/* Live Transcription */}
+          {/* Live Transcription - Always Visible */}
           <div className="bg-gray-800 rounded-lg p-6">
-            <h2 className="text-lg font-semibold text-gray-200 mb-4">
-              Live Transcription
-            </h2>
-            {isRecording && currentSessionId ? (
-              <LiveTranscription sessionId={currentSessionId} isRecording={isRecording} />
-            ) : (
-              <div className="text-center py-12 text-gray-400">
-                <Mic className="w-12 h-12 mx-auto mb-4 text-gray-600" />
-                <p>Start recording to see live transcription</p>
-              </div>
-            )}
+            <AlwaysOnTranscription 
+              userRole="user"
+              maxBufferMinutes={5}
+              className="h-full"
+            />
           </div>
         </div>
       )}

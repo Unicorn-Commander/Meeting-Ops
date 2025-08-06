@@ -112,15 +112,21 @@ export const Login: React.FC = () => {
           </div>
 
           <div className="text-sm text-center">
-            <p className="text-gray-600">
-              Default credentials:
-              <br />
-              Username: <span className="font-mono text-gray-900">admin</span>
-              <br />
-              Password: <span className="font-mono text-gray-900">admin</span>
-            </p>
-            <p className="mt-2 text-red-600 font-semibold">
-              Change the default password immediately!
+            <div className="bg-blue-50 p-3 rounded-md mb-2">
+              <p className="text-gray-700 font-semibold mb-2">Test Accounts:</p>
+              <div className="space-y-1">
+                <p className="text-gray-600">
+                  <span className="font-semibold">Admin:</span> <span className="font-mono text-blue-700">admin / admin123</span>
+                  <span className="text-xs text-gray-500 block">Full Admin Dashboard Access</span>
+                </p>
+                <p className="text-gray-600">
+                  <span className="font-semibold">User:</span> <span className="font-mono text-green-700">user / user123</span>
+                  <span className="text-xs text-gray-500 block">Limited User Dashboard Access</span>
+                </p>
+              </div>
+            </div>
+            <p className="text-orange-600 text-xs">
+              💡 Try both accounts to see role-based dashboard differences
             </p>
           </div>
         </form>
