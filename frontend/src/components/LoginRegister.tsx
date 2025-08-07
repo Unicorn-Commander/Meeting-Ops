@@ -126,11 +126,21 @@ export const LoginRegister: React.FC = () => {
                 <AlertCircle className="h-5 w-5 text-blue-400" />
               </div>
               <div className="ml-3">
-                <h3 className="text-sm font-medium text-blue-300">Default Credentials</h3>
-                <div className="mt-2 text-sm text-blue-200">
-                  <p>Username: <span className="font-mono font-bold">admin</span></p>
-                  <p>Password: <span className="font-mono font-bold">changeme123!</span></p>
-                  <p className="mt-2 text-xs text-blue-300">Please change the password after first login!</p>
+                <h3 className="text-sm font-medium text-blue-300">🔐 Default Login Credentials</h3>
+                <div className="mt-2 text-sm text-blue-200 space-y-3">
+                  <div className="bg-blue-800/30 p-2 rounded border border-blue-600">
+                    <p className="font-bold text-blue-200 mb-1">Administrator Account:</p>
+                    <p>Username: <span className="font-mono font-bold">admin</span></p>
+                    <p>Password: <span className="font-mono font-bold">admin123</span></p>
+                    <p className="text-xs text-blue-300 mt-1">Full system access, all features enabled</p>
+                  </div>
+                  <div className="bg-green-800/30 p-2 rounded border border-green-600">
+                    <p className="font-bold text-green-200 mb-1">Standard User Account:</p>
+                    <p>Username: <span className="font-mono font-bold">user</span></p>
+                    <p>Password: <span className="font-mono font-bold">user123</span></p>
+                    <p className="text-xs text-green-300 mt-1">Limited access, basic recording features</p>
+                  </div>
+                  <p className="mt-2 text-xs text-yellow-300">⚠️ Please change these default passwords after first login for security!</p>
                 </div>
               </div>
             </div>

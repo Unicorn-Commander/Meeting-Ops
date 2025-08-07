@@ -53,7 +53,7 @@ export const AlwaysOnTranscription: React.FC<AlwaysOnTranscriptionProps> = ({
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
-  const bufferCleanupRef = useRef<NodeJS.Timeout>();
+  const bufferCleanupRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   // Start always-on listening
   const startListening = useCallback(async () => {

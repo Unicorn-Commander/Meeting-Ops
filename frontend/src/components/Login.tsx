@@ -112,21 +112,42 @@ export const Login: React.FC = () => {
           </div>
 
           <div className="text-sm text-center">
-            <div className="bg-blue-50 p-3 rounded-md mb-2">
-              <p className="text-gray-700 font-semibold mb-2">Test Accounts:</p>
-              <div className="space-y-1">
-                <p className="text-gray-600">
-                  <span className="font-semibold">Admin:</span> <span className="font-mono text-blue-700">admin / admin123</span>
-                  <span className="text-xs text-gray-500 block">Full Admin Dashboard Access</span>
-                </p>
-                <p className="text-gray-600">
-                  <span className="font-semibold">User:</span> <span className="font-mono text-green-700">user / user123</span>
-                  <span className="text-xs text-gray-500 block">Limited User Dashboard Access</span>
+            <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-4 rounded-lg border border-blue-200 mb-2">
+              <p className="text-gray-800 font-bold mb-3 text-base">
+                🔐 Default Login Credentials
+              </p>
+              <div className="space-y-2">
+                <div className="bg-white p-2 rounded-md border border-blue-300">
+                  <p className="text-gray-700">
+                    <span className="font-bold text-blue-700">Administrator Account:</span>
+                  </p>
+                  <div className="flex items-center justify-center gap-2 mt-1">
+                    <span className="font-mono text-lg bg-blue-600 text-white px-3 py-1 rounded">admin</span>
+                    <span className="text-gray-500">/</span>
+                    <span className="font-mono text-lg bg-blue-600 text-white px-3 py-1 rounded">admin123</span>
+                  </div>
+                  <span className="text-xs text-gray-600 mt-1 block">Full system access, all features enabled</span>
+                </div>
+                <div className="bg-white p-2 rounded-md border border-green-300">
+                  <p className="text-gray-700">
+                    <span className="font-bold text-green-700">Standard User Account:</span>
+                  </p>
+                  <div className="flex items-center justify-center gap-2 mt-1">
+                    <span className="font-mono text-lg bg-green-600 text-white px-3 py-1 rounded">user</span>
+                    <span className="text-gray-500">/</span>
+                    <span className="font-mono text-lg bg-green-600 text-white px-3 py-1 rounded">user123</span>
+                  </div>
+                  <span className="text-xs text-gray-600 mt-1 block">Limited access, basic recording features</span>
+                </div>
+              </div>
+              <div className="mt-3 p-2 bg-yellow-50 rounded-md">
+                <p className="text-xs text-yellow-800">
+                  ⚠️ Please change these default passwords after first login for security
                 </p>
               </div>
             </div>
-            <p className="text-orange-600 text-xs">
-              💡 Try both accounts to see role-based dashboard differences
+            <p className="text-purple-600 text-xs font-medium">
+              💡 Login with either account to explore different dashboard features
             </p>
           </div>
         </form>
