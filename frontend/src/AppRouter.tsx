@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 
 // Layouts
@@ -18,6 +18,7 @@ import { ViewerDashboard } from './components/dashboards/ViewerDashboard';
 
 // Hubs
 import { UnifiedRecordingInterface } from './components/UnifiedRecordingInterface';
+import { TimeShiftRecording } from './components/TimeShiftRecording';
 
 // Components
 import { SessionList } from './components/SessionList';
@@ -96,15 +97,16 @@ export const AppRouter: React.FC = () => {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
         {/* Recording Hub */}
-        <Route path="/recording">
+        <Route path="/recording" element={<Outlet />}>
           <Route path="live" element={<UnifiedRecordingInterface />} />
+          <Route path="timeshift" element={<TimeShiftRecording />} />
           <Route path="main" element={<UnifiedRecordingInterface />} />
           <Route path="sessions" element={<SessionList />} />
           <Route path="sessions/:id" element={<SessionDetails />} />
         </Route>
 
         {/* Intelligence Center */}
-        <Route path="/intelligence">
+        <Route path="/intelligence" element={<Outlet />}>
           <Route path="analytics" element={<MeetingAnalytics />} />
           <Route path="insights" element={
             <div className="p-6">
@@ -133,7 +135,7 @@ export const AppRouter: React.FC = () => {
         </Route>
 
         {/* Content Manager */}
-        <Route path="/content">
+        <Route path="/content" element={<Outlet />}>
           <Route path="files" element={<FileManager />} />
           <Route path="flagged" element={
             <div className="p-6 text-white">
@@ -156,7 +158,7 @@ export const AppRouter: React.FC = () => {
         </Route>
 
         {/* Integrations */}
-        <Route path="/integrations">
+        <Route path="/integrations" element={<Outlet />}>
           <Route path="calendar" element={
             <div className="p-6 text-white">
               <h2 className="text-2xl font-bold mb-4">Calendar Integration</h2>
@@ -184,7 +186,7 @@ export const AppRouter: React.FC = () => {
         </Route>
 
         {/* System Control */}
-        <Route path="/system">
+        <Route path="/system" element={<Outlet />}>
           <Route path="npu" element={
             <div className="p-6">
               <h2 className="text-2xl font-bold text-white mb-4">NPU Monitor</h2>
@@ -212,7 +214,7 @@ export const AppRouter: React.FC = () => {
         </Route>
 
         {/* Organization */}
-        <Route path="/org">
+        <Route path="/org" element={<Outlet />}>
           <Route path="users" element={
             <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
               <div className="p-6 text-white">
@@ -248,7 +250,7 @@ export const AppRouter: React.FC = () => {
         </Route>
 
         {/* Administration */}
-        <Route path="/admin">
+        <Route path="/admin" element={<Outlet />}>
           <Route path="backup" element={
             <ProtectedRoute requiredRoles={['superuser']}>
               <div className="p-6 text-white">

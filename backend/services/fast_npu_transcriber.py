@@ -15,47 +15,70 @@ logger = logging.getLogger(__name__)
 class FastNPUTranscriber:
     """Optimized transcriber using faster-whisper with NPU-optimal settings"""
     
-    def __init__(self):
+    def __init__(self, allow_cpu_fallback=True):
         self.model = None
         self.is_ready = False
+        self.using_npu = False
+        self.allow_cpu_fallback = allow_cpu_fallback
         
-        # Force NPU device check
+        # Check NPU device availability
         if not os.path.exists("/dev/accel/accel0"):
-            raise RuntimeError("NPU device not found - cannot proceed without NPU")
+            if not allow_cpu_fallback:
+                raise RuntimeError("NPU device not found - cannot proceed without NPU")
+            else:
+                logger.warning("⚠️  NPU device not found - falling back to CPU acceleration")
+                self.using_npu = False
+        else:
+            logger.info("✅ NPU device found - using NPU acceleration")
+            self.using_npu = True
         
-        # Initialize with optimal settings for NPU
+        # Initialize with optimal settings for available hardware
         self._init_model()
         
     def _init_model(self):
-        """Initialize faster-whisper with NPU-optimal settings"""
+        """Initialize faster-whisper with hardware-specific settings"""
         try:
-            # Load NPU configuration
+            # Load configuration
             import json
             config_path = "/home/ucadmin/Meeting-Ops/backend/npu_config.json"
             if os.path.exists(config_path):
                 with open(config_path) as f:
                     config = json.load(f)
-                model_name = config.get("default_model", "large-v3")
-                compute_type = config.get("compute_type", "int8")
             else:
-                model_name = "large-v3"  # Best model for NPU
-                compute_type = "int8"
+                config = {}
             
-            # Use int8 quantization for NPU optimization
-            # Device is "cpu" but will use NPU through optimized kernels
+            # Hardware-specific configuration
+            if self.using_npu:
+                model_name = config.get("default_model", "large-v3")  # Best model for NPU
+                compute_type = config.get("compute_type", "int8")     # INT8 for NPU optimization
+                num_workers = 4                                       # Parallel processing for NPU
+                hw_description = "NPU: AMD Phoenix 16 TOPS"
+                optimization_note = "NPU-optimized"
+            else:
+                model_name = config.get("cpu_model", "base")          # Smaller model for CPU
+                compute_type = "float32"                              # Float32 for CPU compatibility
+                num_workers = 2                                       # Fewer workers for CPU
+                hw_description = "CPU: x86_64"
+                optimization_note = "CPU-optimized"
+            
+            # Initialize WhisperModel with hardware-appropriate settings
             self.model = WhisperModel(
-                model_name,  # Use best model - NPU can handle it
-                device="cpu",  # CPU device but NPU-accelerated
-                compute_type=compute_type,  # INT8 for NPU optimization
-                num_workers=4,  # Parallel processing
+                model_name,
+                device="cpu",
+                compute_type=compute_type,
+                num_workers=num_workers,
                 download_root="/home/ucadmin/.cache/whisper"
             )
             
-            logger.info("✅ Faster-whisper model loaded with NPU optimization")
-            logger.info(f"   Model: {model_name} (best quality)")
-            logger.info(f"   Compute type: {compute_type} (NPU-optimized)")
-            logger.info("   Workers: 4")
-            logger.info("   NPU: AMD Phoenix 16 TOPS")
+            # Log initialization status
+            if self.using_npu:
+                logger.info("✅ Faster-whisper model loaded with NPU optimization")
+            else:
+                logger.info("✅ Faster-whisper model loaded with CPU optimization")
+            logger.info(f"   Model: {model_name} ({optimization_note})")
+            logger.info(f"   Compute type: {compute_type}")
+            logger.info(f"   Workers: {num_workers}")
+            logger.info(f"   Hardware: {hw_description}")
             
             self.is_ready = True
             
@@ -158,13 +181,14 @@ class FastNPUTranscriber:
             }
     
     def get_status(self) -> Dict[str, Any]:
-        """Get NPU transcriber status"""
+        """Get transcriber status"""
         return {
             "ready": self.is_ready,
             "npu_device": os.path.exists("/dev/accel/accel0"),
+            "using_npu": self.using_npu,
             "model_loaded": self.model is not None,
             "backend": "faster-whisper",
-            "optimization": "int8",
+            "optimization": "int8" if self.using_npu else "float32",
             "features": {
                 "word_timestamps": True,
                 "vad": True,
@@ -172,7 +196,7 @@ class FastNPUTranscriber:
                 "beam_search": False,  # Disabled for speed
                 "temperature": 0  # Deterministic
             },
-            "device": "NPU-optimized (16 TOPS)"
+            "device": "NPU-optimized (16 TOPS)" if self.using_npu else "CPU-optimized"
         }
 
 

@@ -1,9 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
 import './index.css'
-// import App from './App.tsx'
-import AppRoleBased from './AppRoleBased.tsx'
+import App from './App.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 
 // Add global error handler
@@ -19,11 +17,9 @@ const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <BrowserRouter>
-        <ErrorBoundary>
-          <AppRoleBased />
-        </ErrorBoundary>
-      </BrowserRouter>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </StrictMode>,
   );
 } else {

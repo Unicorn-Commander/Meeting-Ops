@@ -38,17 +38,10 @@ class WhisperRealtimeService:
         except:
             pass
             
-        # Try to install whisper
-        try:
-            logger.info("Installing whisper...")
-            subprocess.run([
-                "pip", "install", "-q", "openai-whisper"
-            ], check=True)
-            logger.info("✅ Whisper installed")
-            return True
-        except Exception as e:
-            logger.warning(f"Could not install whisper: {e}")
-            return False
+        # Skip auto-installation - packages should be pre-installed in venv
+        # This avoids "externally-managed-environment" errors
+        logger.debug("Skipping whisper auto-install - should be pre-installed in venv")
+        return False  # Will use faster-whisper fallback
     
     def transcribe_audio_file(self, audio_path: str) -> Dict:
         """

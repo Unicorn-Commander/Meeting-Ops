@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { Shield, Download } from 'lucide-react';
 
 export const Login: React.FC = () => {
   const [username, setUsername] = useState('');
@@ -150,6 +151,44 @@ export const Login: React.FC = () => {
               💡 Login with either account to explore different dashboard features
             </p>
           </div>
+
+          {/* Certificate Download for HTTPS */}
+          {location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && (
+            <div className="mt-6 p-4 bg-purple-900/20 border border-purple-700 rounded-lg">
+              <div className="flex items-start gap-3">
+                <Shield className="w-5 h-5 text-purple-400 flex-shrink-0 mt-1" />
+                <div className="flex-1">
+                  <h4 className="text-sm font-semibold text-purple-300 mb-1">
+                    🦄 Secure Access Available
+                  </h4>
+                  <p className="text-xs text-gray-400 mb-3">
+                    For enhanced security, install our certificate and use HTTPS.
+                  </p>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <a
+                      href={`http://${location.hostname}:8888`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded transition-colors"
+                    >
+                      <Download className="w-3 h-3" />
+                      Get Certificate
+                    </a>
+                    <a
+                      href={`https://${location.hostname}:7777`}
+                      className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-xs font-medium rounded transition-colors"
+                    >
+                      <Shield className="w-3 h-3" />
+                      Switch to HTTPS
+                    </a>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Issued by: Magic Unicorn Unconventional Technology & Stuff Inc.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </form>
       </div>
     </div>

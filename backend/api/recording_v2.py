@@ -14,7 +14,7 @@ from database.models import RecordingSession
 from auth.dependencies import get_current_user, require_permission
 from services.audio_session_manager import AudioSessionManager
 from services.session_manager import SessionManager
-from services.transcription_service import TranscriptionService
+# TranscriptionService import moved below to get singleton instance
 from services.audio_recording_service import AudioRecordingService
 from services.file_storage_service import FileStorageService
 
@@ -25,7 +25,8 @@ router = APIRouter(prefix="/api/v2/recording", tags=["recording_v2"])
 # Service instances
 audio_session_manager = AudioSessionManager()
 session_manager = SessionManager()
-transcription_service = TranscriptionService()
+# Use the singleton transcription service instead of creating a new one
+from services.transcription_service import transcription_service
 audio_recording_service = AudioRecordingService()
 file_storage_service = FileStorageService()
 

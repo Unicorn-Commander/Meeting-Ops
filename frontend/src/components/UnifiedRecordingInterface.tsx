@@ -44,36 +44,51 @@ export const UnifiedRecordingInterface: React.FC = () => {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize audio capture
-  const initializeAudio = useCallback(async () => {
+  // Check server-side audio status
+  const checkServerAudio = useCallback(async () => {
     try {
       setMicStatus('connecting');
       
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        setMicStatus('error');
+        return false;
+      }
+      
+      // Check server audio device status
+      const response = await fetch(`${API_BASE_URL}/api/audio-devices`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       
-      streamRef.current = stream;
-      
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-          ? 'audio/webm;codecs=opus' 
-          : 'audio/webm',
-        audioBitsPerSecond: 16000
-      });
-      
-      mediaRecorderRef.current = mediaRecorder;
-      setMicStatus('active');
-      return true;
+      if (response.ok) {
+        const devices = await response.json();
+        console.log('[Recording] Server audio devices:', devices);
+        
+        // Check if server microphone is available 
+        const serverMic = devices.find((d: any) => 
+          d.name?.includes('USB') || d.name?.includes('PCM2902') || 
+          d.name?.includes('M-305') || d.name?.includes('Server Microphone')
+        );
+        
+        if (serverMic) {
+          console.log('[Recording] Server mic found:', serverMic.name);
+          setMicStatus('active');
+          return true;
+        } else {
+          console.warn('[Recording] No server mic found');
+          setMicStatus('error');
+          return false;
+        }
+      } else {
+        console.error('[Recording] Failed to check server audio devices');
+        setMicStatus('error');
+        return false;
+      }
       
     } catch (error) {
-      console.error('[Recording] Audio initialization failed:', error);
+      console.error('[Recording] Server audio check failed:', error);
       setMicStatus('error');
       return false;
     }
@@ -85,9 +100,12 @@ export const UnifiedRecordingInterface: React.FC = () => {
       const token = localStorage.getItem('access_token');
       if (!token) return;
 
-      // Initialize audio first
-      const audioReady = await initializeAudio();
-      if (!audioReady) return;
+      // Check server audio first
+      const audioReady = await checkServerAudio();
+      if (!audioReady) {
+        alert('Server USB microphone not available. Please check server audio configuration.');
+        return;
+      }
 
       // Create recording session
       const response = await fetch(`${API_BASE_URL}/api/recording-sessions`, {
@@ -124,18 +142,10 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       ws.onopen = () => {
         setIsConnected(true);
+        console.log('[Recording] WebSocket connected for server-side recording');
         
-        // Start MediaRecorder
-        if (mediaRecorderRef.current) {
-          mediaRecorderRef.current.ondataavailable = async (event) => {
-            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-              const arrayBuffer = await event.data.arrayBuffer();
-              ws.send(arrayBuffer);
-            }
-          };
-          
-          mediaRecorderRef.current.start(500); // Send chunks every 500ms
-        }
+        // Server handles audio capture from USB mic
+        // No need to send audio from browser
       };
 
       ws.onmessage = (event) => {
@@ -188,21 +198,16 @@ export const UnifiedRecordingInterface: React.FC = () => {
       console.error('[Recording] Start failed:', error);
       setMicStatus('error');
     }
-  }, [initializeAudio]);
+  }, [checkServerAudio]);
 
   // Stop recording
   const stopRecording = useCallback(async () => {
     try {
-      // Stop MediaRecorder
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
+      // Server will stop recording
+      console.log('[Recording] Stopping server-side recording...');
       
-      // Stop audio stream
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
+      // No browser stream to stop - recording is server-side
+      console.log('[Recording] Server recording stopped');
       
       // Close WebSocket
       if (wsRef.current) {
@@ -290,24 +295,31 @@ export const UnifiedRecordingInterface: React.FC = () => {
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Check server mic status on mount
+  useEffect(() => {
+    checkServerAudio();
+  }, [checkServerAudio]);
+  
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopRecording();
+      if (isRecording) {
+        stopRecording();
+      }
     };
-  }, [stopRecording]);
+  }, [isRecording, stopRecording]);
 
   // Get mic status color and text
   const getMicStatusDisplay = () => {
     switch (micStatus) {
       case 'active':
-        return { color: 'text-green-400', text: 'Excellent - NPU Ready', icon: CheckCircle };
+        return { color: 'text-green-400', text: 'Server Mic Ready - NPU Active', icon: CheckCircle };
       case 'connecting':
-        return { color: 'text-yellow-400', text: 'Connecting...', icon: Loader2 };
+        return { color: 'text-yellow-400', text: 'Connecting to Server...', icon: Loader2 };
       case 'error':
-        return { color: 'text-red-400', text: 'Error - Check Permissions', icon: AlertCircle };
+        return { color: 'text-red-400', text: 'Server Mic Unavailable', icon: AlertCircle };
       default:
-        return { color: 'text-blue-400', text: 'Ready - Click to Start', icon: Info };
+        return { color: 'text-blue-400', text: 'Server Ready - Click to Record', icon: Info };
     }
   };
 

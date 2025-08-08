@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  ollama-rocm:
+    image: ollama/ollama:rocm
+    container_name: meetingops-ollama-rocm
+    environment:
+      # ROCm and HSA configuration for AMD iGPU
+      - HSA_OVERRIDE_GFX_VERSION=11.0.3
+      - ROCM_PATH=/opt/rocm
+      - HIP_VISIBLE_DEVICES=0
+      # Ollama performance settings
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_GPU_LAYERS=999
+      # Model settings for Gemma3n
+      - OLLAMA_DEFAULT_MODEL=gemma3n:e4b
+    volumes:
+      - ollama_models:/root/.ollama
+      # ROCm device access
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    devices:
+      # GPU devices for ROCm
+      - /dev/dri
+      - /dev/kfd
+    ports:
+      - "11435:11434"  # Different port to avoid conflict
+    networks:
+      - meetingops-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          devices:
+            - driver: amdgpu
+              count: 1
+              capabilities: [gpu]
+    group_add:
+      - video
+      - render
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+
+networks:
+  meetingops-network:
+    external: true
+
+volumes:
+  ollama_models:
+    external: true

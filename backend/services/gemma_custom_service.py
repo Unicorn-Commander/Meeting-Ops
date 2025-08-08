@@ -42,16 +42,20 @@ class GemmaCustomService:
                     logger.warning(f"⚠️ Gemma3n model not found at {self.model_path}")
                     self.engine_available = False
         
-        # Check for Ollama
+        # Check for Ollama API (Docker or local)
         try:
-            result = subprocess.run(
-                ["which", "ollama"], 
-                capture_output=True, 
-                text=True
-            )
-            if result.returncode == 0:
+            import requests
+            response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            if response.status_code == 200:
                 self.ollama_available = True
-                logger.info("✅ Ollama found as fallback")
+                logger.info("✅ Ollama API available at http://localhost:11434")
+                # Check if gemma3n:e4b model is available
+                models = response.json().get('models', [])
+                has_gemma = any('gemma3n:e4b' in model.get('name', '') for model in models)
+                if has_gemma:
+                    logger.info("✅ Gemma3n:e4b model available in Ollama")
+                else:
+                    logger.warning("⚠️ Gemma3n:e4b model not found, will try to use it anyway")
         except:
             pass
             
@@ -143,7 +147,7 @@ class GemmaCustomService:
             response = requests.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": "gemma:2b",  # Use smaller model for speed
+                    "model": "gemma3n:e4b",  # Use the loaded model
                     "prompt": full_prompt,
                     "stream": False,
                     "options": {

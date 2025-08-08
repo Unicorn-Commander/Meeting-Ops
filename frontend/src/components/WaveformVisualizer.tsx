@@ -59,7 +59,7 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
           setCurrentLevel(audioLevel.level);
           setPeak(audioLevel.peak);
           setMicActive(audioLevel.mic_active);
-          setQuality(audioLevel.quality);
+          setQuality((audioLevel.quality as 'low' | 'good' | 'excellent') || 'good');
           
           // Add to buffer for waveform
           dataBufferRef.current.push(audioLevel.level);

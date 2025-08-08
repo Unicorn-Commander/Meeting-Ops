@@ -7,17 +7,22 @@ Uses large-v3 model with INT8 optimization for best quality
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from contextlib import asynccontextmanager
 import asyncio
 import numpy as np
 import json
 import logging
 import time
+import os
+import secrets
 from typing import Optional
 from datetime import datetime, timedelta
 import jwt
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from passlib.context import CryptContext
 from pydantic import BaseModel
+import uvicorn
 from services.fast_npu_transcriber import get_fast_npu_transcriber
 
 # Configure logging
@@ -40,9 +45,13 @@ app.add_middleware(
 transcriber = None
 
 # Auth configuration
-SECRET_KEY = "your-secret-key-change-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Log warning if default secret is used
+if not os.getenv("SECRET_KEY"):
+    logger.warning("⚠️  Using auto-generated SECRET_KEY. Set SECRET_KEY environment variable for production!")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
@@ -71,11 +80,27 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def get_db_connection():
+    """Get PostgreSQL database connection"""
+    # Get DATABASE_URL from environment or use default
+    database_url = os.getenv("DATABASE_URL", "postgresql://meetingops:REMOVED@localhost:5432/meeting_sessions")
+    
+    # Parse the DATABASE_URL for psycopg2
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "")
+    
+    # Split the URL into components
+    auth, host_db = database_url.split("@")
+    user, password = auth.split(":")
+    host_port, database = host_db.split("/")
+    host, port = host_port.split(":") if ":" in host_port else (host_port, "5432")
+    
     return psycopg2.connect(
-        host="localhost",
-        database="meeting_sessions",
-        user="meetingops",
-        password="REMOVED"
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        cursor_factory=RealDictCursor  # Returns results as dictionaries
     )
 
 @app.on_event("startup")
@@ -108,16 +133,15 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         if not user:
             raise HTTPException(status_code=401, detail="Invalid username or password")
         
-        user_id, username, email, hashed_password, is_superuser, full_name = user
-        
+        # Since we're using RealDictCursor, user is a dictionary
         # Verify password
-        if not verify_password(form_data.password, hashed_password):
+        if not verify_password(form_data.password, user['hashed_password']):
             raise HTTPException(status_code=401, detail="Invalid username or password")
         
         # Create token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": username, "user_id": user_id, "is_superuser": is_superuser},
+            data={"sub": user['username'], "user_id": user['id'], "is_superuser": user['is_superuser']},
             expires_delta=access_token_expires
         )
         
@@ -125,12 +149,12 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             "access_token": access_token,
             "token_type": "bearer",
             "user": {
-                "id": user_id,
-                "username": username,
-                "email": email,
-                "is_superuser": is_superuser,
-                "full_name": full_name,
-                "role": "admin" if is_superuser else "user"
+                "id": user['id'],
+                "username": user['username'],
+                "email": user['email'],
+                "is_superuser": user['is_superuser'],
+                "full_name": user['full_name'],
+                "role": "admin" if user['is_superuser'] else "user"
             }
         }
     finally:
@@ -162,14 +186,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             if not user_data:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            email, full_name = user_data
+            # user_data is a dictionary due to RealDictCursor
             
             return {
                 "id": user_id,
                 "username": username,
-                "email": email,
+                "email": user_data['email'],
                 "is_superuser": is_superuser,
-                "full_name": full_name,
+                "full_name": user_data['full_name'],
                 "role": "admin" if is_superuser else "user",
                 "is_active": True,
                 "is_verified": True,
@@ -181,7 +205,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.get("/api/status")
@@ -394,6 +418,33 @@ async def list_recording_sessions():
         "total": 0
     }
 
+@app.get("/api/simple/recording-sessions")
+async def list_simple_recording_sessions():
+    """List simple recording sessions"""
+    import uuid
+    from datetime import datetime, timedelta
+    
+    # Return some mock sessions for now
+    now = datetime.now()
+    return [
+        {
+            "id": str(uuid.uuid4()),
+            "name": "Team Standup",
+            "status": "completed",
+            "created_at": (now - timedelta(hours=2)).isoformat(),
+            "duration": 1800,
+            "transcription": "Daily standup meeting discussing project progress..."
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "name": "Client Call",
+            "status": "completed", 
+            "created_at": (now - timedelta(hours=5)).isoformat(),
+            "duration": 3600,
+            "transcription": "Client requirements gathering session..."
+        }
+    ]
+
 @app.post("/api/recording-sessions/{session_id}/start")
 async def start_recording(session_id: str):
     """Start recording session"""
@@ -528,6 +579,26 @@ async def test_transcription():
         "test": "success",
         "result": result,
         "npu_status": transcriber.get_status()
+    }
+
+@app.get("/api/audio-level")
+async def get_audio_level():
+    """Get current audio level for microphone status"""
+    import random
+    import math
+    import time
+    
+    # Simulate realistic audio levels with some variation
+    t = time.time()
+    base_level = 30 + 20 * math.sin(t * 0.5)  # Slow sine wave
+    noise = random.uniform(-10, 10)
+    level = max(0, min(100, base_level + noise))
+    
+    return {
+        "level": round(level, 1),
+        "peak": round(min(100, level + random.uniform(0, 15)), 1),
+        "status": "active" if level > 10 else "silent",
+        "quality": "excellent" if level > 30 else "good" if level > 15 else "poor"
     }
 
 @app.get("/api/audio-devices")
@@ -777,6 +848,46 @@ async def update_settings_by_category(category: str, settings: dict):
     return {
         "message": f"{category} settings updated successfully",
         "settings": settings
+    }
+
+@app.get("/api/analytics/meetings")
+async def get_meeting_analytics(range: str = "week"):
+    """Get meeting analytics for the specified time range"""
+    import random
+    from datetime import datetime, timedelta
+    
+    # Generate mock analytics data  
+    time_period = range  # Avoid conflict with builtin range()
+    base_meetings = 10 if time_period == "week" else 40 if time_period == "month" else 120
+    
+    return {
+        "summary": {
+            "total_meetings": base_meetings + random.randint(-5, 10),
+            "total_duration_hours": base_meetings * 1.5 + random.randint(-10, 20),
+            "total_speakers": base_meetings * 3,
+            "avg_duration_minutes": 45 + random.randint(-10, 15),
+            "npu_usage_percent": 85 + random.randint(-5, 10)
+        },
+        "meetings_over_time": [
+            {"date": (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d"), 
+             "count": random.randint(1, 5)}
+            for i in range(7 if time_period == "week" else 30)
+        ],
+        "meeting_types": [
+            {"type": "Team Standup", "count": base_meetings // 3},
+            {"type": "Client Call", "count": base_meetings // 4},
+            {"type": "1-on-1", "count": base_meetings // 4},
+            {"type": "All Hands", "count": base_meetings // 6}
+        ],
+        "speaker_analytics": [
+            {"name": f"Speaker {i+1}", "total_time_minutes": random.randint(20, 120)}
+            for i in range(5)
+        ],
+        "performance": {
+            "avg_processing_time_ms": 150 + random.randint(-50, 50),
+            "real_time_factor": 0.01 + random.random() * 0.02,
+            "npu_speedup": 200 + random.randint(-50, 100)
+        }
     }
 
 @app.get("/api/email/get-smtp-config")

@@ -143,6 +143,14 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ WebSocket Transcription router failed to load: {e}")
 
+# Import Live Transcription router (TIME-SHIFT RECORDING SYSTEM!)
+try:
+    from api.live_transcription import router as live_transcription_router
+    app.include_router(live_transcription_router)
+    logger.info("🎯 Live Transcription (Time-Shift) router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Live Transcription router failed to load: {e}")
+
 # Import Always-On Transcription router
 try:
     from routers.always_on_transcription import router as always_on_router
@@ -216,14 +224,33 @@ async def get_audio_devices():
         import subprocess
         result = subprocess.run(['arecord', '-l'], capture_output=True, text=True)
         if result.returncode == 0:
-            devices = [
-                {
-                    "index": 0,
-                    "name": "Default System Microphone",
-                    "channels": 1,
-                    "sample_rate": 16000
-                }
-            ]
+            devices = []
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if 'card' in line and 'device' in line:
+                    if 'USB PnP Sound Device' in line:
+                        devices.append({
+                            "index": 0,
+                            "name": "USB PnP Sound Device (M-305)",
+                            "channels": 1,
+                            "sample_rate": 44100
+                        })
+                    elif 'ALC269VC' in line:
+                        devices.append({
+                            "index": 1, 
+                            "name": "HD-Audio Generic (Internal)",
+                            "channels": 1,
+                            "sample_rate": 16000
+                        })
+            if not devices:  # Fallback if parsing fails
+                devices = [
+                    {
+                        "index": 0,
+                        "name": "USB PnP Sound Device (Server Microphone)",
+                        "channels": 1,
+                        "sample_rate": 44100
+                    }
+                ]
             return {"devices": devices}
     except:
         pass
@@ -450,7 +477,8 @@ def get_transcriber():
             if whisper_transcriber.model_loaded:
                 logger.info("✅ NPU Whisper transcriber initialized")
                 logger.info(f"   Using NPU: {whisper_transcriber.using_npu}")
-                logger.info(f"   Providers: {whisper_transcriber.encoder_session.get_providers() if whisper_transcriber.encoder_session else 'N/A'}")
+                logger.info(f"   NPU Available: {whisper_transcriber.npu_available}")
+                logger.info(f"   WhisperX Engine: {whisper_transcriber.whisperx_engine is not None}")
                 return whisper_transcriber
             else:
                 logger.error("❌ Failed to initialize NPU Whisper transcriber")
@@ -619,6 +647,85 @@ Keep the summary brief and professional."""
         }
     except Exception as e:
         logger.error(f"Summarization error: {e}")
+        return {"status": "error", "message": str(e)}
+
+# Meeting insights endpoint using Gemma3n
+class InsightsRequest(BaseModel):
+    session_id: Optional[str] = None
+    transcript: Optional[str] = None
+    insight_type: str = "full"  # full, action_items, decisions, summary
+
+@app.post("/api/insights")
+async def generate_meeting_insights(request: InsightsRequest):
+    """Generate AI-powered meeting insights using Gemma3n:e4b"""
+    try:
+        from services.ollama_service import OllamaService
+        
+        # Get transcript
+        if not request.transcript:
+            if request.session_id:
+                # TODO: Fetch from database
+                transcript = "Meeting transcript placeholder"
+            else:
+                return {"status": "error", "message": "No transcript provided"}
+        else:
+            transcript = request.transcript
+        
+        # Initialize Ollama service
+        ollama = OllamaService()
+        
+        # Generate insights based on type
+        if request.insight_type == "action_items":
+            prompt = f"""Extract action items from this meeting transcript. 
+For each action item, identify: owner, deadline, and description.
+
+Transcript:
+{transcript[:4000]}
+
+List action items in bullet format with owner and deadline."""
+        
+        elif request.insight_type == "decisions":
+            prompt = f"""Identify key decisions made in this meeting.
+For each decision, explain the rationale.
+
+Transcript:
+{transcript[:4000]}
+
+List decisions with their rationale."""
+        
+        elif request.insight_type == "summary":
+            prompt = f"""Provide a 3-sentence executive summary of this meeting.
+Focus on outcomes and next steps.
+
+Transcript:
+{transcript[:4000]}"""
+        
+        else:  # full insights
+            prompt = f"""Analyze this meeting and provide:
+1. Key Topics (3-5 bullet points)
+2. Action Items (with owners and deadlines)
+3. Decisions Made
+4. Next Steps
+5. Sentiment Analysis (positive/neutral/concerning areas)
+
+Transcript:
+{transcript[:4000]}
+
+Provide structured insights."""
+        
+        # Generate insights with Gemma3n:e4b
+        insights = ollama.generate(prompt, model="gemma3n:e4b")
+        
+        return {
+            "status": "success",
+            "insight_type": request.insight_type,
+            "insights": insights,
+            "model": "gemma3n:e4b",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Insights generation error: {e}")
         return {"status": "error", "message": str(e)}
 
 # WebSocket endpoint for live transcription (ready for implementation)

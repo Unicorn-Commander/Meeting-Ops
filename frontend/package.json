@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:https": "vite --config vite.config.https.ts",
+    "dev:localhost": "vite --host localhost",
     "build": "tsc -b && vite build",
     "build:docker": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "setup:https": "bash setup-https.sh",
+    "setup:magic-cert": "bash generate-magic-unicorn-cert.sh"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

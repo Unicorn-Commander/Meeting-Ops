@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
+import { SystemMonitor } from '../SystemMonitor';
+import { LiveTranscription } from '../LiveTranscription';
 
 interface DashboardMetric {
   label: string;
@@ -55,7 +57,7 @@ export const UltimateDashboard: React.FC = () => {
     },
     {
       label: 'NPU Usage',
-      value: `${realTimeData.npuUsage}%`,
+      value: `${Math.round(realTimeData.npuUsage)}%`,
       icon: Zap,
       color: 'text-purple-400',
       trend: 'up',
@@ -63,7 +65,7 @@ export const UltimateDashboard: React.FC = () => {
     },
     {
       label: 'Storage',
-      value: `${realTimeData.storageUsed}%`,
+      value: `${Math.round(realTimeData.storageUsed)}%`,
       icon: HardDrive,
       color: 'text-yellow-400',
       trend: 'up',
@@ -71,7 +73,7 @@ export const UltimateDashboard: React.FC = () => {
     },
     {
       label: 'Accuracy',
-      value: `${realTimeData.transcriptionRate}%`,
+      value: `${realTimeData.transcriptionRate.toFixed(1)}%`,
       icon: CheckCircle,
       color: 'text-cyan-400',
       trend: 'stable'
@@ -211,10 +213,9 @@ export const UltimateDashboard: React.FC = () => {
 
             {/* Main Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Always-On Transcription */}
+              {/* Live Transcription */}
               <div className="lg:col-span-2">
-                <SimpleAlwaysOnTranscription 
-                  userRole={user?.role as any || 'user'}
+                <LiveTranscription 
                   className="h-[500px]"
                 />
               </div>

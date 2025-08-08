@@ -29,7 +29,7 @@ class LLMSummarizationService:
         openai_key = os.getenv('OPENAI_API_KEY')
         anthropic_key = os.getenv('ANTHROPIC_API_KEY')
         ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-        ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3n:latest')
+        ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3n:e4b')
         
         if openai_key:
             try:

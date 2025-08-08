@@ -12,20 +12,22 @@ interface TranscriptionSegment {
 
 interface LiveTranscriptionProps {
   sessionId?: string;
-  isRecording: boolean;
+  isRecording?: boolean;
+  className?: string;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({ 
   sessionId, 
-  isRecording 
+  isRecording = false,
+  className = ''
 }) => {
   const [transcriptions, setTranscriptions] = useState<TranscriptionSegment[]>([]);
   const [currentSegment, setCurrentSegment] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [activeModel, setActiveModel] = useState<string>('');
+  const [activeModel, setActiveModel] = useState<string>('NPU-Accelerated Whisper');
   const wsRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -141,22 +143,21 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-sm">
+    <div className={`bg-gray-900 rounded-lg border border-gray-800 ${className}`}>
       {/* Header */}
-      <div className="p-4 border-b">
+      <div className="p-4 border-b border-gray-800">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold flex items-center gap-2">
+          <h2 className="text-xl font-semibold flex items-center gap-2 text-white">
             <Volume2 className="w-5 h-5" />
             Live Transcription
           </h2>
           
           <div className="flex items-center gap-3">
-            {activeModel && (
-              <span className="text-sm text-gray-500 flex items-center gap-1">
-                <Zap className="w-3 h-3" />
-                {activeModel}
-              </span>
-            )}
+            <span className="text-sm flex items-center gap-1">
+              <Zap className="w-3 h-3 text-purple-400 animate-pulse" />
+              <span className="text-purple-400 font-medium">NPU Active</span>
+              <span className="text-gray-500 text-xs ml-1">(16 TOPS)</span>
+            </span>
             
             <div className="flex items-center gap-2">
               {isConnected ? (
@@ -183,10 +184,10 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
             <p>Start recording to see live transcription</p>
           </div>
         ) : transcriptions.length === 0 && !currentSegment ? (
-          <div className="text-center py-12 text-gray-500">
-            <Loader2 className="w-8 h-8 mx-auto mb-4 animate-spin text-gray-400" />
-            <p>Waiting for speech...</p>
-            <p className="text-sm text-gray-400 mt-2">Speak into the microphone</p>
+          <div className="text-center py-12 text-gray-400">
+            <Loader2 className="w-8 h-8 mx-auto mb-4 animate-spin text-gray-500" />
+            <p className="text-gray-300">Waiting for speech...</p>
+            <p className="text-sm text-gray-500 mt-2">Speak into the microphone</p>
           </div>
         ) : (
           <div className="space-y-4">

@@ -13,7 +13,7 @@ class OllamaService:
     def __init__(self, base_url: str = "http://localhost:11434"):
         """Initialize Ollama service"""
         self.base_url = base_url
-        self.default_model = "gemma3n:latest"
+        self.default_model = "gemma3n:e4b"  # Use the specific e4b variant
         
     def list_models(self) -> List[str]:
         """List available models in Ollama"""
@@ -73,16 +73,20 @@ class OllamaService:
         # Build prompt
         sections_text = "\n".join([f"- {s}" for s in template.get("sections", [])])
         
-        prompt = f"""Please analyze the following meeting transcript and provide a comprehensive summary.
+        prompt = f"""You are an expert meeting analyst. Analyze this transcript and provide a structured summary.
 
 Meeting Transcript:
 {transcript[:8000]}  # Limit to avoid token limits
 
-Please provide a summary with the following sections:
+Provide a concise summary with these sections:
 {sections_text}
 
-Format the response in a clear, professional manner with bullet points for each section.
-Be concise but comprehensive. Focus on actionable insights."""
+Rules:
+- Use bullet points for clarity
+- Be specific about action items with owners and deadlines
+- Highlight key decisions and their rationale
+- Focus on actionable insights
+- Keep each section to 3-5 key points"""
         
         # Generate summary
         summary_text = self.generate(prompt)

@@ -9,11 +9,11 @@ import queue
 import threading
 import time
 
-from services.transcription_service import TranscriptionService
+from services.transcription_service import transcription_service
 from services.audio_level_monitor import AudioLevelMonitor
 from services.session_manager import SessionManager
-from database.models import User
-from auth.auth_router import get_current_user_from_token
+from auth.models import User
+from auth.dependencies import get_current_user as get_current_user_from_token
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class AlwaysOnTranscriptionManager:
     async def initialize(self):
         """Initialize services"""
         try:
-            self.transcription_service = TranscriptionService()
+            self.transcription_service = transcription_service  # Use singleton
             self.audio_monitor = AudioLevelMonitor()
             self.session_manager = SessionManager()
             

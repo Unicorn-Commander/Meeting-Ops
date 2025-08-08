@@ -24,8 +24,39 @@ fi
 
 # Start the NPU-optimized backend
 echo "🎯 Starting NPU backend on ${HOST}:${PORT}..."
-echo "📊 Using PostgreSQL: ${DATABASE_URL}"
+echo "📊 Using Database: ${DATABASE_URL}"
 echo "🔄 Using Redis: ${REDIS_URL}"
 echo ""
 
-./venv/bin/python -m uvicorn npu_main:app --host ${HOST} --port ${PORT} --reload
+# Check if Docker services are running (don't start/stop them)
+echo "🐳 Checking Docker services status..."
+cd /home/ucadmin/Meeting-Ops
+
+# Check if services are running
+if ! docker ps | grep -q meetingops-postgres; then
+    echo "⚠️  PostgreSQL not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+fi
+
+if ! docker ps | grep -q meetingops-redis; then
+    echo "⚠️  Redis not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+fi
+
+if ! docker ps | grep -q meetingops-ollama; then
+    echo "⚠️  Ollama not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+fi
+
+# Wait for services
+echo "⏳ Waiting for services..."
+for i in {1..15}; do
+    if docker exec meetingops-postgres pg_isready -U meetingops &>/dev/null; then
+        echo "✅ PostgreSQL ready"
+        break
+    fi
+    echo -n "."
+    sleep 1
+done
+
+cd /home/ucadmin/Meeting-Ops/backend
+
+# Start the FULL backend (not npu_main)
+./venv/bin/python -m uvicorn main:app --host ${HOST} --port ${PORT} --reload
