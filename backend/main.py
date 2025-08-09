@@ -43,21 +43,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Transcriber initialization failed: {e}")
     
-    # Start audio monitoring service with Redis
-    # Note: This may conflict with recording if both try to use the same audio device
-    # For internal use, we'll enable it and handle conflicts as needed
-    try:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        from audio_level_redis import AudioLevelRedisService
-        
-        audio_service = AudioLevelRedisService(redis_url)
-        if await audio_service.connect():
-            logger.info("🎤 Starting audio level monitoring service with Redis...")
-            audio_monitor_task = asyncio.create_task(audio_service.start_audio_monitoring())
-        else:
-            logger.warning("⚠️ Audio monitoring disabled - Redis not available")
-    except Exception as e:
-        logger.warning(f"⚠️ Audio monitoring failed to start: {e}")
+    # DISABLED: Audio monitoring conflicts with recording
+    # The audio device can only be used by one process at a time
+    # Recording takes priority over monitoring
+    logger.info("📌 Audio level monitoring DISABLED to allow recording functionality")
+    
+    # To re-enable monitoring (will block recording):
+    # Uncomment the following code block
+    # try:
+    #     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    #     from audio_level_redis import AudioLevelRedisService
+    #     
+    #     audio_service = AudioLevelRedisService(redis_url)
+    #     if await audio_service.connect():
+    #         logger.info("🎤 Starting audio level monitoring service with Redis...")
+    #         audio_monitor_task = asyncio.create_task(audio_service.start_audio_monitoring())
+    #     else:
+    #         logger.warning("⚠️ Audio monitoring disabled - Redis not available")
+    # except Exception as e:
+    #     logger.warning(f"⚠️ Audio monitoring failed to start: {e}")
     
     yield
     
