@@ -3,8 +3,10 @@ import {
   Brain, TrendingUp, Users, Clock, MessageCircle, 
   Target, CheckCircle, AlertCircle, Lightbulb, 
   FileText, Search, Filter, Download, Share2,
-  Zap, Activity, BarChart3, PieChart
+  Zap, Activity, BarChart3, PieChart, Loader2
 } from 'lucide-react';
+import { config } from '../config';
+import { toast } from 'react-toastify';
 
 interface KeywordTrend {
   word: string;
@@ -52,87 +54,85 @@ export const MeetingInsights: React.FC<MeetingInsightsProps> = ({
   } | null>(null);
 
   const [activeTab, setActiveTab] = useState<'summary' | 'keywords' | 'actions' | 'speakers'>('summary');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>('all');
 
-  // Mock data for demonstration
+  // Fetch insights from backend API
   useEffect(() => {
-    const mockInsights = {
-      summary: "This meeting focused on Q4 planning and NPU transcription performance optimization. Key decisions included adopting INT8 quantization for better performance and implementing real-time waveform visualization. The team discussed budget allocation for hardware upgrades and timeline for feature rollout.",
-      keywords: [
-        { word: "NPU optimization", frequency: 15, trend: 'up' as const, category: 'technical' as const },
-        { word: "performance", frequency: 12, trend: 'up' as const, category: 'technical' as const },
-        { word: "budget", frequency: 8, trend: 'stable' as const, category: 'topic' as const },
-        { word: "timeline", frequency: 6, trend: 'down' as const, category: 'action' as const },
-        { word: "implementation", frequency: 10, trend: 'up' as const, category: 'action' as const },
-      ],
-      actionItems: [
-        {
-          id: '1',
-          text: 'Implement INT8 quantization for NPU transcription',
-          assignee: 'Engineering Team',
-          priority: 'high' as const,
-          dueDate: '2024-12-15',
-          completed: false,
-          category: 'Development'
-        },
-        {
-          id: '2', 
-          text: 'Create budget proposal for Q1 hardware upgrades',
-          assignee: 'Finance Team',
-          priority: 'medium' as const,
-          dueDate: '2024-12-10',
-          completed: false,
-          category: 'Planning'
-        },
-        {
-          id: '3',
-          text: 'Review performance metrics for current NPU implementation',
-          assignee: 'QA Team',
-          priority: 'high' as const,
-          dueDate: '2024-12-08',
-          completed: true,
-          category: 'Testing'
+    if (!sessionId) {
+      setLoading(false);
+      return;
+    }
+
+    const fetchInsights = async () => {
+      setLoading(true);
+      setError(null);
+      
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(
+          `${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.insights(sessionId)}`,
+          {
+            headers: {
+              'Authorization': token ? `Bearer ${token}` : '',
+            },
+          }
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          
+          // Transform backend data to match component structure
+          const transformedInsights = {
+            summary: data.summary || 'No summary available yet. The AI will generate insights once the recording has sufficient content.',
+            keywords: data.keywords || [],
+            actionItems: data.action_items || [],
+            speakers: data.speaker_insights || [],
+            sentiment: data.sentiment || { positive: 0, neutral: 100, negative: 0 },
+            duration: data.duration || 0,
+            topicsDiscussed: data.topics || []
+          };
+          
+          setInsights(transformedInsights);
+        } else if (response.status === 404) {
+          // Session exists but insights not generated yet
+          setInsights({
+            summary: 'AI insights will be generated after the recording session ends.',
+            keywords: [],
+            actionItems: [],
+            speakers: [],
+            sentiment: { positive: 0, neutral: 100, negative: 0 },
+            duration: 0,
+            topicsDiscussed: []
+          });
+        } else {
+          throw new Error('Failed to fetch insights');
         }
-      ],
-      speakers: [
-        {
-          speaker: 'Sarah (Engineering)',
-          talkTime: 45,
-          wordCount: 1250,
-          sentiment: 'positive' as const,
-          engagement: 85,
-          keyTopics: ['NPU optimization', 'performance metrics', 'technical implementation']
-        },
-        {
-          speaker: 'Mike (Product)',
-          talkTime: 35,
-          wordCount: 980,
-          sentiment: 'neutral' as const,
-          engagement: 78,
-          keyTopics: ['feature rollout', 'user requirements', 'timeline']
-        },
-        {
-          speaker: 'Lisa (Finance)',
-          talkTime: 20,
-          wordCount: 540,
-          sentiment: 'positive' as const,
-          engagement: 72,
-          keyTopics: ['budget allocation', 'cost analysis', 'ROI projections']
-        }
-      ],
-      sentiment: { positive: 65, neutral: 25, negative: 10 },
-      duration: 3600, // 1 hour
-      topicsDiscussed: [
-        'NPU Performance Optimization',
-        'Q4 Budget Planning', 
-        'Hardware Upgrade Timeline',
-        'Feature Implementation Strategy',
-        'Team Resource Allocation'
-      ]
+      } catch (err) {
+        console.error('Error fetching insights:', err);
+        setError('Unable to load meeting insights. Please try again later.');
+        
+        // Provide empty insights as fallback
+        setInsights({
+          summary: 'Unable to load insights at this time.',
+          keywords: [],
+          actionItems: [],
+          speakers: [],
+          sentiment: { positive: 0, neutral: 100, negative: 0 },
+          duration: 0,
+          topicsDiscussed: []
+        });
+      } finally {
+        setLoading(false);
+      }
     };
 
-    setInsights(mockInsights);
+    fetchInsights();
+    
+    // Poll for updates every 30 seconds if session is active
+    const interval = setInterval(fetchInsights, 30000);
+    return () => clearInterval(interval);
   }, [sessionId]);
 
   const getPriorityColor = (priority: string) => {
@@ -154,7 +154,29 @@ export const MeetingInsights: React.FC<MeetingInsightsProps> = ({
     return colors[category as keyof typeof colors] || 'bg-gray-500/20 text-gray-400';
   };
 
-  if (!insights) {
+  if (loading) {
+    return (
+      <div className={`bg-gray-900 rounded-lg border border-gray-800 p-6 ${className}`}>
+        <div className="flex flex-col items-center justify-center space-y-3">
+          <Loader2 className="w-8 h-8 text-purple-400 animate-spin" />
+          <p className="text-gray-400">Loading AI insights...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={`bg-gray-900 rounded-lg border border-gray-800 p-6 ${className}`}>
+        <div className="text-center">
+          <AlertCircle className="w-8 h-8 text-red-400 mx-auto mb-2" />
+          <p className="text-red-400">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!insights || !sessionId) {
     return (
       <div className={`bg-gray-900 rounded-lg border border-gray-800 p-6 ${className}`}>
         <div className="text-center">
@@ -183,10 +205,45 @@ export const MeetingInsights: React.FC<MeetingInsightsProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <button className="p-2 text-gray-400 hover:text-white transition-colors">
+            <button 
+              onClick={async () => {
+                try {
+                  const token = localStorage.getItem('token');
+                  const response = await fetch(
+                    `${config.apiBaseUrl}${config.apiEndpoints.export.pdf(sessionId!)}`,
+                    {
+                      headers: {
+                        'Authorization': token ? `Bearer ${token}` : '',
+                      },
+                    }
+                  );
+                  
+                  if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `insights-${sessionId}.pdf`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    toast.success('Insights exported successfully');
+                  } else {
+                    toast.error('Export feature coming soon');
+                  }
+                } catch (err) {
+                  toast.info('Export feature coming soon');
+                }
+              }}
+              className="p-2 text-gray-400 hover:text-white transition-colors"
+              title="Export Insights"
+            >
               <Download className="w-5 h-5" />
             </button>
-            <button className="p-2 text-gray-400 hover:text-white transition-colors">
+            <button 
+              onClick={() => toast.info('Share feature coming soon')}
+              className="p-2 text-gray-400 hover:text-white transition-colors"
+              title="Share Insights"
+            >
               <Share2 className="w-5 h-5" />
             </button>
           </div>

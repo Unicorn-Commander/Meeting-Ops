@@ -13,41 +13,44 @@ import {
   ChevronRight,
   Filter,
   RefreshCw,
-  Zap
+  Zap,
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
+import { config } from '../config';
+import { toast } from 'react-toastify';
 
 interface Session {
-  id: number;
-  session_id: string;
-  name: string;  // Changed from 'title' to match backend
+  id: string;  // Simple API uses string IDs
+  name: string;
   description?: string;
-  start_time: string;
-  end_time?: string;
-  duration_seconds?: number;  // Changed from 'duration' to match backend
+  created_at: string;
   status: string;
-  total_speakers?: number;  // Changed from 'speaker_count' to match backend
-  total_transcriptions?: number;  // Changed from 'transcription_count' to match backend
-  summary?: string;  // Changed from 'has_summary' to match backend
-  // Audio metadata
-  audio_file_path?: string;
-  audio_format?: string;
-  sample_rate?: number;
-  channels?: number;
-  // Processing metadata
-  processing_completed?: boolean;
-  npu_accelerated?: boolean;
+  duration?: number;  // Duration in seconds
+  audio_file?: string;
+  transcription?: {
+    text?: string;
+    segments?: Array<{
+      start: number;
+      end: number;
+      text: string;
+      speaker?: string;
+      confidence?: number;
+    }>;
+    npu_accelerated?: boolean;
+    processing_time?: number;
+  };
 }
 
 interface SessionListProps {
   onSelectSession?: (session: Session) => void;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-
 export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => {
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDate, setFilterDate] = useState('all');
   const [sortBy, setSortBy] = useState<'date' | 'duration' | 'size'>('date');
@@ -61,20 +64,33 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
 
   const fetchSessions = async () => {
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
+      setError(null);
+      const token = localStorage.getItem('token');
+      const response = await fetch(
+        `${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.sessions}`,
+        {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         }
-      });
+      );
+      
       if (response.ok) {
         const data = await response.json();
-        setSessions(data.sessions || []);
+        // The simple API returns the array directly
+        const sessionList = Array.isArray(data) ? data : (data.sessions || []);
+        setSessions(sessionList);
+        console.log(`Loaded ${sessionList.length} sessions`);
+      } else if (response.status === 401) {
+        setError('Please log in to view sessions');
+        setSessions([]);
       } else {
         console.error('Failed to fetch sessions:', response.statusText);
+        setError('Unable to load sessions. Please try again.');
+        setSessions([]);
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
+      setError('Failed to connect to server. Please check your connection.');
+      setSessions([]);
     } finally {
       setLoading(false);
     }
@@ -115,7 +131,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
     
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${sessionId}`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${sessionId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -134,7 +150,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
   const handleTranscribe = async (session: Session) => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${session.session_id}/transcribe`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${session.id}/transcribe`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -151,13 +167,13 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
   };
 
   const handleViewTranscript = (session: Session) => {
-    navigate(`/sessions/${session.session_id}`);
+    navigate(`/recording/sessions/${session.id}`);
   };
 
   const handleDownload = async (session: Session) => {
     try {
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`${API_BASE_URL}/api/files/session/${session.session_id}`,
+      const response = await fetch(`${config.apiBaseUrl}/api/files/session/${session.id}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`
@@ -168,7 +184,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
         const data = await response.json();
         if (data.files && data.files.length > 0) {
           const fileId = data.files[0].file_id;
-          const downloadUrl = `${API_BASE_URL}/api/files/${fileId}/download`;
+          const downloadUrl = `${config.apiBaseUrl}${config.apiEndpoints.files.download(fileId)}`;
           
           const downloadResponse = await fetch(downloadUrl, {
             headers: {
@@ -200,12 +216,12 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
 
   const filteredSessions = sessions.filter(session => {
     const matchesSearch = !searchTerm || 
-      session.session_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      session.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
       session.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       session.description?.toLowerCase().includes(searchTerm.toLowerCase());
     
     const matchesDate = filterDate === 'all' || (() => {
-      const date = session.start_time ? new Date(session.start_time) : new Date();
+      const date = session.created_at ? new Date(session.created_at) : new Date();
       const age = Date.now() - date.getTime();
       switch (filterDate) {
         case 'today': return age < 86400000;
@@ -221,13 +237,13 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
   const sortedSessions = [...filteredSessions].sort((a, b) => {
     switch (sortBy) {
       case 'duration':
-        return (b.duration_seconds || 0) - (a.duration_seconds || 0);
+        return (b.duration || 0) - (a.duration || 0);
       case 'size':
         return 0; // No file size in session model
       case 'date':
       default:
-        const dateA = a.start_time ? new Date(a.start_time) : new Date();
-        const dateB = b.start_time ? new Date(b.start_time) : new Date();
+        const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
+        const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
         return dateB.getTime() - dateA.getTime();
     }
   });
@@ -235,7 +251,22 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <RefreshCw className="w-8 h-8 animate-spin text-gray-400" />
+        <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 space-y-4">
+        <AlertCircle className="w-12 h-12 text-red-500" />
+        <p className="text-gray-600">{error}</p>
+        <button
+          onClick={fetchSessions}
+          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+        >
+          Try Again
+        </button>
       </div>
     );
   }
@@ -302,13 +333,18 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
             <p>No recording sessions found</p>
           </div>
         ) : (
-          sortedSessions.map((session) => (
-            <div
-              key={session.session_id}
-              className={`p-4 hover:bg-gray-50 transition-colors ${
-                selectedSession === session.session_id ? 'bg-blue-50' : ''
-              }`}
-            >
+          sortedSessions.map((session) => {
+            const speakerCount = session.transcription?.segments ? 
+              new Set(session.transcription.segments.map(s => s.speaker)).size : 0;
+            const segmentCount = session.transcription?.segments?.length || 0;
+            
+            return (
+              <div
+                key={session.id}
+                className={`p-4 hover:bg-gray-50 transition-colors ${
+                  selectedSession === session.id ? 'bg-blue-50' : ''
+                }`}
+              >
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <h3 className="font-medium text-gray-900">
@@ -318,22 +354,22 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                   <div className="flex items-center gap-4 mt-2 text-sm text-gray-500">
                     <span className="flex items-center gap-1">
                       <Calendar className="w-3 h-3" />
-                      {formatDate(session.start_time)}
+                      {formatDate(session.created_at)}
                     </span>
                     <span className="flex items-center gap-1">
                       <Clock className="w-3 h-3" />
-                      {formatDuration(session.duration_seconds)}
+                      {formatDuration(session.duration)}
                     </span>
-                    {session.audio_file_path && (
+                    {session.audio_file && (
                       <span className="flex items-center gap-1">
                         <Volume2 className="w-3 h-3" />
-                        {session.audio_format || 'WAV'}
+                        WAV
                       </span>
                     )}
-                    {session.total_speakers !== undefined && session.total_speakers > 0 && (
+                    {speakerCount > 0 && (
                       <span className="flex items-center gap-1">
                         <Users className="w-3 h-3" />
-                        {session.total_speakers} speakers
+                        {speakerCount} speaker{speakerCount !== 1 ? 's' : ''}
                       </span>
                     )}
                   </div>
@@ -353,17 +389,12 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                     }`}>
                       {session.status}
                     </span>
-                    {session.total_transcriptions && session.total_transcriptions > 0 && (
+                    {segmentCount > 0 && (
                       <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
-                        Transcribed ({session.total_transcriptions})
+                        {segmentCount} segments
                       </span>
                     )}
-                    {session.summary && (
-                      <span className="px-2 py-1 text-xs bg-purple-100 text-purple-800 rounded-full">
-                        Summary
-                      </span>
-                    )}
-                    {session.npu_accelerated && (
+                    {session.transcription?.npu_accelerated && (
                       <span className="px-2 py-1 text-xs bg-green-100 text-green-800 rounded-full flex items-center gap-1">
                         <Zap className="w-3 h-3" />
                         NPU
@@ -373,7 +404,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                 </div>
 
                 <div className="flex items-center gap-2 ml-4">
-                  {session.status === 'completed' && (!session.total_transcriptions || session.total_transcriptions === 0) && (
+                  {session.status === 'completed' && !session.transcription && (
                     <button
                       onClick={() => handleTranscribe(session)}
                       className="px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
@@ -390,7 +421,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                     <Eye className="w-4 h-4" />
                   </button>
                   
-                  {session.audio_file_path && (
+                  {session.audio_file && (
                     <button
                       onClick={() => handleDownload(session)}
                       className="p-2 hover:bg-gray-200 rounded transition-colors"
@@ -401,7 +432,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                   )}
                   
                   <button
-                    onClick={() => handleDelete(session.session_id)}
+                    onClick={() => handleDelete(session.id)}
                     className="p-2 hover:bg-red-100 text-red-600 rounded transition-colors"
                     title="Delete"
                   >
@@ -410,7 +441,8 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
                 </div>
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { NpuStatusIndicator } from './NpuStatusIndicator';
+import { config } from '../config';
+import { toast } from 'react-toastify';
 
 interface TranscriptionSegment {
   id: string;
@@ -24,8 +26,6 @@ interface RecordingSession {
   duration: number;
   segments: TranscriptionSegment[];
 }
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const UnifiedRecordingInterface: React.FC = () => {
   const [session, setSession] = useState<RecordingSession | null>(null);
@@ -49,35 +49,34 @@ export const UnifiedRecordingInterface: React.FC = () => {
     try {
       setMicStatus('connecting');
       
-      const token = localStorage.getItem('access_token');
-      if (!token) {
-        setMicStatus('error');
-        return false;
-      }
-      
-      // Check server audio device status
-      const response = await fetch(`${API_BASE_URL}/api/audio-devices`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      // Check server audio device status (using main API that has USB device info)
+      const url = `${config.apiBaseUrl}${config.apiEndpoints.audioDevices}`;
+      console.log('[Recording] Fetching audio devices from:', url);
+      const response = await fetch(url);
       
       if (response.ok) {
-        const devices = await response.json();
-        console.log('[Recording] Server audio devices:', devices);
+        const data = await response.json();
+        console.log('[Recording] Server audio devices response:', data);
         
-        // Check if server microphone is available 
-        const serverMic = devices.find((d: any) => 
-          d.name?.includes('USB') || d.name?.includes('PCM2902') || 
-          d.name?.includes('M-305') || d.name?.includes('Server Microphone')
-        );
+        // Check if server microphone is available in the devices array
+        const devices = data.devices || data;
+        console.log('[Recording] Available devices:', devices);
+        
+        // Look for USB microphone - be more flexible with the check
+        const serverMic = devices.find((d: any) => {
+          const name = (d.name || '').toLowerCase();
+          console.log('[Recording] Checking device:', d.name, '-> lowercase:', name);
+          return name.includes('usb') || name.includes('m-305') || 
+                 name.includes('pcm2902') || name.includes('pnp');
+        });
         
         if (serverMic) {
           console.log('[Recording] Server mic found:', serverMic.name);
           setMicStatus('active');
           return true;
         } else {
-          console.warn('[Recording] No server mic found');
+          console.warn('[Recording] No server mic found in devices:', devices);
+          console.warn('[Recording] Looking for USB/M-305/PCM2902 in device names');
           setMicStatus('error');
           return false;
         }
@@ -97,9 +96,6 @@ export const UnifiedRecordingInterface: React.FC = () => {
   // Start recording session
   const startRecording = useCallback(async () => {
     try {
-      const token = localStorage.getItem('access_token');
-      if (!token) return;
-
       // Check server audio first
       const audioReady = await checkServerAudio();
       if (!audioReady) {
@@ -107,16 +103,15 @@ export const UnifiedRecordingInterface: React.FC = () => {
         return;
       }
 
-      // Create recording session
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions`, {
+      // Create recording session using simple API (no auth required)
+      const response = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.sessions}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          title: `Meeting Recording - ${new Date().toLocaleString()}`,
-          is_realtime: true
+          name: `Meeting Recording - ${new Date().toLocaleString()}`,
+          description: 'Live recording with NPU transcription'
         })
       });
 
@@ -125,10 +120,9 @@ export const UnifiedRecordingInterface: React.FC = () => {
       const sessionData = await response.json();
       
       // Start the session
-      const startResponse = await fetch(`${API_BASE_URL}/api/recording-sessions/${sessionData.session_id}/start`, {
+      const startResponse = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.start(sessionData.id)}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         }
       });
@@ -136,7 +130,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
       if (!startResponse.ok) throw new Error('Failed to start session');
 
       // Setup WebSocket for transcription
-      const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/ws/transcription/${sessionData.session_id}`;
+      const wsUrl = config.wsEndpoints.transcription(sessionData.id);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -146,19 +140,30 @@ export const UnifiedRecordingInterface: React.FC = () => {
         
         // Server handles audio capture from USB mic
         // No need to send audio from browser
+        
+        // Send periodic pings to keep connection alive
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000); // Every 30 seconds
+        
+        // Store interval ID for cleanup
+        (ws as any).pingInterval = pingInterval;
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log('[Recording] WebSocket message:', data);
           
-          if (data.type === 'transcription' && data.data?.text) {
+          if (data.type === 'transcription' && data.segment) {
             const segment: TranscriptionSegment = {
               id: Date.now().toString(),
-              text: data.data.text,
+              text: data.segment.text || '',
               timestamp: new Date().toISOString(),
-              speaker: data.data.speaker || 'Speaker',
-              confidence: data.data.confidence || 0.95,
+              speaker: data.segment.speaker || 'Speaker',
+              confidence: data.segment.confidence || 0.95,
               isFlagged: false
             };
             
@@ -168,6 +173,11 @@ export const UnifiedRecordingInterface: React.FC = () => {
             setTimeout(() => {
               transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
             }, 100);
+          } else if (data.type === 'status') {
+            console.log('[Recording] Status update:', data.message);
+            if (data.npu_status) {
+              console.log('[Recording] NPU Status:', data.npu_status);
+            }
           }
         } catch (err) {
           console.error('[Recording] WebSocket message error:', err);
@@ -179,8 +189,8 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       // Set recording state
       setSession({
-        id: sessionData.session_id,
-        title: `Meeting Recording - ${new Date().toLocaleString()}`,
+        id: sessionData.id,
+        title: sessionData.name || `Meeting Recording - ${new Date().toLocaleString()}`,
         status: 'recording',
         duration: 0,
         segments: []
@@ -211,7 +221,13 @@ export const UnifiedRecordingInterface: React.FC = () => {
       
       // Close WebSocket
       if (wsRef.current) {
+        // Clear ping interval if exists
+        const ws = wsRef.current as any;
+        if (ws.pingInterval) {
+          clearInterval(ws.pingInterval);
+        }
         wsRef.current.close();
+        wsRef.current = null;
       }
       
       // Stop timer
@@ -221,16 +237,12 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       // Update session on backend
       if (session) {
-        const token = localStorage.getItem('access_token');
-        if (token) {
-          await fetch(`${API_BASE_URL}/api/recording-sessions/${session.id}/stop`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json'
-            }
-          });
-        }
+        await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.stop(session.id)}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
       }
 
       setIsRecording(false);

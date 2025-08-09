@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Zap, Cpu, Activity, CheckCircle, AlertCircle, Loader2, Info } from 'lucide-react';
+import { config } from '../config';
 
 interface NpuStatus {
   available: boolean;
@@ -19,8 +20,6 @@ interface TranscriberStatus {
   backend: string;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-
 export const NpuStatusIndicator: React.FC = () => {
   const [npuStatus, setNpuStatus] = useState<NpuStatus | null>(null);
   const [transcriberStatus, setTranscriberStatus] = useState<TranscriberStatus | null>(null);
@@ -30,40 +29,41 @@ export const NpuStatusIndicator: React.FC = () => {
 
   const fetchNpuStatus = async () => {
     try {
-      const token = localStorage.getItem('access_token');
+      const token = localStorage.getItem('access_token') || localStorage.getItem('token');
+      const url = `${config.apiBaseUrl}${config.apiEndpoints.system.npu}`;
+      console.log('[NPU] Fetching status from:', url);
 
-      // Try without auth first, fallback to auth if needed
-      let response = await fetch(`${API_BASE_URL}/api/system-info`);
-      
-      if (!response.ok && token) {
-        response = await fetch(`${API_BASE_URL}/api/system-info`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          }
-        });
-      }
+      // Use the dedicated NPU status endpoint from config
+      const response = await fetch(url, {
+        headers: token ? {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        } : {}
+      });
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
 
       const data = await response.json();
-      // Map system-info data to expected NPU format
+      console.log('[NPU] Raw status data from backend:', data);
+      
+      // Map NPU status data to expected format - use actual data from backend
       const npuData = {
-        available: data.npu?.available || false,
+        available: data.available || false,
         device: '/dev/accel/accel0',
-        usage_percent: data.npu?.utilization || 0,
+        usage_percent: data.utilization || 0,  // This should be 0 from backend
         model: 'AMD Phoenix NPU',
         tops: 16,
-        status: data.npu?.status || 'unknown',
+        status: data.status || 'unknown',
         hardware_mode: true,
         aie_version: '1.1'
       };
+      console.log('[NPU] Mapped NPU data:', npuData);
       
       const transcriberData = {
-        ready: true,
-        model: 'whisper-base',
+        ready: data.status === 'active',
+        model: data.model || 'whisperx',
         optimization: 'npu',
         backend: 'WhisperX NPU Engine'
       };
@@ -80,6 +80,11 @@ export const NpuStatusIndicator: React.FC = () => {
   };
 
   useEffect(() => {
+    // Clear any stale data on mount
+    setNpuStatus(null);
+    setTranscriberStatus(null);
+    setError(null);
+    
     fetchNpuStatus();
     const interval = setInterval(fetchNpuStatus, 5000); // Update every 5 seconds
     return () => clearInterval(interval);

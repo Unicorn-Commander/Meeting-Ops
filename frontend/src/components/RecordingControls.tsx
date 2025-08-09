@@ -14,9 +14,7 @@ import {
   Zap
 } from 'lucide-react';
 import { LiveTranscriptionViewer } from './LiveTranscriptionViewer';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-const WS_BASE_URL = (import.meta.env.VITE_API_URL || 'ws://localhost:1950').replace('http', 'ws');
+import { config } from '../config';
 
 interface RecordingSession {
   session_id: string;
@@ -43,13 +41,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isStopping, setIsStopping] = useState(false);
   const [sessionTitle, setSessionTitle] = useState('');
   const [audioLevel, setAudioLevel] = useState(0);
-const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/audio');
+  const { audioLevel: serverAudioLevel } = useWebSocket(config.wsEndpoints.audioLevels());
   const [error, setError] = useState<string | null>(null);
 
   // Fetch current session status
   const fetchSessionStatus = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/current`);
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/current`);
       if (response.ok) {
         const session = await response.json();
         setCurrentSession(session);
@@ -75,7 +73,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
     
     if (currentSession?.status === 'recording') {
       try {
-        ws = new WebSocket(`${WS_BASE_URL}/ws/audio-levels`);
+        ws = new WebSocket(config.wsEndpoints.audioLevels());
         
         ws.onmessage = (event) => {
           const data = JSON.parse(event.data);
@@ -107,7 +105,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions`, {
+      const response = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.sessions}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -125,7 +123,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
       const session = await response.json();
 
       // Start the recording
-      const startResponse = await fetch(`${API_BASE_URL}/api/recording-sessions/${session.session_id}/start`, {
+      const startResponse = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${session.session_id}/start`, {
         method: 'POST',
       });
 
@@ -162,7 +160,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${currentSession.session_id}/stop`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${currentSession.session_id}/stop`, {
         method: 'POST',
       });
 
@@ -190,7 +188,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
     if (!currentSession) return;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${currentSession.session_id}/pause`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${currentSession.session_id}/pause`, {
         method: 'POST',
       });
 
@@ -206,7 +204,7 @@ const { audioLevel: serverAudioLevel } = useWebSocket('ws://localhost:8000/ws/au
     if (!currentSession) return;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/recording-sessions/${currentSession.session_id}/start`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/recording-sessions/${currentSession.session_id}/start`, {
         method: 'POST',
       });
 

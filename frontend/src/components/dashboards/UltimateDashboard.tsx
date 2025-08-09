@@ -9,6 +9,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
 import { SystemMonitor } from '../SystemMonitor';
 import { LiveTranscription } from '../LiveTranscription';
+import { config } from '../../config';
 
 interface DashboardMetric {
   label: string;
@@ -31,12 +32,14 @@ export const UltimateDashboard: React.FC = () => {
   const { user } = useAuth();
   const [activeView, setActiveView] = useState<'overview' | 'recording' | 'analytics' | 'system'>('overview');
   const [realTimeData, setRealTimeData] = useState({
-    activeSessions: 3,
-    totalUsers: 12,
-    npuUsage: 45,
-    storageUsed: 67,
-    transcriptionRate: 98.5
+    activeSessions: 0,
+    totalUsers: 0,
+    npuUsage: 0,
+    storageUsed: 0,
+    transcriptionRate: 0,
+    todaysMeetings: 0
   });
+  const [loading, setLoading] = useState(true);
 
   // Key metrics
   const metrics: DashboardMetric[] = [
@@ -80,44 +83,102 @@ export const UltimateDashboard: React.FC = () => {
     },
     {
       label: 'Today\'s Meetings',
-      value: 8,
+      value: realTimeData.todaysMeetings,
       icon: Calendar,
       color: 'text-pink-400',
-      trend: 'up',
-      change: 3
+      trend: realTimeData.todaysMeetings > 0 ? 'up' : 'stable'
     }
   ];
 
   // System services
-  const [services, setServices] = useState<SystemService[]>([
-    { name: 'PostgreSQL', status: 'running', cpu: 2.3, memory: 156, uptime: '48h 23m' },
-    { name: 'Redis Cache', status: 'running', cpu: 0.5, memory: 48, uptime: '48h 23m' },
-    { name: 'NPU Service', status: 'running', cpu: 8.7, memory: 512, uptime: '12h 45m' },
-    { name: 'Whisper Engine', status: 'running', cpu: 12.3, memory: 1024, uptime: '6h 12m' },
-    { name: 'WebSocket Server', status: 'running', cpu: 1.2, memory: 128, uptime: '48h 23m' },
-    { name: 'Email Service', status: 'stopped', cpu: 0, memory: 0, uptime: '-' },
-    { name: 'Backup Service', status: 'running', cpu: 0.1, memory: 32, uptime: '48h 23m' },
-    { name: 'Nginx Proxy', status: 'running', cpu: 0.8, memory: 64, uptime: '48h 23m' }
-  ]);
+  const [services, setServices] = useState<SystemService[]>([]);
 
   // Recent activities
-  const recentActivities = [
-    { id: 1, type: 'recording', message: 'New recording started by John Doe', time: '2 min ago', icon: Mic },
-    { id: 2, type: 'export', message: 'Session exported to PDF', time: '15 min ago', icon: Download },
-    { id: 3, type: 'flag', message: '5 segments flagged in Team Meeting', time: '1 hour ago', icon: Flag },
-    { id: 4, type: 'user', message: 'Sarah joined as new user', time: '2 hours ago', icon: Users },
-    { id: 5, type: 'summary', message: 'AI summary generated for Board Meeting', time: '3 hours ago', icon: BarChart3 }
-  ];
+  const [recentActivities, setRecentActivities] = useState<any[]>([]);
 
-  // Simulate real-time updates
+  // Fetch real data from backend
   useEffect(() => {
-    const interval = setInterval(() => {
-      setRealTimeData(prev => ({
-        ...prev,
-        npuUsage: Math.min(100, Math.max(0, prev.npuUsage + (Math.random() - 0.5) * 10)),
-        transcriptionRate: Math.min(100, Math.max(90, prev.transcriptionRate + (Math.random() - 0.5) * 2))
-      }));
-    }, 3000);
+    const fetchDashboardData = async () => {
+      setLoading(true);
+      
+      try {
+        const token = localStorage.getItem('token');
+        const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+        
+        // Fetch system status
+        const statusResponse = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.status}`, { headers });
+        if (statusResponse.ok) {
+          const statusData = await statusResponse.json();
+          
+          setRealTimeData(prev => ({
+            ...prev,
+            activeSessions: statusData.active_sessions || 0,
+            npuUsage: statusData.system_info?.npu_usage || 0,
+            transcriptionRate: statusData.transcription_accuracy || 99.0
+          }));
+          
+          // Transform service status
+          if (statusData.services) {
+            const serviceList: SystemService[] = [
+              { name: 'PostgreSQL', status: (statusData.services.database ? 'running' : 'stopped') as 'running' | 'stopped', cpu: 0, memory: 0, uptime: '-' },
+              { name: 'Redis Cache', status: (statusData.services.redis ? 'running' : 'stopped') as 'running' | 'stopped', cpu: 0, memory: 0, uptime: '-' },
+              { name: 'NPU Service', status: (statusData.npu_available ? 'running' : 'stopped') as 'running' | 'stopped', cpu: 0, memory: 0, uptime: '-' },
+              { name: 'Whisper Engine', status: (statusData.transcriber_ready ? 'running' : 'stopped') as 'running' | 'stopped', cpu: 0, memory: 0, uptime: '-' },
+              { name: 'WebSocket Server', status: 'running' as const, cpu: 0, memory: 0, uptime: '-' }
+            ];
+            setServices(serviceList);
+          }
+        }
+        
+        // Fetch sessions for activity
+        const sessionsResponse = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.sessions}`, { headers });
+        if (sessionsResponse.ok) {
+          const sessions = await sessionsResponse.json();
+          
+          // Create activities from recent sessions
+          const activities = sessions.slice(0, 5).map((session: any, index: number) => ({
+            id: session.id || index,
+            type: 'recording',
+            message: `Recording: ${session.title || 'Untitled Session'}`,
+            time: new Date(session.created_at).toLocaleString(),
+            icon: Mic
+          }));
+          setRecentActivities(activities);
+          
+          // Update metrics based on sessions
+          const today = new Date().toDateString();
+          const todaysSessions = sessions.filter((s: any) => 
+            new Date(s.created_at).toDateString() === today
+          ).length;
+          
+          setRealTimeData(prev => ({
+            ...prev,
+            totalUsers: new Set(sessions.map((s: any) => s.user_id)).size || 1,
+            todaysMeetings: todaysSessions
+          }));
+        }
+        
+        // Fetch system metrics if available
+        const metricsResponse = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.system.metrics}`, { headers });
+        if (metricsResponse.ok) {
+          const metrics = await metricsResponse.json();
+          setRealTimeData(prev => ({
+            ...prev,
+            storageUsed: metrics.storage_percentage || 0
+          }));
+        }
+      } catch (error) {
+        console.error('Error fetching dashboard data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    // Initial fetch
+    fetchDashboardData();
+    
+    // Poll for updates every 5 seconds
+    const interval = setInterval(fetchDashboardData, 5000);
     return () => clearInterval(interval);
   }, []);
 

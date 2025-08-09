@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Volume2, VolumeX, Activity, Zap } from 'lucide-react';
+import { config } from '../config';
 
 interface WaveformVisualizerProps {
   className?: string;
@@ -14,8 +15,6 @@ interface AudioData {
   mic_active: boolean;
   quality: string;
 }
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
   className = '',
@@ -39,7 +38,7 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
   const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/ws/audio-levels`;
+    const wsUrl = config.wsEndpoints.audioLevels();
     console.log('[Waveform] Connecting to:', wsUrl);
     
     const ws = new WebSocket(wsUrl);
