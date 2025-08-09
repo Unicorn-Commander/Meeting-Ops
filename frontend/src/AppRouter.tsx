@@ -22,7 +22,7 @@ import { TimeShiftRecording } from './components/TimeShiftRecording';
 
 // Components
 import { SessionList } from './components/SessionList';
-import { SessionDetails } from './components/SessionDetails';
+import { SessionDetails } from './pages/SessionDetails';
 import { LiveTranscription } from './components/LiveTranscription';
 import { TranscriptionSettings } from './components/TranscriptionSettings';
 import { FileManager } from './components/FileManager';
@@ -102,7 +102,7 @@ export const AppRouter: React.FC = () => {
           <Route path="timeshift" element={<TimeShiftRecording />} />
           <Route path="main" element={<UnifiedRecordingInterface />} />
           <Route path="sessions" element={<SessionList />} />
-          <Route path="sessions/:id" element={<SessionDetails />} />
+          <Route path="sessions/:sessionId" element={<SessionDetails />} />
         </Route>
 
         {/* Intelligence Center */}

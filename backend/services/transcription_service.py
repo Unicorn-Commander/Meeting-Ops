@@ -524,6 +524,17 @@ class TranscriptionService:
         self.current_engine = None
         self.current_model_id = None
         self.is_ready = False
+    
+    def transcribe_file(self, file_path: str) -> Optional[dict]:
+        """Simple alias for process_audio_file that returns dict format"""
+        result = self.process_audio_file(file_path)
+        if result:
+            return {
+                "text": result.text,
+                "segments": getattr(result, 'segments', []),
+                "confidence": getattr(result, 'confidence', 0.95)
+            }
+        return None
 
 # Global transcription service instance
 transcription_service = TranscriptionService()

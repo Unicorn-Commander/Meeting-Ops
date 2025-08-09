@@ -76,7 +76,10 @@ class WhisperXNPUAccelerator:
         """Preprocess audio using NPU mel spectrogram kernel"""
         start_time = time.time()
         
-        # Ensure correct format
+        # Keep original audio for Whisper
+        original_audio = audio.copy()
+        
+        # Ensure correct format for NPU processing
         if audio.dtype != np.int16:
             audio = (audio * 32767).astype(np.int16)
             
@@ -91,6 +94,7 @@ class WhisperXNPUAccelerator:
         self.stats["npu_time"] += npu_time
         
         return {
+            "audio": original_audio,  # Add raw audio for Whisper
             "mel_features": mel_features,
             "positional_encoding": pos_encoding,
             "audio_length": len(audio) / 16000

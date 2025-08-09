@@ -58,5 +58,12 @@ done
 
 cd /home/ucadmin/Meeting-Ops/backend
 
-# Start the FULL backend (not npu_main)
-./venv/bin/python -m uvicorn main:app --host ${HOST} --port ${PORT} --reload
+# Kill any existing audio processes that might block the device
+echo "🧹 Cleaning up existing audio processes..."
+pkill -f arecord 2>/dev/null || true
+pkill -f "uvicorn main:app" 2>/dev/null || true
+sleep 1
+
+# Start the FULL backend (without --reload for production stability)
+echo "🚀 Starting backend with WORKING audio recording (ffmpeg)..."
+./venv/bin/python -m uvicorn main:app --host ${HOST} --port ${PORT}

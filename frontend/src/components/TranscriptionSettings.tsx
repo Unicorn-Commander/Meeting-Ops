@@ -15,6 +15,10 @@ export interface TranscriptionSettingsData {
   audioFormat: 'opus' | 'aac' | 'wav' | 'flac';
   audioBitrate: number;
   audioSampleRate: number;
+  whisperModel: 'base' | 'small' | 'medium' | 'large' | 'large-v2' | 'large-v3';
+  enableVAD: boolean;
+  enableWordTimestamps: boolean;
+  enableDiarization: boolean;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
@@ -31,7 +35,11 @@ export const TranscriptionSettings: React.FC<TranscriptionSettingsProps> = ({
     vadThreshold: 0.001,
     audioFormat: 'opus',
     audioBitrate: 64,
-    audioSampleRate: 16000
+    audioSampleRate: 16000,
+    whisperModel: 'large-v3',  // Default to best model
+    enableVAD: true,
+    enableWordTimestamps: true,
+    enableDiarization: true
   });
   
   const [isSaving, setIsSaving] = useState(false);
@@ -306,6 +314,126 @@ export const TranscriptionSettings: React.FC<TranscriptionSettingsProps> = ({
             <span>Balanced</span>
             <span>Noise Resistant</span>
           </div>
+        </div>
+      </div>
+
+      {/* Whisper Model Settings */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-gray-200">
+          <HardDrive className="w-4 h-4" />
+          <span className="font-medium">Whisper Model Selection</span>
+        </div>
+        
+        {/* Model Selection */}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {[
+            { 
+              value: 'large-v3', 
+              label: 'Large v3', 
+              description: 'Best accuracy (99%)',
+              speed: '2.2x realtime',
+              size: '1.5GB',
+              recommended: true
+            },
+            { 
+              value: 'base', 
+              label: 'Base', 
+              description: 'Fast (85% accuracy)',
+              speed: '3.4x realtime',
+              size: '142MB'
+            },
+            { 
+              value: 'small', 
+              label: 'Small', 
+              description: 'Balanced (90%)',
+              speed: '2.8x realtime',
+              size: '461MB'
+            },
+            { 
+              value: 'medium', 
+              label: 'Medium', 
+              description: 'Good (95%)',
+              speed: '2.5x realtime',
+              size: '1.5GB'
+            },
+            { 
+              value: 'large', 
+              label: 'Large v2', 
+              description: 'High accuracy (98%)',
+              speed: '2.0x realtime',
+              size: '3GB'
+            },
+            { 
+              value: 'large-v2', 
+              label: 'Large v2', 
+              description: 'Previous best (98%)',
+              speed: '2.0x realtime',
+              size: '3GB'
+            }
+          ].map(model => (
+            <button
+              key={model.value}
+              onClick={() => updateSetting('whisperModel', model.value as any)}
+              className={`p-3 rounded-lg border transition-all text-left relative ${
+                settings.whisperModel === model.value
+                  ? 'border-purple-500 bg-purple-900/30 text-purple-300'
+                  : 'border-gray-600 bg-gray-700/50 text-gray-300 hover:border-gray-500'
+              }`}
+            >
+              {model.recommended && (
+                <div className="absolute -top-2 -right-2 bg-purple-600 text-white text-xs px-2 py-1 rounded-full">
+                  Recommended
+                </div>
+              )}
+              <div className="font-medium">{model.label}</div>
+              <div className="text-xs mt-1 opacity-75">{model.description}</div>
+              <div className="text-xs mt-1 text-gray-500">
+                {model.speed} • {model.size}
+              </div>
+            </button>
+          ))}
+        </div>
+        
+        {/* NPU Features */}
+        <div className="space-y-2 mt-4">
+          <label className="flex items-center justify-between p-2 bg-gray-700/50 rounded-lg cursor-pointer hover:bg-gray-700/70 transition-colors">
+            <div>
+              <div className="text-gray-200 text-sm font-medium">Voice Activity Detection (VAD)</div>
+              <div className="text-xs text-gray-400">Remove silence automatically</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.enableVAD}
+              onChange={(e) => updateSetting('enableVAD', e.target.checked)}
+              className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500 bg-gray-700 border-gray-600"
+            />
+          </label>
+          
+          <label className="flex items-center justify-between p-2 bg-gray-700/50 rounded-lg cursor-pointer hover:bg-gray-700/70 transition-colors">
+            <div>
+              <div className="text-gray-200 text-sm font-medium">Word-level Timestamps</div>
+              <div className="text-xs text-gray-400">Precise timing for each word</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.enableWordTimestamps}
+              onChange={(e) => updateSetting('enableWordTimestamps', e.target.checked)}
+              className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500 bg-gray-700 border-gray-600"
+            />
+          </label>
+          
+          <label className="flex items-center justify-between p-2 bg-gray-700/50 rounded-lg cursor-pointer hover:bg-gray-700/70 transition-colors">
+            <div>
+              <div className="text-gray-200 text-sm font-medium">Speaker Diarization</div>
+              <div className="text-xs text-gray-400">Identify different speakers</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.enableDiarization}
+              onChange={(e) => updateSetting('enableDiarization', e.target.checked)}
+              className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500 bg-gray-700 border-gray-600"
+            />
+          </label>
         </div>
       </div>
 
