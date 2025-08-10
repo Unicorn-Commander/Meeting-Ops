@@ -71,7 +71,10 @@ Meeting-Ops is a **hardware-accelerated meeting transcription appliance** that l
 ## 🎬 Features
 
 ### Core Capabilities
-- 🎙️ **USB Audio Recording** - Direct hardware recording at 44.1kHz
+- 📝 **Transcription-First Mode** - Continuous transcription with optional audio
+- 🔄 **Circular Buffer** - Always keeps last 60 minutes in memory
+- 💾 **1700x Storage Savings** - Transcripts only: 3KB/min vs 5.3MB/min audio
+- 🎙️ **USB Audio Recording** - Optional, only when needed
 - 🚀 **NPU Acceleration** - 220x speedup with custom MLIR-AIE2 kernels
 - 👥 **Speaker Diarization** - Automatic speaker identification
 - ⏱️ **Word-Level Timestamps** - Precise timing for each word

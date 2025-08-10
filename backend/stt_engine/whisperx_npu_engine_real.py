@@ -372,11 +372,12 @@ class WhisperXNPUEngineReal:
                 best_of=5,
                 temperature=0,
                 word_timestamps=True,  # Enable word-level timestamps
-                vad_filter=True,  # Voice Activity Detection
-                vad_parameters=dict(
-                    min_silence_duration_ms=500,
-                    speech_pad_ms=400
-                )
+                vad_filter=False,  # Disable VAD - it's too aggressive
+                # vad_parameters=dict(
+                #     min_silence_duration_ms=2000,  # Increased from 500ms
+                #     speech_pad_ms=800,  # Increased from 400ms
+                #     threshold=0.3  # Lower threshold for speech detection
+                # )
             )
             
             # Collect all segments with detailed timing

@@ -28,6 +28,21 @@ import { TranscriptionSettings } from './components/TranscriptionSettings';
 import { FileManager } from './components/FileManager';
 import { MeetingAnalytics } from './components/MeetingAnalytics';
 import { MeetingInsights } from './components/MeetingInsights';
+import { SpeakerAnalytics } from './components/SpeakerAnalytics';
+import { KeywordTrends } from './components/KeywordTrends';
+import { ExportCenter } from './components/ExportCenter';
+import { FlaggedSegments } from './components/FlaggedSegments';
+import { UserManagement } from './components/UserManagement';
+import { SystemSettings } from './components/SystemSettings';
+import { CalendarIntegration } from './components/CalendarIntegration';
+import { WebhookManager } from './components/WebhookManager';
+import { APIKeysManager } from './components/APIKeysManager';
+import { EmailTemplates } from './components/EmailTemplates';
+import { RealTimeCollaboration } from './components/RealTimeCollaboration';
+import { CustomVocabulary } from './components/CustomVocabulary';
+import { MeetingTemplates } from './components/MeetingTemplates';
+import { AIChatInterface } from './components/AIChatInterface';
+import { WorkingSystemSettings } from './components/WorkingSystemSettings';
 import { SystemMonitor } from './components/SystemMonitor';
 import { NpuStatusIndicator } from './components/NpuStatusIndicator';
 import { NetworkStatus } from './components/NetworkStatus';
@@ -107,6 +122,7 @@ export const AppRouter: React.FC = () => {
 
         {/* Intelligence Center */}
         <Route path="/intelligence" element={<Outlet />}>
+          <Route path="ai-chat" element={<AIChatInterface />} />
           <Route path="analytics" element={<MeetingAnalytics />} />
           <Route path="insights" element={
             <div className="p-6">
@@ -116,14 +132,12 @@ export const AppRouter: React.FC = () => {
           } />
           <Route path="speakers" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Speaker Insights</h2>
-              <p className="text-gray-400">Advanced speaker analytics with AI-powered insights</p>
+              <SpeakerAnalytics />
             </div>
           } />
           <Route path="keywords" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Keyword Trends</h2>
-              <p className="text-gray-400">Real-time keyword tracking and trend analysis</p>
+              <KeywordTrends />
             </div>
           } />
           <Route path="summaries" element={
@@ -139,14 +153,12 @@ export const AppRouter: React.FC = () => {
           <Route path="files" element={<FileManager />} />
           <Route path="flagged" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Flagged Segments</h2>
-              <p className="text-gray-400">View and manage your flagged transcription segments...</p>
+              <FlaggedSegments />
             </div>
           } />
           <Route path="export" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Export Center</h2>
-              <p className="text-gray-400">Batch export functionality coming soon...</p>
+              <ExportCenter />
             </div>
           } />
           <Route path="storage" element={
@@ -161,26 +173,22 @@ export const AppRouter: React.FC = () => {
         <Route path="/integrations" element={<Outlet />}>
           <Route path="calendar" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Calendar Integration</h2>
-              <p className="text-gray-400">Connect Microsoft 365 or Google Workspace...</p>
+              <CalendarIntegration />
             </div>
           } />
           <Route path="email" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Email Templates</h2>
-              <p className="text-gray-400">Configure email templates for summaries...</p>
+              <EmailTemplates />
             </div>
           } />
           <Route path="webhooks" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">Webhook Management</h2>
-              <p className="text-gray-400">Configure webhook endpoints...</p>
+              <WebhookManager />
             </div>
           } />
           <Route path="api-keys" element={
             <div className="p-6 text-white">
-              <h2 className="text-2xl font-bold mb-4">API Keys</h2>
-              <p className="text-gray-400">Manage API access keys...</p>
+              <APIKeysManager />
             </div>
           } />
         </Route>
@@ -218,8 +226,7 @@ export const AppRouter: React.FC = () => {
           <Route path="users" element={
             <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
               <div className="p-6 text-white">
-                <h2 className="text-2xl font-bold mb-4">User Management</h2>
-                <p className="text-gray-400">Manage users and permissions...</p>
+                <UserManagement />
               </div>
             </ProtectedRoute>
           } />
@@ -228,6 +235,13 @@ export const AppRouter: React.FC = () => {
               <div className="p-6 text-white">
                 <h2 className="text-2xl font-bold mb-4">Team Settings</h2>
                 <p className="text-gray-400">Configure team settings...</p>
+              </div>
+            </ProtectedRoute>
+          } />
+          <Route path="settings" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser']}>
+              <div className="p-6 text-white">
+                <WorkingSystemSettings />
               </div>
             </ProtectedRoute>
           } />
@@ -282,6 +296,31 @@ export const AppRouter: React.FC = () => {
                 <p className="text-gray-400">System maintenance controls...</p>
               </div>
             </ProtectedRoute>
+          } />
+        </Route>
+
+        {/* Advanced Features */}
+        <Route path="/advanced" element={<Outlet />}>
+          <Route path="collaboration" element={
+            <div className="p-6 text-white">
+              <RealTimeCollaboration />
+            </div>
+          } />
+          <Route path="vocabulary" element={
+            <div className="p-6 text-white">
+              <CustomVocabulary />
+            </div>
+          } />
+          <Route path="templates" element={
+            <div className="p-6 text-white">
+              <MeetingTemplates />
+            </div>
+          } />
+          <Route path="mobile" element={
+            <div className="p-6 text-white">
+              <h2 className="text-2xl font-bold mb-4">Mobile Interface</h2>
+              <p className="text-gray-400">Responsive mobile and tablet layouts</p>
+            </div>
           } />
         </Route>
       </Route>

@@ -9,6 +9,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
 import { SystemMonitor } from '../SystemMonitor';
 import { LiveTranscription } from '../LiveTranscription';
+import TranscriptionLoop from '../TranscriptionLoop';
 import { config } from '../../config';
 
 interface DashboardMetric {
@@ -30,7 +31,7 @@ interface SystemService {
 
 export const UltimateDashboard: React.FC = () => {
   const { user } = useAuth();
-  const [activeView, setActiveView] = useState<'overview' | 'recording' | 'analytics' | 'system'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'recording' | 'transcription' | 'analytics' | 'system'>('overview');
   const [realTimeData, setRealTimeData] = useState({
     activeSessions: 0,
     totalUsers: 0,
@@ -233,6 +234,7 @@ export const UltimateDashboard: React.FC = () => {
               {[
                 { id: 'overview', label: 'Overview', icon: Activity },
                 { id: 'recording', label: 'Recording', icon: Mic },
+                { id: 'transcription', label: 'Transcription', icon: Zap },
                 { id: 'analytics', label: 'Analytics', icon: BarChart3 },
                 { id: 'system', label: 'System', icon: Cpu }
               ].map(view => (
@@ -339,6 +341,10 @@ export const UltimateDashboard: React.FC = () => {
 
         {activeView === 'recording' && (
           <UnifiedRecordingInterface />
+        )}
+
+        {activeView === 'transcription' && (
+          <TranscriptionLoop />
         )}
 
         {activeView === 'analytics' && (

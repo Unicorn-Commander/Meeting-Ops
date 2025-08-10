@@ -7,7 +7,8 @@ import {
   Activity, Calendar, Mail, Webhook, Database, Lock,
   HardDrive, Wifi, Bell, Search, Menu, X, LogOut,
   Star, Flag, Save, Download, Upload, Clock,
-  Zap, AlertCircle, CheckCircle, Info, Volume2, Brain
+  Zap, AlertCircle, CheckCircle, Info, Volume2, Brain,
+  Lightbulb, FileText
 } from 'lucide-react';
 
 interface NavItem {
@@ -31,84 +32,66 @@ const navigationStructure: NavItem[] = [
     badgeType: 'success'
   },
   {
-    id: 'recording',
-    label: 'Recording Hub',
+    id: 'record-review',
+    label: 'Record & Review',
     icon: Mic,
     children: [
-      { id: 'live-recording', label: 'Record Meeting', icon: Activity, path: '/recording/live' },
-      { id: 'sessions', label: 'Session Library', icon: Clock, path: '/recording/sessions' }
+      { id: 'live-recording', label: 'Live Recording', icon: Activity, path: '/recording/live', badge: 'REC', badgeType: 'error' },
+      { id: 'sessions', label: 'Session Library', icon: Clock, path: '/recording/sessions' },
+      { id: 'quick-analysis', label: 'Quick Analysis', icon: BarChart3, path: '/intelligence/analytics' }
     ]
   },
   {
-    id: 'intelligence',
-    label: 'Intelligence Center',
-    icon: BarChart3,
+    id: 'ai-intelligence',
+    label: 'AI Intelligence',
+    icon: Brain,
     children: [
-      { id: 'analytics', label: 'Analytics Dashboard', icon: BarChart3, path: '/intelligence/analytics' },
-      { id: 'insights', label: 'AI Insights', icon: Brain, path: '/intelligence/insights', badge: 'NEW', badgeType: 'info' },
-      { id: 'speakers', label: 'Speaker Insights', icon: Users, path: '/intelligence/speakers' },
+      { id: 'ai-chat', label: 'AI Chat Assistant', icon: Brain, path: '/intelligence/ai-chat', badge: 'AI', badgeType: 'success' },
+      { id: 'analytics', label: 'Advanced Analytics', icon: BarChart3, path: '/intelligence/analytics' },
+      { id: 'insights', label: 'AI Insights', icon: Lightbulb, path: '/intelligence/insights', badge: 'NEW', badgeType: 'info' },
+      { id: 'speakers', label: 'Speaker Analysis', icon: Users, path: '/intelligence/speakers' },
       { id: 'keywords', label: 'Keyword Trends', icon: Search, path: '/intelligence/keywords' },
-      { id: 'summaries', label: 'Meeting Summaries', icon: Save, path: '/intelligence/summaries' }
+      { id: 'summaries', label: 'Meeting Summaries', icon: FileText, path: '/intelligence/summaries' }
     ]
   },
   {
-    id: 'content',
-    label: 'Content Manager',
+    id: 'content-export',
+    label: 'Content & Export',
     icon: FolderOpen,
     children: [
-      { id: 'files', label: 'File Browser', icon: FolderOpen, path: '/content/files' },
-      { id: 'flagged', label: 'Flagged Segments', icon: Flag, path: '/content/flagged', badge: 5, badgeType: 'warning' },
+      { id: 'files', label: 'File Manager', icon: FolderOpen, path: '/content/files' },
       { id: 'export', label: 'Export Center', icon: Download, path: '/content/export' },
-      { id: 'storage', label: 'Storage Metrics', icon: HardDrive, path: '/content/storage' }
+      { id: 'flagged', label: 'Flagged Segments', icon: Flag, path: '/content/flagged', badge: 5, badgeType: 'warning' },
+      { id: 'storage', label: 'Storage Status', icon: HardDrive, path: '/content/storage' }
     ]
   },
   {
-    id: 'integrations',
-    label: 'Integrations',
-    icon: Link2,
+    id: 'system-management',
+    label: 'System Management',
+    icon: Settings,
     children: [
-      { id: 'calendar', label: 'Calendar Sync', icon: Calendar, path: '/integrations/calendar' },
-      { id: 'email', label: 'Email Templates', icon: Mail, path: '/integrations/email' },
-      { id: 'webhooks', label: 'Webhooks', icon: Webhook, path: '/integrations/webhooks' },
-      { id: 'api-keys', label: 'API Keys', icon: Lock, path: '/integrations/api-keys' }
-    ],
-    requiredRoles: ['admin', 'superuser']
-  },
-  {
-    id: 'system',
-    label: 'System Control',
-    icon: Cpu,
-    children: [
-      { id: 'npu', label: 'NPU Monitor', icon: Zap, path: '/system/npu', badge: '16 TOPS', badgeType: 'success' },
-      { id: 'services', label: 'Service Status', icon: Activity, path: '/system/services' },
-      { id: 'audio', label: 'Audio Devices', icon: Volume2, path: '/system/audio' },
-      { id: 'network', label: 'Network Config', icon: Wifi, path: '/system/network' }
-    ],
-    requiredRoles: ['admin', 'superuser']
-  },
-  {
-    id: 'organization',
-    label: 'Organization',
-    icon: Users,
-    children: [
+      { id: 'system-settings', label: 'System Settings', icon: Settings, path: '/org/settings', badge: 'CONFIG', badgeType: 'warning' },
       { id: 'users', label: 'User Management', icon: Users, path: '/org/users' },
-      { id: 'teams', label: 'Team Settings', icon: Shield, path: '/org/teams' },
-      { id: 'access', label: 'Access Control', icon: Lock, path: '/org/access' },
+      { id: 'npu-audio', label: 'NPU & Audio', icon: Zap, path: '/system/npu', badge: '16 TOPS', badgeType: 'success' },
+      { id: 'services', label: 'Service Status', icon: Activity, path: '/system/services' },
+      { id: 'integrations', label: 'Integrations', icon: Link2, path: '/integrations/calendar' },
       { id: 'audit', label: 'Audit Logs', icon: Database, path: '/org/audit' }
     ],
     requiredRoles: ['admin', 'superuser', 'manager']
   },
   {
-    id: 'administration',
-    label: 'Administration',
-    icon: Shield,
+    id: 'advanced-tools',
+    label: 'Advanced Tools',
+    icon: Star,
     children: [
-      { id: 'backup', label: 'Backup/Restore', icon: Database, path: '/admin/backup' },
-      { id: 'ssl', label: 'SSL Certificates', icon: Lock, path: '/admin/ssl' },
-      { id: 'logs', label: 'System Logs', icon: Activity, path: '/admin/logs' },
-      { id: 'maintenance', label: 'Maintenance', icon: Settings, path: '/admin/maintenance' }
+      { id: 'collaboration', label: 'Real-time Collaboration', icon: Users, path: '/advanced/collaboration', badge: 'BETA', badgeType: 'info' },
+      { id: 'vocabulary', label: 'Custom Vocabulary', icon: Volume2, path: '/advanced/vocabulary' },
+      { id: 'templates', label: 'Meeting Templates', icon: Clock, path: '/advanced/templates' },
+      { id: 'calendar-sync', label: 'Calendar Sync', icon: Calendar, path: '/integrations/calendar' },
+      { id: 'email-templates', label: 'Email Templates', icon: Mail, path: '/integrations/email' },
+      { id: 'webhooks', label: 'Webhooks & APIs', icon: Webhook, path: '/integrations/webhooks' }
     ],
-    requiredRoles: ['superuser']
+    requiredRoles: ['admin', 'superuser', 'manager']
   }
 ];
 

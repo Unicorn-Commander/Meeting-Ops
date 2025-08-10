@@ -164,6 +164,54 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Live Transcription router failed to load: {e}")
 
+# Import Transcription Loop router (NEW: Transcription-first approach!)
+try:
+    from routers.transcription_loop import router as transcription_loop_router
+    app.include_router(transcription_loop_router)
+    logger.info("🔄 Transcription Loop router loaded (transcription-first mode)")
+except Exception as e:
+    logger.warning(f"⚠️ Transcription Loop router failed to load: {e}")
+
+# Import Analytics router for comprehensive meeting analytics
+try:
+    from api.analytics import router as analytics_router
+    app.include_router(analytics_router)
+    logger.info("📊 Analytics router loaded (charts and insights)")
+except Exception as e:
+    logger.warning(f"⚠️ Analytics router failed to load: {e}")
+
+# Import AI Insights router for meeting intelligence
+try:
+    from api.ai_insights import router as ai_insights_router
+    app.include_router(ai_insights_router)
+    logger.info("🧠 AI Insights router loaded (meeting intelligence)")
+except Exception as e:
+    logger.warning(f"⚠️ AI Insights router failed to load: {e}")
+
+# Import AI Chat router for conversational interface
+try:
+    from api.ai_chat import router as ai_chat_router
+    app.include_router(ai_chat_router)
+    logger.info("💬 AI Chat router loaded (conversational AI)")
+except Exception as e:
+    logger.warning(f"⚠️ AI Chat router failed to load: {e}")
+
+# Import System Configuration router
+try:
+    from api.system_config import router as system_config_router
+    app.include_router(system_config_router)
+    logger.info("⚙️ System Configuration router loaded (working settings)")
+except Exception as e:
+    logger.warning(f"⚠️ System Configuration router failed to load: {e}")
+
+# Import Batch Export router
+try:
+    from api.batch_export import router as batch_export_router
+    app.include_router(batch_export_router)
+    logger.info("📦 Batch Export router loaded (multi-session exports)")
+except Exception as e:
+    logger.warning(f"⚠️ Batch Export router failed to load: {e}")
+
 # Import Always-On Transcription router (DISABLED to prevent recording conflicts)
 # The always-on service uses sounddevice which blocks arecord
 # TODO: Implement a solution that shares audio device access
@@ -1199,6 +1247,7 @@ async def get_system_info():
     try:
         import psutil
         import platform
+        from datetime import datetime
         
         # CPU info - don't use interval to avoid delay
         cpu_percent = psutil.cpu_percent(interval=0)
@@ -1214,9 +1263,15 @@ async def get_system_info():
         # Network info
         net_io = psutil.net_io_counters()
         
-        # Don't iterate all processes - just get counts
-        running = 0
-        sleeping = 0
+        # Get process information
+        try:
+            process_list = list(psutil.process_iter(['status']))
+            running = len([p for p in process_list if p.info['status'] == psutil.STATUS_RUNNING])
+            sleeping = len([p for p in process_list if p.info['status'] == psutil.STATUS_SLEEPING])
+        except:
+            process_list = []
+            running = 0
+            sleeping = 0
         
         # System uptime
         boot_time = psutil.boot_time()

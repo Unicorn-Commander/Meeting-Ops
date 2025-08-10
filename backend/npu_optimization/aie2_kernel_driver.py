@@ -23,6 +23,7 @@ class AIE2KernelDriver:
         self.mlir_file = Path("mlir_aie2_kernels.mlir")
         self.xclbin_path = None
         self.device = None
+        self.npu_device = None  # Initialize npu_device
         self.buffers = {}
         
         # AIE2 architecture parameters
@@ -32,6 +33,15 @@ class AIE2KernelDriver:
         self.MEM_PER_TILE = 64 * 1024  # 64KB per tile
         
         logger.info("🚀 AIE2 Kernel Driver Initializing...")
+        
+        # Try to initialize direct NPU runtime
+        try:
+            from .direct_npu_runtime import direct_npu_runtime
+            if direct_npu_runtime.initialize():
+                self.npu_device = direct_npu_runtime
+                logger.info("✅ Direct NPU runtime initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize direct NPU: {e}")
         
     def compile_mlir_to_xclbin(self) -> bool:
         """Compile MLIR kernels to NPU binary"""
@@ -147,6 +157,7 @@ class AIE2KernelDriver:
                     break
                     
             self.device = pyxrt.device(device_id)
+            self.npu_device = self.device  # Set npu_device for kernel execution
             
             # Load XCLBIN
             self.xclbin = pyxrt.xclbin(str(self.xclbin_path))
@@ -162,6 +173,7 @@ class AIE2KernelDriver:
     def _initialize_emulation(self) -> bool:
         """Initialize CPU emulation mode"""
         self.device = "CPU_EMULATION"
+        self.npu_device = None  # No NPU in emulation mode
         logger.info("✅ CPU emulation mode initialized")
         return True
         
@@ -225,9 +237,12 @@ class AIE2KernelDriver:
         
     def _execute_custom_mel_kernel(self, audio: np.ndarray) -> np.ndarray:
         """Execute mel spectrogram using our custom MLIR-AIE2 kernel"""
-        # This is our custom NPU kernel execution without pyxrt
-        # Uses direct memory mapping and DMA transfers
+        # Use direct NPU runtime if available
+        if hasattr(self.npu_device, 'execute_mel_spectrogram_npu'):
+            logger.info("🚀 Using direct NPU runtime for mel spectrogram")
+            return self.npu_device.execute_mel_spectrogram_npu(audio)
         
+        # Fallback to simplified computation
         # Prepare audio data for NPU
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)

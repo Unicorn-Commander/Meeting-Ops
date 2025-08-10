@@ -201,7 +201,7 @@ class TranscriptionService:
         try:
             # First try WhisperX NPU engine from stt_engine
             logger.info(f"Attempting to initialize NPU WhisperX for {model_id}")
-            from stt_engine.whisperx_npu_engine import WhisperXNPUEngine
+            from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
             engine = WhisperXNPUEngine()
             logger.info("✅ WhisperX NPU engine initialized for fast transcription")
             return engine
@@ -239,11 +239,10 @@ class TranscriptionService:
     def _initialize_whisperx_npu(self):
         """Initialize WhisperX NPU transcription only"""
         try:
-            from npu_optimization.whisperx_npu_engine_real import WhisperXNPUEngine
-            engine = WhisperXNPUEngine(enable_diarization=False)
-            if engine.initialize():
-                logger.info("✅ WhisperX NPU engine initialized")
-                return engine
+            from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
+            engine = WhisperXNPUEngine()
+            logger.info("✅ WhisperX NPU engine initialized")
+            return engine
         except ImportError:
             logger.warning("WhisperX NPU engine not available, falling back to ONNX")
             return self._initialize_onnx_npu()

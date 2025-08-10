@@ -349,3 +349,72 @@ async def deactivate_user(
     db.commit()
     
     return {"message": "User deactivated successfully"}
+
+@router.put("/users/{user_id}/role")
+async def update_user_role(
+    user_id: int,
+    role_data: dict,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Update a user's role"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    new_role = role_data.get("role")
+    if new_role not in ["user", "manager", "admin", "superuser", "viewer"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role"
+        )
+    
+    # Update role by setting superuser status
+    if new_role == "superuser":
+        user.is_superuser = True
+    else:
+        user.is_superuser = False
+    
+    db.commit()
+    
+    # Log the action
+    AuthService.log_action(
+        db, current_user.id, "role_update", 
+        details={"user_id": user_id, "new_role": new_role}
+    )
+    
+    return {"message": f"User role updated to {new_role}"}
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a user account"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account"
+        )
+    
+    # Log the action before deletion
+    AuthService.log_action(
+        db, current_user.id, "user_deleted", 
+        details={"deleted_user_id": user_id, "deleted_username": user.username}
+    )
+    
+    db.delete(user)
+    db.commit()
+    
+    return {"message": "User deleted successfully"}
