@@ -10,9 +10,9 @@ import logging
 import asyncio
 from datetime import datetime
 
-from database import get_db
-from auth import get_current_user
-from models import User
+from database.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
 
 router = APIRouter(prefix="/api/system", tags=["System Configuration"])
 logger = logging.getLogger(__name__)

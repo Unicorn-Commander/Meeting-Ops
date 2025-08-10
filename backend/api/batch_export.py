@@ -9,9 +9,10 @@ import os
 import uuid
 from pathlib import Path
 
-from database import get_db
-from auth import get_current_user
-from models import User, RecordingSession
+from database.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
+from database.models import RecordingSession
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
 logger = logging.getLogger(__name__)

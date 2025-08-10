@@ -2,14 +2,18 @@
 Transcription Loop Router - API endpoints for continuous transcription
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from datetime import datetime
+import json
+import asyncio
+import logging
 
 from services.transcription_loop_service import transcription_loop_service
 
 router = APIRouter(prefix="/api/transcription-loop", tags=["transcription-loop"])
+logger = logging.getLogger(__name__)
 
 class SaveMeetingRequest(BaseModel):
     """Request to save current buffer as a meeting"""
@@ -173,3 +177,71 @@ async def clear_transcription_buffer():
         "status": "cleared",
         "message": "Transcription buffer cleared successfully"
     }
+
+@router.websocket("/ws")
+async def transcription_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time transcription updates"""
+    await websocket.accept()
+    logger.info("WebSocket client connected for transcription updates")
+    
+    try:
+        # Send initial status (get_status is not async)
+        status = transcription_loop_service.get_status()
+        await websocket.send_json({
+            "type": "status",
+            "data": status
+        })
+        
+        # Get Redis connection for monitoring buffer
+        from redis import Redis
+        redis_client = Redis.from_url("redis://localhost:6379", decode_responses=True)
+        last_index = 0
+        
+        while True:
+            # Check for new transcriptions in Redis buffer
+            try:
+                # Get buffer length
+                buffer_len = redis_client.llen("transcript:buffer")
+                
+                if buffer_len > last_index:
+                    # Get new items
+                    new_items = redis_client.lrange("transcript:buffer", last_index, buffer_len - 1)
+                    
+                    for item_str in new_items:
+                        try:
+                            item = json.loads(item_str)
+                            await websocket.send_json({
+                                "type": "transcription",
+                                "segment": {
+                                    "text": item.get("text", ""),
+                                    "timestamp": item.get("timestamp", ""),
+                                    "confidence": item.get("confidence", 0.95),
+                                    "speaker": item.get("speaker", "SPEAKER_00")
+                                }
+                            })
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    last_index = buffer_len
+            except Exception as e:
+                logger.debug(f"Redis read error: {e}")
+            
+            # Handle client messages (ping/pong)
+            try:
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                data = json.loads(message)
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                pass  # No message received, continue
+            except:
+                pass  # Invalid message, ignore
+            
+            # Small delay to prevent CPU spinning
+            await asyncio.sleep(0.5)
+            
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.close()

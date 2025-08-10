@@ -116,6 +116,9 @@ export const config = {
     audioLevels: () => `${getWsBaseUrl()}/ws/audio-levels`,
     systemMetrics: () => `${getWsBaseUrl()}/ws/system-metrics`,
     
+    // Transcription loop (real-time transcription)
+    transcriptionLoop: () => `${getWsBaseUrl()}/api/transcription-loop/ws`,
+    
     // Time-shift recording
     timeshift: {
       start: () => `${getWsBaseUrl()}/ws/timeshift/start`,

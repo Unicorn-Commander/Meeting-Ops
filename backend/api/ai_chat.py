@@ -7,9 +7,9 @@ import json
 import asyncio
 import logging
 
-from database import get_db
-from auth import get_current_user
-from models import User
+from database.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
 
 router = APIRouter(prefix="/api/ai-chat", tags=["AI Chat"])
 logger = logging.getLogger(__name__)

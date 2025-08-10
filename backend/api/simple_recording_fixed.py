@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 import asyncio
 import os
+import logging
 
 # Import the working audio service
 from services.working_audio_service import audio_service
@@ -16,6 +17,7 @@ from services.transcription_service import transcription_service
 from services.gemma_custom_service import GemmaCustomService
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording"])
+logger = logging.getLogger(__name__)
 
 # In-memory session storage (replace with database in production)
 sessions: Dict[str, Any] = {}
@@ -71,10 +73,21 @@ async def start_recording(session_id: str):
             sessions[session_id]["start_time"] = datetime.utcnow().isoformat()
             sessions[session_id]["audio_file"] = result
             
+            # Start live transcription monitoring
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                asyncio.create_task(
+                    live_recording_transcription.start_monitoring(result, session_id)
+                )
+                logger.info(f"Started live transcription for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Could not start live transcription: {e}")
+            
             return {
                 "status": "recording",
                 "message": "Recording started successfully",
-                "audio_file": result
+                "audio_file": result,
+                "live_transcription": True
             }
         else:
             raise HTTPException(status_code=500, detail=f"Failed to start recording: {result}")
@@ -97,6 +110,14 @@ async def stop_recording(session_id: str):
         
         if not success:
             raise HTTPException(status_code=500, detail=f"Failed to stop recording: {audio_file}")
+        
+        # Stop live transcription monitoring  
+        try:
+            from services.live_recording_transcription import live_recording_transcription
+            asyncio.create_task(live_recording_transcription.stop_monitoring())
+            logger.info(f"Stopped live transcription for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Could not stop live transcription: {e}")
         
         # Update session
         sessions[session_id]["status"] = "processing"
@@ -188,7 +209,8 @@ async def get_recording_status():
             return {
                 "is_recording": True,
                 "session_id": session_id,
-                "session_name": session["name"]
+                "session_name": session["name"],
+                "started_at": session.get("start_time")
             }
     
     return {

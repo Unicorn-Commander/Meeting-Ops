@@ -72,7 +72,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
         
         if (serverMic) {
           console.log('[Recording] Server mic found:', serverMic.name);
-          setMicStatus('active');
+          setMicStatus('ready');  // Set to ready when mic is found (active is for recording)
           return true;
         } else {
           console.warn('[Recording] No server mic found in devices:', devices);
@@ -129,14 +129,16 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       if (!startResponse.ok) throw new Error('Failed to start session');
 
-      // Setup WebSocket for transcription
-      const wsUrl = config.wsEndpoints.transcription(sessionData.id);
+      // Setup WebSocket for real-time transcription
+      // Use session-specific WebSocket for live transcription
+      const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${sessionData.id}`;
+      console.log('[Recording] Connecting to transcription WebSocket:', wsUrl);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         setIsConnected(true);
-        console.log('[Recording] WebSocket connected for server-side recording');
+        console.log('[Recording] WebSocket connected for server-side recording at:', wsUrl);
         
         // Server handles audio capture from USB mic
         // No need to send audio from browser
@@ -155,9 +157,10 @@ export const UnifiedRecordingInterface: React.FC = () => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('[Recording] WebSocket message:', data);
+          console.log('[Recording] WebSocket message received:', data);
           
           if (data.type === 'transcription' && data.segment) {
+            console.log('[Recording] Transcription segment received:', data.segment);
             const segment: TranscriptionSegment = {
               id: Date.now().toString(),
               text: data.segment.text || '',
@@ -167,7 +170,12 @@ export const UnifiedRecordingInterface: React.FC = () => {
               isFlagged: false
             };
             
-            setTranscriptions(prev => [...prev, segment]);
+            console.log('[Recording] Adding transcription segment:', segment);
+            setTranscriptions(prev => {
+              const newTranscriptions = [...prev, segment];
+              console.log('[Recording] Total transcriptions:', newTranscriptions.length);
+              return newTranscriptions;
+            });
             
             // Auto-scroll to bottom
             setTimeout(() => {
@@ -198,6 +206,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
       
       setIsRecording(true);
       setRecordingTime(0);
+      setMicStatus('active'); // Set mic status to active when recording starts
       
       // Start timer
       intervalRef.current = setInterval(() => {
@@ -206,7 +215,9 @@ export const UnifiedRecordingInterface: React.FC = () => {
       
     } catch (error) {
       console.error('[Recording] Start failed:', error);
-      setMicStatus('error');
+      // Don't change mic status on recording error - mic might still be available
+      alert('Failed to start recording. Please try again.');
+      setIsRecording(false);
     }
   }, [checkServerAudio]);
 
@@ -216,8 +227,23 @@ export const UnifiedRecordingInterface: React.FC = () => {
       // Server will stop recording
       console.log('[Recording] Stopping server-side recording...');
       
-      // No browser stream to stop - recording is server-side
-      console.log('[Recording] Server recording stopped');
+      // Get session ID - either from state or check for active recording
+      let sessionId = session?.id;
+      
+      if (!sessionId) {
+        const statusResponse = await fetch(`${config.apiBaseUrl}/api/simple/recording-status`);
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+          if (status.is_recording) {
+            sessionId = status.session_id;
+          }
+        }
+      }
+      
+      if (!sessionId) {
+        console.error('[Recording] No active recording to stop');
+        return;
+      }
       
       // Close WebSocket
       if (wsRef.current) {
@@ -235,28 +261,27 @@ export const UnifiedRecordingInterface: React.FC = () => {
         clearInterval(intervalRef.current);
       }
 
-      // Update session on backend
-      if (session) {
-        await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.stop(session.id)}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        });
+      // Stop recording on backend
+      const stopResponse = await fetch(`${config.apiBaseUrl}${config.apiEndpoints.simpleRecording.stop(sessionId)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!stopResponse.ok) {
+        throw new Error('Failed to stop recording on server');
       }
+      
+      console.log('[Recording] Server recording stopped');
 
       setIsRecording(false);
       setIsPaused(false);
       setIsConnected(false);
       setMicStatus('idle');
       setAudioLevel(0);
-      
-      if (session) {
-        setSession({
-          ...session,
-          status: 'stopped'
-        });
-      }
+      setSession(null);
+      setTranscriptions([]);
       
     } catch (error) {
       console.error('[Recording] Stop failed:', error);
@@ -307,10 +332,86 @@ export const UnifiedRecordingInterface: React.FC = () => {
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Check server mic status on mount
+  // Check recording status on mount
+  const checkRecordingStatus = useCallback(async () => {
+    try {
+      console.log('[Recording] Checking for active recording status...');
+      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-status`);
+      if (response.ok) {
+        const status = await response.json();
+        console.log('[Recording] Recording status response:', status);
+        if (status.is_recording) {
+          console.log('[Recording] Active recording found! Session:', status.session_id);
+          setIsRecording(true);
+          setSession({
+            id: status.session_id,
+            title: status.session_name || `Meeting Recording - ${new Date().toLocaleString()}`,
+            status: 'recording',
+            duration: 0,
+            segments: []
+          });
+          setMicStatus('active');
+          console.log('[Recording] Found active recording session:', status.session_id);
+          
+          // Restore timer (estimate based on when recording might have started)
+          if (status.started_at) {
+            const startTime = new Date(status.started_at).getTime();
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            setRecordingTime(elapsed);
+          }
+          
+          // Start timer
+          intervalRef.current = setInterval(() => {
+            setRecordingTime(prev => prev + 1);
+          }, 1000);
+          
+          // Reconnect WebSocket for live transcription
+          const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${status.session_id}`;
+          const ws = new WebSocket(wsUrl);
+          wsRef.current = ws;
+          
+          ws.onopen = () => {
+            setIsConnected(true);
+            console.log('[Recording] Reconnected to transcription WebSocket');
+          };
+          
+          ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'transcription' && data.segment) {
+                setTranscriptions(prev => [...prev, {
+                  id: Date.now().toString(),
+                  text: data.segment.text || '',
+                  timestamp: new Date().toISOString(),
+                  speaker: data.segment.speaker || 'SPEAKER_00',
+                  confidence: data.segment.confidence || 0.95,
+                  isFlagged: false
+                }]);
+              }
+            } catch (error) {
+              console.error('[Recording] WebSocket message error:', error);
+            }
+          };
+          
+          ws.onerror = (error) => {
+            console.error('[Recording] WebSocket error:', error);
+          };
+          
+          ws.onclose = () => {
+            setIsConnected(false);
+          };
+        }
+      }
+    } catch (error) {
+      console.error('[Recording] Failed to check recording status:', error);
+    }
+  }, []);
+
+  // Check server mic and recording status on mount
   useEffect(() => {
     checkServerAudio();
-  }, [checkServerAudio]);
+    checkRecordingStatus();
+  }, [checkServerAudio, checkRecordingStatus]);
   
   // Cleanup on unmount
   useEffect(() => {
@@ -325,13 +426,15 @@ export const UnifiedRecordingInterface: React.FC = () => {
   const getMicStatusDisplay = () => {
     switch (micStatus) {
       case 'active':
-        return { color: 'text-green-400', text: 'Server Mic Ready - NPU Active', icon: CheckCircle };
+        return { color: 'text-green-400', text: 'Recording - Server Mic Active', icon: CheckCircle };
+      case 'ready':
+        return { color: 'text-blue-400', text: 'Server Mic Available', icon: Mic };
       case 'connecting':
         return { color: 'text-yellow-400', text: 'Connecting to Server...', icon: Loader2 };
       case 'error':
         return { color: 'text-red-400', text: 'Server Mic Unavailable', icon: AlertCircle };
       default:
-        return { color: 'text-blue-400', text: 'Server Ready - Click to Record', icon: Info };
+        return { color: 'text-gray-400', text: 'Checking Server Audio...', icon: Info };
     }
   };
 

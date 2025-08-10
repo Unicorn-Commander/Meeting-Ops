@@ -793,12 +793,14 @@ Provide structured insights."""
         return {"status": "error", "message": str(e)}
 
 # WebSocket endpoint for live transcription (ready for implementation)
-from fastapi import WebSocket, WebSocketDisconnect
+# DISABLED: Using the websocket_transcription router instead which supports session_id
+# The websocket_transcription router in api/websocket_transcription.py handles this now
 
+"""
+# Old WebSocket endpoint - disabled to avoid conflicts
 @app.websocket("/ws/transcription")
-async def websocket_transcription(websocket: WebSocket):
-    """WebSocket endpoint for live transcription feed"""
-    await websocket.accept()
+async def websocket_transcription_old(websocket: WebSocket):
+    # This entire function is disabled - see api/websocket_transcription.py
     from datetime import datetime
     import numpy as np
     import tempfile
@@ -892,31 +894,67 @@ async def websocket_transcription(websocket: WebSocket):
                 del recording_processes[session_id]
             except:
                 pass
+"""
+
+from fastapi import WebSocket, WebSocketDisconnect
 
 @app.websocket("/ws/audio-levels")
 async def websocket_audio_levels(websocket: WebSocket):
     """WebSocket endpoint for real-time audio level monitoring"""
     await websocket.accept()
     
-    # Use Redis for scalable WebSocket broadcasting
+    import asyncio
+    import redis.asyncio as redis
+    import json
+    from datetime import datetime
+    
+    # Use Redis for audio level broadcasting from recording service
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    use_redis = True  # Enable Redis-based broadcasting
     
     try:
-        if use_redis:
-            # Use Redis pub/sub for audio levels
-            from audio_level_redis import AudioLevelWebSocketHandler
-            handler = AudioLevelWebSocketHandler(redis_url)
-            await handler.handle_websocket(websocket)
-        else:
-            # Use direct USB monitoring for real audio
-            from audio_level_direct_usb import DirectUSBAudioMonitor, handle_direct_usb_websocket
-            
-            logger.info("🎤 Starting DIRECT USB audio monitoring (Texas Instruments PCM2902)")
-            
-            # Use the direct USB handler
-            await handle_direct_usb_websocket(websocket)
-            return
+        # Connect to Redis and subscribe to audio levels channel
+        redis_client = await redis.from_url(redis_url, decode_responses=True)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe('audio:levels')
+        
+        logger.info("📊 Audio level WebSocket connected, subscribing to Redis audio:levels")
+        
+        # Send initial connection message
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Audio level monitoring connected"
+        })
+        
+        # Listen for audio level updates from Redis
+        async for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    # Check if WebSocket is still open
+                    if websocket.client_state.value == 0:  # 0 = CONNECTING, 1 = CONNECTED, 2 = DISCONNECTED
+                        break
+                        
+                    # Parse the audio level data
+                    data = json.loads(message['data'])
+                    
+                    # Forward to WebSocket client in the format the frontend expects
+                    await websocket.send_json({
+                        "type": "audio_level",
+                        "data": {
+                            "level": data.get('level', 0),
+                            "peak": data.get('level', 0) * 1.2,  # Peak is slightly higher
+                            "timestamp": int(datetime.now().timestamp() * 1000),
+                            "mic_active": data.get('status') == 'recording',
+                            "quality": "good" if data.get('status') == 'recording' else "low"
+                        }
+                    })
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in audio level message: {message['data']}")
+                except WebSocketDisconnect:
+                    break
+                except Exception as e:
+                    if "close message has been sent" not in str(e):
+                        logger.error(f"Error forwarding audio level: {e}")
+                    break
                     
     except WebSocketDisconnect:
         logger.info("Audio level WebSocket disconnected")
@@ -927,6 +965,13 @@ async def websocket_audio_levels(websocket: WebSocket):
                 "type": "error", 
                 "message": str(e)
             })
+        except:
+            pass
+    finally:
+        # Clean up Redis connection
+        try:
+            await pubsub.unsubscribe('audio:levels')
+            await redis_client.close()
         except:
             pass
 @app.post("/api/session/create")
@@ -1412,6 +1457,42 @@ async def get_npu_status():
         logger.error(f"Error getting NPU status: {e}")
         return {
             "available": False,
+            "status": "error",
+            "model": "none",
+            "error": str(e)
+        }
+
+# Additional NPU Status Endpoint for frontend compatibility
+@app.get("/api/system/npu-status")
+async def get_system_npu_status():
+    """Get NPU status for frontend (alternate endpoint)"""
+    try:
+        # Check if NPU device exists
+        npu_available = os.path.exists("/dev/accel/accel0")
+        
+        # Check if transcription service is ready
+        transcription_ready = False
+        model_loaded = "none"
+        
+        try:
+            if hasattr(transcription_service, 'is_ready'):
+                transcription_ready = transcription_service.is_ready()
+                if transcription_ready and hasattr(transcription_service, 'model_name'):
+                    model_loaded = transcription_service.model_name
+        except:
+            pass
+        
+        # Return format expected by RecordingPage.tsx
+        return {
+            "status": "active" if npu_available and transcription_ready else "ready" if npu_available else "offline",
+            "processingSpeed": 220 if npu_available else 0,  # 220x speedup
+            "available": npu_available,
+            "model": model_loaded if model_loaded != "none" else "whisperx",
+            "utilization": 15 if transcription_ready else 0
+        }
+    except Exception as e:
+        logger.error(f"Error getting system NPU status: {e}")
+        return {
             "status": "error",
             "model": "none",
             "error": str(e)

@@ -372,9 +372,11 @@ class TranscriptionLoopService:
                 temp_path = temp_file.name
             
             # Transcribe using the service
-            result = await self.transcription_engine.transcribe_audio_file(
-                temp_path,
-                diarize=False  # Skip diarization for speed in continuous mode
+            # Use sync method in async context
+            import asyncio
+            result = await asyncio.to_thread(
+                self.transcription_engine.transcribe_file,
+                temp_path
             )
             
             # Clean up temp file

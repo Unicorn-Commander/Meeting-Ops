@@ -41,11 +41,9 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
       return;
     }
 
-    // Connect to transcription WebSocket
-    const token = localStorage.getItem('access_token');
-    if (!token) return;
-
-    const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/ws/transcription?token=${token}`;
+    // Connect to transcription WebSocket for this session
+    const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/ws/transcription/${sessionId}`;
+    console.log('[LiveTranscription] Connecting to WebSocket:', wsUrl);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -53,26 +51,32 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
       console.log('[LiveTranscription] WebSocket connected');
       setIsConnected(true);
       
-      // Send session ID to subscribe to transcriptions
-      ws.send(JSON.stringify({
-        type: 'subscribe',
-        session_id: sessionId
-      }));
+      // Send ping to keep connection alive
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
+      
+      // Store interval for cleanup
+      (ws as any).pingInterval = pingInterval;
     };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       console.log('[LiveTranscription] Received:', data);
 
-      if (data.type === 'transcription') {
-        handleTranscriptionData(data.data);
-      } else if (data.type === 'partial') {
-        setCurrentSegment(data.text || '');
-        setIsProcessing(true);
+      if (data.type === 'transcription' && data.segment) {
+        // Handle transcription segment from our backend
+        handleTranscriptionData(data.segment);
+        setIsProcessing(false);
       } else if (data.type === 'status') {
-        if (data.model) {
-          setActiveModel(data.model);
+        console.log('[LiveTranscription] Status:', data.message);
+        if (data.npu_status) {
+          setActiveModel('NPU-Accelerated Whisper');
         }
+      } else if (data.type === 'keepalive' || data.type === 'pong') {
+        // Keep-alive messages
       }
     };
 
@@ -87,6 +91,12 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
     };
 
     return () => {
+      // Clear ping interval if exists
+      const wsWithInterval = ws as any;
+      if (wsWithInterval.pingInterval) {
+        clearInterval(wsWithInterval.pingInterval);
+      }
+      
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }

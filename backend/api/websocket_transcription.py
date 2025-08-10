@@ -69,25 +69,33 @@ async def websocket_transcription(websocket: WebSocket, session_id: str):
         
         # Keep connection alive and handle messages
         while True:
-            # Wait for messages from client
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-            elif message.get("type") == "audio_chunk":
-                # Process audio chunk for real-time transcription
-                audio_data = message.get("audio")
-                if audio_data:
-                    result = whisperx_service.transcribe_stream(
-                        audio_data.encode(),
-                        session_id
-                    )
-                    if result:
-                        await manager.broadcast_transcription(session_id, {
-                            "type": "transcription",
-                            "segment": result
-                        })
+            try:
+                # Wait for messages from client with timeout
+                # This allows the connection to stay open for broadcasting
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                message = json.loads(data)
+                
+                if message.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                elif message.get("type") == "audio_chunk":
+                    # Process audio chunk for real-time transcription
+                    audio_data = message.get("audio")
+                    if audio_data:
+                        result = whisperx_service.transcribe_stream(
+                            audio_data.encode(),
+                            session_id
+                        )
+                        if result:
+                            await manager.broadcast_transcription(session_id, {
+                                "type": "transcription",
+                                "segment": result
+                            })
+            except asyncio.TimeoutError:
+                # Send keepalive on timeout
+                try:
+                    await websocket.send_json({"type": "keepalive"})
+                except:
+                    break  # Connection closed
                         
     except WebSocketDisconnect:
         manager.disconnect(websocket, session_id)
@@ -99,6 +107,7 @@ async def websocket_transcription(websocket: WebSocket, session_id: str):
 # Function to broadcast transcription updates (can be called from other modules)
 async def broadcast_transcription_update(session_id: str, segment: Dict):
     """Broadcast a transcription segment to all connected clients"""
+    logger.info(f"Broadcasting transcription update to session {session_id}: {segment.get('text', '')[:50]}...")
     await manager.broadcast_transcription(session_id, {
         "type": "transcription",
         "segment": segment

@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Activity, Users, HardDrive, Cpu, Mic, Clock, 
   TrendingUp, Calendar, Mail, AlertCircle, CheckCircle,
   BarChart3, PieChart, Flag, Star, Zap, Database,
-  Shield, Wifi, Volume2, Download, Upload, Settings
+  Shield, Wifi, Volume2, Download, Upload, Settings,
+  Circle, Square, MicOff
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
@@ -41,6 +42,12 @@ export const UltimateDashboard: React.FC = () => {
     todaysMeetings: 0
   });
   const [loading, setLoading] = useState(true);
+  
+  // Recording state for dashboard
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Key metrics
   const metrics: DashboardMetric[] = [
@@ -96,6 +103,88 @@ export const UltimateDashboard: React.FC = () => {
 
   // Recent activities
   const [recentActivities, setRecentActivities] = useState<any[]>([]);
+
+  // Recording functions
+  const startRecording = useCallback(async () => {
+    try {
+      // Create recording session
+      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: `Dashboard Recording - ${new Date().toLocaleString()}`,
+          description: 'Quick recording from dashboard'
+        })
+      });
+
+      if (!response.ok) throw new Error('Failed to create session');
+      
+      const sessionData = await response.json();
+      setRecordingSessionId(sessionData.id);
+      
+      // Start the recording
+      const startResponse = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${sessionData.id}/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!startResponse.ok) throw new Error('Failed to start recording');
+
+      setIsRecording(true);
+      setRecordingTime(0);
+      
+      // Start timer
+      intervalRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+      
+      console.log('[Dashboard] Recording started:', sessionData.id);
+      
+    } catch (error) {
+      console.error('[Dashboard] Failed to start recording:', error);
+      alert('Failed to start recording');
+    }
+  }, []);
+
+  const stopRecording = useCallback(async () => {
+    try {
+      if (!recordingSessionId) return;
+      
+      // Stop recording
+      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${recordingSessionId}/stop`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!response.ok) throw new Error('Failed to stop recording');
+      
+      // Clear timer
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      
+      setIsRecording(false);
+      setRecordingSessionId(null);
+      setRecordingTime(0);
+      
+      console.log('[Dashboard] Recording stopped');
+      
+    } catch (error) {
+      console.error('[Dashboard] Failed to stop recording:', error);
+    }
+  }, [recordingSessionId]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   // Fetch real data from backend
   useEffect(() => {
@@ -276,11 +365,60 @@ export const UltimateDashboard: React.FC = () => {
 
             {/* Main Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Live Transcription */}
+              {/* Live Transcription with Recording Controls */}
               <div className="lg:col-span-2">
-                <LiveTranscription 
-                  className="h-[500px]"
-                />
+                <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+                  {/* Recording Header */}
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                      <Mic className="w-5 h-5 text-purple-400" />
+                      Live Transcription
+                      {isRecording && (
+                        <span className="ml-2 px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full flex items-center gap-1">
+                          <Circle className="w-2 h-2 fill-current animate-pulse" />
+                          Recording
+                        </span>
+                      )}
+                    </h3>
+                    
+                    {/* Recording Controls */}
+                    <div className="flex items-center gap-3">
+                      {isRecording && (
+                        <span className="text-sm font-mono text-cyan-400">
+                          {formatTime(recordingTime)}
+                        </span>
+                      )}
+                      
+                      <button
+                        onClick={isRecording ? stopRecording : startRecording}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
+                          isRecording 
+                            ? 'bg-red-600 hover:bg-red-700 text-white' 
+                            : 'bg-purple-600 hover:bg-purple-700 text-white'
+                        }`}
+                      >
+                        {isRecording ? (
+                          <>
+                            <Square className="w-4 h-4" />
+                            <span>Stop</span>
+                          </>
+                        ) : (
+                          <>
+                            <Circle className="w-4 h-4" />
+                            <span>Record</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Transcription Display */}
+                  <LiveTranscription 
+                    sessionId={recordingSessionId}
+                    isRecording={isRecording}
+                    className="h-[400px]"
+                  />
+                </div>
               </div>
 
               {/* Recent Activity */}

@@ -477,14 +477,43 @@ class WhisperXNPUEngineReal:
         diarized_segments = []
         current_speaker = 0
         last_end_time = 0
+        speaker_turns = []  # Track when speakers change
         
         for i, seg in enumerate(segments):
-            # Simple heuristic: change speaker after significant pause
-            pause_duration = seg["start"] - last_end_time
+            # Calculate pause duration
+            pause_duration = seg["start"] - last_end_time if last_end_time > 0 else 0
             
-            # Change speaker if pause > 2 seconds or based on pitch change
-            if pause_duration > 2.0:
-                current_speaker = (current_speaker + 1) % 3  # Cycle through 3 speakers
+            # More sophisticated speaker change detection:
+            # 1. Long pause (> 1.5 seconds) suggests speaker change
+            # 2. Very short segments followed by pause might be same speaker
+            # 3. Question marks often indicate speaker change for next segment
+            
+            should_change_speaker = False
+            
+            if i == 0:
+                # First segment, assign to speaker 0
+                current_speaker = 0
+            elif pause_duration > 1.5:
+                # Long pause - likely speaker change
+                should_change_speaker = True
+            elif i > 0 and segments[i-1]["text"].strip().endswith("?"):
+                # Previous segment was a question - likely different speaker answering
+                should_change_speaker = True
+            elif pause_duration > 0.8 and len(seg["text"].split()) > 10:
+                # Medium pause with substantial text - might be new speaker
+                should_change_speaker = True
+            
+            # Also look for conversational patterns
+            text_lower = seg["text"].lower().strip()
+            if any(phrase in text_lower for phrase in ["yes,", "no,", "well,", "actually,", "but", "however"]):
+                # Response phrases often indicate different speaker
+                if i > 0 and pause_duration > 0.3:
+                    should_change_speaker = True
+            
+            if should_change_speaker:
+                # Cycle through up to 4 speakers
+                current_speaker = (current_speaker + 1) % 4
+                speaker_turns.append(i)
             
             diarized_seg = {
                 "start": seg["start"],
@@ -501,7 +530,10 @@ class WhisperXNPUEngineReal:
             diarized_segments.append(diarized_seg)
             last_end_time = seg["end"]
         
-        logger.info(f"Diarization complete: {len(set(s['speaker'] for s in diarized_segments))} speakers detected")
+        # Log diarization results
+        unique_speakers = len(set(s['speaker'] for s in diarized_segments))
+        logger.info(f"Diarization complete: {unique_speakers} speakers detected, {len(speaker_turns)} speaker changes")
+        
         return diarized_segments
     
     def get_performance_stats(self) -> Dict:
