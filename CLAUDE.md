@@ -122,7 +122,46 @@ docker compose -f docker-compose-full-stack.yml up -d
   - [ ] Edit transcript capability (future)
   - [x] Export options (TXT done, PDF/DOCX planned)
 
-### Phase 2: Intelligence Features (Priority 2) 🟡
+### Phase 2: Intelligence Features (Priority 2) 🟡 ACTIVE DEVELOPMENT
+
+#### 2A: Live Meeting Notes (HIGHEST PRIORITY) 🔥
+- [ ] **Real-time Meeting Notes Generation**
+  - [ ] Replace/supplement raw transcription with AI-generated notes
+  - [ ] Update notes every 30-60 seconds during meeting
+  - [ ] Show key points, decisions, action items in real-time
+  - [ ] Option to toggle between notes and raw transcription
+- [ ] **Admin Settings for Live Transcription**
+  - [ ] Model selection (base, small, medium, large, large-v3)
+  - [ ] Live transcription quality vs speed tradeoff
+  - [ ] User permission controls for viewing live transcription
+  - [ ] Show/hide live transcription toggle
+- [ ] **Custom Vocabulary System** 🎯
+  - [ ] Industry-specific acronym dictionary
+  - [ ] Defense sector acronyms (priority for first customer)
+  - [ ] Medical terminology support
+  - [ ] Custom term management UI
+  - [ ] Import/export vocabulary lists
+  - [ ] Apply to both live and final transcription
+
+#### 2B: AI Chat Integration 🤖
+- [ ] **Per-Meeting AI Chat**
+  - [ ] Chat interface within meeting details page
+  - [ ] Context-aware responses using meeting transcript
+  - [ ] Ask questions about specific meeting content
+  - [ ] Generate custom summaries on demand
+- [ ] **Global AI Assistant (Sidebar)**
+  - [ ] Cross-meeting knowledge base
+  - [ ] Memory RAG for conversation history
+  - [ ] Data RAG for meeting content
+  - [ ] Graph RAG for relationship mapping
+  - [ ] "Ask about all meetings" capability
+- [ ] **Gemma3n Integration**
+  - [ ] Configure Gemma3n:e4b in Ollama
+  - [ ] ROCm optimization with override
+  - [ ] Docker container deployment
+  - [ ] Model performance monitoring
+
+#### 2C: Analytics & Insights
 - [ ] Meeting Analytics Dashboard
   - [ ] Speaking time charts
   - [ ] Keyword frequency
@@ -380,6 +419,252 @@ docker compose -f docker-compose-full-stack.yml up -d
 - Created dynamic config.ts that adapts to access hostname
 - Added .env support for explicit backend URL configuration
 
+## 🏗️ Technical Implementation Plan - Phase 2
+
+### Live Meeting Notes Architecture
+```
+[Transcript Buffer] → [Gemma3n LLM] → [Notes Generation] → [WebSocket Broadcast]
+      ↓                     ↑                ↓                      ↓
+   (30-60 sec)         (Context)        (Real-time)         (Frontend Display)
+      ↓                     ↑                ↓                      ↓
+[Redis Cache]        [Custom Vocab]    [PostgreSQL]        [Toggle View]
+```
+
+**Implementation Details**:
+- Buffer transcription segments (30-60 seconds)
+- Send to Gemma3n with structured prompt for note extraction
+- Generate: key points, decisions, action items, participants
+- Stream updates via WebSocket alongside raw transcription
+- Store both raw transcript and generated notes
+
+### Custom Vocabulary System
+```sql
+-- Database Schema
+CREATE TABLE custom_vocabulary (
+    id UUID PRIMARY KEY,
+    term VARCHAR(100),           -- Original term/acronym
+    expansion VARCHAR(500),       -- Full expansion
+    category VARCHAR(50),         -- defense, medical, finance, etc.
+    priority INT DEFAULT 0,       -- Higher priority = prefer this expansion
+    context_hints TEXT[],         -- Words that suggest this meaning
+    created_by UUID,
+    created_at TIMESTAMP
+);
+
+CREATE TABLE vocabulary_sets (
+    id UUID PRIMARY KEY,
+    name VARCHAR(100),            -- "Defense Acronyms", "Medical Terms"
+    is_active BOOLEAN DEFAULT true,
+    industry VARCHAR(50),
+    vocab_ids UUID[]
+);
+```
+
+**Processing Pipeline**:
+1. Pre-transcription: Load active vocabulary sets
+2. During transcription: Apply replacements in real-time
+3. Post-processing: Re-apply to final transcript
+4. Admin UI: CRUD operations for terms and sets
+
+### AI Chat Integration Architecture
+
+**Per-Meeting Chat**:
+```python
+class MeetingChatService:
+    def __init__(self, session_id: str):
+        self.context = load_transcript(session_id)
+        self.llm = Gemma3n(context_window=32k)
+    
+    async def chat(self, query: str):
+        # RAG over meeting content
+        relevant_segments = vector_search(query, self.context)
+        response = await self.llm.generate(
+            query=query,
+            context=relevant_segments,
+            system="You are an assistant for this specific meeting"
+        )
+        return response
+```
+
+**Global AI Assistant**:
+```python
+class GlobalAssistant:
+    def __init__(self):
+        self.memory_rag = MemoryRAG()      # Conversation history
+        self.data_rag = DataRAG()          # All meetings content
+        self.graph_rag = GraphRAG()        # Relationships
+        
+    async def query(self, user_query: str):
+        # Multi-RAG retrieval
+        memory_context = self.memory_rag.retrieve(user_query)
+        data_context = self.data_rag.retrieve(user_query)
+        graph_context = self.graph_rag.retrieve(user_query)
+        
+        return await self.llm.generate(
+            query=user_query,
+            contexts={
+                'history': memory_context,
+                'meetings': data_context,
+                'relationships': graph_context
+            }
+        )
+```
+
+### Gemma3n Docker Configuration
+
+**Docker Compose Setup**:
+```yaml
+# docker-compose-gemma.yml
+services:
+  ollama-gemma:
+    image: ollama/ollama:rocm
+    container_name: meeting-ops-gemma
+    runtime: docker
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0  # For ROCm compatibility
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MODELS=/models
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_FLASH_ATTENTION=1
+    volumes:
+      - ./models:/models
+      - ./ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          memory: 32G
+        reservations:
+          devices:
+            - driver: amd
+              capabilities: [gpu]
+    command: |
+      sh -c "ollama serve & 
+             sleep 5 && 
+             ollama pull gemma3n:e4b && 
+             tail -f /dev/null"
+```
+
+**Backend Integration**:
+```python
+# backend/services/llm_service.py
+import ollama
+
+class GemmaService:
+    def __init__(self):
+        self.client = ollama.Client(host="http://localhost:11434")
+        self.model = "gemma3n:e4b"
+        
+    async def generate_meeting_notes(self, transcript: str) -> dict:
+        prompt = f"""
+        Analyze this meeting transcript and generate structured notes:
+        
+        TRANSCRIPT:
+        {transcript}
+        
+        Generate:
+        1. Key Points (bullet list)
+        2. Decisions Made
+        3. Action Items (with owners if mentioned)
+        4. Next Steps
+        
+        Format as JSON.
+        """
+        
+        response = await self.client.generate(
+            model=self.model,
+            prompt=prompt,
+            format="json",
+            options={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "num_ctx": 32768,
+                "num_gpu": 100,  # Use GPU layers
+            }
+        )
+        
+        return json.loads(response['response'])
+```
+
+**Frontend Components**:
+```typescript
+// frontend/src/components/LiveMeetingNotes.tsx
+interface MeetingNotes {
+  keyPoints: string[];
+  decisions: string[];
+  actionItems: ActionItem[];
+  nextSteps: string[];
+  lastUpdated: string;
+}
+
+export const LiveMeetingNotes: React.FC<{sessionId: string}> = ({sessionId}) => {
+  const [notes, setNotes] = useState<MeetingNotes | null>(null);
+  const [viewMode, setViewMode] = useState<'notes' | 'transcript'>('notes');
+  
+  useEffect(() => {
+    const ws = new WebSocket(`${config.wsEndpoints.base}/ws/meeting-notes/${sessionId}`);
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'notes_update') {
+        setNotes(data.notes);
+      }
+    };
+    
+    return () => ws.close();
+  }, [sessionId]);
+  
+  return (
+    <div className="meeting-notes-container">
+      <ToggleSwitch 
+        value={viewMode}
+        onChange={setViewMode}
+        options={['notes', 'transcript']}
+      />
+      
+      {viewMode === 'notes' && notes && (
+        <NotesDisplay notes={notes} />
+      )}
+      
+      {viewMode === 'transcript' && (
+        <LiveTranscriptionChat sessionId={sessionId} />
+      )}
+    </div>
+  );
+};
+```
+
+### Implementation Timeline
+
+**Week 1**: Live Meeting Notes
+- [ ] Implement transcript buffering system
+- [ ] Integrate Gemma3n for note generation
+- [ ] Create WebSocket endpoint for notes
+- [ ] Build frontend toggle component
+
+**Week 2**: Custom Vocabulary
+- [ ] Design and create database schema
+- [ ] Build vocabulary management API
+- [ ] Implement real-time replacement engine
+- [ ] Create admin UI for term management
+
+**Week 3**: AI Chat - Per Meeting
+- [ ] Implement meeting context loading
+- [ ] Build chat API endpoint
+- [ ] Create chat UI component
+- [ ] Add to session details page
+
+**Week 4**: AI Chat - Global Assistant
+- [ ] Set up RAG infrastructure
+- [ ] Implement multi-meeting search
+- [ ] Build sidebar chat interface
+- [ ] Test cross-meeting queries
+
 ---
 
 **Current Session Updates**:
@@ -387,6 +672,7 @@ docker compose -f docker-compose-full-stack.yml up -d
 - Improved speaker diarization with advanced pattern detection
 - Added recording controls to dashboard for better accessibility
 - Updated all documentation with latest implementation details
+- **NEW**: Added complete Phase 2 technical implementation plan
 
 **Audio Processing Notes**:
 - Recording at 44.1kHz (USB mic native rate) - no hardware resampling needed
@@ -394,4 +680,4 @@ docker compose -f docker-compose-full-stack.yml up -d
 - 10-second chunks provide optimal context for transcription
 - NPU provides 220x speedup with Whisper Large-v3
 
-**Next Session Focus**: Begin Phase 2 - Intelligence Features (Analytics, AI Insights, Speaker Metrics)
+**Next Session Focus**: Begin Phase 2A - Live Meeting Notes with Gemma3n Integration

@@ -1,0 +1,85 @@
+# Gemma3n LLM Service for Meeting-Ops
+# Provides AI-powered meeting notes generation and chat capabilities
+version: '3.8'
+
+services:
+  ollama-gemma:
+    image: ollama/ollama:rocm
+    container_name: meeting-ops-gemma
+    runtime: docker
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    environment:
+      # ROCm compatibility for AMD GPUs
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/models
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_FLASH_ATTENTION=1
+      # Memory settings
+      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_MAX_VRAM=16G
+    volumes:
+      - ./models:/models
+      - ./ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - meeting-ops-network
+    deploy:
+      resources:
+        limits:
+          memory: 32G
+        reservations:
+          devices:
+            - driver: amd
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    command: |
+      sh -c "
+        ollama serve &
+        sleep 10 &&
+        echo 'Pulling Gemma3n model...' &&
+        ollama pull gemma3n:e4b &&
+        echo 'Gemma3n model ready!' &&
+        tail -f /dev/null
+      "
+
+  # Optional: Ollama Web UI for model management
+  ollama-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: meeting-ops-ollama-ui
+    environment:
+      - OLLAMA_BASE_URL=http://ollama-gemma:11434
+      - WEBUI_SECRET_KEY=meeting-ops-secret-key-change-in-production
+      - WEBUI_AUTH=false  # Set to true in production
+    ports:
+      - "8080:8080"
+    networks:
+      - meeting-ops-network
+    depends_on:
+      - ollama-gemma
+    volumes:
+      - ./ollama-webui:/app/backend/data
+    restart: unless-stopped
+
+networks:
+  meeting-ops-network:
+    external: true
+    name: meeting-ops_default
+
+volumes:
+  models:
+    driver: local
+  ollama:
+    driver: local
+  ollama-webui:
+    driver: local
