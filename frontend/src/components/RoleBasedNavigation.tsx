@@ -40,23 +40,10 @@ const navigationItems: NavItem[] = [
   },
   {
     id: 'meetings',
-    label: '📊 Meetings',
+    label: '📊 Recording Sessions',
     icon: <FileText className="w-5 h-5" />,
-    roles: ['viewer', 'user', 'manager', 'admin', 'superuser'],
-    children: [
-      {
-        id: 'meetings',
-        label: 'All Meetings',
-        icon: <FileText className="w-4 h-4" />,
-        roles: ['viewer', 'user', 'manager', 'admin', 'superuser']
-      },
-      {
-        id: 'upload',
-        label: 'Upload Audio',
-        icon: <Upload className="w-4 h-4" />,
-        roles: ['user', 'manager', 'admin', 'superuser']
-      }
-    ]
+    roles: ['viewer', 'user', 'manager', 'admin', 'superuser']
+    // Upload functionality integrated into Recording Sessions page
   },
   {
     id: 'ai-config',

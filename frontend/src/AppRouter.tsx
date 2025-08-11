@@ -21,7 +21,7 @@ import { UnifiedRecordingInterface } from './components/UnifiedRecordingInterfac
 import { TimeShiftRecording } from './components/TimeShiftRecording';
 
 // Components
-import { SessionList } from './components/SessionList';
+import { RecordingSessionsList } from './components/RecordingSessionsList';
 import { SessionDetails } from './pages/SessionDetails';
 import { LiveTranscription } from './components/LiveTranscription';
 import { TranscriptionSettings } from './components/TranscriptionSettings';
@@ -116,7 +116,7 @@ export const AppRouter: React.FC = () => {
           <Route path="live" element={<UnifiedRecordingInterface />} />
           <Route path="timeshift" element={<TimeShiftRecording />} />
           <Route path="main" element={<UnifiedRecordingInterface />} />
-          <Route path="sessions" element={<SessionList />} />
+          <Route path="sessions" element={<RecordingSessionsList />} />
           <Route path="sessions/:sessionId" element={<SessionDetails />} />
         </Route>
 

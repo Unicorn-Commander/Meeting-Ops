@@ -3,14 +3,21 @@ import { HashRouter as Router } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import { AuthProvider } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { RecordingProvider } from './contexts/RecordingContext';
 import { AppRouter } from './AppRouter';
+import { RecordingIndicator } from './components/RecordingIndicator';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import 'react-toastify/dist/ReactToastify.css';
 import './index.css';
 
 function AppWithShortcuts() {
   useMeetingOpsShortcuts();
-  return <AppRouter />;
+  return (
+    <>
+      <RecordingIndicator />
+      <AppRouter />
+    </>
+  );
 }
 
 function App() {
@@ -18,21 +25,23 @@ function App() {
     <Router>
       <ThemeProvider>
         <AuthProvider>
-          <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
-            <AppWithShortcuts />
-            <ToastContainer 
-              position="bottom-right"
-              theme="dark"
-              autoClose={5000}
-              hideProgressBar={false}
-              newestOnTop
-              closeOnClick
-              rtl={false}
-              pauseOnFocusLoss
-              draggable
-              pauseOnHover
-            />
-          </div>
+          <RecordingProvider>
+            <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
+              <AppWithShortcuts />
+              <ToastContainer 
+                position="bottom-right"
+                theme="dark"
+                autoClose={5000}
+                hideProgressBar={false}
+                newestOnTop
+                closeOnClick
+                rtl={false}
+                pauseOnFocusLoss
+                draggable
+                pauseOnHover
+              />
+            </div>
+          </RecordingProvider>
         </AuthProvider>
       </ThemeProvider>
     </Router>

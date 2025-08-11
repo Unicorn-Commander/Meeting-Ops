@@ -4,9 +4,11 @@ import {
   TrendingUp, Calendar, Mail, AlertCircle, CheckCircle,
   BarChart3, PieChart, Flag, Star, Zap, Database,
   Shield, Wifi, Volume2, Download, Upload, Settings,
-  Circle, Square, MicOff
+  Circle, Square, MicOff, Loader2
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { useRecording } from '../../contexts/RecordingContext';
+import { useNavigate } from 'react-router-dom';
 import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
 import { SystemMonitor } from '../SystemMonitor';
 import { LiveTranscription } from '../LiveTranscription';
@@ -32,6 +34,17 @@ interface SystemService {
 
 export const UltimateDashboard: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const { 
+    isRecording: globalIsRecording, 
+    activeSession,
+    transcriptions: globalTranscriptions,
+    setActiveSession,
+    setIsRecording: setGlobalIsRecording,
+    setRecordingTime: setGlobalRecordingTime,
+    setTranscriptions: setGlobalTranscriptions,
+    addTranscription 
+  } = useRecording();
   const [activeView, setActiveView] = useState<'overview' | 'recording' | 'transcription' | 'analytics' | 'system'>('overview');
   const [realTimeData, setRealTimeData] = useState({
     activeSessions: 0,
@@ -43,11 +56,13 @@ export const UltimateDashboard: React.FC = () => {
   });
   const [loading, setLoading] = useState(true);
   
-  // Recording state for dashboard
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
+  // Recording state for dashboard - use global state
+  const isRecording = globalIsRecording;
+  const recordingSessionId = activeSession?.id || null;
   const [recordingTime, setRecordingTime] = useState(0);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Key metrics
   const metrics: DashboardMetric[] = [
@@ -106,6 +121,13 @@ export const UltimateDashboard: React.FC = () => {
 
   // Recording functions
   const startRecording = useCallback(async () => {
+    // If already recording, navigate to recording page
+    if (globalIsRecording) {
+      console.log('[Dashboard] Already recording, navigating to recording interface');
+      navigate('/recording/live');
+      return;
+    }
+    
     try {
       // Create recording session
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions`, {
@@ -115,14 +137,13 @@ export const UltimateDashboard: React.FC = () => {
         },
         body: JSON.stringify({
           name: `Dashboard Recording - ${new Date().toLocaleString()}`,
-          description: 'Quick recording from dashboard'
+          description: 'Recording started from dashboard'
         })
       });
 
       if (!response.ok) throw new Error('Failed to create session');
       
       const sessionData = await response.json();
-      setRecordingSessionId(sessionData.id);
       
       // Start the recording
       const startResponse = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${sessionData.id}/start`, {
@@ -134,27 +155,83 @@ export const UltimateDashboard: React.FC = () => {
 
       if (!startResponse.ok) throw new Error('Failed to start recording');
 
-      setIsRecording(true);
-      setRecordingTime(0);
+      // Update global recording state
+      const newSession = {
+        id: sessionData.id,
+        name: sessionData.name || `Dashboard Recording - ${new Date().toLocaleString()}`,
+        status: 'recording' as const,
+        startTime: new Date().toISOString(),
+        duration: 0
+      };
+
+      setActiveSession(newSession);
+      setGlobalIsRecording(true);
+      setGlobalRecordingTime(0);
+      
+      // Setup WebSocket for live transcription
+      const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${sessionData.id}`;
+      console.log('[Dashboard] Connecting to transcription WebSocket:', wsUrl);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('[Dashboard] WebSocket connected');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'transcription' && data.segment) {
+            const segment = {
+              id: Date.now().toString() + '_' + Math.random(),
+              text: data.segment.text || '',
+              timestamp: new Date().toISOString(),
+              speaker: null,  // No speaker for live
+              confidence: data.segment.confidence || 0.95,
+              isFlagged: false
+            };
+            
+            console.log('[Dashboard] Adding transcription segment:', segment);
+            addTranscription(segment);
+          }
+        } catch (error) {
+          console.error('[Dashboard] WebSocket message error:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('[Dashboard] WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        console.log('[Dashboard] WebSocket closed');
+      };
       
       // Start timer
       intervalRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
+        setRecordingTime(prev => {
+          const newTime = prev + 1;
+          setGlobalRecordingTime(newTime);
+          return newTime;
+        });
       }, 1000);
-      
+
       console.log('[Dashboard] Recording started:', sessionData.id);
       
     } catch (error) {
       console.error('[Dashboard] Failed to start recording:', error);
-      alert('Failed to start recording');
+      alert('Failed to start recording. Please try again.');
     }
-  }, []);
+  }, [globalIsRecording, navigate, setActiveSession, setGlobalIsRecording, setGlobalRecordingTime, addTranscription]);
 
   const stopRecording = useCallback(async () => {
     try {
-      if (!recordingSessionId) return;
+      if (!recordingSessionId) {
+        console.log('[Dashboard] No active session to stop');
+        return;
+      }
       
-      // Stop recording
+      // Stop recording on backend
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${recordingSessionId}/stop`, {
         method: 'POST',
         headers: {
@@ -164,27 +241,85 @@ export const UltimateDashboard: React.FC = () => {
       
       if (!response.ok) throw new Error('Failed to stop recording');
       
+      // Close WebSocket
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      
       // Clear timer
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
       
-      setIsRecording(false);
-      setRecordingSessionId(null);
+      // Update global state
+      setGlobalIsRecording(false);
+      setActiveSession(null);
       setRecordingTime(0);
+      setGlobalRecordingTime(0);
       
       console.log('[Dashboard] Recording stopped');
       
     } catch (error) {
       console.error('[Dashboard] Failed to stop recording:', error);
+      alert('Failed to stop recording. Please try again.');
     }
-  }, [recordingSessionId]);
+  }, [recordingSessionId, setGlobalIsRecording, setActiveSession, setGlobalRecordingTime]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  // Connect to existing recording WebSocket if recording is active
+  useEffect(() => {
+    if (globalIsRecording && activeSession?.id && !wsRef.current) {
+      const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${activeSession.id}`;
+      console.log('[Dashboard] Connecting to existing transcription WebSocket:', wsUrl);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('[Dashboard] WebSocket connected to existing session');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'transcription' && data.segment) {
+            const segment = {
+              id: Date.now().toString() + '_' + Math.random(),
+              text: data.segment.text || '',
+              timestamp: new Date().toISOString(),
+              speaker: null,
+              confidence: data.segment.confidence || 0.95,
+              isFlagged: false
+            };
+            
+            addTranscription(segment);
+          }
+        } catch (error) {
+          console.error('[Dashboard] WebSocket message error:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('[Dashboard] WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        console.log('[Dashboard] WebSocket closed');
+      };
+    }
+  }, [globalIsRecording, activeSession, addTranscription]);
+
+  // Auto-scroll dashboard transcription
+  useEffect(() => {
+    if (transcriptEndRef.current) {
+      transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [globalTranscriptions]);
 
   // Fetch real data from backend
   useEffect(() => {
@@ -413,11 +548,57 @@ export const UltimateDashboard: React.FC = () => {
                   </div>
                   
                   {/* Transcription Display */}
-                  <LiveTranscription 
-                    sessionId={recordingSessionId}
-                    isRecording={isRecording}
-                    className="h-[400px]"
-                  />
+                  <div className="bg-gray-800/50 rounded-lg p-4 h-[400px] overflow-y-auto">
+                    {globalTranscriptions.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                        {isRecording ? (
+                          <>
+                            <Loader2 className="w-8 h-8 animate-spin mb-3" />
+                            <p className="text-sm">Waiting for speech...</p>
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-8 h-8 mb-3 text-gray-600" />
+                            <p className="text-sm">Start recording to see transcription</p>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {globalTranscriptions.map((segment, index) => (
+                          <div
+                            key={segment.id}
+                            className="bg-gray-700/30 backdrop-blur-sm rounded-lg p-4 border-l-4 border-purple-500 shadow-lg"
+                          >
+                            <div className="text-white text-xl leading-relaxed font-medium">
+                              {segment.text}
+                            </div>
+                            {segment.confidence && (
+                              <div className="mt-2 flex items-center gap-2">
+                                <div className="text-xs text-gray-400">Confidence:</div>
+                                <div className="flex gap-1">
+                                  {[1, 2, 3, 4, 5].map((level) => (
+                                    <div
+                                      key={level}
+                                      className={`w-2 h-2 rounded-full ${
+                                        segment.confidence! >= level * 0.2
+                                          ? 'bg-green-400'
+                                          : 'bg-gray-600'
+                                      }`}
+                                    />
+                                  ))}
+                                </div>
+                                <span className="text-xs text-gray-400">
+                                  {Math.round((segment.confidence || 0) * 100)}%
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                        <div ref={transcriptEndRef} />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 

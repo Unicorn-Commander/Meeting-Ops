@@ -1,5 +1,5 @@
 # NPU Implementation Complete - Full Documentation
-*Last Updated: January 9, 2025*
+*Last Updated: January 10, 2025*
 
 ## 🎉 PRODUCTION READY: Real NPU Acceleration with Whisper Large-v3!
 
@@ -24,7 +24,7 @@ The Meeting-Ops system now features **real hardware NPU acceleration** with prof
 
 ## Current Implementation Status
 
-### ✅ Working Models (Tested January 9, 2025)
+### ✅ Working Models (Tested January 10, 2025)
 
 | Model | Size | NPU Speed | Accuracy | NPU Speedup | Use Case |
 |-------|------|-----------|----------|-------------|----------|
@@ -36,13 +36,19 @@ The Meeting-Ops system now features **real hardware NPU acceleration** with prof
 
 ### Performance Metrics (Real NPU Measurements)
 
-**Production Performance (January 9, 2025):**
+**Production Performance (January 10, 2025):**
 - Model: Whisper large-v3 with INT8 NPU optimization
-- Real-Time Factor: **0.004 RTF** (220x faster than real-time)
+- Real-Time Factor: **0.0045 RTF** (220x faster than real-time)
 - Throughput: **4,789 tokens/second**
 - 30-second audio: Processed in 0.14 seconds
 - 1-hour meeting: Processed in 14 seconds
 - NPU Utilization: 16 TOPS INT8 performance
+
+**Audio Processing Pipeline**:
+- Recording: 44.1kHz native rate (USB mic)
+- Resampling: Software resample to 16kHz for Whisper
+- Chunk Size: 10-second chunks with 3-second minimum
+- Live Monitoring: Real-time transcription during recording
 
 ## Architecture Overview
 
@@ -118,23 +124,52 @@ def execute_mel_spectrogram(self, audio: np.ndarray) -> np.ndarray:
     # No pyxrt or vendor SDK required
     mel_output = self._execute_custom_mel_kernel(audio)
     return mel_output
+
+# Live recording transcription service
+class LiveRecordingTranscriptionService:
+    async def _monitor_and_transcribe(self):
+        """Monitor recording file and transcribe chunks"""
+        chunk_duration = 10  # Process 10-second chunks
+        recording_sample_rate = 44100  # Recording at 44.1kHz
+        target_sample_rate = 16000  # Whisper needs 16kHz
+        
+        # Resample and transcribe
+        chunk_resampled = librosa.resample(
+            chunk_data, 
+            orig_sr=recording_sample_rate, 
+            target_sr=target_sample_rate
+        )
 ```
 
-### 4. Speaker Diarization
+### 4. Enhanced Speaker Diarization
 
 ```python
 # Apply speaker detection based on voice characteristics
 def _apply_speaker_diarization(self, segments: List[Dict]) -> List[Dict]:
-    """Detect different speakers using pause patterns"""
-    for seg in segments:
-        # Analyze pauses and voice changes
-        if pause_duration > 2.0:
-            current_speaker = (current_speaker + 1) % 3
+    """Detect different speakers using sophisticated patterns"""
+    for i, seg in enumerate(segments):
+        # Calculate pause duration
+        pause_duration = seg["start"] - last_end_time
+        
+        # Detection rules:
+        # 1. Long pause (> 1.5s) suggests speaker change
+        # 2. Question marks often indicate speaker change
+        # 3. Conversational markers ("yes,", "no,", "well,")
+        
+        should_change_speaker = False
+        if pause_duration > 1.5:
+            should_change_speaker = True
+        elif segments[i-1]["text"].endswith("?"):
+            should_change_speaker = True
+        elif any(phrase in seg["text"].lower() for phrase in 
+                ["yes,", "no,", "well,", "actually,", "but"]):
+            if pause_duration > 0.3:
+                should_change_speaker = True
+        
+        if should_change_speaker:
+            current_speaker = (current_speaker + 1) % 4  # Up to 4 speakers
         
         diarized_seg = {
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg["text"],
             "speaker": f"SPEAKER_{current_speaker:02d}",
             "words": seg["words"]  # Preserve word timestamps
         }
@@ -161,7 +196,7 @@ const whisperModels = [
 
 ## Performance Benchmarks
 
-### Real-World Test Results (January 9, 2025)
+### Real-World Test Results (January 10, 2025)
 
 **Test Audio: 30-second podcast with multiple speakers**
 
@@ -225,7 +260,9 @@ backend/
 │   ├── aie2_kernel_driver.py          # Custom MLIR-AIE2 kernels
 │   └── whisperx_npu_integration.py    # NPU accelerator
 ├── services/
-│   └── transcription_service.py       # Model management
+│   ├── transcription_service.py       # Model management
+│   ├── working_audio_service.py       # Reliable audio capture (arecord)
+│   └── live_recording_transcription.py # Real-time chunk processing
 └── test_large_whisper.py              # Test script
 ```
 

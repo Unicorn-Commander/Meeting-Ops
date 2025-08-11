@@ -69,14 +69,15 @@ class WorkingAudioService:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = os.path.join(output_dir, f"recording_{session_id}_{timestamp}.wav")
         
-        # Build arecord command - use USB mic directly via ALSA
+        # Build arecord command - use USB mic at its native sample rate
+        # Then we'll resample in software for Whisper
         cmd = [
             'arecord',
             '-D', 'hw:0,0',     # USB mic device directly
             '-f', 'S16_LE',     # 16-bit signed little-endian
             '-c', '1',          # Mono
-            '-r', '44100',      # 44.1kHz sample rate
-            '-d', '30',         # Max duration 30 seconds (safety limit)
+            '-r', '44100',      # Use mic's native 44.1kHz sample rate
+            # No duration limit - will record until stopped
             output_file
         ]
         

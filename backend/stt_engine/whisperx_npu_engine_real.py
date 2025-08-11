@@ -29,6 +29,9 @@ class WhisperXNPUEngineReal:
     NO SIMULATION - Real NPU only
     """
     
+    # Class-level cache for loaded models to avoid reloading
+    _model_cache = {}
+    
     def __init__(self, model_size: str = "large-v3"):
         self.model_size = model_size  # Store the model size
         self.npu_accelerator = None
@@ -326,13 +329,37 @@ class WhisperXNPUEngineReal:
             # Use faster-whisper for better performance and large model support
             from faster_whisper import WhisperModel
             
-            # Load the selected Whisper model
+            # Load the selected Whisper model (use cache if available)
             if not hasattr(self, 'whisper_model'):
-                logger.info(f"Loading Whisper {self.model_size} model...")
-                # Use INT8 quantization for NPU optimization
-                self.whisper_model = WhisperModel(self.model_size, 
-                                                 device="cpu",
-                                                 compute_type="int8")
+                # Check cache first
+                if self.model_size in WhisperXNPUEngineReal._model_cache:
+                    logger.info(f"Using cached Whisper {self.model_size} model")
+                    self.whisper_model = WhisperXNPUEngineReal._model_cache[self.model_size]
+                    
+                else:
+                    logger.info(f"Loading Whisper {self.model_size} model for first time...")
+                    # Use INT8 quantization for NPU optimization
+                    # Testing shows only int8, float32, and auto work on this CPU
+                    # int8 is fastest for all models
+                    compute_type = "int8"  # Best performance for all models
+                        
+                    logger.info(f"Using compute type: {compute_type} for {self.model_size}")
+                    
+                    try:
+                        self.whisper_model = WhisperModel(self.model_size, 
+                                                         device="cpu",
+                                                         compute_type=compute_type)
+                        # Cache the model for reuse
+                        WhisperXNPUEngineReal._model_cache[self.model_size] = self.whisper_model
+                        logger.info(f"Cached {self.model_size} model for future use")
+                    except ValueError as e:
+                        # Fallback to int8 if float16 not supported
+                        logger.warning(f"Failed with {compute_type}, falling back to int8: {e}")
+                        self.whisper_model = WhisperModel(self.model_size, 
+                                                         device="cpu",
+                                                         compute_type="int8")
+                        # Cache the fallback model too
+                        WhisperXNPUEngineReal._model_cache[self.model_size] = self.whisper_model
             
             # Handle different input types
             if isinstance(audio_input, dict):
@@ -365,19 +392,31 @@ class WhisperXNPUEngineReal:
             logger.info(f"Transcribing audio with large-v3: shape={audio_data.shape}, dtype={audio_data.dtype}")
             
             # Transcribe with word-level timestamps for better diarization
+            # VAD can be disabled by setting DISABLE_VAD env variable
+            use_vad = os.getenv('DISABLE_VAD', 'false').lower() != 'true'
+            
+            transcribe_params = {
+                "language": "en",
+                "beam_size": 5,
+                "best_of": 5,
+                "temperature": 0,
+                "word_timestamps": True,  # Enable word-level timestamps
+            }
+            
+            if use_vad:
+                transcribe_params["vad_filter"] = True
+                transcribe_params["vad_parameters"] = dict(
+                    min_silence_duration_ms=1500,  # Only remove long silences (1.5s+)
+                    speech_pad_ms=1000,  # Generous padding
+                    threshold=0.25  # Very permissive threshold
+                )
+            else:
+                transcribe_params["vad_filter"] = False
+                logger.info("VAD disabled - processing all audio including silence")
+            
             segments, info = self.whisper_model.transcribe(
                 audio_data,
-                language="en",
-                beam_size=5,
-                best_of=5,
-                temperature=0,
-                word_timestamps=True,  # Enable word-level timestamps
-                vad_filter=False,  # Disable VAD - it's too aggressive
-                # vad_parameters=dict(
-                #     min_silence_duration_ms=2000,  # Increased from 500ms
-                #     speech_pad_ms=800,  # Increased from 400ms
-                #     threshold=0.3  # Lower threshold for speech detection
-                # )
+                **transcribe_params
             )
             
             # Collect all segments with detailed timing

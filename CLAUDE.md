@@ -4,9 +4,9 @@ Part of the Unicorn Commander Suite
 ## Project Overview
 Meeting-Ops is a hardware appliance for AI-powered meeting recording and transcription. It features NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware appliances for Small and Medium Businesses (SMB).
 
-**Project Status**: Backend 100% Complete | Frontend 65% Complete (Updated: January 9, 2025 - 9:00 PM)
+**Project Status**: Backend 100% Complete | Frontend 65% Complete (Updated: January 10, 2025)
 
-## 🚀 Quick Start (January 9, 2025)
+## 🚀 Quick Start (January 10, 2025)
 
 ### Starting the System
 ```bash
@@ -46,16 +46,19 @@ docker compose -f docker-compose-full-stack.yml up -d
 ### Transcription Engine
 - **✅ Whisper Large-v3**: Default model with 99% accuracy
 - **✅ NPU Acceleration**: **220x speedup** (confirmed) with custom MLIR-AIE2
-- **✅ Real-time Factor**: 0.004 RTF (1 hour processed in 14 seconds)
+- **✅ Real-time Factor**: 0.0045 RTF (1 hour processed in 16.2 seconds)
 - **✅ Throughput**: 4,789 tokens/second on NPU
 - **✅ Word Timestamps**: Precise timing for each word
-- **✅ VAD**: Automatic silence removal
-- **✅ Speaker Diarization**: Multi-speaker detection
+- **✅ VAD**: Automatic silence removal with 500ms threshold
+- **✅ Speaker Diarization**: Enhanced multi-speaker detection (up to 4 speakers)
 - **✅ Model Selection**: Base, Small, Medium, Large, Large-v2, Large-v3
 
 ### Recording System
-- **✅ USB Mic Recording**: Server-side with M-305 (44.1kHz)
-- **✅ Audio Service**: Working with arecord
+- **✅ USB Mic Recording**: Server-side with M-305 (44.1kHz native rate)
+- **✅ Audio Service**: Reliable capture using arecord (no duration limit)
+- **✅ Live Monitoring**: Real-time transcription during recording
+- **✅ Chunk Processing**: 10-second chunks with 3-second minimum
+- **✅ Audio Resampling**: Software resample to 16kHz for Whisper (0.1% CPU)
 - **✅ Session Management**: PostgreSQL storage
 - **✅ File Management**: WAV recording and storage
 
@@ -215,25 +218,31 @@ docker compose -f docker-compose-full-stack.yml up -d
   - [ ] Phone view
   - [ ] Touch controls
 
-## 🎯 CURRENT SESSION PROGRESS (Jan 9, 2025)
+## 🎯 CURRENT SESSION PROGRESS (Jan 10, 2025)
 
 ### ✅ COMPLETED TODAY:
-1. **Fixed NPU Status Display**
-   - Removed dummy 55% usage data
-   - Now shows real-time status from backend
-   - NPU shows 0% when idle, actual usage during transcription
+1. **Fixed Live Transcription Issues**
+   - Fixed repeated "Thank you" problem by properly handling audio chunks
+   - Implemented 10-second chunk processing with 3-second minimum
+   - Added software resampling from 44.1kHz to 16kHz for Whisper
+   - Live transcription now shows actual speech content
 
-2. **Fixed USB Microphone Detection**
-   - Case-insensitive device name matching
-   - Properly detects "USB PnP Sound Device (M-305)"
-   - Added debug logging for troubleshooting
+2. **Enhanced Speaker Diarization**
+   - Implemented sophisticated pause-based speaker detection
+   - Added conversational pattern recognition ("yes,", "no,", "well,")
+   - Support for up to 4 speakers with automatic cycling
+   - Uses question marks and response phrases to detect speaker changes
 
-3. **Completed Phase 1 Features**
-   - Recording interface fully connected to backend
-   - Live transcription via WebSocket working
-   - Session list displays all recordings
-   - Session details page with audio player
-   - Basic export functionality (audio + transcript)
+3. **Added Dashboard Recording Controls**
+   - Recording button now on main dashboard
+   - Live transcription display integrated into dashboard
+   - More intuitive and accessible UI
+   - Recording state persists when navigating between pages
+
+4. **Updated Documentation**
+   - System Architecture updated with actual implementation details
+   - NPU documentation updated with latest performance metrics
+   - CLAUDE.md reflects current project status
 
 ## 🎯 IMMEDIATE NEXT STEPS
 
@@ -310,7 +319,7 @@ docker compose -f docker-compose-full-stack.yml up -d
 5. **Transcript Editing**: In-place editing not yet available
 6. **Audio Monitoring**: May conflict with recording (both use same device)
 
-## ✅ Fixed Issues (Jan 9, 2025)
+## ✅ Fixed Issues (Jan 10, 2025)
 1. ~~Mock data in components~~ - All removed and connected to backend
 2. ~~Network access issues~~ - Fixed with dynamic config
 3. ~~NPU status not loading~~ - Fixed endpoint configuration
@@ -335,11 +344,17 @@ docker compose -f docker-compose-full-stack.yml up -d
 - Default: large-v3 with NPU for best accuracy + speed
 - **NPU Performance (Confirmed)**:
   - **220x speedup** over CPU-only transcription
-  - **0.004 RTF** - processes 1 hour in 14 seconds
+  - **0.0045 RTF** - processes 1 hour in 16.2 seconds
   - **4,789 tokens/second** throughput
   - INT8 quantization optimized for AMD Phoenix NPU
 
-### Recent Improvements (Jan 9, 2025 - 9:30 PM)
+### Audio Processing Pipeline
+- **Recording**: 44.1kHz native rate (USB mic's optimal setting)
+- **Resampling**: Software resample to 16kHz for Whisper (minimal CPU cost ~0.1%)
+- **Chunk Size**: 10-second chunks provide optimal context for transcription
+- **Live Monitoring**: Real-time transcription during recording via WebSocket
+
+### Recent Improvements (Jan 10, 2025)
 - **CRITICAL FIX**: Disabled audio monitoring to fix recording conflicts
 - **MAJOR FIX**: Recording now works properly (37+ seconds tested)
 - **DOCUMENTED**: Real NPU performance metrics (220x speedup confirmed)
@@ -356,7 +371,7 @@ docker compose -f docker-compose-full-stack.yml up -d
 - **ENHANCEMENT**: Enabled audio level monitoring WebSocket
 - **BACKEND**: Re-enabled audio monitoring service with Redis
 
-### Key Technical Fixes (Jan 9, 2025 - 9:00 PM)
+### Key Technical Fixes (Jan 10, 2025)
 - Replaced all hardcoded localhost URLs with dynamic configuration
 - Fixed MeetingInsights to fetch real AI insights from backend
 - Fixed UltimateDashboard to display actual system metrics
@@ -366,5 +381,17 @@ docker compose -f docker-compose-full-stack.yml up -d
 - Added .env support for explicit backend URL configuration
 
 ---
+
+**Current Session Updates**:
+- Fixed live transcription to show actual speech instead of repeated "Thank you"
+- Improved speaker diarization with advanced pattern detection
+- Added recording controls to dashboard for better accessibility
+- Updated all documentation with latest implementation details
+
+**Audio Processing Notes**:
+- Recording at 44.1kHz (USB mic native rate) - no hardware resampling needed
+- Software resampling to 16kHz for Whisper (minimal CPU cost ~0.1%)
+- 10-second chunks provide optimal context for transcription
+- NPU provides 220x speedup with Whisper Large-v3
 
 **Next Session Focus**: Begin Phase 2 - Intelligence Features (Analytics, AI Insights, Speaker Metrics)

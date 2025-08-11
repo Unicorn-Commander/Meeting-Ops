@@ -110,6 +110,11 @@ export const config = {
   },
   
   wsEndpoints: {
+    // Base URL for WebSocket connections
+    get base() {
+      return getWsBaseUrl();
+    },
+    
     // Core WebSocket endpoints
     stream: (sessionId: string) => `${getWsBaseUrl()}/ws/stream/${sessionId}`,
     transcription: (sessionId: string) => `${getWsBaseUrl()}/ws/transcription/${sessionId}`,

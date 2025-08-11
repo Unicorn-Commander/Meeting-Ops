@@ -9,6 +9,9 @@ import uuid
 import json
 import sys
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -117,33 +120,61 @@ async def stop_recording(session_id: str):
         session = sessions[session_id]
         session["duration"] = result.get("duration", 0)
         session["file_size"] = result.get("file_size", 0)
-        session["status"] = "processing"  # Set to processing while transcribing
+        session["status"] = "processing_final"  # Processing final accurate transcription
         session["end_time"] = datetime.utcnow().isoformat()
         session["audio_file_path"] = result.get("file_path")
         
-        # Start transcription - try real Whisper first, fallback to WhisperX mock
+        # Store live transcription segments before final processing
+        # These are the real-time chunks that were shown during recording
+        if "transcription" in session:
+            session["live_transcription"] = session["transcription"].copy()
+            logger.info(f"Saved {len(session.get('live_transcription', {}).get('segments', []))} live segments")
+        
+        # Do FULL ACCURATE TRANSCRIPTION of entire recording
+        # This is separate from live transcription chunks
         if result.get("file_path") and os.path.exists(result["file_path"]):
             try:
-                print(f"🎙️ Starting transcription of {result['file_path']}")
+                print(f"🎙️ Starting FINAL ACCURATE transcription of {result['file_path']}")
+                print(f"   File size: {session['file_size']:,} bytes")
+                print(f"   Duration: {session['duration']:.1f} seconds")
+                print("   Using Whisper Large-v3 for maximum accuracy...")
                 
-                # Try real Whisper transcription first
-                transcription_result = whisper_realtime_service.transcribe_audio_file(
-                    result["file_path"]
+                # Use WhisperX NPU engine for best accuracy
+                from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
+                
+                # Initialize with large-v3 for best accuracy
+                transcriber = WhisperXNPUEngine(model_size="large-v3")
+                
+                # Process ENTIRE file at once for best context
+                # No chunking, no rushing - just accuracy
+                transcription_result = transcriber.transcribe(
+                    result["file_path"],
+                    diarize=True  # Full speaker diarization
                 )
                 
-                if transcription_result and transcription_result.get("text"):
+                if transcription_result:
+                    # Store BOTH transcriptions
+                    session["final_transcription"] = transcription_result  # Accurate full transcript
+                    # Keep live_transcription separate for reference
+                    # The main 'transcription' field will be the final accurate one
                     session["transcription"] = transcription_result
-                    print(f"✅ Real Whisper transcription completed in {transcription_result.get('processing_time', 0):.2f}s")
-                    print(f"   Model: {transcription_result.get('model', 'unknown')}")
-                    print(f"   Text length: {len(transcription_result.get('text', ''))}")
+                    
+                    # Calculate stats
+                    num_segments = len(transcription_result.get("segments", []))
+                    processing_time = transcription_result.get("processing_time", 0)
+                    speedup = transcription_result.get("speedup", 0)
+                    
+                    print(f"✅ FINAL transcription completed!")
+                    print(f"   Segments: {num_segments}")
+                    print(f"   Processing time: {processing_time:.2f}s")
+                    print(f"   Speedup: {speedup:.1f}x real-time")
+                    print(f"   NPU accelerated: {transcription_result.get('npu_accelerated', False)}")
+                    
+                    # Mark the difference
+                    session["has_final_transcription"] = True
                 else:
-                    # Fallback to WhisperX mock if real transcription fails
-                    print("⚠️ Real transcription failed, using WhisperX mock")
-                    transcription_result = whisperx_service.transcribe_file(
-                        result["file_path"], 
-                        diarize=True
-                    )
-                    session["transcription"] = transcription_result
+                    print("⚠️ Final transcription returned no results")
+                    session["has_final_transcription"] = False
                     
                 session["status"] = "completed"
                 
@@ -167,6 +198,8 @@ async def stop_recording(session_id: str):
             "file_path": result.get("file_path"),
             "file_size": result.get("file_size", 0),
             "has_transcription": "transcription" in session,
+            "has_live_transcription": "live_transcription" in session,
+            "has_final_transcription": "final_transcription" in session,
             "message": "Recording stopped and transcribed successfully"
         }
     except Exception as e:
@@ -247,6 +280,64 @@ async def get_audio_level():
     """Get current audio level"""
     level = simple_audio_recorder.get_audio_level()
     return {"level": level}
+
+@router.get("/recording-sessions/{session_id}/download/audio")
+async def download_audio(session_id: str):
+    """Download audio file for a session"""
+    from fastapi.responses import FileResponse
+    
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    audio_path = session.get("audio_file_path")
+    
+    if not audio_path or not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    
+    filename = f"{session['name'].replace(' ', '_')}_audio.wav"
+    return FileResponse(audio_path, filename=filename, media_type="audio/wav")
+
+@router.get("/recording-sessions/{session_id}/download/transcript")
+async def download_transcript(session_id: str):
+    """Download transcript for a session"""
+    from fastapi.responses import Response
+    
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    # Build transcript text
+    transcript = f"Recording: {session['name']}\n"
+    transcript += f"Date: {session['created_at']}\n"
+    transcript += f"Duration: {session.get('duration', 0)} seconds\n"
+    transcript += "\n--- TRANSCRIPT ---\n\n"
+    
+    # Use final transcription if available, otherwise use regular
+    if "final_transcription" in session and session["final_transcription"].get("segments"):
+        for segment in session["final_transcription"]["segments"]:
+            speaker = segment.get("speaker", "SPEAKER")
+            text = segment.get("text", "")
+            transcript += f"[{speaker}]: {text}\n\n"
+    elif "transcription" in session and session["transcription"].get("segments"):
+        for segment in session["transcription"]["segments"]:
+            speaker = segment.get("speaker", "SPEAKER")
+            text = segment.get("text", "")
+            transcript += f"[{speaker}]: {text}\n\n"
+    elif "transcription" in session and session["transcription"].get("text"):
+        transcript += session["transcription"]["text"]
+    else:
+        transcript += "No transcription available."
+    
+    filename = f"{session['name'].replace(' ', '_')}_transcript.txt"
+    return Response(
+        content=transcript,
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 @router.post("/recording-sessions/{session_id}/summarize")
 async def summarize_session(session_id: str):

@@ -106,16 +106,21 @@ Unicorn Commander Meeting Ops is a local-first, AI-powered meeting room recordin
 ### 2. Audio Processing Pipeline
 
 ```
-Audio Input → Buffer → NPU Processing → Transcription → Storage
-     ↓           ↓           ↓              ↓           ↓
-  Hardware → WebSocket → MLIR Kernels → Speaker ID → Database
+USB Mic (44.1kHz) → arecord → WAV File → Live Monitoring
+        ↓                          ↓              ↓
+   Native Rate                Recording     Chunk Processing
+        ↓                          ↓              ↓
+   No Resampling             Storage      Resample to 16kHz
+                                   ↓              ↓
+                               Database    NPU Transcription
+                                            (WhisperX Large-v3)
 ```
 
 **Components**:
-- `AudioInputService`: Hardware interface layer
-- `AudioRecordingService`: File recording and streaming
-- `AudioBuffer`: Circular buffer for real-time processing
-- `NPUAccelerator`: Hardware acceleration interface
+- `WorkingAudioService`: Simplified reliable audio capture using arecord
+- `LiveRecordingTranscriptionService`: Monitors recording files and transcribes chunks
+- `WhisperXNPUEngineReal`: Hardware acceleration with Large-v3 model
+- `AudioResampling`: Software resampling from 44.1kHz to 16kHz for Whisper
 
 ### 3. NPU Acceleration Layer
 
@@ -131,17 +136,24 @@ aie.tile {
 ```
 
 **Performance Characteristics**:
-- **WhisperX NPU Unified**: 7,866x real-time factor
-- **Basic Transcription**: 220x real-time factor
-- **Speaker Diarization**: 50x real-time factor
+- **WhisperX NPU Unified**: 220x real-time factor (actual measurement)
+- **Whisper Large-v3**: INT8 quantized for NPU optimization
+- **Speaker Diarization**: Enhanced pause-based detection
 - **Power Efficiency**: 10x better than CPU
+- **Processing Speed**: 10-second chunks with 3-second minimum
 
 ### 4. Real-Time Communication
 
 **WebSocket Endpoints**:
-- `/ws/stream/{session_id}`: Audio streaming and transcription
-- `/ws/audio-level`: Real-time audio level monitoring
+- `/ws/transcription/{session_id}`: Session-specific live transcription
+- `/ws/audio-levels`: Real-time audio level monitoring (Redis pub/sub)
 - `/ws/session-status`: Session state updates
+
+**Live Transcription Architecture**:
+- Server-side recording from USB microphone
+- Chunk-based processing (10-second chunks)
+- Real-time broadcasting of transcription segments
+- Speaker diarization with conversational pattern detection
 
 **Wyoming Protocol** (Port 10700):
 - **Satellite Integration**: ESP32 microphone arrays
@@ -537,18 +549,20 @@ events = service.events().list(
 ## Performance Characteristics
 
 ### NPU Performance
-- **Inference Speed**: 4,789 tokens/second
-- **Real-Time Factor**: 0.0001x (7,866x real-time)
-- **Memory Usage**: 512MB for unified model
+- **Model**: Whisper Large-v3 (INT8 quantized)
+- **Real-Time Factor**: 0.0045x (220x real-time)
+- **Memory Usage**: ~2GB for Large-v3 model
 - **Power Consumption**: 15W total system load
 - **Latency**: 50-100ms first token
+- **Audio Resampling**: Minimal cost (~0.1% CPU for 44.1kHz to 16kHz)
 
 ### System Performance
-- **Concurrent Sessions**: 10+ simultaneous recordings
-- **Audio Processing**: 16kHz, 16-bit, mono
+- **Concurrent Sessions**: Single active recording (server-side mic limitation)
+- **Audio Processing**: Recording at 44.1kHz native, processing at 16kHz
 - **WebSocket Connections**: 100+ concurrent clients
 - **File Storage**: Unlimited with automatic cleanup
 - **Database**: 1M+ transcription segments supported
+- **Chunk Processing**: 10-second chunks for optimal context
 
 ### Scalability
 - **Horizontal**: Multiple appliance deployment

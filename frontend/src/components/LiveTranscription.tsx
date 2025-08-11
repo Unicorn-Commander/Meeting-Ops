@@ -105,9 +105,9 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
 
   const handleTranscriptionData = (data: any) => {
     const newSegment: TranscriptionSegment = {
-      id: data.id || Date.now().toString(),
+      id: data.id || `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       text: data.text || '',
-      speaker: data.speaker_id || data.speaker,
+      speaker: data.speaker_id || data.speaker || null,  // Can be null for live (no diarization)
       timestamp: data.timestamp || new Date().toISOString(),
       confidence: data.confidence || 0,
       isComplete: true
