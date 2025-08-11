@@ -196,6 +196,22 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ AI Chat router failed to load: {e}")
 
+# Import Vocabulary Management router
+try:
+    from api.vocabulary import router as vocabulary_router
+    app.include_router(vocabulary_router)
+    logger.info("📚 Vocabulary Management router loaded (custom acronyms)")
+except Exception as e:
+    logger.warning(f"⚠️ Vocabulary Management router failed to load: {e}")
+
+# Import Meeting Notes router
+try:
+    from api.meeting_notes import router as meeting_notes_router
+    app.include_router(meeting_notes_router)
+    logger.info("📝 Meeting Notes router loaded (AI-powered notes generation)")
+except Exception as e:
+    logger.warning(f"⚠️ Meeting Notes router failed to load: {e}")
+
 # Import System Configuration router
 try:
     from api.system_config import router as system_config_router

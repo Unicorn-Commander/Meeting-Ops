@@ -1,16 +1,19 @@
 """
 Live Recording Transcription Service
 Processes chunks of audio during recording for real-time transcription
+Now with AI-powered meeting notes generation
 """
 
 import asyncio
 import logging
 import time
 import os
+import json
 from pathlib import Path
 from typing import Optional, Dict, List
 import numpy as np
 import soundfile as sf
+import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,8 @@ class LiveRecordingTranscriptionService:
         self.current_file = None
         self.last_position = 0
         self.transcription_task = None
+        self.redis_client = None
+        self.transcript_buffer = []  # Buffer for meeting notes generation
         
     async def start_monitoring(self, audio_file: str, session_id: str):
         """Start monitoring a recording file for live transcription"""
@@ -149,6 +154,12 @@ class LiveRecordingTranscriptionService:
                                         broadcast_segment
                                     )
                                     
+                                    # Add to transcript buffer for notes generation
+                                    self.transcript_buffer.append(broadcast_segment)
+                                    
+                                    # Publish to Redis for notes generation service
+                                    await self._publish_to_redis(broadcast_segment)
+                                    
                                 logger.info(f"Transcribed chunk: {len(result['segments'])} segments")
                             else:
                                 logger.warning("No segments returned from transcription")
@@ -164,6 +175,28 @@ class LiveRecordingTranscriptionService:
             except Exception as e:
                 logger.error(f"Live transcription error: {e}")
                 await asyncio.sleep(2)
+    
+    async def _publish_to_redis(self, segment: Dict):
+        """Publish transcript segment to Redis for notes generation"""
+        try:
+            if not self.redis_client:
+                self.redis_client = await redis.from_url("redis://localhost:6379", decode_responses=True)
+            
+            # Publish to channel for meeting notes service
+            channel = f"transcription:{self.session_id}"
+            message = json.dumps({
+                'text': segment['text'],
+                'speaker': segment.get('speaker'),
+                'timestamp': time.time(),
+                'start': segment.get('start'),
+                'end': segment.get('end')
+            })
+            
+            await self.redis_client.publish(channel, message)
+            logger.debug(f"Published segment to Redis channel: {channel}")
+            
+        except Exception as e:
+            logger.error(f"Error publishing to Redis: {e}")
                 
 # Global instance
 live_recording_transcription = LiveRecordingTranscriptionService()
