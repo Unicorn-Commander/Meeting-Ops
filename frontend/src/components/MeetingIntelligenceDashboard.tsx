@@ -71,6 +71,10 @@ export const MeetingIntelligenceDashboard: React.FC<{
     const saved = localStorage.getItem('meeting-intelligence-auto-final');
     return saved ? JSON.parse(saved) : true;
   });
+  const [liveAiEnabled, setLiveAiEnabled] = useState(() => {
+    const saved = localStorage.getItem('meeting-intelligence-live-ai-enabled');
+    return saved ? JSON.parse(saved) : true;
+  });
   // Generated content state with persistence
   const [realNotes, setRealNotes] = useState<any>(() => {
     const saved = localStorage.getItem(`meeting-intelligence-live-notes-${meetingData.sessionId}`);
@@ -256,6 +260,10 @@ export const MeetingIntelligenceDashboard: React.FC<{
     localStorage.setItem('meeting-intelligence-auto-final', JSON.stringify(autoDetectionFinal));
   }, [autoDetectionFinal]);
 
+  useEffect(() => {
+    localStorage.setItem('meeting-intelligence-live-ai-enabled', JSON.stringify(liveAiEnabled));
+  }, [liveAiEnabled]);
+
   // Persist generated content
   useEffect(() => {
     if (realNotes && meetingData.sessionId) {
@@ -271,8 +279,8 @@ export const MeetingIntelligenceDashboard: React.FC<{
 
   // Connect to meeting notes WebSocket
   useEffect(() => {
-    if (!meetingData.sessionId || !isRecording) {
-      // Cleanup WebSocket if not recording
+    if (!meetingData.sessionId || !isRecording || !liveAiEnabled) {
+      // Cleanup WebSocket if not recording or AI disabled
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -326,7 +334,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
         wsRef.current.close();
       }
     };
-  }, [meetingData.sessionId, isRecording]);
+  }, [meetingData.sessionId, isRecording, liveAiEnabled]);
 
   // Send transcript chunks to WebSocket when transcript updates
   useEffect(() => {
@@ -354,14 +362,14 @@ export const MeetingIntelligenceDashboard: React.FC<{
         }
       }
       
-      // Also trigger API call for live notes generation if we have enough new content
-      // and templates are selected
-      if (activeLiveTemplates.length > 0 && newContent.length > 100 && !notesLoading) {
+      // Also trigger API call for live notes generation if we have enough new content,
+      // templates are selected, and live AI is enabled
+      if (activeLiveTemplates.length > 0 && newContent.length > 100 && !notesLoading && liveAiEnabled) {
         console.log('[MeetingIntelligence] Auto-generating notes for new content...');
         generateLiveNotes();
       }
     }
-  }, [meetingData.transcript, isRecording, activeLiveTemplates, lastTranscriptLength]);
+  }, [meetingData.transcript, isRecording, activeLiveTemplates, lastTranscriptLength, liveAiEnabled]);
 
   // Fetch existing notes if not recording
   useEffect(() => {
@@ -786,19 +794,17 @@ export const MeetingIntelligenceDashboard: React.FC<{
             {isRecording && (
               <button
                 onClick={() => {
-                  // Toggle live AI processing
-                  // This could control whether WebSocket sends transcript chunks to AI
-                  console.log('Toggle live AI processing');
+                  setLiveAiEnabled(!liveAiEnabled);
                 }}
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors ${
-                  wsConnected 
+                  liveAiEnabled 
                     ? 'bg-green-500/20 text-green-400 border border-green-500/50'
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
                 title="Enable/disable real-time AI analysis during recording"
               >
                 <Brain className="w-3 h-3" />
-                Live AI {wsConnected ? 'ON' : 'OFF'}
+                Live AI {liveAiEnabled ? 'ON' : 'OFF'}
               </button>
             )}
 
@@ -994,8 +1000,8 @@ export const MeetingIntelligenceDashboard: React.FC<{
         <div className="flex items-center justify-between text-xs text-gray-400">
           {isRecording ? (
             <span className="flex items-center gap-1">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-              Live AI analysis {wsConnected ? 'active' : 'paused'}
+              <div className={`w-2 h-2 rounded-full ${liveAiEnabled && wsConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></div>
+              Live AI analysis {liveAiEnabled ? (wsConnected ? 'active' : 'connecting') : 'disabled'}
             </span>
           ) : meetingData.transcript ? (
             <span className="flex items-center gap-1">

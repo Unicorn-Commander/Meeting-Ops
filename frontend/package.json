@@ -8,6 +8,7 @@
     "dev:https": "vite --config vite.config.https.ts",
     "dev:localhost": "vite --host localhost",
     "build": "tsc -b && vite build",
+    "build:production": "vite build",
     "build:docker": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",

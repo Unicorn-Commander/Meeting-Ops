@@ -814,7 +814,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
                 <LiveTranscriptionChat 
                   transcriptions={globalTranscriptions || []}
                   isRecording={isRecording}
-                  className="h-full"
+                  className="h-[400px] min-h-[300px]"
                 />
                 
                 {/* Live AI Summary Panel */}

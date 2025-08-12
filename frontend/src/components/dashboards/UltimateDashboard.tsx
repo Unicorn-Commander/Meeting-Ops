@@ -65,7 +65,6 @@ export const UltimateDashboard: React.FC = () => {
   const recordingSessionId = activeSession?.id || null;
   const recordingTime = useRecording().recordingTime; // Use global recording time directly
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Key metrics
@@ -228,11 +227,7 @@ export const UltimateDashboard: React.FC = () => {
       
       if (!response.ok) throw new Error('Failed to stop recording');
       
-      // Close WebSocket
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      // WebSocket is handled by LiveTranscription component
       
       // Clear timer
       if (intervalRef.current) {
@@ -258,47 +253,8 @@ export const UltimateDashboard: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Connect to existing recording WebSocket if recording is active
-  useEffect(() => {
-    if (globalIsRecording && activeSession?.id && !wsRef.current) {
-      const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${activeSession.id}`;
-      console.log('[Dashboard] Connecting to existing transcription WebSocket:', wsUrl);
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('[Dashboard] WebSocket connected to existing session');
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'transcription' && data.segment) {
-            const segment = {
-              id: Date.now().toString() + '_' + Math.random(),
-              text: data.segment.text || '',
-              timestamp: new Date().toISOString(),
-              speaker: null,
-              confidence: data.segment.confidence || 0.95,
-              isFlagged: false
-            };
-            
-            addTranscription(segment);
-          }
-        } catch (error) {
-          console.error('[Dashboard] WebSocket message error:', error);
-        }
-      };
-
-      ws.onerror = (error) => {
-        console.error('[Dashboard] WebSocket error:', error);
-      };
-
-      ws.onclose = () => {
-        console.log('[Dashboard] WebSocket closed');
-      };
-    }
-  }, [globalIsRecording, activeSession, addTranscription]);
+  // Note: WebSocket transcription is handled by LiveTranscription component to avoid duplicates
+  // The dashboard just displays the global transcriptions from the context
 
   // Auto-scroll dashboard transcription
   useEffect(() => {
