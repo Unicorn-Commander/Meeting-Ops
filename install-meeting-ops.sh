@@ -194,24 +194,49 @@ pip install --upgrade pip setuptools wheel
 
 # Install backend dependencies
 print_status "Installing Python dependencies..."
+
+# Check Python version for appropriate requirements
+PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | grep -oP '\d+\.\d+')
+print_status "Detected Python version: $PYTHON_VERSION"
+
+# Install core dependencies first
+print_status "Installing core dependencies..."
+pip install psycopg2-binary  # Install PostgreSQL adapter first
+pip install redis  # Install Redis client
+pip install requests  # Install requests for API calls
+pip install ollama  # Install Ollama client
+
+# Handle PyTorch installation separately for version compatibility
+print_status "Installing PyTorch packages..."
+pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu || {
+    print_warning "PyTorch installation failed, trying without specific versions..."
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
+}
+
+# Try to install full requirements
 if [ -f "requirements.txt" ]; then
-    # Install in order to handle dependencies properly
-    pip install psycopg2-binary  # Install PostgreSQL adapter first
-    pip install redis  # Install Redis client
-    pip install requests  # Install requests for API calls
-    pip install ollama  # Install Ollama client
-    
-    # Handle PyTorch installation separately for version compatibility
-    print_status "Installing PyTorch packages..."
-    pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
-    
-    # Install remaining requirements, ignoring PyTorch packages already installed
-    pip install -r requirements.txt || {
-        print_warning "Some packages may have failed. Attempting to install core packages..."
-        # Install core packages that we know work
-        pip install fastapi uvicorn sqlalchemy alembic
-        pip install openai anthropic ollama
-        pip install numpy librosa soundfile pyaudio
+    print_status "Installing full requirements..."
+    pip install -r requirements.txt 2>&1 | tee install.log || {
+        print_warning "Some packages failed to install. Installing essential packages..."
+        
+        # If main requirements fail, use essential requirements
+        if [ -f "requirements-essential.txt" ]; then
+            print_status "Using essential requirements for fresh installation..."
+            pip install -r requirements-essential.txt || {
+                print_error "Essential requirements also failed"
+                print_status "Check install.log for details"
+            }
+        else
+            # Fallback to manual installation of core packages
+            print_status "Installing core packages manually..."
+            pip install fastapi uvicorn sqlalchemy alembic
+            pip install openai anthropic ollama
+            pip install numpy librosa soundfile pyaudio pydub
+            pip install openai-whisper  # Fallback transcription
+        fi
+        
+        print_warning "Note: Custom NPU-optimized transcription is included in the codebase"
+        print_warning "The system will work even if whisperx package installation failed"
     }
 else
     print_error "No requirements.txt found"

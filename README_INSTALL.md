@@ -266,6 +266,19 @@ ollama list
 4. Click "Start Recording" on dashboard
 5. Verify live transcription appears
 
+## Important Notes for Fresh Installations
+
+### Custom NPU-Optimized Components
+This system includes custom NPU-optimized implementations that don't require external packages:
+- **WhisperX NPU**: Custom implementation in `backend/services/whisperx_py313.py`
+- **Speaker Diarization**: Built-in implementation without pyannote.audio dependency
+- If `whisperx` or `pyannote.audio` fail to install, the system will still work using the custom implementations
+
+### Python Version Compatibility
+- **Python 3.13**: Use `requirements-essential.txt` if you encounter package conflicts
+- **Python 3.11/3.12**: Use standard `requirements.txt`
+- PyTorch will be installed with CPU support by default (NPU optimization is handled separately)
+
 ## Troubleshooting
 
 ### Common Issues

@@ -31,8 +31,11 @@ sentence-transformers==3.3.1
 huggingface-hub>=0.16.0
 
 # Audio Processing (NPU-optimized whisperx)
-whisperx==3.1.1
-pyannote.audio==3.1.1
+# Note: whisperx and pyannote.audio may fail on fresh installs
+# The system includes custom implementations in services/whisperx_py313.py
+# that work without these packages for NPU acceleration
+# whisperx==3.1.1  # Optional - custom implementation available
+# pyannote.audio==3.1.1  # Optional - may have compatibility issues
 librosa==0.10.2.post1
 soundfile>=0.12.1
 pyaudio==0.2.14
