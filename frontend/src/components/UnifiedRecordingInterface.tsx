@@ -3,11 +3,16 @@ import {
   Mic, MicOff, Play, Pause, Square, Circle, Flag, 
   Volume2, Settings, Zap, CheckCircle, AlertCircle,
   Activity, Users, Clock, Save, Download, Share2,
-  Brain, TrendingUp, Loader2, Info, Trash2
+  Brain, TrendingUp, Loader2, Info, Trash2, ExternalLink,
+  Maximize2, Minimize2, FileText, MessageSquare, Sparkles,
+  Cpu
 } from 'lucide-react';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { NpuStatusIndicator } from './NpuStatusIndicator';
 import { LiveTranscriptionChat } from './LiveTranscriptionChat';
+import { MeetingIntelligenceDashboard } from './MeetingIntelligenceDashboard';
+import { LiveMeetingNotes } from './LiveMeetingNotes';
+import { ModelProviderSelector } from './ModelProviderSelector';
 import { config } from '../config';
 import { toast } from 'react-toastify';
 import { useRecording } from '../contexts/RecordingContext';
@@ -45,12 +50,24 @@ export const UnifiedRecordingInterface: React.FC = () => {
   const [session, setSession] = useState<RecordingSession | null>(activeSession);
   const [isRecording, setIsRecording] = useState(globalIsRecording);
   const [isPaused, setIsPaused] = useState(false);
-  const [transcriptions, setTranscriptions] = useState<TranscriptionSegment[]>(globalTranscriptions);
+  const [transcriptions, setTranscriptions] = useState<TranscriptionSegment[]>(globalTranscriptions || []);
   const [isConnected, setIsConnected] = useState(false);
-  const [micStatus, setMicStatus] = useState<'idle' | 'connecting' | 'active' | 'error'>('idle');
+  const [micStatus, setMicStatus] = useState<'idle' | 'connecting' | 'ready' | 'active' | 'error'>('idle');
   const [audioLevel, setAudioLevel] = useState(0);
   const [recordingTime, setRecordingTime] = useState(globalRecordingTime);
   const [showInsights, setShowInsights] = useState(true);
+  const [activeView, setActiveView] = useState<'transcription' | 'notes' | 'intelligence' | 'models'>('transcription');
+  const [transcriptSubView, setTranscriptSubView] = useState<'raw' | 'notes'>('notes'); // Default to notes view
+
+  // Meeting intelligence data
+  const [meetingData, setMeetingData] = useState({
+    transcript: '',
+    notes: null,
+    sessionId: session?.id || '',
+    duration: recordingTime,
+    participants: [],
+    topics: []
+  });
   
   const wsRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -185,7 +202,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
               id: Date.now().toString() + '_' + Math.random(),
               text: data.segment.text || '',
               timestamp: new Date().toISOString(),
-              speaker: null,  // No speaker for live
+              speaker: undefined,  // No speaker for live
               confidence: data.segment.confidence || 0.95,
               isFlagged: false
             };
@@ -358,7 +375,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
   // Flag moment
   const flagMoment = () => {
-    if (transcriptions.length > 0) {
+    if (transcriptions && transcriptions.length > 0) {
       const lastSegment = transcriptions[transcriptions.length - 1];
       setTranscriptions(prev => 
         prev.map(seg => 
@@ -381,6 +398,13 @@ export const UnifiedRecordingInterface: React.FC = () => {
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Pop-out window management
+  const openPopoutWindow = (type: string, sessionId: string) => {
+    // For now, just show an alert until backend is implemented
+    alert(`Pop-out window for ${type} - Feature coming soon!`);
+    console.log(`[Recording] Pop-out requested for ${type} with session ${sessionId}`);
   };
 
   // Check recording status on mount
@@ -449,7 +473,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
                   id: Date.now().toString() + '_' + Math.random(),
                   text: data.segment.text || '',
                   timestamp: new Date().toISOString(),
-                  speaker: null,  // No speaker for live
+                  speaker: undefined,  // No speaker for live
                   confidence: data.segment.confidence || 0.95,
                   isFlagged: false
                 };
@@ -520,7 +544,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
                 id: Date.now().toString() + '_' + Math.random(),
                 text: data.segment.text || '',
                 timestamp: new Date().toISOString(),
-                speaker: null,  // No speaker for live
+                speaker: undefined,  // No speaker for live
                 confidence: data.segment.confidence || 0.95,
                 isFlagged: false
               };
@@ -572,6 +596,20 @@ export const UnifiedRecordingInterface: React.FC = () => {
       }
     };
   }, []);
+
+  // Update meeting data when transcriptions change
+  useEffect(() => {
+    if (transcriptions) {
+      const combinedTranscript = transcriptions.map(t => t.text).join(' ');
+      setMeetingData(prev => ({
+        ...prev,
+        transcript: combinedTranscript,
+        sessionId: session?.id || '',
+        duration: recordingTime,
+        participants: Array.from(new Set(transcriptions.map(t => t.speaker).filter(Boolean)))
+      }));
+    }
+  }, [transcriptions, session, recordingTime]);
 
   // Get mic status color and text
   const getMicStatusDisplay = () => {
@@ -669,7 +707,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
             <button 
               onClick={clearTranscription}
-              disabled={transcriptions.length === 0}
+              disabled={!transcriptions || transcriptions.length === 0}
               className="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               title="Clear transcription"
             >
@@ -679,40 +717,222 @@ export const UnifiedRecordingInterface: React.FC = () => {
             <button className="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 transition-colors" title="Save">
               <Save className="w-5 h-5" />
             </button>
+
+            {/* View Switcher */}
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
+                <button
+                  onClick={() => setActiveView('transcription')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm transition-all ${
+                    activeView === 'transcription'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Live Feed
+                </button>
+                <button
+                  onClick={() => setActiveView('notes')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm transition-all ${
+                    activeView === 'notes'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4" />
+                  AI Notes
+                </button>
+                <button
+                  onClick={() => setActiveView('intelligence')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm transition-all ${
+                    activeView === 'intelligence'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  <Brain className="w-4 h-4" />
+                  Analytics
+                </button>
+                <button
+                  onClick={() => setActiveView('models')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm transition-all ${
+                    activeView === 'models'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  <Cpu className="w-4 h-4" />
+                  Models
+                </button>
+              </div>
+              
+              {/* Pop-out Controls */}
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => openPopoutWindow('transcription', session?.id || '')}
+                  className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors"
+                  title="Open transcription in new window"
+                >
+                  <ExternalLink className="w-3 h-3 text-gray-400" />
+                </button>
+                <button
+                  onClick={() => openPopoutWindow('intelligence', session?.id || '')}
+                  className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors"
+                  title="Open intelligence in new window"
+                >
+                  <Brain className="w-3 h-3 text-gray-400" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
       <div className="flex-1 flex gap-6 p-6 overflow-hidden">
-        {/* Left Panel - Live Transcription Chat */}
+        {/* Left Panel - Dynamic Content */}
         <div className="flex-1 flex flex-col gap-4">
-          {/* Use new chat-style component */}
-          <LiveTranscriptionChat 
-            transcriptions={transcriptions}
-            isRecording={isRecording}
-            className="flex-1"
-          />
+          {/* Live Feed View - Shows raw transcription with optional side panel */}
+          {activeView === 'transcription' && (
+            <>
+              <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* Enhanced Live Transcription */}
+                <LiveTranscriptionChat 
+                  transcriptions={transcriptions || []}
+                  isRecording={isRecording}
+                  className="h-full"
+                />
+                
+                {/* Live AI Summary Panel */}
+                <div className="bg-gray-900 rounded-lg border border-gray-800">
+                  <MeetingIntelligenceDashboard
+                    meetingData={{
+                      transcript: (transcriptions || []).map(t => t.text).join(' '),
+                      notes: null,
+                      sessionId: session?.id || '',
+                      duration: recordingTime,
+                      participants: Array.from(new Set((transcriptions || []).map(t => t.speaker).filter(Boolean))),
+                      topics: []
+                    }}
+                    isRecording={isRecording}
+                    className="h-full"
+                  />
+                </div>
+              </div>
+            </>
+          )}
 
-          {/* Real-time Insights */}
-          {showInsights && transcriptions.length > 0 && (
-            <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-              <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
-                <Brain className="w-4 h-4 text-purple-400" />
-                AI Insights
-              </h3>
-              <div className="grid grid-cols-3 gap-4 text-sm">
-                <div className="bg-gray-800/50 rounded p-3">
-                  <p className="text-purple-400 font-medium">Topics</p>
-                  <p className="text-gray-300">NPU optimization, performance</p>
+          {/* AI Notes View - Shows structured meeting notes */}
+          {activeView === 'notes' && (
+            <>
+              {session ? (
+                <div className="flex-1 flex flex-col">
+                  {/* Header with toggle */}
+                  <div className="bg-gray-900 rounded-t-lg border border-gray-800 border-b-0 p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Sparkles className="w-5 h-5 text-purple-400" />
+                        <h3 className="text-lg font-semibold text-white">AI-Generated Meeting Notes</h3>
+                        {isRecording && (
+                          <span className="px-2 py-1 bg-green-900/50 text-green-400 text-xs rounded-full animate-pulse">
+                            Live Updates
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-400">
+                        <Clock className="w-4 h-4" />
+                        <span>Updates every 30-60 seconds</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Live Meeting Notes Component */}
+                  <div className="flex-1 bg-gray-900 rounded-b-lg border border-gray-800 border-t-0 overflow-hidden">
+                    <LiveMeetingNotes
+                      sessionId={session.id}
+                      isRecording={isRecording}
+                      className="h-full"
+                    />
+                  </div>
                 </div>
-                <div className="bg-gray-800/50 rounded p-3">
-                  <p className="text-blue-400 font-medium">Speakers</p>
-                  <p className="text-gray-300">{new Set(transcriptions.map(t => t.speaker)).size} identified</p>
+              ) : (
+                <div className="flex-1 flex items-center justify-center bg-gray-900 rounded-lg border border-gray-800">
+                  <div className="text-center p-8">
+                    <Sparkles className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+                    <h3 className="text-lg font-semibold text-gray-400 mb-2">No Active Meeting</h3>
+                    <p className="text-gray-500">Start recording to see AI-generated meeting notes</p>
+                  </div>
                 </div>
-                <div className="bg-gray-800/50 rounded p-3">
-                  <p className="text-green-400 font-medium">Sentiment</p>
-                  <p className="text-gray-300">Positive (78%)</p>
+              )}
+            </>
+          )}
+
+          {/* Analytics View */}
+          {activeView === 'intelligence' && (
+            <div className="flex-1">
+              <MeetingIntelligenceDashboard
+                meetingData={{
+                  transcript: (transcriptions || []).map(t => t.text).join(' '),
+                  notes: null,
+                  sessionId: session?.id || '',
+                  duration: recordingTime,
+                  participants: Array.from(new Set((transcriptions || []).map(t => t.speaker).filter(Boolean))),
+                  topics: []
+                }}
+                isRecording={isRecording}
+                className="h-full"
+              />
+            </div>
+          )}
+
+          {/* Models View - AI Model Provider Selection */}
+          {activeView === 'models' && (
+            <div className="flex-1">
+              <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
+                <div className="mb-6">
+                  <h3 className="text-xl font-semibold text-white mb-2 flex items-center gap-3">
+                    <Cpu className="w-6 h-6 text-purple-400" />
+                    AI Model Configuration
+                  </h3>
+                  <p className="text-gray-400">
+                    Choose the AI model for meeting notes and analysis. Changes take effect immediately for new content.
+                  </p>
+                </div>
+                
+                <ModelProviderSelector />
+                
+                {/* Model Performance Info */}
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-gray-800 rounded-lg p-4">
+                    <h4 className="font-semibold text-white mb-2 flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-green-400" />
+                      Speed
+                    </h4>
+                    <p className="text-sm text-gray-400">
+                      Phi4-mini is fastest for real-time updates during live meetings.
+                    </p>
+                  </div>
+                  
+                  <div className="bg-gray-800 rounded-lg p-4">
+                    <h4 className="font-semibold text-white mb-2 flex items-center gap-2">
+                      <TrendingUp className="w-4 h-4 text-blue-400" />
+                      Balance
+                    </h4>
+                    <p className="text-sm text-gray-400">
+                      Granite 3.3 offers the best balance of speed and quality for most meetings.
+                    </p>
+                  </div>
+                  
+                  <div className="bg-gray-800 rounded-lg p-4">
+                    <h4 className="font-semibold text-white mb-2 flex items-center gap-2">
+                      <Brain className="w-4 h-4 text-purple-400" />
+                      Quality
+                    </h4>
+                    <p className="text-sm text-gray-400">
+                      Gemma3n provides the most detailed analysis and comprehensive insights.
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>

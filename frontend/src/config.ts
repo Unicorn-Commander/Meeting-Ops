@@ -83,6 +83,32 @@ export const config = {
       diarizationSettings: '/api/ai/diarization-settings',
     },
     
+    // Multi-model meeting notes (new unified system)
+    meetingNotes: {
+      generate: '/api/meeting-notes-unified/generate',
+      status: '/api/meeting-notes-unified/status',
+      switchProvider: '/api/meeting-notes-unified/switch-provider',
+      test: '/api/meeting-notes-unified/test',
+      websocket: (sessionId: string) => `/api/meeting-notes-unified/ws/meeting-notes/${sessionId}`,
+    },
+    
+    // Agent System (new decoupled system)
+    agents: {
+      configurations: '/api/agents/configurations',
+      create: '/api/agents/configurations',
+      providers: '/api/agents/providers',
+      execute: '/api/agents/execute/live',
+      initialize: '/api/agents/initialize-defaults',
+    },
+    
+    // Model Management (new system)
+    models: {
+      configurations: '/api/model-management/configurations',
+      providers: '/api/model-management/providers',
+      parameters: '/api/model-management/parameter-sets',
+      status: '/api/model-management/status',
+    },
+    
     // File management
     files: {
       list: '/api/files',

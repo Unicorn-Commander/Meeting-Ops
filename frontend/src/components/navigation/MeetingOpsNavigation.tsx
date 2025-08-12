@@ -37,7 +37,7 @@ const navigationStructure: NavItem[] = [
     icon: Mic,
     children: [
       { id: 'live-recording', label: 'Live Recording', icon: Activity, path: '/recording/live', badge: 'REC', badgeType: 'error' },
-      { id: 'sessions', label: 'Session Library', icon: Clock, path: '/recording/sessions' },
+      { id: 'sessions', label: 'Session Manager', icon: FolderOpen, path: '/sessions', badge: 'NEW', badgeType: 'success' },
       { id: 'quick-analysis', label: 'Quick Analysis', icon: BarChart3, path: '/intelligence/analytics' }
     ]
   },
@@ -71,6 +71,7 @@ const navigationStructure: NavItem[] = [
     icon: Settings,
     children: [
       { id: 'system-settings', label: 'System Settings', icon: Settings, path: '/org/settings', badge: 'CONFIG', badgeType: 'warning' },
+      { id: 'llm-settings', label: 'LLM Configuration', icon: Brain, path: '/org/llm-settings', badge: 'AI', badgeType: 'success' },
       { id: 'users', label: 'User Management', icon: Users, path: '/org/users' },
       { id: 'npu-audio', label: 'NPU & Audio', icon: Zap, path: '/system/npu', badge: '16 TOPS', badgeType: 'success' },
       { id: 'services', label: 'Service Status', icon: Activity, path: '/system/services' },

@@ -86,101 +86,8 @@ export const EmailTemplates: React.FC = () => {
         const data = await response.json();
         setTemplates(data);
       } else {
-        // Mock templates for demonstration
-        setTemplates([
-          {
-            id: '1',
-            name: 'Weekly Standup Summary',
-            subject: 'Weekly Standup Summary - {{meeting_date}}',
-            body: `Hi team,
-
-Here's a summary of our weekly standup meeting:
-
-**Meeting Summary:**
-{{summary}}
-
-**Action Items:**
-{{action_items}}
-
-**Attendees:**
-{{attendees}}
-
-**Recording:** {{recording_url}}
-
-Best regards,
-Meeting-Ops AI`,
-            type: 'summary',
-            variables: ['{{meeting_date}}', '{{summary}}', '{{action_items}}', '{{attendees}}', '{{recording_url}}'],
-            recipients: ['team@company.com'],
-            autoSend: true,
-            trigger: 'meeting_end',
-            createdAt: '2025-01-05T10:00:00Z',
-            lastUsed: '2025-01-09T15:30:00Z',
-            usageCount: 15,
-            isDefault: true
-          },
-          {
-            id: '2',
-            name: 'Client Meeting Report',
-            subject: 'Meeting Summary: {{meeting_title}}',
-            body: `Dear {{attendees}},
-
-Thank you for joining our meeting today. Here's a comprehensive summary:
-
-**Key Points Discussed:**
-{{summary}}
-
-**Decisions Made:**
-{{key_decisions}}
-
-**Next Steps:**
-{{action_items}}
-
-**Full Transcript:**
-{{export_links}}
-
-Please let me know if you have any questions.
-
-Best regards,
-Account Management Team`,
-            type: 'summary',
-            variables: ['{{meeting_title}}', '{{attendees}}', '{{summary}}', '{{key_decisions}}', '{{action_items}}', '{{export_links}}'],
-            recipients: ['client@external.com', 'account@company.com'],
-            autoSend: false,
-            trigger: 'manual',
-            createdAt: '2025-01-01T09:00:00Z',
-            usageCount: 8,
-            isDefault: false
-          },
-          {
-            id: '3',
-            name: 'Action Items Reminder',
-            subject: 'Action Items from {{meeting_title}} - Due Soon',
-            body: `Hello,
-
-This is a reminder about the action items from our recent meeting:
-
-{{action_items}}
-
-**Meeting Details:**
-- Date: {{meeting_date}}
-- Duration: {{meeting_duration}} minutes
-- Recording: {{recording_url}}
-
-Please update your progress on these items.
-
-Thanks!`,
-            type: 'action_items',
-            variables: ['{{meeting_title}}', '{{action_items}}', '{{meeting_date}}', '{{meeting_duration}}', '{{recording_url}}'],
-            recipients: ['team@company.com'],
-            autoSend: false,
-            trigger: 'scheduled',
-            createdAt: '2024-12-20T14:00:00Z',
-            lastUsed: '2025-01-08T11:20:00Z',
-            usageCount: 4,
-            isDefault: false
-          }
-        ]);
+        console.warn('Email templates data not available');
+        setTemplates([]);
       }
     } catch (error) {
       console.error('Failed to fetch templates:', error);
@@ -213,7 +120,13 @@ Thanks!`,
         // Demo mode
         const mockTemplate: EmailTemplate = {
           id: Date.now().toString(),
-          ...newTemplate,
+          name: newTemplate.name,
+          subject: newTemplate.subject,
+          body: newTemplate.body,
+          type: newTemplate.type as "summary" | "custom" | "transcript" | "action_items",
+          recipients: newTemplate.recipients,
+          autoSend: newTemplate.autoSend,
+          trigger: newTemplate.trigger,
           variables: extractVariables(newTemplate.body),
           createdAt: new Date().toISOString(),
           usageCount: 0,

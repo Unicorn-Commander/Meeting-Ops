@@ -23,6 +23,7 @@ import { TimeShiftRecording } from './components/TimeShiftRecording';
 // Components
 import { RecordingSessionsList } from './components/RecordingSessionsList';
 import { SessionDetails } from './pages/SessionDetails';
+import { Sessions } from './pages/Sessions';
 import { LiveTranscription } from './components/LiveTranscription';
 import { TranscriptionSettings } from './components/TranscriptionSettings';
 import { FileManager } from './components/FileManager';
@@ -47,6 +48,7 @@ import { SystemMonitor } from './components/SystemMonitor';
 import { NpuStatusIndicator } from './components/NpuStatusIndicator';
 import { NetworkStatus } from './components/NetworkStatus';
 import { LogViewer } from './components/LogViewer';
+import { LLMSettingsPage } from './pages/LLMSettingsPage';
 
 // Protected Route Component
 const ProtectedRoute: React.FC<{ 
@@ -100,6 +102,7 @@ export const AppRouter: React.FC = () => {
       <Route path="/login" element={
         isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login />
       } />
+      
 
       {/* Protected Routes */}
       <Route element={
@@ -116,9 +119,13 @@ export const AppRouter: React.FC = () => {
           <Route path="live" element={<UnifiedRecordingInterface />} />
           <Route path="timeshift" element={<TimeShiftRecording />} />
           <Route path="main" element={<UnifiedRecordingInterface />} />
-          <Route path="sessions" element={<RecordingSessionsList />} />
+          <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:sessionId" element={<SessionDetails />} />
         </Route>
+
+        {/* Sessions - Top level route for better access */}
+        <Route path="/sessions" element={<Sessions />} />
+        <Route path="/sessions/:sessionId" element={<SessionDetails />} />
 
         {/* Intelligence Center */}
         <Route path="/intelligence" element={<Outlet />}>
@@ -243,6 +250,11 @@ export const AppRouter: React.FC = () => {
               <div className="p-6 text-white">
                 <WorkingSystemSettings />
               </div>
+            </ProtectedRoute>
+          } />
+          <Route path="llm-settings" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser']}>
+              <LLMSettingsPage />
             </ProtectedRoute>
           } />
           <Route path="access" element={

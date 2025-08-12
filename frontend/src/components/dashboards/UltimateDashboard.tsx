@@ -4,7 +4,8 @@ import {
   TrendingUp, Calendar, Mail, AlertCircle, CheckCircle,
   BarChart3, PieChart, Flag, Star, Zap, Database,
   Shield, Wifi, Volume2, Download, Upload, Settings,
-  Circle, Square, MicOff, Loader2
+  Circle, Square, MicOff, Loader2, Brain, ExternalLink,
+  Maximize2, Minimize2
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useRecording } from '../../contexts/RecordingContext';
@@ -13,6 +14,7 @@ import { UnifiedRecordingInterface } from '../UnifiedRecordingInterface';
 import { SystemMonitor } from '../SystemMonitor';
 import { LiveTranscription } from '../LiveTranscription';
 import TranscriptionLoop from '../TranscriptionLoop';
+import { MeetingIntelligenceDashboard } from '../MeetingIntelligenceDashboard';
 import { config } from '../../config';
 
 interface DashboardMetric {
@@ -55,11 +57,13 @@ export const UltimateDashboard: React.FC = () => {
     todaysMeetings: 0
   });
   const [loading, setLoading] = useState(true);
+  const [fullscreenMode, setFullscreenMode] = useState<string | null>(null);
+  const [popoutWindows, setPopoutWindows] = useState<{[key: string]: Window | null}>({});
   
   // Recording state for dashboard - use global state
   const isRecording = globalIsRecording;
   const recordingSessionId = activeSession?.id || null;
-  const [recordingTime, setRecordingTime] = useState(0);
+  const recordingTime = useRecording().recordingTime; // Use global recording time directly
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
@@ -118,6 +122,27 @@ export const UltimateDashboard: React.FC = () => {
 
   // Recent activities
   const [recentActivities, setRecentActivities] = useState<any[]>([]);
+
+  // Pop-out window management
+  const openPopoutWindow = (type: string, sessionId: string) => {
+    // For now, just show an alert until backend is implemented
+    alert(`Pop-out window for ${type} - Feature coming soon!`);
+    console.log(`[Dashboard] Pop-out requested for ${type} with session ${sessionId}`);
+  };
+  
+  const toggleFullscreen = (type: string) => {
+    setFullscreenMode(prev => prev === type ? null : type);
+  };
+
+  // Meeting intelligence data - dynamically computed from global state
+  const meetingData = {
+    transcript: globalTranscriptions.map(t => t.text).join(' '),
+    notes: null,
+    sessionId: recordingSessionId || '',
+    duration: recordingTime,
+    participants: Array.from(new Set(globalTranscriptions.map(t => t.speaker).filter(Boolean))),
+    topics: []
+  };
 
   // Recording functions
   const startRecording = useCallback(async () => {
@@ -207,13 +232,11 @@ export const UltimateDashboard: React.FC = () => {
         console.log('[Dashboard] WebSocket closed');
       };
       
-      // Start timer
+      // Start timer - update global recording time
+      const startTime = Date.now();
       intervalRef.current = setInterval(() => {
-        setRecordingTime(prev => {
-          const newTime = prev + 1;
-          setGlobalRecordingTime(newTime);
-          return newTime;
-        });
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        setGlobalRecordingTime(elapsed);
       }, 1000);
 
       console.log('[Dashboard] Recording started:', sessionData.id);
@@ -255,7 +278,6 @@ export const UltimateDashboard: React.FC = () => {
       // Update global state
       setGlobalIsRecording(false);
       setActiveSession(null);
-      setRecordingTime(0);
       setGlobalRecordingTime(0);
       
       console.log('[Dashboard] Recording stopped');
@@ -320,6 +342,8 @@ export const UltimateDashboard: React.FC = () => {
       transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [globalTranscriptions]);
+
+  // Meeting data is now computed directly from global state, no need for effect
 
   // Fetch real data from backend
   useEffect(() => {
@@ -433,6 +457,39 @@ export const UltimateDashboard: React.FC = () => {
     );
   };
 
+  // Fullscreen overlay
+  if (fullscreenMode === 'intelligence') {
+    return (
+      <div className="fixed inset-0 z-50 bg-gray-950 text-white">
+        <div className="h-full flex flex-col">
+          <div className="flex items-center justify-between p-4 border-b border-gray-800">
+            <h1 className="text-xl font-bold">Meeting Intelligence - Fullscreen</h1>
+            <button
+              onClick={() => setFullscreenMode(null)}
+              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex-1 p-4">
+            <MeetingIntelligenceDashboard
+              meetingData={{
+                transcript: (globalTranscriptions || []).map(t => t.text).join(' '),
+                notes: null,
+                sessionId: recordingSessionId || '',
+                duration: recordingTime,
+                participants: Array.from(new Set((globalTranscriptions || []).map(t => t.speaker).filter(Boolean))),
+                topics: []
+              }}
+              isRecording={isRecording}
+              className="h-full"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       {/* Header */}
@@ -500,14 +557,14 @@ export const UltimateDashboard: React.FC = () => {
 
             {/* Main Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Live Transcription with Recording Controls */}
+              {/* Meeting Intelligence with Recording Controls */}
               <div className="lg:col-span-2">
                 <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
                   {/* Recording Header */}
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold flex items-center gap-2">
-                      <Mic className="w-5 h-5 text-purple-400" />
-                      Live Transcription
+                      <Brain className="w-5 h-5 text-purple-400" />
+                      Meeting Intelligence
                       {isRecording && (
                         <span className="ml-2 px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full flex items-center gap-1">
                           <Circle className="w-2 h-2 fill-current animate-pulse" />
@@ -547,57 +604,38 @@ export const UltimateDashboard: React.FC = () => {
                     </div>
                   </div>
                   
-                  {/* Transcription Display */}
-                  <div className="bg-gray-800/50 rounded-lg p-4 h-[400px] overflow-y-auto">
-                    {globalTranscriptions.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                        {isRecording ? (
-                          <>
-                            <Loader2 className="w-8 h-8 animate-spin mb-3" />
-                            <p className="text-sm">Waiting for speech...</p>
-                          </>
-                        ) : (
-                          <>
-                            <Mic className="w-8 h-8 mb-3 text-gray-600" />
-                            <p className="text-sm">Start recording to see transcription</p>
-                          </>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        {globalTranscriptions.map((segment, index) => (
-                          <div
-                            key={segment.id}
-                            className="bg-gray-700/30 backdrop-blur-sm rounded-lg p-4 border-l-4 border-purple-500 shadow-lg"
-                          >
-                            <div className="text-white text-xl leading-relaxed font-medium">
-                              {segment.text}
-                            </div>
-                            {segment.confidence && (
-                              <div className="mt-2 flex items-center gap-2">
-                                <div className="text-xs text-gray-400">Confidence:</div>
-                                <div className="flex gap-1">
-                                  {[1, 2, 3, 4, 5].map((level) => (
-                                    <div
-                                      key={level}
-                                      className={`w-2 h-2 rounded-full ${
-                                        segment.confidence! >= level * 0.2
-                                          ? 'bg-green-400'
-                                          : 'bg-gray-600'
-                                      }`}
-                                    />
-                                  ))}
-                                </div>
-                                <span className="text-xs text-gray-400">
-                                  {Math.round((segment.confidence || 0) * 100)}%
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                        <div ref={transcriptEndRef} />
-                      </div>
-                    )}
+                  {/* Meeting Intelligence Dashboard */}
+                  <div className="h-[450px] relative">
+                    <MeetingIntelligenceDashboard
+                      meetingData={{
+                        transcript: (globalTranscriptions || []).map(t => t.text).join(' '),
+                        notes: null,
+                        sessionId: recordingSessionId || '',
+                        duration: recordingTime,
+                        participants: Array.from(new Set((globalTranscriptions || []).map(t => t.speaker).filter(Boolean))),
+                        topics: []
+                      }}
+                      isRecording={isRecording}
+                      className="h-full"
+                    />
+                    
+                    {/* Pop-out and Full-screen Controls */}
+                    <div className="absolute top-2 right-2 flex items-center gap-1">
+                      <button
+                        onClick={() => openPopoutWindow('intelligence', recordingSessionId || '')}
+                        className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors"
+                        title="Open in new window"
+                      >
+                        <ExternalLink className="w-3 h-3 text-gray-400" />
+                      </button>
+                      <button
+                        onClick={() => toggleFullscreen('intelligence')}
+                        className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors"
+                        title="Toggle fullscreen"
+                      >
+                        <Maximize2 className="w-3 h-3 text-gray-400" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -667,9 +705,44 @@ export const UltimateDashboard: React.FC = () => {
         )}
 
         {activeView === 'analytics' && (
-          <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
-            <h2 className="text-xl font-semibold mb-4">Analytics Dashboard</h2>
-            <p className="text-gray-400">Analytics components will be integrated here...</p>
+          <div className="space-y-6">
+            <div className="h-[600px]">
+              <MeetingIntelligenceDashboard
+                meetingData={{
+                  transcript: (globalTranscriptions || []).map(t => t.text).join(' '),
+                  notes: null,
+                  sessionId: recordingSessionId || '',
+                  duration: recordingTime,
+                  participants: Array.from(new Set((globalTranscriptions || []).map(t => t.speaker).filter(Boolean))),
+                  topics: []
+                }}
+                isRecording={isRecording}
+                className="h-full w-full"
+              />
+            </div>
+            
+            {/* Additional Analytics Components */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-green-400" />
+                  Performance Trends
+                </h3>
+                <p className="text-gray-400 text-sm">
+                  Historical performance metrics and trends will appear here as more meetings are recorded.
+                </p>
+              </div>
+              
+              <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-blue-400" />
+                  Usage Analytics
+                </h3>
+                <p className="text-gray-400 text-sm">
+                  Meeting duration, frequency, and participation analytics will be displayed here.
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
@@ -681,8 +754,8 @@ export const UltimateDashboard: React.FC = () => {
         )}
       </div>
 
-      {/* Footer Status Bar */}
-      <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">
+      {/* Footer Status Bar - with proper spacing */}
+      <div className="bg-gray-900 border-t border-gray-800 px-6 py-2 mt-4">
         <div className="flex items-center justify-between text-xs">
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1">

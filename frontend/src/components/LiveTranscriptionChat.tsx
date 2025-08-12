@@ -108,7 +108,7 @@ export const LiveTranscriptionChat: React.FC<LiveTranscriptionChatProps> = ({
               {transcriptions.map((segment, index) => (
                 <div
                   key={segment.id}
-                  className="bg-gray-800/30 backdrop-blur-sm rounded-lg p-4 border-l-4 border-purple-500 shadow-lg animate-fadeIn"
+                  className="bg-gray-800/30 backdrop-blur-sm rounded-lg p-4 border-l-4 border-purple-500 shadow-lg animate-fade-in-up"
                   style={{ animationDelay: `${index * 0.1}s` }}
                 >
                   <div className="text-white text-xl leading-relaxed font-medium">
@@ -161,28 +161,3 @@ export const LiveTranscriptionChat: React.FC<LiveTranscriptionChatProps> = ({
     </div>
   );
 };
-
-// Add animation styles
-const styles = `
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.animate-fadeIn {
-  animation: fadeIn 0.3s ease-out forwards;
-}
-`;
-
-// Inject styles
-if (typeof document !== 'undefined') {
-  const styleSheet = document.createElement('style');
-  styleSheet.textContent = styles;
-  document.head.appendChild(styleSheet);
-}

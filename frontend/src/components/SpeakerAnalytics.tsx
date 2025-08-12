@@ -66,20 +66,9 @@ export const SpeakerAnalytics: React.FC = () => {
         setSpeakers(data.speakers || []);
         setInteractions(data.interactions || []);
       } else {
-        // Mock data for demo
-        setSpeakers([
-          { id: '1', name: 'John Doe', totalTime: 7200, totalWords: 8500, sessions: 15, averageSpeed: 145, sentiment: 'positive', lastActive: '2025-01-09' },
-          { id: '2', name: 'Jane Smith', totalTime: 6500, totalWords: 7200, sessions: 12, averageSpeed: 138, sentiment: 'neutral', lastActive: '2025-01-08' },
-          { id: '3', name: 'Mike Johnson', totalTime: 5400, totalWords: 6100, sessions: 10, averageSpeed: 142, sentiment: 'positive', lastActive: '2025-01-09' },
-          { id: '4', name: 'Sarah Wilson', totalTime: 4800, totalWords: 5500, sessions: 8, averageSpeed: 140, sentiment: 'neutral', lastActive: '2025-01-07' },
-          { id: '5', name: 'David Brown', totalTime: 3600, totalWords: 4200, sessions: 6, averageSpeed: 148, sentiment: 'positive', lastActive: '2025-01-06' }
-        ]);
-        setInteractions([
-          { speakerA: 'John Doe', speakerB: 'Jane Smith', interactions: 25, totalTime: 1800 },
-          { speakerA: 'John Doe', speakerB: 'Mike Johnson', interactions: 20, totalTime: 1500 },
-          { speakerA: 'Jane Smith', speakerB: 'Sarah Wilson', interactions: 18, totalTime: 1200 },
-          { speakerA: 'Mike Johnson', speakerB: 'David Brown', interactions: 15, totalTime: 900 }
-        ]);
+        console.warn('Speaker analytics data not available');
+        setSpeakers([]);
+        setInteractions([]);
       }
     } catch (error) {
       console.error('Failed to fetch speakers:', error);

@@ -56,28 +56,24 @@ services:
       - QDRANT__LOG_LEVEL=INFO
       - QDRANT__SERVICE__GRPC_PORT=6334
 
-  # Ollama with ROCm for iGPU (Gemma3n)
+  # Ollama with ROCm for AMD 780M iGPU (Gemma3n)
   ollama:
     image: ollama/ollama:rocm
     container_name: meetingops-ollama
-    environment:
-      # Ollama settings - CPU mode for stability
-      - OLLAMA_KEEP_ALIVE=10m
-      - OLLAMA_NUM_PARALLEL=2
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_GPU_LAYERS=0
+    restart: unless-stopped
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
     volumes:
       - ollama_models:/root/.ollama
-      - /dev/dri:/dev/dri
-      - /dev/kfd:/dev/kfd
-    devices:
-      - /dev/dri
-      - /dev/kfd
     ports:
       - "11434:11434"
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "11.0.2"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_HOST: "0.0.0.0"
     networks:
       - meetingops-network
-    restart: unless-stopped
     security_opt:
       - seccomp:unconfined
     cap_add:

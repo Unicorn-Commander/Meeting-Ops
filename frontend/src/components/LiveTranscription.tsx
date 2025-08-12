@@ -130,17 +130,47 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
   };
 
   const getSpeakerColor = (speaker?: string) => {
-    if (!speaker) return 'text-gray-600';
+    if (!speaker) return 'text-gray-400';
     const colors = [
-      'text-blue-600',
-      'text-green-600',
-      'text-purple-600',
-      'text-orange-600',
-      'text-pink-600',
-      'text-indigo-600'
+      'text-blue-400',
+      'text-green-400',
+      'text-purple-400',
+      'text-orange-400',
+      'text-pink-400',
+      'text-indigo-400'
     ];
     const index = parseInt(speaker.replace(/\D/g, '')) % colors.length;
     return colors[index];
+  };
+
+  // Group consecutive transcriptions by speaker for conversational display
+  const groupTranscriptionsBySpeaker = (segments: TranscriptionSegment[]) => {
+    const groups: Array<{
+      speaker: string | undefined;
+      segments: TranscriptionSegment[];
+      startTime: string;
+      endTime: string;
+    }> = [];
+
+    segments.forEach((segment) => {
+      const lastGroup = groups[groups.length - 1];
+      
+      if (lastGroup && lastGroup.speaker === segment.speaker) {
+        // Add to existing speaker group
+        lastGroup.segments.push(segment);
+        lastGroup.endTime = segment.timestamp;
+      } else {
+        // Create new speaker group
+        groups.push({
+          speaker: segment.speaker,
+          segments: [segment],
+          startTime: segment.timestamp,
+          endTime: segment.timestamp
+        });
+      }
+    });
+
+    return groups;
   };
 
   const formatTime = (timestamp: string) => {
@@ -200,34 +230,58 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
             <p className="text-sm text-gray-500 mt-2">Speak into the microphone</p>
           </div>
         ) : (
-          <div className="space-y-4">
-            {/* Completed transcriptions */}
-            {transcriptions.map((segment) => (
+          <div className="space-y-6">
+            {/* Grouped transcriptions by speaker */}
+            {groupTranscriptionsBySpeaker(transcriptions).map((group, groupIndex) => (
               <div 
-                key={segment.id}
-                className="border-l-2 border-gray-200 pl-4 hover:border-blue-400 transition-colors"
+                key={`group-${groupIndex}`}
+                className="bg-gray-800/30 rounded-lg p-4 border-l-4 transition-all hover:bg-gray-800/40"
+                style={{ borderColor: group.speaker ? getSpeakerColor(group.speaker).replace('text-', '#').replace('-400', '') : '#6b7280' }}
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      {segment.speaker && (
-                        <span className={`flex items-center gap-1 text-sm font-medium ${getSpeakerColor(segment.speaker)}`}>
-                          <User className="w-3 h-3" />
-                          {segment.speaker}
-                        </span>
-                      )}
-                      <span className="text-xs text-gray-500">
-                        {formatTime(segment.timestamp)}
+                {/* Speaker header */}
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    {group.speaker ? (
+                      <span className={`flex items-center gap-2 font-semibold ${getSpeakerColor(group.speaker)}`}>
+                        <User className="w-4 h-4" />
+                        {group.speaker}
                       </span>
-                      {segment.confidence > 0 && (
-                        <span className="text-xs text-gray-400">
-                          {Math.round(segment.confidence * 100)}%
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-gray-800">{segment.text}</p>
+                    ) : (
+                      <span className="flex items-center gap-2 font-medium text-gray-400">
+                        <User className="w-4 h-4" />
+                        Unknown Speaker
+                      </span>
+                    )}
+                    <span className="text-xs text-gray-500">
+                      {formatTime(group.startTime)}
+                      {group.startTime !== group.endTime && ` - ${formatTime(group.endTime)}`}
+                    </span>
                   </div>
+                  {group.segments.length > 1 && (
+                    <span className="text-xs text-gray-500">
+                      {group.segments.length} segments
+                    </span>
+                  )}
                 </div>
+                
+                {/* Conversational text */}
+                <div className="text-gray-200 leading-relaxed space-y-2">
+                  {group.segments.map((segment, index) => (
+                    <p key={segment.id} className="inline">
+                      {segment.text}
+                      {index < group.segments.length - 1 && ' '}
+                    </p>
+                  ))}
+                </div>
+                
+                {/* Average confidence if available */}
+                {group.segments.some(s => s.confidence > 0) && (
+                  <div className="mt-2 text-xs text-gray-500">
+                    Confidence: {Math.round(
+                      group.segments.reduce((acc, s) => acc + s.confidence, 0) / group.segments.length * 100
+                    )}%
+                  </div>
+                )}
               </div>
             ))}
 

@@ -51,9 +51,9 @@ export const LiveMeetingNotes: React.FC<LiveMeetingNotesProps> = ({
   useEffect(() => {
     if (!sessionId || !isRecording) return;
 
-    // Connect to meeting notes WebSocket
-    const wsUrl = `${config.wsEndpoints.base}/ws/meeting-notes/${sessionId}`;
-    console.log('[LiveMeetingNotes] Connecting to:', wsUrl);
+    // Connect to unified meeting notes WebSocket (supports Granite, Phi4, and Gemma)
+    const wsUrl = `${config.wsEndpoints.base}${config.apiEndpoints.meetingNotes.websocket(sessionId)}`;
+    console.log('[LiveMeetingNotes] Connecting to unified endpoint:', wsUrl);
     
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

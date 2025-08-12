@@ -6,7 +6,6 @@ services:
   ollama-gemma:
     image: ollama/ollama:rocm
     container_name: meeting-ops-gemma
-    runtime: docker
     devices:
       - /dev/kfd
       - /dev/dri

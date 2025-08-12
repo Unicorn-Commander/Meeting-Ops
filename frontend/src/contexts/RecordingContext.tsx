@@ -73,7 +73,22 @@ export const RecordingProvider: React.FC<{ children: ReactNode }> = ({ children 
   }, [activeSession, isRecording, recordingTime, transcriptions]);
 
   const addTranscription = (segment: TranscriptionSegment) => {
-    setTranscriptions(prev => [...prev, segment]);
+    setTranscriptions(prev => {
+      // Check for duplicates by ID or by text and timestamp proximity
+      const isDuplicate = prev.some(existing => 
+        existing.id === segment.id ||
+        (existing.text === segment.text && 
+         Math.abs(new Date(existing.timestamp).getTime() - new Date(segment.timestamp).getTime()) < 1000)
+      );
+      
+      if (isDuplicate) {
+        console.log('[RecordingContext] Duplicate transcription segment ignored:', segment.text.substring(0, 50));
+        return prev;
+      }
+      
+      console.log('[RecordingContext] Adding new transcription segment:', segment.text.substring(0, 50));
+      return [...prev, segment];
+    });
   };
 
   return (
