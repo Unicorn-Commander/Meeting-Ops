@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { NpuStatusIndicator } from './NpuStatusIndicator';
+import { LiveTranscription } from './LiveTranscription';
 import { LiveTranscriptionChat } from './LiveTranscriptionChat';
 import { MeetingIntelligenceDashboard } from './MeetingIntelligenceDashboard';
 import { LiveMeetingNotes } from './LiveMeetingNotes';
@@ -799,9 +800,19 @@ export const UnifiedRecordingInterface: React.FC = () => {
           {activeView === 'transcription' && (
             <>
               <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* Enhanced Live Transcription */}
+                {/* Hidden LiveTranscription to handle WebSocket */}
+                {isRecording && session?.id && (
+                  <div style={{ display: 'none' }}>
+                    <LiveTranscription 
+                      sessionId={session.id} 
+                      isRecording={isRecording} 
+                    />
+                  </div>
+                )}
+                
+                {/* Enhanced Live Transcription Display */}
                 <LiveTranscriptionChat 
-                  transcriptions={transcriptions || []}
+                  transcriptions={globalTranscriptions || []}
                   isRecording={isRecording}
                   className="h-full"
                 />
