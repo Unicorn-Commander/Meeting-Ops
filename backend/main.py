@@ -367,6 +367,19 @@ async def get_status():
         logger.error(f"Error getting status: {e}")
         return {"status": "error", "error": str(e)}
 
+@app.get("/api/audio-devices")
+async def get_audio_devices():
+    """Get list of available audio input devices"""
+    try:
+        if working_audio_service:
+            devices = working_audio_service.get_audio_devices()
+            return {"devices": devices, "status": "success"}
+        else:
+            return {"devices": [], "status": "error", "message": "Audio service not initialized"}
+    except Exception as e:
+        logger.error(f"Failed to get audio devices: {e}")
+        return {"devices": [], "status": "error", "message": str(e)}
+
 @app.get("/api/system-info")
 async def get_system_info():
     """Get detailed system information"""

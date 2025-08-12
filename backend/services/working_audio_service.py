@@ -227,6 +227,69 @@ class WorkingAudioService:
         
         return {'recording': False, 'session_id': session_id}
     
+    def get_audio_devices(self) -> list:
+        """Get list of available audio devices"""
+        devices = []
+        
+        try:
+            # Get audio devices using arecord -l
+            result = subprocess.run(['arecord', '-l'], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                lines = result.stdout.splitlines()
+                current_card = None
+                
+                for line in lines:
+                    # Parse card line: "card 0: Device [Device Name], device 0: USB Audio [USB Audio]"
+                    if line.startswith('card '):
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            card_num = parts[0].replace('card ', '').strip()
+                            device_info = ':'.join(parts[1:]).strip()
+                            
+                            # Extract device name from brackets
+                            if '[' in device_info and ']' in device_info:
+                                device_name = device_info[device_info.find('[')+1:device_info.find(']')]
+                            else:
+                                device_name = device_info.split(',')[0].strip()
+                            
+                            devices.append({
+                                'id': f'hw:{card_num},0',
+                                'name': device_name,
+                                'type': 'USB' if 'USB' in device_info else 'Built-in',
+                                'available': True
+                            })
+            
+            # If no devices found via arecord, try a default device
+            if not devices:
+                devices.append({
+                    'id': 'default',
+                    'name': 'Default Audio Device',
+                    'type': 'System',
+                    'available': True
+                })
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout getting audio devices")
+            devices.append({
+                'id': 'default',
+                'name': 'Default Audio Device',
+                'type': 'System',
+                'available': False,
+                'error': 'Timeout detecting devices'
+            })
+        except Exception as e:
+            logger.error(f"Error getting audio devices: {e}")
+            devices.append({
+                'id': 'default',
+                'name': 'Default Audio Device',
+                'type': 'System',
+                'available': False,
+                'error': str(e)
+            })
+        
+        return devices
+    
     def start_live_capture(self, callback: Optional[Callable] = None):
         """
         Start capturing audio for live transcription

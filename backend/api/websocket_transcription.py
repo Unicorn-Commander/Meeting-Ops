@@ -53,6 +53,78 @@ class TranscriptionManager:
 
 manager = TranscriptionManager()
 
+@router.websocket("/ws/audio-levels")
+async def websocket_audio_levels(websocket: WebSocket):
+    """WebSocket endpoint for real-time audio level monitoring"""
+    await websocket.accept()
+    logger.info("Audio levels WebSocket connected")
+    
+    try:
+        # Import Redis client
+        import redis.asyncio as redis
+        import json
+        
+        # Connect to Redis for audio level updates
+        redis_client = await redis.from_url("redis://localhost:6379", decode_responses=True)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe("audio:levels")
+        
+        # Send initial status
+        await websocket.send_json({
+            "type": "status",
+            "message": "Connected to audio level stream"
+        })
+        
+        # Listen for audio level updates from Redis
+        async def listen_for_levels():
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        data = json.loads(message["data"])
+                        await websocket.send_json({
+                            "type": "audio_level",
+                            "level": data.get("level", 0),
+                            "timestamp": data.get("timestamp"),
+                            "status": data.get("status", "active")
+                        })
+                    except json.JSONDecodeError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error sending audio level: {e}")
+                        break
+        
+        # Run the listening task
+        listen_task = asyncio.create_task(listen_for_levels())
+        
+        # Keep connection alive and handle client messages
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                message = json.loads(data)
+                
+                if message.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    
+            except asyncio.TimeoutError:
+                # Send keepalive
+                await websocket.send_json({"type": "keepalive"})
+            except Exception:
+                break
+                
+    except WebSocketDisconnect:
+        logger.info("Audio levels WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Audio levels WebSocket error: {e}")
+    finally:
+        # Cleanup
+        if 'listen_task' in locals():
+            listen_task.cancel()
+        if 'pubsub' in locals():
+            await pubsub.unsubscribe("audio:levels")
+            await pubsub.close()
+        if 'redis_client' in locals():
+            await redis_client.close()
+
 @router.websocket("/ws/transcription/{session_id}")
 async def websocket_transcription(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for live transcription streaming"""
