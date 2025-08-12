@@ -200,7 +200,19 @@ if [ -f "requirements.txt" ]; then
     pip install redis  # Install Redis client
     pip install requests  # Install requests for API calls
     pip install ollama  # Install Ollama client
-    pip install -r requirements.txt
+    
+    # Handle PyTorch installation separately for version compatibility
+    print_status "Installing PyTorch packages..."
+    pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
+    
+    # Install remaining requirements, ignoring PyTorch packages already installed
+    pip install -r requirements.txt || {
+        print_warning "Some packages may have failed. Attempting to install core packages..."
+        # Install core packages that we know work
+        pip install fastapi uvicorn sqlalchemy alembic
+        pip install openai anthropic ollama
+        pip install numpy librosa soundfile pyaudio
+    }
 else
     print_error "No requirements.txt found"
     exit 1
