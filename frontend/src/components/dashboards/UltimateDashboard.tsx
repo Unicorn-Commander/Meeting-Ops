@@ -193,44 +193,8 @@ export const UltimateDashboard: React.FC = () => {
       setGlobalIsRecording(true);
       setGlobalRecordingTime(0);
       
-      // Setup WebSocket for live transcription
-      const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${sessionData.id}`;
-      console.log('[Dashboard] Connecting to transcription WebSocket:', wsUrl);
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('[Dashboard] WebSocket connected');
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'transcription' && data.segment) {
-            const segment = {
-              id: Date.now().toString() + '_' + Math.random(),
-              text: data.segment.text || '',
-              timestamp: new Date().toISOString(),
-              speaker: null,  // No speaker for live
-              confidence: data.segment.confidence || 0.95,
-              isFlagged: false
-            };
-            
-            console.log('[Dashboard] Adding transcription segment:', segment);
-            addTranscription(segment);
-          }
-        } catch (error) {
-          console.error('[Dashboard] WebSocket message error:', error);
-        }
-      };
-
-      ws.onerror = (error) => {
-        console.error('[Dashboard] WebSocket error:', error);
-      };
-
-      ws.onclose = () => {
-        console.log('[Dashboard] WebSocket closed');
-      };
+      // WebSocket for live transcription is handled by the LiveTranscription component
+      // We don't need to create another connection here
       
       // Start timer - update global recording time
       const startTime = Date.now();

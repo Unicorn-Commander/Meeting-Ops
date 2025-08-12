@@ -166,8 +166,9 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       if (!startResponse.ok) throw new Error('Failed to start session');
 
-      // Setup WebSocket for real-time transcription
-      // Use session-specific WebSocket for live transcription
+      // WebSocket for transcription is handled by LiveTranscription component
+      // Commenting out to prevent duplicate transcriptions
+      /*
       const wsUrl = `${config.wsEndpoints.base}/ws/transcription/${sessionData.id}`;
       console.log('[Recording] Connecting to transcription WebSocket:', wsUrl);
       const ws = new WebSocket(wsUrl);
@@ -236,6 +237,7 @@ export const UnifiedRecordingInterface: React.FC = () => {
 
       ws.onerror = () => setIsConnected(false);
       ws.onclose = () => setIsConnected(false);
+      */
 
       // Set recording state
       const newSession = {
