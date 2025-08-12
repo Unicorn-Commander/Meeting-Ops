@@ -371,11 +371,10 @@ async def get_status():
 async def get_audio_devices():
     """Get list of available audio input devices"""
     try:
-        if working_audio_service:
-            devices = working_audio_service.get_audio_devices()
-            return {"devices": devices, "status": "success"}
-        else:
-            return {"devices": [], "status": "error", "message": "Audio service not initialized"}
+        from services.working_audio_service import WorkingAudioService
+        audio_service = WorkingAudioService()
+        devices = audio_service.get_audio_devices()
+        return {"devices": devices, "status": "success"}
     except Exception as e:
         logger.error(f"Failed to get audio devices: {e}")
         return {"devices": [], "status": "error", "message": str(e)}
