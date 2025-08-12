@@ -115,7 +115,7 @@ except Exception as e:
 # Meeting Intelligence (Real AI)
 try:
     from api.meeting_intelligence import router as intelligence_router
-    app.include_router(intelligence_router)
+    app.include_router(intelligence_router, prefix="/api/meeting-intelligence")
     logger.info("✅ Meeting Intelligence router loaded")
 except Exception as e:
     logger.warning(f"⚠️ Meeting Intelligence router failed to load: {e}")

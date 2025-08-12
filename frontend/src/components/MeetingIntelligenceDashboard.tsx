@@ -471,7 +471,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
     console.log('[MeetingIntelligence] Generating live notes with transcript length:', meetingData.transcript.length);
     setNotesLoading(true);
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence-simple/live-notes`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence/live-notes`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -506,7 +506,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
 
     setReportLoading(true);
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence-simple/final-report`, {
+      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence/final-report`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
