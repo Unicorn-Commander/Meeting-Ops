@@ -331,9 +331,9 @@ async def get_status():
         # Audio devices
         audio_devices = []
         try:
-            from services.working_audio_service import audio_service
-            devices_response = audio_service.get_audio_devices()
-            audio_devices = devices_response.get("devices", [])
+            from services.working_audio_service import WorkingAudioService
+            audio_service = WorkingAudioService()
+            audio_devices = audio_service.get_audio_devices()  # This returns a list directly
         except Exception as e:
             logger.error(f"Failed to get audio devices: {e}")
         

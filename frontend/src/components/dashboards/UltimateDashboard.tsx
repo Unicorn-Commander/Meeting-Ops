@@ -606,6 +606,16 @@ export const UltimateDashboard: React.FC = () => {
                   
                   {/* Meeting Intelligence Dashboard */}
                   <div className="h-[450px] relative">
+                    {/* Hidden LiveTranscription component to handle WebSocket updates */}
+                    {isRecording && recordingSessionId && (
+                      <div style={{ display: 'none' }}>
+                        <LiveTranscription 
+                          sessionId={recordingSessionId} 
+                          isRecording={isRecording} 
+                        />
+                      </div>
+                    )}
+                    
                     <MeetingIntelligenceDashboard
                       meetingData={{
                         transcript: (globalTranscriptions || []).map(t => t.text).join(' '),

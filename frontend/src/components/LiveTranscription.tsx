@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Volume2, Zap, Loader2, User } from 'lucide-react';
+import { useRecording } from '../contexts/RecordingContext';
 
 interface TranscriptionSegment {
   id: string;
@@ -23,6 +24,7 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
   isRecording = false,
   className = ''
 }) => {
+  const { addTranscription } = useRecording();
   const [transcriptions, setTranscriptions] = useState<TranscriptionSegment[]>([]);
   const [currentSegment, setCurrentSegment] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
@@ -113,9 +115,19 @@ export const LiveTranscription: React.FC<LiveTranscriptionProps> = ({
       isComplete: true
     };
 
+    // Update local state
     setTranscriptions(prev => [...prev, newSegment]);
     setCurrentSegment('');
     setIsProcessing(false);
+    
+    // Also update global context for other components to see
+    addTranscription({
+      id: newSegment.id,
+      text: newSegment.text,
+      timestamp: newSegment.timestamp,
+      speaker: newSegment.speaker,
+      confidence: newSegment.confidence
+    });
 
     // Only auto-scroll if user is near bottom (text editor behavior)
     setTimeout(() => {
