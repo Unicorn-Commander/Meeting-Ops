@@ -14,7 +14,7 @@ import logging
 # Import the working audio service
 from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
-from services.gemma_custom_service import GemmaCustomService
+from services.unified_llm_service import UnifiedLLMService
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording"])
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 sessions: Dict[str, Any] = {}
 
 # Initialize services
-gemma_service = GemmaCustomService()
+llm_service = UnifiedLLMService()
 
 class CreateSessionRequest(BaseModel):
     name: str

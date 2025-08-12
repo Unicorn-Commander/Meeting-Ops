@@ -36,7 +36,7 @@ class SettingsManager:
             "npu_acceleration": True,
             "speaker_diarization": True,
             "real_time_processing": True,
-            "whisper_model": "whisper-onnx-npu",
+            "whisper_model": "whisperx-npu",
             "language": "auto",
             "max_speakers": 10
         },

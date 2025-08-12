@@ -8,9 +8,9 @@ from typing import List, Optional
 from uuid import UUID
 import logging
 
-from ..database import get_db
-from ..models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary
-from ..auth.dependencies import get_current_user
+from database.database import get_db
+from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary
+from auth.dependencies import get_current_user
 from pydantic import BaseModel
 from datetime import datetime
 

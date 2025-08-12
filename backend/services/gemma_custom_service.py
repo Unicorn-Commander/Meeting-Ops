@@ -1,6 +1,7 @@
 """
-Custom Gemma3n inference service for Meeting-Ops
-Uses custom inference engine if available, falls back to Ollama or mock
+Unified LLM inference service for Meeting-Ops
+Supports multiple models: Gemma3n, Granite, Phi4-mini
+Uses Ollama as the primary inference engine
 """
 import os
 import json
@@ -14,10 +15,17 @@ logger = logging.getLogger(__name__)
 
 class GemmaCustomService:
     def __init__(self):
-        """Initialize Gemma3n service with custom engine detection"""
+        """Initialize unified LLM service with Ollama support"""
         self.engine_path = os.getenv("GEMMA_ENGINE_PATH", "/home/ucadmin/gemma-engine/")
         self.model_path = os.getenv("GEMMA_MODEL_PATH", "/home/ucadmin/gemma-engine/models/gemma3n.gguf")
         self.use_custom = os.getenv("USE_CUSTOM_GEMMA", "false").lower() == "true"
+        
+        # Support for multiple models
+        self.supported_models = {
+            'gemma3n:e4b': 'Gemma3n (6.9B parameters)',
+            'granite3.3:8b': 'Granite 3.3 (8.2B parameters)', 
+            'phi4-mini:3.8b': 'Phi4-mini (3.8B parameters)'
+        }
         
         self.engine_available = False
         self.ollama_available = False
@@ -49,13 +57,19 @@ class GemmaCustomService:
             if response.status_code == 200:
                 self.ollama_available = True
                 logger.info("✅ Ollama API available at http://localhost:11434")
-                # Check if gemma3n:e4b model is available
+                # Check which supported models are available
                 models = response.json().get('models', [])
-                has_gemma = any('gemma3n:e4b' in model.get('name', '') for model in models)
-                if has_gemma:
-                    logger.info("✅ Gemma3n:e4b model available in Ollama")
+                available_models = []
+                for model_info in models:
+                    model_name = model_info.get('name', '')
+                    for supported_model in self.supported_models:
+                        if supported_model.split(':')[0] in model_name:
+                            available_models.append(model_name)
+                
+                if available_models:
+                    logger.info(f"✅ Available models in Ollama: {', '.join(available_models)}")
                 else:
-                    logger.warning("⚠️ Gemma3n:e4b model not found, will try to use it anyway")
+                    logger.info("ℹ️  No predefined models found, Ollama can pull models on demand")
         except:
             pass
             

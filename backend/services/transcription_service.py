@@ -68,8 +68,16 @@ class TranscriptionService:
         """Initialize with the default STT model"""
         try:
             current_model = settings_manager.get_setting("ai.whisper_model")
-            if not current_model or current_model == "base":
-                current_model = "whisper-base"  # Use the correct model ID
+            if not current_model:
+                current_model = "whisperx-npu"  # Default to WhisperX NPU
+            # Map settings values to actual model IDs
+            model_mapping = {
+                "whisper-onnx-npu": "whisperx-npu",
+                "whisperx": "whisperx-npu",
+                "base": "whisperx-npu",  # Default base to WhisperX
+                "whisper-base": "whisperx-npu"  # Map whisper-base to WhisperX
+            }
+            current_model = model_mapping.get(current_model, current_model)
             self.switch_model(current_model)
         except Exception as e:
             logger.error(f"Failed to initialize default model: {e}")

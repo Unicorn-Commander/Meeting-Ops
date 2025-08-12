@@ -1,7 +1,7 @@
 """
 Simple recording API without authentication for testing
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -10,6 +10,8 @@ import json
 import sys
 import os
 import logging
+import shutil
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.simple_audio_recorder import simple_audio_recorder
 from services.ollama_service import ollama_service
-from services.gemma_custom_service import gemma_service
+from services.unified_llm_service import llm_service
 from services.whisperx_npu_service import whisperx_service
 from services.realtime_transcription import realtime_service
 from services.whisper_realtime import whisper_realtime_service
@@ -33,19 +35,35 @@ sessions: Dict[str, dict] = {}
 class SessionCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    participants: Optional[List[str]] = []
+    tags: Optional[List[str]] = []
+    session_type: Optional[str] = "live"  # "live" or "upload"
 
 @router.post("/recording-sessions")
 async def create_session(session_data: SessionCreate):
     """Create a new recording session - no auth required"""
     session_id = str(uuid.uuid4())
     
+    # Create session directory for files
+    session_dir = Path(f"./recordings/{session_id}")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    
     session = {
         "id": session_id,
         "name": session_data.name,
         "description": session_data.description or "",
+        "participants": session_data.participants or [],
+        "tags": session_data.tags or [],
+        "session_type": session_data.session_type or "live",
         "created_at": datetime.utcnow().isoformat(),
-        "status": "created",
-        "duration": 0
+        "updated_at": datetime.utcnow().isoformat(),
+        "status": "idle",
+        "duration": 0,
+        "has_audio": False,
+        "has_transcript": False,
+        "audio_file": None,
+        "transcript": None,
+        "documents": []
     }
     
     sessions[session_id] = session
@@ -246,7 +264,7 @@ async def auto_rename(session_id: str):
             """
         
         # Generate a better title using Gemma (custom engine or Ollama)
-        new_name = gemma_service.generate_meeting_title(transcript)
+        new_name = llm_service.generate_meeting_title(transcript)
         
         # Fallback if generation fails
         if not new_name or new_name == "":
@@ -368,7 +386,7 @@ async def summarize_session(session_id: str):
         """
         
         # Generate summary using Gemma (custom engine or Ollama)
-        summary_result = gemma_service.summarize_meeting(mock_transcript)
+        summary_result = llm_service.summarize_meeting(mock_transcript)
         
         # Store summary in session
         sessions[session_id]["summary"] = summary_result
@@ -919,3 +937,177 @@ async def export_session_srt(session_id: str):
             "Content-Type": "application/x-subrip"
         }
     )
+
+@router.post("/recording-sessions/{session_id}/upload-audio")
+async def upload_audio(session_id: str, audio: UploadFile = File(...)):
+    """Upload audio file to session"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    # Validate file type
+    allowed_types = ["audio/wav", "audio/mpeg", "audio/mp3", "audio/m4a", "audio/ogg", "audio/flac"]
+    if audio.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {audio.content_type}")
+    
+    # Validate file size (max 500MB)
+    max_size = 500 * 1024 * 1024
+    if audio.size and audio.size > max_size:
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 500MB.")
+    
+    try:
+        # Create session directory
+        session_dir = Path(f"./recordings/{session_id}")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save audio file
+        audio_filename = f"audio_{session_id}.{audio.filename.split('.')[-1]}"
+        audio_path = session_dir / audio_filename
+        
+        with open(audio_path, "wb") as buffer:
+            shutil.copyfileobj(audio.file, buffer)
+        
+        # Update session
+        session["audio_file"] = str(audio_path)
+        session["has_audio"] = True
+        session["updated_at"] = datetime.utcnow().isoformat()
+        session["status"] = "processing"
+        
+        logger.info(f"Audio uploaded for session {session_id}: {audio_path}")
+        
+        return {
+            "message": "Audio uploaded successfully",
+            "filename": audio_filename,
+            "size": audio.size,
+            "session_id": session_id
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to upload audio: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload audio: {str(e)}")
+
+@router.post("/recording-sessions/{session_id}/upload-document")
+async def upload_document(session_id: str, document: UploadFile = File(...)):
+    """Upload document to session"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    try:
+        # Create session directory
+        session_dir = Path(f"./recordings/{session_id}")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create documents subdirectory
+        docs_dir = session_dir / "documents"
+        docs_dir.mkdir(exist_ok=True)
+        
+        # Save document
+        doc_filename = f"doc_{len(session['documents'])}_{document.filename}"
+        doc_path = docs_dir / doc_filename
+        
+        with open(doc_path, "wb") as buffer:
+            shutil.copyfileobj(document.file, buffer)
+        
+        # Add to session documents
+        doc_info = {
+            "id": str(uuid.uuid4()),
+            "name": document.filename,
+            "path": str(doc_path),
+            "type": document.content_type,
+            "size": document.size,
+            "uploaded_at": datetime.utcnow().isoformat()
+        }
+        
+        session["documents"].append(doc_info)
+        session["updated_at"] = datetime.utcnow().isoformat()
+        
+        logger.info(f"Document uploaded for session {session_id}: {doc_path}")
+        
+        return {
+            "message": "Document uploaded successfully",
+            "document": doc_info,
+            "session_id": session_id
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to upload document: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
+
+@router.get("/recording-sessions/{session_id}/audio")
+async def download_audio(session_id: str):
+    """Download audio file for session"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    if not session.get("has_audio") or not session.get("audio_file"):
+        raise HTTPException(status_code=404, detail="No audio file found for session")
+    
+    audio_path = Path(session["audio_file"])
+    
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found on disk")
+    
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=str(audio_path),
+        filename=f"{session['name']}_audio.{audio_path.suffix}",
+        media_type="audio/wav"
+    )
+
+@router.delete("/recording-sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete session and all associated files"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    try:
+        # Remove session directory and all files
+        session_dir = Path(f"./recordings/{session_id}")
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+        
+        # Remove from memory
+        del sessions[session_id]
+        
+        logger.info(f"Session {session_id} deleted successfully")
+        
+        return {"message": "Session deleted successfully", "session_id": session_id}
+    
+    except Exception as e:
+        logger.error(f"Failed to delete session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
+
+@router.get("/recording-sessions/{session_id}/transcript")
+async def get_transcript(session_id: str):
+    """Get transcript for session"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    transcript_text = ""
+    
+    # Try different transcription sources
+    if "transcription" in session and session["transcription"]:
+        transcription = session["transcription"]
+        if "segments" in transcription and transcription["segments"]:
+            for segment in transcription["segments"]:
+                speaker = segment.get("speaker", "Speaker")
+                text = segment.get("text", "").strip()
+                timestamp = segment.get("start", 0)
+                mins = int(timestamp // 60)
+                secs = int(timestamp % 60)
+                transcript_text += f"[{mins:02d}:{secs:02d}] {speaker}: {text}\n"
+        else:
+            transcript_text = transcription.get("text", "No transcript available")
+    elif session.get("transcript"):
+        transcript_text = session["transcript"]
+    else:
+        transcript_text = "No transcript available"
+    
+    return {"transcript": transcript_text, "session_id": session_id}

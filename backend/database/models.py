@@ -20,7 +20,7 @@ class RecordingSession(Base):
     """Recording session model"""
     __tablename__ = "recording_sessions"
     
-    id = Column(String(100), primary_key=True)  # Changed to String for UUID
+    id = Column(Integer, primary_key=True)  # Keep as Integer to match existing table
     session_id = Column(String(100), unique=True, nullable=True)  # Legacy field
     name = Column(String(200))
     description = Column(Text)

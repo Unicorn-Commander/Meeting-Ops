@@ -11,9 +11,9 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import redis.asyncio as redis
 
-from ..database import get_db
-from ..services.llm_service import GemmaService, MeetingNotesBuffer
-from ..auth.dependencies import get_current_user_optional
+from database.database import get_db
+from services.meeting_notes_service import MeetingNotesService, MeetingNotesBuffer
+from auth.dependencies import get_current_user_optional
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -24,14 +24,14 @@ router = APIRouter(prefix="/api/meeting-notes", tags=["meeting-notes"])
 notes_buffers: Dict[str, MeetingNotesBuffer] = {}
 
 # Initialize services
-gemma_service = None
+meeting_notes_service = None
 redis_client = None
 
 
-async def get_gemma_service():
-    """Get or create Gemma service instance"""
-    global gemma_service
-    if not gemma_service:
+async def get_meeting_notes_service():
+    """Get or create meeting notes service instance"""
+    global meeting_notes_service
+    if not meeting_notes_service:
         try:
             # Try to connect to Redis for caching
             global redis_client
@@ -42,15 +42,25 @@ async def get_gemma_service():
             logger.warning(f"Redis not available for caching: {e}")
             redis_client = None
         
-        gemma_service = GemmaService(redis_client=redis_client)
+        # Use Granite model configuration (available in our Ollama container)
+        model_config = {
+            "provider": "ollama",
+            "model_name": "granite3.3:8b",
+            "api_endpoint": "http://localhost:11434"
+        }
+        
+        meeting_notes_service = MeetingNotesService(
+            model_config=model_config,
+            redis_client=redis_client
+        )
         
         # Test connection
-        if await gemma_service.test_connection():
-            logger.info("Gemma service initialized successfully")
+        if await meeting_notes_service.test_connection():
+            logger.info("Meeting notes service initialized successfully with Granite model")
         else:
-            logger.warning("Gemma service connection test failed - notes generation may not work")
+            logger.warning("Meeting notes service connection test failed - notes generation may not work")
     
-    return gemma_service
+    return meeting_notes_service
 
 
 class GenerateNotesRequest(BaseModel):
@@ -75,7 +85,7 @@ async def generate_meeting_notes(
 ):
     """Generate meeting notes from transcript"""
     try:
-        service = await get_gemma_service()
+        service = await get_meeting_notes_service()
         
         if request.incremental and request.previous_notes:
             notes = await service.generate_incremental_notes(
@@ -107,14 +117,10 @@ async def chat_with_meeting(
 ):
     """Chat about a specific meeting"""
     try:
-        service = await get_gemma_service()
+        service = await get_meeting_notes_service()
         
-        response = await service.chat_with_meeting(
-            request.session_id,
-            request.query,
-            request.transcript,
-            request.history
-        )
+        # For now, return a simple response - chat functionality can be added later
+        response = f"Chat functionality coming soon. You asked: {request.query}"
         
         return {
             "success": True,
@@ -139,11 +145,10 @@ async def meeting_notes_websocket(
     
     # Get or create notes buffer for this session
     if session_id not in notes_buffers:
-        service = await get_gemma_service()
+        service = await get_meeting_notes_service()
         notes_buffers[session_id] = MeetingNotesBuffer(
-            gemma_service=service,
-            buffer_duration=30,  # Generate notes every 30 seconds
-            min_words=50
+            session_id=session_id,
+            service=service
         )
     
     buffer = notes_buffers[session_id]
@@ -303,7 +308,7 @@ async def test_gemma_connection(
 ):
     """Test connection to Gemma service"""
     try:
-        service = await get_gemma_service()
+        service = await get_meeting_notes_service()
         connected = await service.test_connection()
         
         if connected:

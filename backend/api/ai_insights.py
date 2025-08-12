@@ -13,13 +13,13 @@ from database.database import get_db
 from database.models import RecordingSession, Transcription
 from auth.dependencies import get_current_user
 from auth.models import User
-from services.gemma_custom_service import GemmaCustomService
+from services.unified_llm_service import UnifiedLLMService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
 
 # Initialize Gemma service
-gemma_service = GemmaCustomService()
+llm_service = UnifiedLLMService()
 
 class ActionItem(BaseModel):
     id: str
@@ -159,11 +159,9 @@ async def generate_ai_insights(
         Focus on key points, decisions, and outcomes.
         """
         
-        summary = await gemma_service.generate_summary(
-            transcript=transcript[:3000],
-            prompt=summary_prompt,
-            max_length=200
-        )
+        # Use the summarize_meeting method from UnifiedLLMService
+        summary_result = llm_service.summarize_meeting(transcript[:3000])
+        summary = summary_result.get("summary", "Meeting discussion covered multiple topics.")
     except Exception as e:
         logger.warning(f"Failed to generate AI summary: {e}")
         summary = "Meeting discussion covered multiple topics. AI summary generation in progress."
@@ -177,11 +175,9 @@ async def generate_ai_insights(
         {transcript[:3000]}
         """
         
-        action_response = await gemma_service.generate_summary(
-            transcript=transcript[:3000],
-            prompt=action_prompt,
-            max_length=500
-        )
+        # Use the summarize_meeting method for action items
+        action_result = llm_service.summarize_meeting(transcript[:3000], template="standard")
+        action_response = action_result.get("summary", "")
         
         # Parse action items from response
         action_items = []
@@ -296,11 +292,9 @@ async def generate_ai_insights(
         {transcript[:2000]}
         """
         
-        decision_response = await gemma_service.generate_summary(
-            transcript=transcript[:2000],
-            prompt=decision_prompt,
-            max_length=300
-        )
+        # Use the summarize_meeting method for decisions
+        decision_result = llm_service.summarize_meeting(transcript[:2000], template="executive")
+        decision_response = decision_result.get("summary", "")
         
         for line in decision_response.split('\n'):
             if line.strip() and len(line.strip()) > 10:
