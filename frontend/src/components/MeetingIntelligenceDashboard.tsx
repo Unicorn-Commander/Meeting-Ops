@@ -330,23 +330,35 @@ export const MeetingIntelligenceDashboard: React.FC<{
 
   // Send transcript chunks to WebSocket when transcript updates
   useEffect(() => {
-    if (!wsRef.current || !isRecording || !meetingData.transcript) return;
-
-    // Only send if there's new content
+    if (!isRecording || !meetingData.transcript) return;
+    
+    // Only process if there's new content
     if (meetingData.transcript.length > lastTranscriptLength) {
       const newContent = meetingData.transcript.slice(lastTranscriptLength);
       
-      try {
-        const message = {
-          type: "transcript_chunk",
-          text: newContent,
-          templates: activeLiveTemplates
-        };
-        wsRef.current.send(JSON.stringify(message));
-        console.log('[MeetingIntelligence] Sent transcript chunk:', newContent.length, 'chars', 'templates:', activeLiveTemplates);
-        setLastTranscriptLength(meetingData.transcript.length);
-      } catch (error) {
-        console.error('[MeetingIntelligence] Failed to send transcript chunk:', error);
+      // Update length tracker
+      setLastTranscriptLength(meetingData.transcript.length);
+      
+      // Try WebSocket first
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        try {
+          const message = {
+            type: "transcript_chunk",
+            text: newContent,
+            templates: activeLiveTemplates
+          };
+          wsRef.current.send(JSON.stringify(message));
+          console.log('[MeetingIntelligence] Sent transcript chunk via WebSocket:', newContent.length, 'chars');
+        } catch (error) {
+          console.error('[MeetingIntelligence] WebSocket send failed:', error);
+        }
+      }
+      
+      // Also trigger API call for live notes generation if we have enough new content
+      // and templates are selected
+      if (activeLiveTemplates.length > 0 && newContent.length > 100 && !notesLoading) {
+        console.log('[MeetingIntelligence] Auto-generating notes for new content...');
+        generateLiveNotes();
       }
     }
   }, [meetingData.transcript, isRecording, activeLiveTemplates, lastTranscriptLength]);
