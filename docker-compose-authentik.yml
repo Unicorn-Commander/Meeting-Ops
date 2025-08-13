@@ -1,0 +1,225 @@
+version: '3.8'
+
+networks:
+  meeting-ops:
+    driver: bridge
+
+volumes:
+  meeting_ops_postgres_data:
+  meeting_ops_redis_data:
+  meeting_ops_qdrant_data:
+  meeting_ops_ollama_data:
+  authentik_postgres_data:
+  authentik_redis_data:
+
+services:
+  # Main PostgreSQL database for Meeting-Ops
+  postgres:
+    image: postgres:15-alpine
+    container_name: meeting-ops-postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - meeting_ops_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:-MeetingOps2025!}
+      POSTGRES_USER: ${PG_USER:-meetingops}
+      POSTGRES_DB: ${PG_DB:-meeting_sessions}
+    ports:
+      - "5432:5432"
+    networks:
+      - meeting-ops
+
+  # Redis for Meeting-Ops real-time features
+  redis:
+    image: redis:7-alpine
+    container_name: meeting-ops-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - meeting_ops_redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - meeting-ops
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: meeting-ops-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - meeting_ops_qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    networks:
+      - meeting-ops
+
+  # Ollama LLM Service with ROCm support
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: meeting-ops-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - meeting_ops_ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_FLASH_ATTENTION=1
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          devices:
+            - driver: amd
+              capabilities: [gpu]
+    networks:
+      - meeting-ops
+
+  # ============ AUTHENTIK SERVICES ============
+  
+  # PostgreSQL for Authentik
+  authentik-postgres:
+    image: postgres:15-alpine
+    container_name: authentik-postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - authentik_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${AUTHENTIK_PG_PASS:-AuthentikPass2025!}
+      POSTGRES_USER: ${AUTHENTIK_PG_USER:-authentik}
+      POSTGRES_DB: ${AUTHENTIK_PG_DB:-authentik}
+    networks:
+      - meeting-ops
+
+  # Redis for Authentik
+  authentik-redis:
+    image: redis:7-alpine
+    container_name: authentik-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - authentik_redis_data:/data
+    networks:
+      - meeting-ops
+
+  # Authentik Server
+  authentik-server:
+    image: ghcr.io/goauthentik/authentik:2024.12.1
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    environment:
+      # Core Authentik Configuration
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-$(openssl rand -base64 32)}
+      AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      AUTHENTIK_LOG_LEVEL: info
+      
+      # Database Configuration
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_PG_PASS:-AuthentikPass2025!}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_PG_DB:-authentik}
+      
+      # Redis Configuration
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      
+      # Email Configuration (Optional)
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL_HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL_PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL_USER:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL_PASS:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL_TLS:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL_FROM:-noreply@meeting-ops.local}
+      
+      # Meeting-Ops Integration
+      AUTHENTIK_LISTEN__HTTP: 0.0.0.0:9000
+      AUTHENTIK_LISTEN__HTTPS: 0.0.0.0:9443
+    volumes:
+      - ./authentik/media:/media
+      - ./authentik/templates:/templates
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    depends_on:
+      - authentik-postgres
+      - authentik-redis
+    networks:
+      - meeting-ops
+
+  # Authentik Worker
+  authentik-worker:
+    image: ghcr.io/goauthentik/authentik:2024.12.1
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    environment:
+      # Core Authentik Configuration
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-$(openssl rand -base64 32)}
+      AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      AUTHENTIK_LOG_LEVEL: info
+      
+      # Database Configuration
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_PG_PASS:-AuthentikPass2025!}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_PG_DB:-authentik}
+      
+      # Redis Configuration
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      
+      # Email Configuration (Optional)
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL_HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL_PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL_USER:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL_PASS:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL_TLS:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL_FROM:-noreply@meeting-ops.local}
+    user: root
+    volumes:
+      - ./authentik/media:/media
+      - ./authentik/templates:/templates
+      - ./authentik/certs:/certs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - authentik-postgres
+      - authentik-redis
+    networks:
+      - meeting-ops
