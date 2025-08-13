@@ -304,6 +304,22 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Files router failed to load: {e}")
 
+# New Settings API (from API Delta Document)
+try:
+    from api.settings_new import router as settings_new_router
+    app.include_router(settings_new_router)
+    logger.info("✅ New Settings API router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ New Settings API router failed to load: {e}")
+
+# Meeting Intelligence Delta (Live Templates & Session Templates)
+try:
+    from api.meeting_intelligence_delta import router as intelligence_delta_router
+    app.include_router(intelligence_delta_router)
+    logger.info("✅ Meeting Intelligence Delta router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Meeting Intelligence Delta router failed to load: {e}")
+
 
 # === CORE API ENDPOINTS ===
 
