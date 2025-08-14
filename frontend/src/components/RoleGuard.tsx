@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { AlertCircle } from 'lucide-react';
 
 interface RoleGuardProps {
@@ -13,16 +13,22 @@ export const RoleGuard: React.FC<RoleGuardProps> = ({
   children, 
   fallback 
 }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
 
   if (!user) {
     return null;
   }
 
-  // Check if user has one of the allowed roles
-  const userRole = user.role || 'viewer';
-  const hasPermission = allowedRoles.includes(userRole) || 
-                       (user.is_superuser && allowedRoles.includes('superuser'));
+  // Check if user has one of the allowed roles (using Authentik groups)
+  const userGroups = user.groups || [];
+  const hasPermission = allowedRoles.some(role => 
+    userGroups.includes(role) || 
+    (role === 'admin' && user.is_admin) ||
+    (role === 'superuser' && user.is_admin) ||
+    (role === 'manager' && (user.is_admin || userGroups.includes('Meeting-Ops-Managers'))) ||
+    (role === 'user' && userGroups.includes('Meeting-Ops-Users')) ||
+    (role === 'viewer' && userGroups.length > 0) // Any authenticated user can view
+  );
 
   if (!hasPermission) {
     if (fallback) {

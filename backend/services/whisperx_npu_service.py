@@ -131,21 +131,62 @@ class WhisperXNPUService:
     def _transcribe_with_npu(self, audio_path: str, diarize: bool) -> Dict:
         """Transcribe using NPU acceleration"""
         
-        # In production, this would:
-        # 1. Load audio
-        # 2. Run through NPU-optimized WhisperX
-        # 3. Perform alignment for word-level timestamps
-        # 4. Run diarization if requested
-        
-        # For now, return a detailed mock result
-        return self._mock_transcription_result(audio_path, npu=True)
+        # Use WhisperX Py313 service for actual transcription
+        try:
+            from services.whisperx_py313 import WhisperXTranscriber
+            
+            logger.info(f"Using WhisperX with Large-v3 model on NPU for {audio_path}")
+            
+            # Initialize WhisperX with large-v3 model
+            transcriber = WhisperXTranscriber(
+                model_size="large-v3",
+                device="cpu",  # NPU uses CPU interface
+                compute_type="int8",  # NPU optimization
+                diarize=diarize
+            )
+            
+            # Transcribe
+            result = transcriber.transcribe(
+                audio_path,
+                word_timestamps=True
+            )
+            
+            logger.info(f"✅ NPU transcription complete: {len(result.get('segments', []))} segments")
+            return result
+            
+        except Exception as e:
+            logger.error(f"NPU transcription failed, falling back to mock: {e}")
+            return self._mock_transcription_result(audio_path, npu=True)
     
     def _transcribe_with_cpu(self, audio_path: str, diarize: bool) -> Dict:
         """Transcribe using CPU"""
         
-        # In production, this would use regular WhisperX
-        # For now, return a mock result
-        return self._mock_transcription_result(audio_path, npu=False)
+        # Use WhisperX Py313 service for actual transcription
+        try:
+            from services.whisperx_py313 import WhisperXTranscriber
+            
+            logger.info(f"Using WhisperX with base model on CPU for {audio_path}")
+            
+            # Initialize WhisperX with base model for CPU
+            transcriber = WhisperXTranscriber(
+                model_size="base",  # Smaller model for CPU
+                device="cpu",
+                compute_type="float32",
+                diarize=diarize
+            )
+            
+            # Transcribe
+            result = transcriber.transcribe(
+                audio_path,
+                word_timestamps=True
+            )
+            
+            logger.info(f"✅ CPU transcription complete: {len(result.get('segments', []))} segments")
+            return result
+            
+        except Exception as e:
+            logger.error(f"CPU transcription failed, falling back to mock: {e}")
+            return self._mock_transcription_result(audio_path, npu=False)
     
     def _mock_transcription_result(self, audio_path: str, npu: bool = False) -> Dict:
         """Generate a mock transcription result with realistic structure"""

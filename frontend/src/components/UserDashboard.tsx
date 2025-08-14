@@ -14,7 +14,7 @@ import {
   Search,
   Download
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface Recording {
   id: number;
@@ -30,7 +30,7 @@ interface UserDashboardProps {
 }
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({ onSwitchToAdmin }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState('home');
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);

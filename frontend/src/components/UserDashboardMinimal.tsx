@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface UserDashboardMinimalProps {
   onSwitchToAdmin?: () => void;
 }
 
 export const UserDashboardMinimal: React.FC<UserDashboardMinimalProps> = ({ onSwitchToAdmin }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState('command-center');
   
   return (

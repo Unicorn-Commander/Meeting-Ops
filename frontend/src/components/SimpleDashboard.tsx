@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { Navigation } from './Navigation';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { SessionList } from './SessionList';
 import { SessionDetails } from './SessionDetails';
 import { FileManager } from './FileManager';
@@ -60,7 +60,7 @@ interface SessionStats {
 }
 
 export const SimpleDashboard: React.FC<SimpleDashboardProps> = ({ onSwitchToAdmin }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState('command-center');
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);

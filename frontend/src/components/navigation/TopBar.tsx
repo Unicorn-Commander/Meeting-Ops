@@ -10,7 +10,7 @@ import {
   Square,
   ChevronDown
 } from 'lucide-react';
-import { useAuth } from '../../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface TopBarProps {
   isRecording: boolean;
@@ -27,7 +27,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onStartRecording,
   onNavigate
 }) => {
-  const { user, logout } = useAuth();
+  const { user, logout } = useAuthentikAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User, Lock, Shield, Calendar, Save, AlertCircle, CheckCircle, Key, Trash2 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface UserProfile {
   id: number;
@@ -18,7 +18,7 @@ interface UserProfile {
 }
 
 export const AccountManagement: React.FC = () => {
-  const { user: currentUser, logout } = useAuth();
+  const { user: currentUser, logout } = useAuthentikAuth();
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);

@@ -87,11 +87,7 @@ class WhisperXTranscriber:
             audio_path,
             language=self.language,
             word_timestamps=word_timestamps,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-                speech_pad_ms=400,
-            ),
+            vad_filter=False,  # Disable VAD - it's too aggressive
             **kwargs
         )
         

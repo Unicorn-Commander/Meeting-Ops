@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { UserDashboard } from './UserDashboard';
 import { UserDashboardSimple } from './UserDashboardSimple';
 import { SystemAdminPanel } from './SystemAdminPanel'; // New system admin panel
@@ -12,7 +12,7 @@ interface DashboardRouterProps {
 }
 
 export const DashboardRouter: React.FC<DashboardRouterProps> = ({ defaultView }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState<'user' | 'admin' | 'app-admin' | 'legacy' | 'improved'>(() => {
     if (defaultView) return defaultView;
     

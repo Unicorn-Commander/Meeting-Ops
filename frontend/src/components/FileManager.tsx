@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
@@ -29,7 +29,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ sessionId, onFileSelec
   const [sortBy, setSortBy] = useState<'created_at' | 'filename' | 'file_size'>('created_at');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [searchTerm, setSearchTerm] = useState('');
-  const { token } = useAuth();
+  const { token } = useAuthentikAuth();
 
   useEffect(() => {
     fetchFiles();

@@ -3,8 +3,11 @@
 
 echo "🚀 Starting Meeting-Ops Backend with NPU..."
 
-# Load environment variables from .env file
-if [ -f .env ]; then
+# Load environment variables from .env file (supports both regular and SSO configs)
+if [ -f ../.env ]; then
+    echo "📄 Loading configuration from parent .env file..."
+    export $(cat ../.env | grep -v '^#' | xargs)
+elif [ -f .env ]; then
     echo "📄 Loading configuration from .env file..."
     export $(cat .env | grep -v '^#' | xargs)
 else
@@ -13,6 +16,22 @@ else
     export REDIS_URL="redis://localhost:6379"
     export HOST="0.0.0.0"
     export PORT="9050"
+fi
+
+# Set SSO-related environment variables if using Authentik
+if [ ! -z "$AUTHENTIK_SECRET_KEY" ]; then
+    echo "🔐 SSO Configuration detected (Authentik)"
+    export AUTHENTIK_URL="${AUTHENTIK_URL:-http://authentik-server:9000}"
+    export AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN:-}"
+    export AUTHENTIK_ADMIN_GROUPS="${AUTHENTIK_ADMIN_GROUPS:-admin,Meeting-Ops-Admins}"
+    export AUTHENTIK_VERIFY_SSL="${AUTHENTIK_VERIFY_SSL:-false}"
+    
+    # Development mode for testing without full SSO
+    export DEVELOPMENT_MODE="${DEVELOPMENT_MODE:-false}"
+    
+    if [ "$DEVELOPMENT_MODE" = "true" ]; then
+        echo "⚠️  Running in DEVELOPMENT MODE - using mock authentication"
+    fi
 fi
 
 # Check if NPU is available
@@ -26,6 +45,19 @@ fi
 echo "🎯 Starting NPU backend on ${HOST}:${PORT}..."
 echo "📊 Using Database: ${DATABASE_URL}"
 echo "🔄 Using Redis: ${REDIS_URL}"
+
+# Show authentication mode
+if [ ! -z "$AUTHENTIK_SECRET_KEY" ]; then
+    echo "🔐 Authentication: Authentik SSO"
+    if [ "$DEVELOPMENT_MODE" = "true" ]; then
+        echo "   Mode: Development (mock auth)"
+    else
+        echo "   Mode: Production (full SSO)"
+        echo "   Authentik URL: ${AUTHENTIK_URL}"
+    fi
+else
+    echo "🔑 Authentication: Local (JWT)"
+fi
 echo ""
 
 # Check if Docker services are running (don't start/stop them)

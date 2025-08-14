@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { SidebarNavigation } from './navigation/SidebarNavigation';
 import { TopBar } from './navigation/TopBar';
 
@@ -66,7 +66,7 @@ const QuickAccessToolbar: React.FC<{
 };
 
 export const ImprovedDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState('dashboard');
   const [currentSubView, setCurrentSubView] = useState<string | undefined>();
   const [isRecording, setIsRecording] = useState(false);

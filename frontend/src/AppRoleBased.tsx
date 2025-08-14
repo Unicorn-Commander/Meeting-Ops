@@ -37,7 +37,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LogOut, User, Shield } from 'lucide-react';
 
 function AppContent() {
-  const { user, logout, isAuthenticated, isLoading } = useAuth();
+  const { user, logout, isAuthenticated, isLoading } = useAuthentikAuth();
   const [currentView, setCurrentView] = useState('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 

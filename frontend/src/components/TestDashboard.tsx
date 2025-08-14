@@ -1,8 +1,8 @@
 import React from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 export const TestDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">

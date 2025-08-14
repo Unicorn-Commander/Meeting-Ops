@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { AlertTriangle, RefreshCw, LogOut } from 'lucide-react';
 
 interface AuthError {
@@ -9,7 +9,7 @@ interface AuthError {
 }
 
 export const AuthErrorHandler: React.FC = () => {
-  const { refreshToken, logout } = useAuth();
+  const { refreshToken, logout } = useAuthentikAuth();
   const [error, setError] = useState<AuthError | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [retryCount, setRetryCount] = useState(0);

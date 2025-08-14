@@ -14,7 +14,7 @@ import {
   Play,
   AlertCircle
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface TranscriptionChunk {
   id: string;
@@ -32,7 +32,7 @@ interface SummaryTemplate {
 }
 
 export const RecordingDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);

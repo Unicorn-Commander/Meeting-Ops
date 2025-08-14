@@ -38,11 +38,16 @@ class LiveRecordingTranscriptionService:
         self.last_position = 0
         self.is_active = True
         
+        logger.info(f"🎙️ Starting live transcription monitoring")
+        logger.info(f"   File: {audio_file}")
+        logger.info(f"   Session: {session_id}")
+        logger.info(f"   File exists: {os.path.exists(audio_file)}")
+        
         # Start the monitoring task
         self.transcription_task = asyncio.create_task(
             self._monitor_and_transcribe()
         )
-        logger.info(f"Started live transcription monitoring for {audio_file}")
+        logger.info(f"✅ Live transcription task started")
         
     async def stop_monitoring(self):
         """Stop monitoring"""
@@ -57,10 +62,10 @@ class LiveRecordingTranscriptionService:
         
     async def _monitor_and_transcribe(self):
         """Monitor recording file and transcribe new chunks"""
-        # Faster updates for more responsive feel (like iPhone)
-        # Smaller chunks = faster processing = more frequent updates
-        chunk_duration = 5  # Process 5-second chunks for quick updates
-        chunk_overlap = 1  # 1-second overlap for continuity
+        # Longer chunks for more reliable transcription
+        # 15 seconds gives enough context for accurate transcription
+        chunk_duration = 15  # Process 15-second chunks for better accuracy
+        chunk_overlap = 2  # 2-second overlap for continuity
         recording_sample_rate = 44100  # Recording at 44.1kHz
         target_sample_rate = 16000  # Whisper needs 16kHz
         chunk_samples = chunk_duration * recording_sample_rate
@@ -68,27 +73,36 @@ class LiveRecordingTranscriptionService:
         min_chunk_duration = 3  # Minimum chunk size to avoid bad transcriptions
         
         # Import transcription service
-        from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
+        from services.whisperx_py313 import WhisperXTranscriber
         from api.websocket_transcription import broadcast_transcription_update
         
         # Use whisper-base for live transcription (faster, good enough for monitoring)
         # Save large-v3 for final accurate transcription
-        transcriber = WhisperXNPUEngine(model_size="base")
+        logger.info("Initializing WhisperX for live transcription...")
+        transcriber = WhisperXTranscriber(
+            model_size="base",  # Use base for speed in live mode
+            device="cpu",
+            compute_type="int8",
+            diarize=False  # Skip diarization for speed
+        )
         
         while self.is_active:
             try:
                 # Check if file exists and has grown
                 if not os.path.exists(self.current_file):
+                    logger.warning(f"Recording file not found: {self.current_file}")
                     await asyncio.sleep(1)
                     continue
                 
                 file_size = os.path.getsize(self.current_file)
+                logger.debug(f"File size: {file_size} bytes, last position: {self.last_position}")
                 
                 # WAV header is 44 bytes, each sample is 2 bytes (16-bit)
                 available_samples = (file_size - 44) // 2
                 
                 # Check if we have enough new data for a chunk
                 if available_samples - self.last_position >= chunk_samples:
+                    logger.info(f"Processing chunk: {available_samples} samples available, need {chunk_samples}")
                     # Read the chunk with overlap from previous chunk
                     try:
                         with sf.SoundFile(self.current_file, 'r') as audio_file:
@@ -118,12 +132,21 @@ class LiveRecordingTranscriptionService:
                                 target_sr=target_sample_rate
                             )
                             
-                            # Transcribe the resampled chunk
-                            # No diarization for live - faster and simpler
-                            result = transcriber.transcribe(
-                                chunk_resampled,
-                                diarize=False  # Skip diarization for speed
-                            )
+                            # Save chunk to temporary file for WhisperX
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                                sf.write(tmp_file.name, chunk_resampled, target_sample_rate)
+                                tmp_path = tmp_file.name
+                            
+                            # Transcribe the chunk using WhisperX
+                            try:
+                                result = transcriber.transcribe(
+                                    tmp_path,
+                                    word_timestamps=False  # Skip word timestamps for speed
+                                )
+                            finally:
+                                # Clean up temp file
+                                os.unlink(tmp_path)
                             
                             if result and result.get("segments"):
                                 # Broadcast each segment
@@ -169,6 +192,11 @@ class LiveRecordingTranscriptionService:
                             
                     except Exception as e:
                         logger.error(f"Error reading audio chunk: {e}")
+                else:
+                    # Not enough data yet
+                    needed_samples = chunk_samples - (available_samples - self.last_position)
+                    needed_seconds = needed_samples / recording_sample_rate
+                    logger.debug(f"Waiting for more audio: need {needed_seconds:.1f} more seconds")
                         
                 await asyncio.sleep(1)  # Check every second
                 

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Webhook, Plus, TestTube, Edit, Trash2, Activity, AlertCircle, CheckCircle, Clock } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { getErrorMessage } from '../utils/errorHandling';
 
 interface WebhookEndpoint {
@@ -33,7 +33,7 @@ interface WebhookStats {
 }
 
 export function WebhookManager() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuthentikAuth();
   const [endpoints, setEndpoints] = useState<WebhookEndpoint[]>([]);
   const [events, setEvents] = useState<WebhookEvent[]>([]);
   const [stats, setStats] = useState<WebhookStats>({

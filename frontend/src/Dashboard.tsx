@@ -5,7 +5,7 @@ import { User, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import SessionDetails from './SessionDetails';
 import { FileManager } from './components/FileManager';
 import { AudioPlayer } from './components/AudioPlayer';
-import { useAuth } from './contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 // import { SettingsPage } from './components/Settings/SettingsPage';
 import { PerformanceMonitor } from './components/PerformanceMonitor';
 import ModelPerformanceDashboard from './components/ModelPerformanceDashboard';
@@ -117,7 +117,7 @@ interface Settings {
 function Dashboard() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
+  const { user, logout } = useAuthentikAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [performanceView, setPerformanceView] = useState<'system' | 'models'>('models');
   

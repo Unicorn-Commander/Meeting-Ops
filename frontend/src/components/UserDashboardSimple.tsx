@@ -13,7 +13,7 @@ import {
   Folder,
   Settings
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { LiveTranscriptionViewer } from './LiveTranscriptionViewer';
 import { AudioLevelMeter } from './AudioLevelMeter';
 import { useApiCache } from '../hooks/useApiCache';
@@ -42,7 +42,7 @@ interface UserDashboardSimpleProps {
 }
 
 export const UserDashboardSimple: React.FC<UserDashboardSimpleProps> = ({ onSwitchToAdmin }) => {
-  const { user, token } = useAuth();
+  const { user, token } = useAuthentikAuth();
   
   const getAuthHeaders = () => ({
     'Authorization': `Bearer ${token}`

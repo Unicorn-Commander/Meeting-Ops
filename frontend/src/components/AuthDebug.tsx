@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { Key, RefreshCw, CheckCircle, XCircle } from 'lucide-react';
 
 export const AuthDebug: React.FC = () => {
-  const { token, user } = useAuth();
+  const { token, user } = useAuthentikAuth();
   const [authStatus, setAuthStatus] = useState<any>({});
   const [loading, setLoading] = useState(false);
 

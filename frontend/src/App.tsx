@@ -4,7 +4,7 @@ import { ToastContainer } from 'react-toastify';
 import { AuthProvider } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { RecordingProvider } from './contexts/RecordingContext';
-import { AppRouter } from './AppRouter';
+import { AppRouterSimplified } from './AppRouterSimplified';
 import { RecordingIndicator } from './components/RecordingIndicator';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import 'react-toastify/dist/ReactToastify.css';
@@ -15,7 +15,7 @@ function AppWithShortcuts() {
   return (
     <>
       <RecordingIndicator />
-      <AppRouter />
+      <AppRouterSimplified />
     </>
   );
 }

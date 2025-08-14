@@ -5,7 +5,7 @@ import {
   Cpu, Zap, Activity
 } from 'lucide-react';
 import { AlwaysOnTranscription } from '../components/AlwaysOnTranscription';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { useNavigate } from 'react-router-dom';
 
 interface RecordingSession {
@@ -26,7 +26,7 @@ export const RecordingPage: React.FC = () => {
   // Safely get user - useAuth might not work in all contexts
   let user = null;
   try {
-    const auth = useAuth();
+    const auth = useAuthentikAuth();
     user = auth?.user;
   } catch (e) {
     console.log('Auth context not available');

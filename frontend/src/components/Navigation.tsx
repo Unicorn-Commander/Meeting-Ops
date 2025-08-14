@@ -22,7 +22,7 @@ import {
   HelpCircle,
   LogOut
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { useNavigate } from 'react-router-dom';
 
 interface MenuItem {
@@ -46,7 +46,7 @@ interface NavigationProps {
 }
 
 export const Navigation: React.FC<NavigationProps> = ({ currentView, onNavigate, isAdmin }) => {
-  const { user, logout } = useAuth();
+  const { user, logout } = useAuthentikAuth();
   const navigate = useNavigate();
 
   const mainMenuItems: MenuGroup[] = [

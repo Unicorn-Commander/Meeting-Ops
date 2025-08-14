@@ -16,7 +16,7 @@ import {
   Users,
   BarChart
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { AlwaysOnTranscription } from './AlwaysOnTranscription';
 
 interface SessionData {
@@ -29,7 +29,7 @@ interface SessionData {
 }
 
 export const ProductionDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const navigate = useNavigate();
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);

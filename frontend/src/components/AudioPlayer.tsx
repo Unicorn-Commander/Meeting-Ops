@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface AudioFile {
   file_id: string;
@@ -23,7 +23,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ file, onClose }) => {
   
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const progressRef = useRef<HTMLDivElement | null>(null);
-  const { token } = useAuth();
+  const { token } = useAuthentikAuth();
 
   useEffect(() => {
     if (file && audioRef.current) {

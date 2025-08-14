@@ -9,8 +9,16 @@ const getApiUrl = () => {
     return import.meta.env.VITE_API_URL;
   }
   
-  // Otherwise use the current hostname with backend port
-  // This works whether accessing via localhost, 192.168.x.x, or any other IP
+  // Check if we're in SSO mode (served via HTTPS with subdomains)
+  const isSSO = window.location.protocol === 'https:' && window.location.hostname.includes('.');
+  
+  if (isSSO) {
+    // SSO mode: use api subdomain
+    const domain = window.location.hostname.split('.').slice(1).join('.');
+    return `https://api.${domain}`;
+  }
+  
+  // Local/development mode: use the current hostname with backend port
   const host = window.location.hostname;
   return `http://${host}:9050`;
 };
@@ -26,6 +34,11 @@ const getWsBaseUrl = () => {
 export const config = {
   // Make apiBaseUrl a getter so it's evaluated dynamically
   get apiBaseUrl() {
+    return getApiUrl();
+  },
+  
+  // Add apiUrl alias for backward compatibility
+  get apiUrl() {
     return getApiUrl();
   },
   
@@ -49,13 +62,33 @@ export const config = {
       insights: (id: string) => `/api/simple/recording-sessions/${id}/insights`,
     },
     
-    // Auth endpoints
+    // Auth endpoints (updated for Authentik)
     auth: {
-      login: '/api/auth/login',
-      logout: '/api/auth/logout',
-      register: '/api/auth/register',
-      profile: '/api/auth/profile',
-      refresh: '/api/auth/refresh',
+      me: '/api/auth/me', // Get current user from headers
+      login: () => {
+        const isSSO = window.location.protocol === 'https:' && window.location.hostname.includes('.');
+        if (isSSO) {
+          const domain = window.location.hostname.split('.').slice(1).join('.');
+          return `https://auth.${domain}/if/flow/authentication/?next=${encodeURIComponent(window.location.href)}`;
+        }
+        return 'https://auth.meeting-ops.local/if/flow/authentication/';
+      },
+      logout: () => {
+        const isSSO = window.location.protocol === 'https:' && window.location.hostname.includes('.');
+        if (isSSO) {
+          const domain = window.location.hostname.split('.').slice(1).join('.');
+          return `https://auth.${domain}/if/flow/invalidation/`;
+        }
+        return 'https://auth.meeting-ops.local/if/flow/invalidation/';
+      },
+      profile: () => {
+        const isSSO = window.location.protocol === 'https:' && window.location.hostname.includes('.');
+        if (isSSO) {
+          const domain = window.location.hostname.split('.').slice(1).join('.');
+          return `https://auth.${domain}/api/v3/core/users/me/`;
+        }
+        return 'https://auth.meeting-ops.local/api/v3/core/users/me/';
+      },
     },
     
     // Meeting management

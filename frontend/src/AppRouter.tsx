@@ -55,7 +55,19 @@ const ProtectedRoute: React.FC<{
   children: React.ReactNode; 
   requiredRoles?: string[] 
 }> = ({ children, requiredRoles }) => {
-  const { isAuthenticated, user } = useAuth();
+  const { isAuthenticated, user, isLoading } = useAuth();
+
+  // Show loading while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-950">
+        <div className="text-white text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mx-auto mb-4"></div>
+          <p>Checking authentication...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -76,25 +88,36 @@ const DashboardSelector: React.FC = () => {
   // It adapts based on role internally
   return <UltimateDashboard />;
   
-  // Alternative: role-specific dashboards
+  // Alternative: role-specific dashboards based on Authentik groups
   /*
-  switch (user?.role) {
-    case 'superuser':
-      return <SuperuserDashboard />;
-    case 'admin':
-      return <AdminDashboard />;
-    case 'manager':
-      return <ManagerDashboard />;
-    case 'viewer':
-      return <ViewerDashboard />;
-    default:
-      return <StandardUserDashboard />;
+  const userGroups = user?.groups || [];
+  
+  if (user?.is_admin || userGroups.includes('Meeting-Ops-Admins')) {
+    return <SuperuserDashboard />;
+  } else if (userGroups.includes('Meeting-Ops-Managers')) {
+    return <ManagerDashboard />;
+  } else if (userGroups.includes('Meeting-Ops-Viewers')) {
+    return <ViewerDashboard />;
+  } else {
+    return <StandardUserDashboard />;
   }
   */
 };
 
 export const AppRouter: React.FC = () => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  // Show loading screen while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-950">
+        <div className="text-white text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mx-auto mb-4"></div>
+          <p>Loading Meeting-Ops...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Routes>

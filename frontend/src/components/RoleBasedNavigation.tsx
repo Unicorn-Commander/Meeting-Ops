@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { 
   LayoutDashboard, 
   Mic, 
@@ -152,7 +152,7 @@ export const RoleBasedNavigation: React.FC<RoleBasedNavigationProps> = ({
   currentView,
   onNavigate
 }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const userRole = user?.role || 'viewer';
   const isSuperuser = user?.is_superuser || false;
 

@@ -256,6 +256,14 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ System Configuration router failed to load: {e}")
 
+# Simple Settings (New)
+try:
+    from api.simple_settings import router as simple_settings_router
+    app.include_router(simple_settings_router)
+    logger.info("✅ Simple Settings router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Simple Settings router failed to load: {e}")
+
 # Batch Export
 try:
     from api.batch_export import router as batch_export_router

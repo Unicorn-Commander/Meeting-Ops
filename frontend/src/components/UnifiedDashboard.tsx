@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { ProductionDashboard } from './ProductionDashboard';
 import { SystemAdminPanel } from './SystemAdminPanel';
 import { ApplicationAdminPanel } from './ApplicationAdminPanel';
@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export const UnifiedDashboard: React.FC = () => {
-  const { user, logout } = useAuth();
+  const { user, logout } = useAuthentikAuth();
   
   // Always use production dashboard for now
   const currentView = 'user';

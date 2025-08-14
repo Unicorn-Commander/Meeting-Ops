@@ -14,6 +14,7 @@ import logging
 # Import the working audio service
 from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
+from services.real_whisper_service import real_whisper_service
 from services.unified_llm_service import UnifiedLLMService
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording"])
@@ -80,6 +81,10 @@ async def start_recording(session_id: str):
                     live_recording_transcription.start_monitoring(result, session_id)
                 )
                 logger.info(f"Started live transcription for session {session_id}")
+                
+                # NOTE: We don't start transcription-loop as it conflicts with recording
+                # The live_recording_transcription service handles live transcription during recording
+                pass
             except Exception as e:
                 logger.warning(f"Could not start live transcription: {e}")
             
@@ -218,3 +223,86 @@ async def get_recording_status():
         "session_id": None,
         "session_name": None
     }
+
+@router.post("/recording-sessions/{session_id}/insights")
+async def get_session_insights(session_id: str):
+    """Get AI-generated insights for a recording session - POST endpoint for frontend compatibility"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    # Check if we already have cached insights
+    if "insights" in session and session["insights"]:
+        return session["insights"]
+    
+    # Get the transcript to generate insights from
+    transcript_text = ""
+    
+    if "transcript" in session and session["transcript"]:
+        transcript_text = session["transcript"]
+    elif "transcription_segments" in session and session["transcription_segments"]:
+        # Build transcript from segments
+        for segment in session["transcription_segments"]:
+            text = segment.get("text", "").strip()
+            if text:
+                transcript_text += text + " "
+    
+    # If transcript is too short, return minimal insights
+    if len(transcript_text) < 50:
+        return {
+            "summary": "Recording in progress...",
+            "key_points": [],
+            "action_items": [],
+            "sentiment": "neutral",
+            "topics": [],
+            "participants": session.get("participants", []),
+            "duration_seconds": 0,
+            "speaker_stats": {}
+        }
+    
+    # Generate basic insights (without AI for now to avoid delays)
+    insights = {
+        "summary": "Meeting recording in progress. Content is being captured and analyzed.",
+        "key_points": [],
+        "action_items": [],
+        "sentiment": "neutral",
+        "topics": [],
+        "participants": session.get("participants", []),
+        "duration_seconds": 0,
+        "speaker_stats": {}
+    }
+    
+    # Extract basic insights from transcript
+    if len(transcript_text) > 100:
+        # Extract first few sentences as key points
+        sentences = [s.strip() for s in transcript_text.split('.') if len(s.strip()) > 20]
+        insights["key_points"] = sentences[:3] if sentences else []
+        
+        # Look for action-oriented phrases
+        action_keywords = ["will", "should", "need to", "must", "going to", "plan to"]
+        for sentence in sentences:
+            if any(keyword in sentence.lower() for keyword in action_keywords):
+                insights["action_items"].append(sentence)
+                if len(insights["action_items"]) >= 3:
+                    break
+        
+        # Basic sentiment detection
+        positive_words = ["good", "great", "excellent", "happy", "success", "achieve"]
+        negative_words = ["bad", "issue", "problem", "concern", "fail", "difficult"]
+        
+        text_lower = transcript_text.lower()
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if positive_count > negative_count * 1.5:
+            insights["sentiment"] = "positive"
+        elif negative_count > positive_count * 1.5:
+            insights["sentiment"] = "negative"
+        else:
+            insights["sentiment"] = "neutral"
+    
+    # Cache insights
+    sessions[session_id]["insights"] = insights
+    
+    return insights

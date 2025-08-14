@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { Mic, MicOff, AlertCircle, CheckCircle } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const RecordingDebug: React.FC = () => {
-  const { token } = useAuth();
+  const { token } = useAuthentikAuth();
   const [isRecording, setIsRecording] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);

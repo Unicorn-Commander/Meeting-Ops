@@ -4,7 +4,7 @@ import {
   Eye, EyeOff, Trash2, X, CheckCircle, 
   AlertCircle, Key, Calendar, Clock
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 
 interface User {
   id: number;
@@ -28,7 +28,7 @@ interface CreateUserForm {
 }
 
 export const UserManagement: React.FC = () => {
-  const { token, user: currentUser } = useAuth();
+  const { token, user: currentUser } = useAuthentikAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

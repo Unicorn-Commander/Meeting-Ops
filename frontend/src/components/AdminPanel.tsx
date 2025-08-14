@@ -11,7 +11,7 @@ import {
   Upload,
   Lock
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { NetworkManagement } from './admin/NetworkManagement';
 import { SystemDashboard } from './admin/SystemDashboard';
 import { AIConfiguration } from './admin/AIConfiguration';
@@ -25,7 +25,7 @@ interface AdminPanelProps {
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
-  const { user } = useAuth();
+  const { user } = useAuthentikAuth();
   const [currentSection, setCurrentSection] = useState('dashboard');
   // const [systemStatus, setSystemStatus] = useState<any>(null);
 

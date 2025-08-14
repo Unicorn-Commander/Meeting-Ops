@@ -1,87 +1,43 @@
 #!/usr/bin/env python3
 """
-Test the audio level WebSocket endpoint
+Test audio level publishing to Redis
 """
-
-import asyncio
-import websockets
+import redis
 import json
-import sys
+import time
+import random
+import math
 
-async def test_audio_levels():
-    """Connect to audio levels WebSocket and display levels"""
-    uri = "ws://localhost:9050/ws/audio-levels"
+def main():
+    r = redis.Redis(host='localhost', port=6379, decode_responses=True)
     
-    print("🎤 Testing Audio Level WebSocket")
-    print(f"   Connecting to: {uri}")
-    print("=" * 50)
+    print("Publishing fake audio levels to Redis...")
+    print("Check the frontend audio meter - it should start moving!")
     
-    try:
-        async with websockets.connect(uri) as websocket:
-            print("✅ Connected to WebSocket")
-            
-            # Receive messages
-            message_count = 0
-            while True:
-                try:
-                    message = await websocket.recv()
-                    data = json.loads(message)
-                    
-                    if data.get("type") == "audio_level":
-                        level = data.get("level", 0)
-                        db = data.get("db", -60)
-                        peak = data.get("peak", 0)
-                        status = data.get("status", "unknown")
-                        
-                        # Create visual bar
-                        bar_length = int(level * 50)
-                        bar = "█" * bar_length + "░" * (50 - bar_length)
-                        
-                        # Status icon
-                        if status == "monitoring":
-                            icon = "🎤"
-                        elif status == "simulated":
-                            icon = "🎭"
-                        else:
-                            icon = "❓"
-                        
-                        # Print update
-                        print(f"\r{icon} [{bar}] {db:.1f} dB | Peak: {peak:.2f} | Status: {status}", end="", flush=True)
-                        
-                        message_count += 1
-                        
-                        # Exit after 100 messages for testing
-                        if message_count >= 100:
-                            print("\n\n✅ Test completed successfully!")
-                            break
-                    
-                    elif data.get("type") == "status":
-                        print(f"📊 Status: {data.get('message')}")
-                    
-                    elif data.get("type") == "error":
-                        print(f"❌ Error: {data.get('message')}")
-                        break
-                        
-                except websockets.exceptions.ConnectionClosed:
-                    print("\n❌ WebSocket connection closed")
-                    break
-                except Exception as e:
-                    print(f"\n❌ Error receiving message: {e}")
-                    break
-                    
-    except websockets.exceptions.WebSocketException as e:
-        print(f"❌ WebSocket error: {e}")
-    except ConnectionRefusedError:
-        print("❌ Could not connect to server. Make sure the backend is running on port 9050.")
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+    t = 0
+    while True:
+        # Generate a sine wave pattern for visual effect
+        level = abs(math.sin(t)) * 0.3 + random.random() * 0.2
+        peak = level + random.random() * 0.1
+        
+        message = {
+            'timestamp': time.time(),
+            'audio_level': level,
+            'level': level,  # Both formats for compatibility
+            'peak_level': peak,
+            'status': 'active'
+        }
+        
+        # Publish to the audio:levels channel
+        r.publish('audio:levels', json.dumps(message))
+        
+        print(f"Published level: {level:.3f}")
+        
+        t += 0.1
+        time.sleep(0.1)  # 10 updates per second
 
 if __name__ == "__main__":
-    print("Audio Level WebSocket Test")
-    print("Press Ctrl+C to stop\n")
-    
     try:
-        asyncio.run(test_audio_levels())
+        main()
     except KeyboardInterrupt:
-        print("\n\n👋 Test stopped by user")
-        sys.exit(0)
+        print("\nStopped publishing audio levels")

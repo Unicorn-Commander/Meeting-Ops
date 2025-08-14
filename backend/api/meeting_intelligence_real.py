@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/meeting-intelligence-real", tags=["meeting-intel
 
 # Ollama configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3n:e4b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi4-mini:3.8b")  # Using faster model
 
 class MeetingIntelligenceService:
     """Real AI-powered meeting intelligence service"""

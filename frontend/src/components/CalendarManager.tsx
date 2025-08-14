@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Calendar, MapPin, CheckCircle, AlertCircle, Plus } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuthentikAuth } from '../contexts/AuthentikAuthContext';
 import { getErrorMessage } from '../utils/errorHandling';
 
 interface CalendarStatus {
@@ -39,7 +39,7 @@ interface RoomStatus {
 }
 
 export function CalendarManager() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuthentikAuth();
   const [calendarStatus, setCalendarStatus] = useState<CalendarStatus>({
     microsoft365: { configured: false, authenticated: false },
     google: { configured: false, authenticated: false },

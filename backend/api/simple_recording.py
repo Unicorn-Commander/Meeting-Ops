@@ -1,7 +1,7 @@
 """
 Simple recording API without authentication for testing
 """
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -1111,3 +1111,110 @@ async def get_transcript(session_id: str):
         transcript_text = "No transcript available"
     
     return {"transcript": transcript_text, "session_id": session_id}
+
+@router.post("/recording-sessions/{session_id}/insights")
+async def get_session_insights(session_id: str):
+    """Get AI-generated insights for a recording session"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    # Check if we already have insights
+    if "insights" in session and session["insights"]:
+        return session["insights"]
+    
+    # Get the transcript to generate insights from
+    transcript_text = ""
+    
+    if "transcription" in session and session["transcription"]:
+        transcription = session["transcription"]
+        if "segments" in transcription and transcription["segments"]:
+            # Get last 10 segments for real-time insights
+            recent_segments = transcription["segments"][-10:] if len(transcription["segments"]) > 10 else transcription["segments"]
+            for segment in recent_segments:
+                text = segment.get("text", "").strip()
+                if text:
+                    transcript_text += text + " "
+        else:
+            transcript_text = transcription.get("text", "")
+    elif session.get("transcript"):
+        transcript_text = session["transcript"]
+    
+    # If transcript is too short, return minimal insights
+    if len(transcript_text) < 50:
+        return {
+            "summary": "Recording in progress...",
+            "key_points": [],
+            "action_items": [],
+            "sentiment": "neutral",
+            "topics": [],
+            "participants": [],
+            "duration_seconds": session.get("duration_seconds", 0)
+        }
+    
+    try:
+        # Generate insights using LLM service
+        insights = {
+            "summary": "Meeting in progress. Key discussion points are being captured.",
+            "key_points": [],
+            "action_items": [],
+            "sentiment": "neutral",
+            "topics": [],
+            "participants": session.get("participants", []),
+            "duration_seconds": session.get("duration_seconds", 0)
+        }
+        
+        # Try to generate real insights if we have enough content
+        if len(transcript_text) > 100:
+            try:
+                # Use the LLM service to generate insights
+                prompt = f"""Analyze this meeting transcript and provide insights:
+
+{transcript_text}
+
+Provide:
+1. A brief summary (1-2 sentences)
+2. Key discussion points (up to 3)
+3. Any action items mentioned
+4. Overall sentiment (positive/neutral/negative)
+5. Main topics discussed
+
+Format as JSON with keys: summary, key_points (array), action_items (array), sentiment, topics (array)"""
+                
+                # Try to get AI insights
+                if hasattr(llm_service, 'generate_insights'):
+                    ai_insights = llm_service.generate_insights(transcript_text)
+                    if ai_insights:
+                        insights.update(ai_insights)
+                elif hasattr(llm_service, 'summarize_meeting'):
+                    # Fallback to summary
+                    summary = llm_service.summarize_meeting(transcript_text)
+                    if summary:
+                        insights["summary"] = summary.get("summary", insights["summary"])
+                        insights["key_points"] = summary.get("key_points", [])
+                        insights["action_items"] = summary.get("action_items", [])
+                        
+            except Exception as e:
+                logger.warning(f"Failed to generate AI insights: {e}")
+                # Use basic extraction
+                lines = transcript_text.split(".")
+                insights["key_points"] = [line.strip() for line in lines[:3] if len(line.strip()) > 20]
+        
+        # Store insights in session
+        sessions[session_id]["insights"] = insights
+        
+        return insights
+        
+    except Exception as e:
+        logger.error(f"Failed to generate insights: {e}")
+        # Return basic insights on error
+        return {
+            "summary": "Processing meeting content...",
+            "key_points": [],
+            "action_items": [],
+            "sentiment": "neutral", 
+            "topics": [],
+            "participants": session.get("participants", []),
+            "duration_seconds": session.get("duration_seconds", 0)
+        }
