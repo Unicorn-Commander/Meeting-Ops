@@ -192,6 +192,38 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ WebSocket Transcription router failed to load: {e}")
 
+# WebSocket with Auto-Summary
+try:
+    from api.websocket_auto_summary import router as ws_auto_summary_router
+    app.include_router(ws_auto_summary_router)
+    logger.info("✅ WebSocket Auto-Summary router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ WebSocket Auto-Summary router failed to load: {e}")
+
+# Unified Agent (Simplified Single Agent with granite3.3:8b)
+try:
+    from api.unified_agent_api import router as unified_agent_router
+    app.include_router(unified_agent_router)
+    logger.info("✅ Unified Agent router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Unified Agent router failed to load: {e}")
+
+# Advanced Agents (Progressive Meeting Agent System - Legacy)
+try:
+    from api.advanced_agents import router as advanced_agents_router
+    app.include_router(advanced_agents_router)
+    logger.info("✅ Advanced Agents router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Advanced Agents router failed to load: {e}")
+
+# Advanced AI Providers (Progressive Meeting Agent System)
+try:
+    from api.advanced_ai_providers import router as advanced_providers_router
+    app.include_router(advanced_providers_router)
+    logger.info("✅ Advanced AI Providers router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Advanced AI Providers router failed to load: {e}")
+
 # Live Transcription
 try:
     from api.live_transcription import router as live_transcription_router

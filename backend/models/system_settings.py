@@ -101,7 +101,11 @@ class AllSettings(BaseModel):
     aiModel: str = Field(default="granite3.3:8b")
     aiTemperature: float = Field(default=0.7, ge=0.0, le=1.0)
     enableAutoSummary: bool = True
-    summaryUpdateInterval: int = Field(default=60, description="Seconds between summary updates")
+    enableLiveSummarization: bool = Field(default=True, description="Enable automatic summarization during recording")
+    summaryTriggerMode: str = Field(default="word_count", pattern="^(time|word_count)$", description="Trigger mode for summaries")
+    summaryUpdateInterval: int = Field(default=60, description="Seconds between summary updates (time mode)")
+    summaryWordCountInterval: int = Field(default=500, ge=100, le=5000, description="Words between summary updates (word_count mode)")
+    enableFinalSummary: bool = Field(default=True, description="Generate comprehensive summary when recording stops")
     
     # Network settings
     hostname: str = Field(default="meeting-ops")

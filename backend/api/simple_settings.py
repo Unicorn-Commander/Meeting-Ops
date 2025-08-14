@@ -210,6 +210,7 @@ async def get_ai_settings():
             "aiModel": settings.aiModel,
             "aiTemperature": settings.aiTemperature,
             "enableAutoSummary": settings.enableAutoSummary,
+            "enableLiveSummarization": settings.enableLiveSummarization,
             "summaryUpdateInterval": settings.summaryUpdateInterval
         }
     except Exception as e:

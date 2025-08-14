@@ -184,3 +184,10 @@ async def broadcast_transcription_update(session_id: str, segment: Dict):
         "type": "transcription",
         "segment": segment
     })
+    
+    # Also broadcast using the registry (avoids circular imports)
+    try:
+        from services.websocket_registry import websocket_registry
+        await websocket_registry.broadcast_to_all(session_id, segment)
+    except Exception as e:
+        logger.debug(f"Could not broadcast via registry: {e}")

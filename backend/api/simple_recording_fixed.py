@@ -124,6 +124,21 @@ async def stop_recording(session_id: str):
         except Exception as e:
             logger.warning(f"Could not stop live transcription: {e}")
         
+        # Stop auto-summarization and generate final summary
+        try:
+            from services.auto_summarization_service import auto_summarization_service
+            
+            # Stop periodic summaries
+            await auto_summarization_service.stop_auto_summarization(session_id)
+            
+            # Generate comprehensive final summary
+            final_summary = await auto_summarization_service.generate_final_summary(session_id)
+            if final_summary:
+                sessions[session_id]["final_summary"] = final_summary
+                logger.info(f"Generated final summary for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Could not generate final summary: {e}")
+        
         # Update session
         sessions[session_id]["status"] = "processing"
         sessions[session_id]["stop_time"] = datetime.utcnow().isoformat()

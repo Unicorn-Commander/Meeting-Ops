@@ -4,8 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from .models import Base
 
-# Get database URL from environment or use SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./meeting_sessions.db")
+# Get database URL from environment or use PostgreSQL
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://meetingops:REMOVED@localhost:5432/meeting_sessions")
 
 # Create engine
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
@@ -24,3 +24,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def get_db_session():
+    """Get database session (direct, not for dependency injection)"""
+    return SessionLocal()
