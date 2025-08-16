@@ -1,0 +1,76 @@
+services:
+  llama-vulkan-780m:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: meeting-ops-vulkan-780m
+    restart: unless-stopped
+    
+    # AMD 780M iGPU Configuration
+    environment:
+      # Critical for AMD 780M (gfx1103) support
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - AMD_LOG_LEVEL=1
+      - GPU_MAX_HEAP_SIZE=100
+      - GPU_MAX_ALLOC_PERCENT=100
+      - GPU_SINGLE_ALLOC_PERCENT=100
+      
+      # Vulkan optimizations
+      - VK_LOADER_DEBUG=none
+      - MESA_VK_VERSION_OVERRIDE=1.3
+      
+    # GPU device access for 780M
+    devices:
+      - "/dev/dri:/dev/dri"
+      - "/dev/kfd:/dev/kfd"
+    
+    # Security settings for GPU access
+    security_opt:
+      - seccomp:unconfined
+    
+    # Model and server configuration
+    volumes:
+      - "/home/ucadmin/llama.cpp/models:/models"
+      - "./vulkan_cache:/tmp/vulkan_cache"
+    
+    ports:
+      - "11437:8080"
+    
+    # Server startup with full GPU offloading  
+    command: [
+      "/app/llama-server",
+      "--model", "/models/granite-3.3-8b-instruct-Q4_K_M.gguf",
+      "--host", "0.0.0.0",
+      "--port", "8080",
+      "--ctx-size", "8192",
+      "--batch-size", "4096",
+      "--gpu-layers", "99",
+      "--verbose",
+      "--threads", "4",
+      "--parallel", "1"
+    ]
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Optional: GPU monitoring
+  gpu-monitor:
+    image: amd64/ubuntu:24.04
+    container_name: gpu-monitor-780m
+    devices:
+      - "/dev/dri:/dev/dri"
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y mesa-utils &&
+        while true; do
+          echo '=== AMD 780M GPU Status ===' &&
+          glxinfo -B 2>/dev/null | grep -E 'Device|Memory|OpenGL' &&
+          echo '=========================' &&
+          sleep 30
+        done
+      "
+    profiles:
+      - monitoring

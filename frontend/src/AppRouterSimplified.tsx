@@ -3,7 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { Login } from './components/Login';
 import LiveRecording from './pages/LiveRecording';
-import { Sessions } from './pages/SessionsWrapper';
+import { Sessions } from './pages/Sessions';  // Use the correct Sessions component, not the wrapper
 import { SessionDetails } from './pages/SessionDetails';
 import SettingsEnhanced from './pages/SettingsEnhanced';
 

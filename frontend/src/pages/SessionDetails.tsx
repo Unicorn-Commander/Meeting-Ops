@@ -3,8 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Play, Pause, Download, Share2, Flag,
   Users, Clock, Calendar, FileText, Volume2,
-  ChevronLeft, ChevronRight, Zap, Brain, Search
+  ChevronLeft, ChevronRight, Zap, Brain, Search,
+  FileDown, FileAudio, FileSpreadsheet, BookOpen,
+  Upload, Mail, Sparkles, RefreshCw
 } from 'lucide-react';
+import { LoadingSpinner } from '../components/LoadingSpinner';
+import { ErrorMessage } from '../components/ErrorMessage';
+import { config } from '../config';
 
 interface TranscriptionSegment {
   start: number;
@@ -17,11 +22,63 @@ interface TranscriptionSegment {
 interface Session {
   id: string;
   name: string;
+  title?: string;              // AI-generated title
   description?: string;
   created_at: string;
+  started_at?: string;
+  ended_at?: string;
   status: string;
   duration?: number;
   audio_file?: string;
+  transcript?: string;         // Full transcript text
+  transcript_simple?: string;  // Simple transcript without speakers
+  transcript_diarized?: {      // Transcript with speaker info
+    text: string;
+    segments: TranscriptionSegment[];
+    speakers: string[];
+  };
+  summary?: any;               // AI-generated summary JSON (legacy)
+  final_summary?: {            // Comprehensive final summary
+    executive?: string;
+    bullets?: string[];
+    actions?: Array<{action: string; owner?: string; priority?: string}>;
+    decisions?: string[];
+    tasks?: Array<{task: string; assignee?: string}>;
+    minutes?: string;
+    title?: string;
+  };
+  progressive_summaries?: Array<{  // All summaries during recording
+    timestamp: string;
+    word_count_at_summary: number;
+    interval_used: number;
+    processing_time_ms?: number;
+    text?: string;                   // New plain text format
+    sections?: {                     // Legacy structured format (optional)
+      executive?: string;
+      bullets?: string[];
+      actions?: Array<{action: string; owner?: string; priority?: string}>;
+      decisions?: string[];
+      title?: string;
+    };
+  }>;
+  ai_insights?: any;           // Legacy field
+  metadata?: {                 // Processing metadata
+    word_count?: number;
+    speaker_count?: number;
+    npu_accelerated?: boolean;
+    processing_time_ms?: number;
+    model_used?: string;
+    last_progressive_summary?: string;
+    total_progressive_summaries?: number;
+  };
+  generated_emails?: Array<{    // Generated follow-up emails
+    subject: string;
+    to?: string;
+    cc?: string;
+    body: string;
+    attachments?: string[];
+    type?: string;              // follow-up, action-items, summary, etc.
+  }>;
   transcription?: {
     text?: string;
     segments?: TranscriptionSegment[];
@@ -30,45 +87,81 @@ interface Session {
     language?: string;
     speakers?: string[];
   };
+  transcription_segments?: TranscriptionSegment[];
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-
 export const SessionDetails: React.FC = () => {
-  const { sessionId } = useParams<{ sessionId: string }>();
+  const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [activeSegment, setActiveSegment] = useState<number>(-1);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>('all');
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [generatingEmail, setGeneratingEmail] = useState(false);
+  const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
   
   const audioRef = useRef<HTMLAudioElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    console.log('🔍 SessionDetails useEffect - sessionId:', sessionId);
     if (sessionId) {
       fetchSession();
+    } else {
+      console.error('❌ No sessionId found in URL params');
+      setError('No session ID provided in URL');
+      setLoading(false);
     }
   }, [sessionId]);
 
   const fetchSession = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/simple/recording-sessions/${sessionId}`);
+      setError(null);
+      console.log('📋 Fetching session details for:', sessionId);
+      const url = `${config.apiUrl}/api/simple/recording-sessions/${sessionId}`;
+      console.log('🔗 Fetching from URL:', url);
+      
+      const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
+        console.log('✅ Session data received:', data);
+        
+        // Normalize transcription data - prefer transcription_segments if available
+        if (data.transcription_segments && data.transcription_segments.length > 0) {
+          if (!data.transcription) {
+            data.transcription = {};
+          }
+          data.transcription.segments = data.transcription_segments;
+          console.log('📝 Found', data.transcription_segments.length, 'transcription segments');
+        }
+        
+        // Check if we have transcript text
+        if (data.transcript || data.transcription?.text) {
+          console.log('✅ Transcript text available');
+        } else {
+          console.log('⚠️ No transcript text found');
+        }
+        
         setSession(data);
-        console.log('Session loaded:', data);
+        console.log('✅ Session loaded successfully');
       } else {
-        console.error('Failed to fetch session');
+        const errorText = await response.text();
+        console.error('❌ Failed to fetch session:', response.status, errorText);
+        setError(`Failed to fetch session: ${response.status} ${errorText}`);
       }
     } catch (error) {
-      console.error('Error fetching session:', error);
+      console.error('❌ Error fetching session:', error);
+      setError(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -132,17 +225,89 @@ export const SessionDetails: React.FC = () => {
   };
 
   const downloadTranscript = () => {
-    if (!session?.transcription) return;
+    if (!session?.transcription && !session?.transcript) return;
     
-    const content = session.transcription.segments?.map(seg => 
-      `[${formatTime(seg.start)}] ${seg.speaker || 'Speaker'}: ${seg.text}`
-    ).join('\n\n') || session.transcription.text || '';
+    let content = '';
+    
+    // Try segments first, then full transcript text
+    if (session.transcription?.segments && session.transcription.segments.length > 0) {
+      content = session.transcription.segments.map(seg => 
+        `[${formatTime(seg.start)}] ${seg.speaker || 'Speaker'}: ${seg.text}`
+      ).join('\n\n');
+    } else if (session.transcript) {
+      content = session.transcript;
+    } else if (session.transcription?.text) {
+      content = session.transcription.text;
+    }
+    
+    if (!content) {
+      alert('No transcript available for download');
+      return;
+    }
     
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `transcript_${session.name.replace(/\s+/g, '_')}.txt`;
+    a.download = `transcript_${(session.title || session.name || 'session').replace(/\s+/g, '_')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadSummary = () => {
+    if (!session?.summary) {
+      alert('No summary available for download');
+      return;
+    }
+    
+    let content = `MEETING SUMMARY\n`;
+    content += `===============\n\n`;
+    content += `Meeting: ${session.title || session.name || 'Untitled'}\n`;
+    content += `Date: ${formatDate(session.created_at)}\n`;
+    content += `Duration: ${session.duration ? formatTime(session.duration) : 'N/A'}\n\n`;
+    
+    if (session.summary.analysis?.executive) {
+      content += `EXECUTIVE SUMMARY\n`;
+      content += `-----------------\n`;
+      content += `${session.summary.analysis.executive}\n\n`;
+    }
+    
+    if (session.summary.analysis?.bullets && session.summary.analysis.bullets.length > 0) {
+      content += `KEY DISCUSSION POINTS\n`;
+      content += `---------------------\n`;
+      session.summary.analysis.bullets.forEach((bullet: string) => {
+        content += `• ${bullet}\n`;
+      });
+      content += '\n';
+    }
+    
+    if (session.summary.analysis?.decisions && session.summary.analysis.decisions.length > 0) {
+      content += `IMPORTANT DECISIONS\n`;
+      content += `-------------------\n`;
+      session.summary.analysis.decisions.forEach((decision: string) => {
+        content += `✓ ${decision}\n`;
+      });
+      content += '\n';
+    }
+    
+    if (session.summary.analysis?.actions && session.summary.analysis.actions.length > 0) {
+      content += `ACTION ITEMS\n`;
+      content += `------------\n`;
+      session.summary.analysis.actions.forEach((action: any) => {
+        content += `□ ${action.action}\n`;
+        if (action.owner) content += `  Owner: ${action.owner}\n`;
+        if (action.priority) content += `  Priority: ${action.priority}\n`;
+        content += '\n';
+      });
+    }
+    
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `summary_${(session.title || session.name || 'session').replace(/\s+/g, '_')}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -153,7 +318,7 @@ export const SessionDetails: React.FC = () => {
     if (!session?.audio_file) return;
     
     try {
-      const response = await fetch(`${API_BASE_URL}/api/simple/recording-sessions/${session.id}/audio`);
+      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`);
       if (response.ok) {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
@@ -170,24 +335,133 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const handleAudioUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !session) return;
+    
+    // Validate file type
+    if (!file.type.startsWith('audio/')) {
+      alert('Please select an audio file');
+      return;
+    }
+    
+    // Validate file size (max 500MB)
+    if (file.size > 500 * 1024 * 1024) {
+      alert('Audio file is too large. Please select a file under 500MB.');
+      return;
+    }
+    
+    setUploading(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('audio', file);
+      
+      const response = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id}/upload-audio`,
+        {
+          method: 'POST',
+          body: formData
+        }
+      );
+      
+      if (response.ok) {
+        alert('Audio uploaded successfully! Processing will begin shortly.');
+        // Refresh session data
+        await fetchSession();
+        setShowUploadModal(false);
+      } else {
+        const error = await response.text();
+        alert(`Failed to upload audio: ${error}`);
+      }
+    } catch (error) {
+      console.error('Upload failed:', error);
+      alert('Failed to upload audio file');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const generateEmails = async () => {
+    if (!session) return;
+    
+    setGeneratingEmail(true);
+    
+    try {
+      const response = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id}/generate-emails`,
+        { method: 'POST' }
+      );
+      
+      if (response.ok) {
+        const emails = await response.json();
+        setGeneratedEmails(emails);
+        
+        // Store emails in session data
+        setSession({
+          ...session,
+          generated_emails: emails
+        });
+      } else {
+        alert('Failed to generate emails');
+      }
+    } catch (error) {
+      console.error('Email generation failed:', error);
+      alert('Failed to generate emails');
+    } finally {
+      setGeneratingEmail(false);
+    }
+  };
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
+        <div className="text-center">
+          <LoadingSpinner size="lg" message="Loading session details..." />
+          <div className="mt-4 text-sm text-gray-400">
+            Session ID: {sessionId}
+            <br />
+            Check browser console for debug logs
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
+        <div className="max-w-md w-full">
+          <ErrorMessage 
+            message={error}
+            onRetry={fetchSession}
+            variant="banner"
+          />
+          <div className="text-center mt-6">
+            <button
+              onClick={() => navigate('/sessions')}
+              className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+            >
+              Back to Sessions
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
 
   if (!session) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen">
-        <p className="text-gray-500 mb-4">Session not found</p>
-        <button
-          onClick={() => navigate('/recording/sessions')}
-          className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
-        >
-          Back to Sessions
-        </button>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-500 mb-4">Session not found</p>
+          <button
+            onClick={() => navigate('/sessions')}
+            className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+          >
+            Back to Sessions
+          </button>
+        </div>
       </div>
     );
   }
@@ -216,7 +490,12 @@ export const SessionDetails: React.FC = () => {
               </button>
               
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">{session.name}</h1>
+                <h1 className="text-2xl font-bold text-gray-900">
+                  {session.title || session.name || 'Meeting Session'}
+                </h1>
+                {session.title && session.name !== session.title && (
+                  <p className="text-sm text-gray-500 mt-1">Original: {session.name}</p>
+                )}
                 <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
                   <span className="flex items-center gap-1">
                     <Calendar className="w-4 h-4" />
@@ -241,30 +520,414 @@ export const SessionDetails: React.FC = () => {
             </div>
             
             <div className="flex items-center gap-3">
+              {/* Upload Audio Button */}
+              {!session.audio_file && (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {uploading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Uploading...
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-4 h-4" />
+                      Upload Audio
+                    </>
+                  )}
+                </button>
+              )}
+              
+              {/* Generate Emails Button */}
               <button
-                onClick={downloadTranscript}
-                className="px-4 py-2 bg-white border rounded-lg hover:bg-gray-50 flex items-center gap-2"
+                onClick={generateEmails}
+                disabled={generatingEmail || !session.transcript}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
               >
-                <FileText className="w-4 h-4" />
-                Download Transcript
+                {generatingEmail ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Mail className="w-4 h-4" />
+                    Generate Emails
+                  </>
+                )}
               </button>
-              <button
-                onClick={downloadAudio}
-                disabled={!session.audio_file}
-                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                <Download className="w-4 h-4" />
-                Download Audio
-              </button>
+              
+              {/* Download Dropdown Menu */}
+              <div className="relative group">
+                <button className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2">
+                  <Download className="w-4 h-4" />
+                  Downloads
+                  <ChevronRight className="w-4 h-4 transform group-hover:rotate-90 transition-transform" />
+                </button>
+                
+                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
+                  <div className="py-2">
+                    <button
+                      onClick={downloadAudio}
+                      disabled={!session.audio_file}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <FileAudio className="w-4 h-4 text-purple-600" />
+                      Audio (WAV)
+                    </button>
+                    
+                    <button
+                      onClick={downloadTranscript}
+                      disabled={!session.transcript && !session.transcript_simple}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <FileText className="w-4 h-4 text-blue-600" />
+                      Transcript (Simple)
+                    </button>
+                    
+                    <button
+                      onClick={async () => {
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/transcript`);
+                        if (response.ok) {
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `transcript_with_speakers_${session.id}.txt`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }
+                      }}
+                      disabled={!session.transcript_diarized && !session.transcription_segments}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <Users className="w-4 h-4 text-green-600" />
+                      Transcript (Speakers)
+                    </button>
+                    
+                    <button
+                      onClick={() => downloadSummary()}
+                      disabled={!session.final_summary && !session.summary}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <Brain className="w-4 h-4 text-purple-600" />
+                      Summary (TXT)
+                    </button>
+                    
+                    <button
+                      onClick={async () => {
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/minutes`);
+                        if (response.ok) {
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `minutes_${session.id}.txt`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }
+                      }}
+                      disabled={!session.final_summary?.minutes}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <BookOpen className="w-4 h-4 text-indigo-600" />
+                      Meeting Minutes
+                    </button>
+                    
+                    <div className="border-t my-2"></div>
+                    
+                    <button
+                      onClick={async () => {
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/pdf`);
+                        if (response.status === 501) {
+                          alert('PDF export not yet implemented');
+                        }
+                      }}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2 opacity-50"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-red-600" />
+                      Summary (PDF) - Coming Soon
+                    </button>
+                    
+                    <button
+                      onClick={async () => {
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/docx`);
+                        if (response.status === 501) {
+                          alert('DOCX export not yet implemented');
+                        }
+                      }}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2 opacity-50"
+                    >
+                      <FileText className="w-4 h-4 text-blue-600" />
+                      Summary (DOCX) - Coming Soon
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
+      {/* Hidden File Input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*"
+        onChange={handleAudioUpload}
+        className="hidden"
+      />
+
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
+            {/* AI Summary Section */}
+            {(session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Brain className="w-5 h-5 text-purple-600" />
+                  AI Summary
+                  {session.metadata?.total_progressive_summaries && (
+                    <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full">
+                      {session.metadata.total_progressive_summaries} progressive updates
+                    </span>
+                  )}
+                </h2>
+                
+                {/* Use final_summary first, then fall back to legacy summary field */}
+                {(session.final_summary || session.summary) ? (
+                  <div className="space-y-4">
+                    {/* Executive Summary */}
+                    {(session.final_summary?.executive || session.summary?.analysis?.executive) && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Executive Summary</h3>
+                        <p className="text-gray-700 bg-gray-50 p-4 rounded-lg">
+                          {session.final_summary?.executive || session.summary.analysis.executive}
+                        </p>
+                      </div>
+                    )}
+                    
+                    {/* Key Discussion Points */}
+                    {((session.final_summary?.bullets && session.final_summary.bullets.length > 0) || 
+                      (session.summary?.analysis?.bullets && session.summary.analysis.bullets.length > 0)) && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Key Discussion Points</h3>
+                        <ul className="space-y-2">
+                          {(session.final_summary?.bullets || session.summary?.analysis?.bullets || []).map((bullet: string, idx: number) => (
+                            <li key={idx} className="flex items-start gap-2">
+                              <span className="text-purple-600 mt-1.5">•</span>
+                              <span className="text-gray-700">{bullet}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    {/* Action Items */}
+                    {((session.final_summary?.actions && session.final_summary.actions.length > 0) ||
+                      (session.summary?.analysis?.actions && session.summary.analysis.actions.length > 0)) && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Action Items</h3>
+                        <div className="space-y-2">
+                          {(session.final_summary?.actions || session.summary?.analysis?.actions || []).map((action: any, idx: number) => (
+                            <div key={idx} className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded">
+                              <p className="text-gray-800 font-medium">{action.action}</p>
+                              {action.owner && (
+                                <p className="text-sm text-gray-600 mt-1">Owner: {action.owner}</p>
+                              )}
+                              {action.priority && (
+                                <span className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
+                                  action.priority.toLowerCase() === 'high' ? 'bg-red-100 text-red-800' :
+                                  action.priority.toLowerCase() === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                  'bg-green-100 text-green-800'
+                                }`}>
+                                  {action.priority} Priority
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Important Decisions */}
+                    {((session.final_summary?.decisions && session.final_summary.decisions.length > 0) ||
+                      (session.summary?.analysis?.decisions && session.summary.analysis.decisions.length > 0)) && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Important Decisions</h3>
+                        <ul className="space-y-2">
+                          {(session.final_summary?.decisions || session.summary?.analysis?.decisions || []).map((decision: string, idx: number) => (
+                            <li key={idx} className="flex items-start gap-2">
+                              <span className="text-green-600 mt-1.5">✓</span>
+                              <span className="text-gray-700">{decision}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    {/* Meeting Minutes (new) */}
+                    {session.final_summary?.minutes && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Meeting Minutes</h3>
+                        <div className="text-gray-700 bg-gray-50 p-4 rounded-lg whitespace-pre-wrap">
+                          {session.final_summary.minutes}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Tasks (new) */}
+                    {session.final_summary?.tasks && session.final_summary.tasks.length > 0 && (
+                      <div>
+                        <h3 className="text-md font-medium text-gray-800 mb-2">Tasks</h3>
+                        <div className="space-y-2">
+                          {session.final_summary.tasks.map((task: any, idx: number) => (
+                            <div key={idx} className="bg-blue-50 border-l-4 border-blue-400 p-3 rounded">
+                              <p className="text-gray-800">{task.task || task}</p>
+                              {task.assignee && (
+                                <p className="text-sm text-gray-600 mt-1">Assignee: {task.assignee}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <p className="text-gray-500 mb-4">
+                      {session.status === 'processing' ? 
+                        'AI summary is being generated...' : 
+                        'AI summary not yet available'}
+                    </p>
+                    {session.status === 'processing' && (
+                      <div className="flex items-center justify-center">
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-600"></div>
+                        <span className="ml-2 text-sm text-gray-500">Processing...</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Progressive Summaries Timeline */}
+            {session.progressive_summaries && session.progressive_summaries.length > 0 && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-yellow-500" />
+                  Progressive Summary Timeline
+                  <span className="text-xs px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full">
+                    {session.progressive_summaries.length} updates
+                  </span>
+                </h2>
+                
+                <div className="space-y-4 max-h-96 overflow-y-auto">
+                  {session.progressive_summaries.map((summary, idx) => (
+                    <div key={idx} className="border-l-2 border-gray-200 pl-4 pb-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-3 h-3 bg-yellow-500 rounded-full -ml-6"></div>
+                        <span className="text-sm font-medium text-gray-700">
+                          Update #{idx + 1} - {summary.word_count_at_summary} words
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          {new Date(summary.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      
+                      {/* Handle both new plain text format and legacy structured format */}
+                      {summary.text ? (
+                        // New plain text format
+                        <div className="bg-gray-50 p-3 rounded text-sm text-gray-700 mb-2">
+                          {summary.text}
+                        </div>
+                      ) : summary.sections ? (
+                        // Legacy structured format
+                        <>
+                          {summary.sections.executive && (
+                            <div className="bg-gray-50 p-3 rounded text-sm text-gray-700 mb-2">
+                              {summary.sections.executive}
+                            </div>
+                          )}
+                          
+                          {summary.sections.bullets && summary.sections.bullets.length > 0 && (
+                            <ul className="text-sm text-gray-600 space-y-1">
+                              {summary.sections.bullets.slice(0, 3).map((bullet, bidx) => (
+                                <li key={bidx}>• {bullet}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
+                      ) : (
+                        // Fallback for empty summaries
+                        <div className="text-sm text-gray-500 italic">
+                          No summary content available
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Generated Emails Section */}
+            {(generatedEmails.length > 0 || session?.generated_emails?.length > 0) && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Mail className="w-5 h-5 text-green-600" />
+                  Generated Emails
+                  <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full">
+                    {generatedEmails.length || session?.generated_emails?.length} emails
+                  </span>
+                </h2>
+                
+                <div className="space-y-4">
+                  {(generatedEmails.length > 0 ? generatedEmails : session?.generated_emails || []).map((email: any, idx: number) => (
+                    <div key={idx} className="border rounded-lg p-4 hover:bg-gray-50">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <h4 className="font-medium text-gray-900">{email.subject}</h4>
+                          <p className="text-sm text-gray-500 mt-1">
+                            To: {email.to || 'stakeholders@company.com'}
+                          </p>
+                          {email.cc && (
+                            <p className="text-sm text-gray-500">
+                              CC: {email.cc}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => {
+                            // Copy email to clipboard
+                            const emailText = `To: ${email.to || 'stakeholders@company.com'}\n${email.cc ? `CC: ${email.cc}\n` : ''}Subject: ${email.subject}\n\n${email.body}`;
+                            navigator.clipboard.writeText(emailText);
+                            alert('Email copied to clipboard!');
+                          }}
+                          className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      
+                      <div className="text-sm text-gray-700 whitespace-pre-wrap bg-gray-50 p-3 rounded">
+                        {email.body}
+                      </div>
+                      
+                      {email.attachments && email.attachments.length > 0 && (
+                        <div className="mt-2 text-sm text-gray-500">
+                          <span className="font-medium">Attachments:</span> {email.attachments.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Audio Player */}
             {session.audio_file && (
               <div className="bg-white rounded-lg shadow-sm p-6">
@@ -275,9 +938,13 @@ export const SessionDetails: React.FC = () => {
                 
                 <audio
                   ref={audioRef}
-                  src={`${API_BASE_URL}/api/simple/recording-sessions/${session.id}/audio`}
+                  src={`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+                  onError={(e) => {
+                    console.error('Audio load error:', e);
+                    console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`);
+                  }}
                   className="hidden"
                 />
                 
@@ -353,9 +1020,24 @@ export const SessionDetails: React.FC = () => {
               </div>
               
               <div ref={transcriptRef} className="space-y-3 max-h-96 overflow-y-auto">
-                {filteredSegments.length === 0 ? (
+                {/* Show full transcript text if available */}
+                {filteredSegments.length === 0 && (session.transcript || session.transcription?.text) ? (
+                  <div className="p-4 rounded-lg bg-gray-50">
+                    <p className="text-gray-700 whitespace-pre-wrap">
+                      {session.transcript || session.transcription?.text}
+                    </p>
+                  </div>
+                ) : filteredSegments.length === 0 && session.status === 'processing' ? (
+                  <div className="text-center py-8">
+                    <div className="flex items-center justify-center mb-4">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
+                    </div>
+                    <p className="text-gray-500">Transcription in progress...</p>
+                  </div>
+                ) : filteredSegments.length === 0 ? (
                   <p className="text-gray-500 text-center py-8">
-                    {searchTerm ? 'No matching segments found' : 'No transcript available'}
+                    {searchTerm ? 'No matching segments found' : 
+                     session.status === 'completed' ? 'No transcript available' : 'Transcription pending'}
                   </p>
                 ) : (
                   filteredSegments.map((segment, index) => (
@@ -396,6 +1078,73 @@ export const SessionDetails: React.FC = () => {
 
           {/* Sidebar */}
           <div className="space-y-6">
+            {/* Processing Metadata */}
+            {session.metadata && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-yellow-500" />
+                  Processing Stats
+                </h3>
+                
+                <div className="space-y-3">
+                  {session.metadata.word_count && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Total Words</span>
+                      <span className="text-sm font-medium">{session.metadata.word_count.toLocaleString()}</span>
+                    </div>
+                  )}
+                  
+                  {session.metadata.speaker_count && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Speakers</span>
+                      <span className="text-sm font-medium">{session.metadata.speaker_count}</span>
+                    </div>
+                  )}
+                  
+                  {session.metadata.npu_accelerated !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">NPU Accelerated</span>
+                      <span className={`text-sm font-medium ${session.metadata.npu_accelerated ? 'text-green-600' : 'text-gray-500'}`}>
+                        {session.metadata.npu_accelerated ? 'Yes' : 'No'}
+                      </span>
+                    </div>
+                  )}
+                  
+                  {session.metadata.processing_time_ms && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Processing Time</span>
+                      <span className="text-sm font-medium">
+                        {(session.metadata.processing_time_ms / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                  )}
+                  
+                  {session.metadata.model_used && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">AI Model</span>
+                      <span className="text-sm font-medium">{session.metadata.model_used}</span>
+                    </div>
+                  )}
+                  
+                  {session.metadata.total_progressive_summaries && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Progressive Updates</span>
+                      <span className="text-sm font-medium">{session.metadata.total_progressive_summaries}</span>
+                    </div>
+                  )}
+                  
+                  {session.duration && session.metadata.word_count && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Words/Minute</span>
+                      <span className="text-sm font-medium">
+                        {Math.round(session.metadata.word_count / (session.duration / 60))}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            
             {/* AI Insights */}
             <div className="bg-white rounded-lg shadow-sm p-6">
               <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">

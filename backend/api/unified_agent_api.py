@@ -21,7 +21,7 @@ class AgentUpdateRequest(BaseModel):
     system_prompt: Optional[str] = None
     provider_type: Optional[str] = None
     model_name: Optional[str] = None
-    model_config: Optional[Dict] = None
+    model_settings: Optional[Dict] = None  # Renamed from model_config
     progressive_config: Optional[Dict] = None
     output_template: Optional[Dict] = None
 
@@ -55,6 +55,7 @@ async def update_agent(
     # Update fields that were provided
     update_data = update_request.dict(exclude_unset=True)
     
+    # model_settings is already the correct field name now
     for field, value in update_data.items():
         if hasattr(agent, field):
             setattr(agent, field, value)

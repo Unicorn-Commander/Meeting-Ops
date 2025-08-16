@@ -218,7 +218,13 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
     const matchesSearch = !searchTerm || 
       session.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
       session.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      session.description?.toLowerCase().includes(searchTerm.toLowerCase());
+      session.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      // Search in transcript text
+      session.transcription?.text?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      // Search in transcript segments
+      session.transcription?.segments?.some(segment => 
+        segment.text.toLowerCase().includes(searchTerm.toLowerCase())
+      );
     
     const matchesDate = filterDate === 'all' || (() => {
       const date = session.created_at ? new Date(session.created_at) : new Date();
@@ -295,7 +301,7 @@ export const SessionList: React.FC<SessionListProps> = ({ onSelectSession }) => 
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
-              placeholder="Search sessions..."
+              placeholder="Search sessions, names, or transcript content..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"

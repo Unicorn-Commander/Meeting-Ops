@@ -1,5 +1,7 @@
 """
-Ollama service for LLM operations (summarization, insights, etc.)
+DEPRECATED: Ollama service - DO NOT USE
+This service is deprecated. Use GPU-accelerated llama.cpp on port 11437 instead.
+Keeping for legacy compatibility only.
 """
 import json
 import urllib.request
@@ -11,7 +13,9 @@ logger = logging.getLogger(__name__)
 
 class OllamaService:
     def __init__(self, base_url: str = "http://localhost:11434"):
-        """Initialize Ollama service"""
+        """Initialize Ollama service - DEPRECATED"""
+        logger.warning("⚠️ OllamaService is DEPRECATED! Use GPU llama.cpp on port 11437 instead.")
+        logger.warning("   Ollama causes high CPU usage. See /extensions/ollama/ for legacy setup.")
         self.base_url = base_url
         self.default_model = "gemma3n:e4b"  # Use the specific e4b variant
         

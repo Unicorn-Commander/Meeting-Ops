@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -56,34 +54,58 @@ services:
       - QDRANT__LOG_LEVEL=INFO
       - QDRANT__SERVICE__GRPC_PORT=6334
 
-  # Ollama with ROCm for AMD 780M iGPU (Gemma3n)
-  ollama:
-    image: ollama/ollama:rocm
-    container_name: meetingops-ollama
+  # GPU-accelerated llama.cpp for AI operations
+  llama-gpu:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: meetingops-llama-gpu
     restart: unless-stopped
-    devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
-    volumes:
-      - ollama_models:/root/.ollama
-    ports:
-      - "11434:11434"
+    
+    # AMD 780M iGPU Configuration
     environment:
-      HSA_OVERRIDE_GFX_VERSION: "11.0.2"
-      OLLAMA_MAX_LOADED_MODELS: "1"
-      OLLAMA_HOST: "0.0.0.0"
-    networks:
-      - meetingops-network
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - AMD_LOG_LEVEL=1
+      - GPU_MAX_HEAP_SIZE=100
+      - GPU_MAX_ALLOC_PERCENT=100
+      - GPU_SINGLE_ALLOC_PERCENT=100
+      - VK_LOADER_DEBUG=none
+      - MESA_VK_VERSION_OVERRIDE=1.3
+      
+    # GPU device access
+    devices:
+      - "/dev/dri:/dev/dri"
+      - "/dev/kfd:/dev/kfd"
+      
     security_opt:
       - seccomp:unconfined
-    cap_add:
-      - SYS_PTRACE
-    user: "0:44"  # root:video group
+      
+    volumes:
+      - "/home/ucadmin/llama.cpp/models:/models"
+      - llama_cache:/tmp/vulkan_cache
+      
+    ports:
+      - "11437:8080"
+      
+    # Server startup with full GPU offloading  
+    command: >
+      --model /models/Phi-4-mini-instruct-Q4_K_M.gguf
+      --host 0.0.0.0
+      --port 8080
+      --ctx-size 8192
+      --batch-size 4096
+      --gpu-layers 99
+      --verbose
+      --threads 4
+      --parallel 1
+    
+    networks:
+      - meetingops-network
+      
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
 
 networks:
   meetingops-network:
@@ -99,5 +121,5 @@ volumes:
     driver: local
   qdrant_data:
     driver: local
-  ollama_models:
+  llama_cache:
     driver: local

@@ -56,8 +56,11 @@ manager = TranscriptionManager()
 @router.websocket("/ws/audio-levels")
 async def websocket_audio_levels(websocket: WebSocket):
     """WebSocket endpoint for real-time audio level monitoring"""
+    # Add basic connection validation to reduce spam
+    client_host = websocket.client.host if websocket.client else "unknown"
+    
     await websocket.accept()
-    logger.info("Audio levels WebSocket connected")
+    logger.debug(f"Audio levels WebSocket connected from {client_host}")  # Changed to debug level
     
     try:
         # Import Redis client
@@ -176,13 +179,28 @@ async def websocket_transcription(websocket: WebSocket, session_id: str):
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket, session_id)
 
+# Store word counts per session
+session_word_counts: Dict[str, int] = {}
+
 # Function to broadcast transcription updates (can be called from other modules)
 async def broadcast_transcription_update(session_id: str, segment: Dict):
     """Broadcast a transcription segment to all connected clients"""
     logger.info(f"Broadcasting transcription update to session {session_id}: {segment.get('text', '')[:50]}...")
+    
+    # Calculate word count for the segment
+    segment_text = segment.get("text", "")
+    word_count = len(segment_text.split())
+    
+    # Update session word count
+    if session_id not in session_word_counts:
+        session_word_counts[session_id] = 0
+    session_word_counts[session_id] += word_count
+    
     await manager.broadcast_transcription(session_id, {
         "type": "transcription",
-        "segment": segment
+        "segment": segment,
+        "word_count": session_word_counts[session_id],  # Total words so far
+        "segment_word_count": word_count  # Words in this segment
     })
     
     # Also broadcast using the registry (avoids circular imports)

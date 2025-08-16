@@ -1,0 +1,118 @@
+services:
+  # Phi-4 for live/progressive summarization (lighter, faster)
+  llama-phi4:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: meetingops-llama-phi4
+    restart: unless-stopped
+    
+    # AMD 780M iGPU Configuration
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - AMD_LOG_LEVEL=1
+      - GPU_MAX_HEAP_SIZE=100
+      - GPU_MAX_ALLOC_PERCENT=100
+      - GPU_SINGLE_ALLOC_PERCENT=100
+      - VK_LOADER_DEBUG=none
+      - MESA_VK_VERSION_OVERRIDE=1.3
+      
+    # GPU device access
+    devices:
+      - "/dev/dri:/dev/dri"
+      - "/dev/kfd:/dev/kfd"
+      
+    security_opt:
+      - seccomp:unconfined
+      
+    volumes:
+      - "/home/ucadmin/llama.cpp/models:/models"
+      - llama_cache_phi:/tmp/vulkan_cache
+      
+    ports:
+      - "11437:8080"  # Main port for live summaries
+      
+    # Server startup with GPU offloading for Phi-4
+    command: >
+      --model /models/Phi-4-mini-instruct-Q4_K_M.gguf
+      --host 0.0.0.0
+      --port 8080
+      --ctx-size 8192
+      --batch-size 2048
+      --gpu-layers 99
+      --verbose
+      --threads 4
+      --parallel 2
+      --alias phi4
+      
+    networks:
+      - meetingops-network
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Granite 3.3 8B for final comprehensive summaries (more capable)
+  llama-granite:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: meetingops-llama-granite
+    restart: unless-stopped
+    
+    # AMD 780M iGPU Configuration
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - AMD_LOG_LEVEL=1
+      - GPU_MAX_HEAP_SIZE=100
+      - GPU_MAX_ALLOC_PERCENT=100
+      - GPU_SINGLE_ALLOC_PERCENT=100
+      - VK_LOADER_DEBUG=none
+      - MESA_VK_VERSION_OVERRIDE=1.3
+      
+    # GPU device access
+    devices:
+      - "/dev/dri:/dev/dri"
+      - "/dev/kfd:/dev/kfd"
+      
+    security_opt:
+      - seccomp:unconfined
+      
+    volumes:
+      - "/home/ucadmin/llama.cpp/models:/models"
+      - llama_cache_granite:/tmp/vulkan_cache
+      
+    ports:
+      - "11438:8080"  # Secondary port for final summaries
+      
+    # Server startup with GPU offloading for Granite
+    command: >
+      --model /models/granite-3.3-8b-instruct-Q4_K_M.gguf
+      --host 0.0.0.0
+      --port 8080
+      --ctx-size 8192
+      --batch-size 4096
+      --gpu-layers 99
+      --verbose
+      --threads 4
+      --parallel 1
+      --alias granite
+      
+    networks:
+      - meetingops-network
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  meetingops-network:
+    external: true
+
+volumes:
+  llama_cache_phi:
+    driver: local
+  llama_cache_granite:
+    driver: local

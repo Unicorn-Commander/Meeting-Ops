@@ -1,0 +1,40 @@
+version: '3.8'
+
+# Ollama - CPU-based LLM (DEPRECATED - Using GPU llama.cpp instead)
+# This is kept for reference/fallback only. DO NOT START by default.
+
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: ollama-deprecated
+    runtime: docker
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/models
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_FLASH_ATTENTION=1
+    volumes:
+      - ./models:/models
+      - ./data:/root/.ollama
+    ports:
+      - "11434:11434"  # CPU Ollama port (deprecated)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          devices:
+            - driver: amd
+              capabilities: [gpu]
+    command: /bin/ollama serve
+    networks:
+      - ollama-network
+
+networks:
+  ollama-network:
+    driver: bridge

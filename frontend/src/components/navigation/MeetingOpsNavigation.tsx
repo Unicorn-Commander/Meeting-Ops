@@ -8,7 +8,7 @@ import {
   HardDrive, Wifi, Bell, Search, Menu, X, LogOut,
   Star, Flag, Save, Download, Upload, Clock,
   Zap, AlertCircle, CheckCircle, Info, Volume2, Brain,
-  Lightbulb, FileText
+  Lightbulb, FileText, Cog, Bot
 } from 'lucide-react';
 
 interface NavItem {
@@ -85,14 +85,28 @@ const navigationStructure: NavItem[] = [
     label: 'Advanced Tools',
     icon: Star,
     children: [
+      { id: 'unified-agent', label: 'Meeting Agent', icon: Bot, path: '/advanced/unified-agent', badge: 'NEW', badgeType: 'success' },
+      { id: 'ai-settings', label: 'AI Settings (Legacy)', icon: Brain, path: '/advanced/ai-settings', badge: 'LEGACY', badgeType: 'warning' },
+      { id: 'agents', label: 'Multi-Agents (Legacy)', icon: Bot, path: '/advanced/agents', badge: 'LEGACY', badgeType: 'warning' },
+      { id: 'agent-templates', label: 'Agent Templates', icon: FileText, path: '/advanced/templates', badge: 'BETA', badgeType: 'info' },
       { id: 'collaboration', label: 'Real-time Collaboration', icon: Users, path: '/advanced/collaboration', badge: 'BETA', badgeType: 'info' },
       { id: 'vocabulary', label: 'Custom Vocabulary', icon: Volume2, path: '/advanced/vocabulary' },
-      { id: 'templates', label: 'Meeting Templates', icon: Clock, path: '/advanced/templates' },
+      { id: 'meeting-templates', label: 'Meeting Templates', icon: Clock, path: '/advanced/meeting-templates' },
       { id: 'calendar-sync', label: 'Calendar Sync', icon: Calendar, path: '/integrations/calendar' },
       { id: 'email-templates', label: 'Email Templates', icon: Mail, path: '/integrations/email' },
       { id: 'webhooks', label: 'Webhooks & APIs', icon: Webhook, path: '/integrations/webhooks' }
     ],
     requiredRoles: ['admin', 'superuser', 'manager']
+  },
+  {
+    id: 'administration',
+    label: 'Administration',
+    icon: Shield,
+    children: [
+      { id: 'system-logs', label: 'System Logs', icon: Database, path: '/admin/logs' },
+      { id: 'maintenance', label: 'Maintenance', icon: Cog, path: '/admin/maintenance' }
+    ],
+    requiredRoles: ['admin', 'superuser']
   }
 ];
 

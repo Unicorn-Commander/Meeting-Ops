@@ -69,32 +69,56 @@ class WorkingAudioService:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = os.path.join(output_dir, f"recording_{session_id}_{timestamp}.wav")
         
-        # Build arecord command - use USB mic at its native sample rate
-        # Then we'll resample in software for Whisper
+        # Find the USB mic device
+        usb_device = None
+        devices = self.get_audio_devices()
+        for device in devices:
+            if 'usb' in device.get('name', '').lower() or 'm-305' in device.get('name', '').lower():
+                usb_device = device.get('id', 'hw:0,0')
+                logger.info(f"Found USB mic: {device.get('name')} at {usb_device}")
+                break
+        
+        if not usb_device:
+            logger.warning("No USB mic found, using default device")
+            usb_device = 'default'
+        
+        # Build arecord command - use USB mic directly
         cmd = [
             'arecord',
-            '-D', 'hw:0,0',     # USB mic device directly
-            '-f', 'S16_LE',     # 16-bit signed little-endian
-            '-c', '1',          # Mono
-            '-r', '44100',      # Use mic's native 44.1kHz sample rate
+            '-D', usb_device,    # Use detected USB device
+            '-f', 'S16_LE',      # 16-bit signed little-endian
+            '-c', '1',           # Mono
+            '-r', '44100',       # Use mic's native 44.1kHz sample rate
+            '-t', 'wav',         # Output WAV format (not raw)
             # No duration limit - will record until stopped
             output_file
         ]
         
+        logger.info(f"Recording command: {' '.join(cmd)}")
+        
         try:
-            # Start ffmpeg process
+            # Start arecord process
+            # Capture stderr to see any errors
             self.recording_process = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE  # Capture errors
             )
+            
+            # Check if process started successfully
+            time.sleep(0.1)  # Give it a moment to start
+            if self.recording_process.poll() is not None:
+                # Process already exited, something went wrong
+                stderr_output = self.recording_process.stderr.read().decode() if self.recording_process.stderr else "No error output"
+                logger.error(f"arecord process failed to start: {stderr_output}")
+                raise Exception(f"arecord failed: {stderr_output}")
             
             self.is_recording = True
             self.current_session_id = session_id
             self.current_output_file = output_file
             
-            # Start monitoring thread
+            # Start monitoring thread (just keeps track of recording state)
             monitor_thread = threading.Thread(
                 target=self._monitor_recording,
                 args=(session_id,),
@@ -104,13 +128,17 @@ class WorkingAudioService:
             
             logger.info(f"🎤 Started recording session {session_id}")
             logger.info(f"   Output: {output_file}")
+            logger.info(f"   Process PID: {self.recording_process.pid}")
             
-            # Update Redis status
+            # Update Redis status for recording state tracking
             self.redis_client.hset(f"recording:{session_id}", mapping={
                 "status": "recording",
                 "started_at": datetime.now().isoformat(),
                 "output_file": output_file
             })
+            
+            # Set global recording flag
+            self.redis_client.set("recording:active", session_id)
             
             return True, output_file
             
@@ -167,6 +195,10 @@ class WorkingAudioService:
                     "duration": duration
                 })
                 
+                # Clear global recording flag
+                self.redis_client.delete("recording:active")
+                logger.info("📼 Cleared recording:active flag")
+                
                 return True, output_file
             else:
                 return False, "Recording file not found"
@@ -179,37 +211,18 @@ class WorkingAudioService:
             self.recording_process = None
     
     def _monitor_recording(self, session_id: str):
-        """Monitor recording process and update status"""
-        import random
+        """Monitor recording process"""
+        # Audio level monitoring disabled - it conflicts with recording
+        # and the frontend doesn't display audio levels
         
+        # Just monitor the recording process
         while self.is_recording and self.current_session_id == session_id:
-            try:
-                # Publish recording status to Redis
-                # Since we're recording from the actual USB mic, we just indicate active status
-                # The actual audio levels would need to be extracted from the audio stream
-                self.redis_client.publish('audio:levels', json.dumps({
-                    'session_id': session_id,
-                    'timestamp': datetime.now().isoformat(),
-                    'level': 0.3 + random.random() * 0.4,  # Vary between 0.3-0.7 to show activity
-                    'status': 'recording'
-                }))
-                
-                time.sleep(0.1)  # Update every 100ms
-                
-            except Exception as e:
-                logger.error(f"Monitor error: {e}")
+            # Check if recording process is still running
+            if self.recording_process and self.recording_process.poll() is not None:
+                logger.warning(f"Recording process ended unexpectedly for session {session_id}")
+                self.is_recording = False
                 break
-        
-        # Send final status when recording stops
-        try:
-            self.redis_client.publish('audio:levels', json.dumps({
-                'session_id': session_id,
-                'timestamp': datetime.now().isoformat(),
-                'level': 0,
-                'status': 'stopped'
-            }))
-        except:
-            pass
+            time.sleep(1)
     
     def get_recording_status(self, session_id: str) -> dict:
         """Get current recording status"""

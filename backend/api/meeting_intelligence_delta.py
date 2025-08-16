@@ -19,7 +19,7 @@ from models.settings import (
     UpdateTemplateRequest
 )
 from services.unified_llm_service import UnifiedLLMService
-from services.transcription_service import TranscriptionService
+from services.transcription_service import transcription_service  # Import singleton instance
 
 router = APIRouter(tags=["meeting-intelligence"])
 
@@ -29,7 +29,7 @@ TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Initialize services
 llm_service = UnifiedLLMService()
-transcription_service = TranscriptionService()
+# transcription_service is already initialized as singleton
 
 # Active WebSocket connections
 active_connections: Dict[str, WebSocket] = {}

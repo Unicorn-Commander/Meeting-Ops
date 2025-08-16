@@ -28,20 +28,24 @@ class RecordingSession(Base):
     description = Column(Text)
     meeting_type = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)
-    start_time = Column(DateTime)
-    end_time = Column(DateTime)
+    started_at = Column(DateTime)  # Changed from start_time
+    ended_at = Column(DateTime)    # Changed from end_time
     duration = Column(Float, default=0)
     status = Column(String(50), default="active")
     extra_data = Column(JSON)
     user_id = Column(Integer)  # Foreign key to User
-    audio_file_path = Column(String(500))
-    file_size = Column(Integer, default=0)
+    audio_file = Column(String(500))  # Changed from audio_file_path
+    title = Column(String(500))  # Added title column
+    transcript = Column(Text)  # Added transcript column
+    transcript_simple = Column(Text)  # Simple text transcript without speakers
+    transcript_diarized = Column(JSON)  # Full diarized transcript with speakers
     summary = Column(Text)
-    tags = Column(JSON)
-    starred = Column(Boolean, default=False)
-    npu_processed = Column(Boolean, default=False)
-    processing_time = Column(Float)
-    confidence_score = Column(Float)
+    progressive_summaries = Column(JSON)  # List of summaries during recording
+    final_summary = Column(JSON)  # Comprehensive final analysis
+    ai_insights = Column(JSON)  # Legacy field for compatibility
+    processing_metadata = Column(JSON)  # Processing stats and metadata (renamed from metadata)
+    generated_emails = Column(JSON)  # Generated follow-up emails
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def to_dict(self):
         return {
@@ -57,39 +61,36 @@ class RecordingSession(Base):
         }
 
 class Transcription(Base):
-    """Transcription model"""
+    """Transcription model - matches actual database schema"""
     __tablename__ = "transcriptions"
     
     id = Column(Integer, primary_key=True)
-    session_id = Column(String(100), nullable=False)  # Changed to match RecordingSession.id type
+    session_id = Column(Integer, nullable=False)  # Foreign key to RecordingSession.id (integer)
     text = Column(Text, nullable=False)
-    confidence = Column(Float)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    start_time = Column(Float)  # Renamed for consistency
-    end_time = Column(Float)    # Renamed for consistency
-    duration_seconds = Column(Float)
-    processing_time_ms = Column(Float)
-    npu_accelerated = Column(Boolean)
-    model_used = Column(String(100))
-    speaker = Column(String(100))  # Added for speaker name
-    speaker_id = Column(String(100))
-    speaker_confidence = Column(Float)
+    speaker = Column(String(100))  # Speaker name
+    # Note: speaker_id column doesn't exist in actual database
+    start_time = Column(Float)  # Start time in seconds
+    end_time = Column(Float)    # End time in seconds
+    confidence = Column(Float)  # Transcription confidence
+    created_at = Column(DateTime, default=datetime.utcnow)  # Creation timestamp
+    
+    # REMOVED: These columns don't exist in actual database:
+    # duration_seconds = Column(Float)  # ❌ REMOVED
+    # processing_time_ms = Column(Float)  # ❌ REMOVED  
+    # npu_accelerated = Column(Boolean)  # ❌ REMOVED
+    # model_used = Column(String(100))  # ❌ REMOVED
+    # speaker_confidence = Column(Float)  # ❌ REMOVED
     
     def to_dict(self):
         return {
             "id": self.id,
             "session_id": self.session_id,
             "text": self.text,
-            "speaker": self.speaker_id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "speaker": self.speaker,
+            "timestamp": self.created_at.isoformat() if self.created_at else None,
             "confidence": self.confidence,
-            "start_time_seconds": self.start_time,
-            "end_time_seconds": self.end_time,
-            "duration_seconds": self.duration_seconds,
-            "processing_time_ms": self.processing_time_ms,
-            "npu_accelerated": self.npu_accelerated,
-            "model_used": self.model_used,
-            "speaker_confidence": self.speaker_confidence
+            "start_time": self.start_time,
+            "end_time": self.end_time
         }
 
 class Speaker(Base):

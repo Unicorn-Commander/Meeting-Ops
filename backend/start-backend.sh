@@ -73,8 +73,12 @@ if ! docker ps | grep -q meetingops-redis; then
     echo "⚠️  Redis not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
 fi
 
-if ! docker ps | grep -q meetingops-ollama; then
-    echo "⚠️  Ollama not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+# Check for AI inference servers (llama.cpp containers)
+if ! docker ps | grep -q meetingops-llama-phi4; then
+    echo "⚠️  Phi-4 AI server not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+fi
+if ! docker ps | grep -q meetingops-llama-granite; then
+    echo "⚠️  Granite AI server not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
 fi
 
 # Wait for services
@@ -95,6 +99,10 @@ echo "🧹 Cleaning up existing audio processes..."
 pkill -f arecord 2>/dev/null || true
 pkill -f "uvicorn main:app" 2>/dev/null || true
 sleep 1
+
+# Run database migrations if needed
+echo "🔄 Running database migrations..."
+./venv/bin/python migrate_model_config.py 2>/dev/null || true
 
 # Start the FULL backend (without --reload for production stability)
 echo "🚀 Starting backend with WORKING audio recording (ffmpeg)..."

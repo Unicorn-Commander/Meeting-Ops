@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -14,18 +14,134 @@ from database.database import get_db_session
 from models.unified_agent import UnifiedMeetingAgent
 from services.progressive_interval_manager import progressive_interval_manager, ProgressiveConfig
 
+# Import AI backend configuration - Dual model support
+try:
+    from config.dual_ai_backends import get_live_summary_backend, get_final_summary_backend, get_backend_for_task
+    dual_model_support = True
+except ImportError:
+    try:
+        from config.ai_backends import get_ai_backend, get_available_backend, check_backend_health
+        dual_model_support = False
+    except ImportError:
+        # Fallback if config doesn't exist yet
+        def get_ai_backend(name=None):
+            return {
+                "url": "http://localhost:11437",
+                "endpoint": "/completion",
+                "type": "llamacpp",
+                "name": "GPU-Accelerated LLaMA.cpp"
+            }
+        def get_available_backend():
+            return "llamacpp", get_ai_backend()
+        def check_backend_health(config):
+            return True
+        dual_model_support = False
+
 logger = logging.getLogger(__name__)
 
 class UnifiedAgentService:
     """
     Simplified service for single meeting agent
-    Uses granite3.3:8b for all tasks
+    Uses granite3.3:8b for all tasks with GPU acceleration
     """
     
     def __init__(self):
         self.active_sessions: Dict[str, Dict] = {}
         self.monitoring_tasks: Dict[str, asyncio.Task] = {}
-        logger.info("Unified Agent Service initialized with granite3.3:8b")
+        
+        # Get AI backend configuration - Use dual model if available
+        global dual_model_support
+        if dual_model_support:
+            # Use Phi-4 for live summaries by default
+            backend_name, self.ai_backend = get_live_summary_backend()
+            self.base_url = self.ai_backend["url"]
+            self.endpoint_path = self.ai_backend["endpoint"]
+            self.backend_type = self.ai_backend["type"]
+            logger.info("🎯 Dual-model mode: Phi-4 for live, Granite for final summaries")
+        else:
+            backend_name, self.ai_backend = get_available_backend()
+            self.base_url = self.ai_backend["url"]
+            self.endpoint_path = self.ai_backend["endpoint"]
+            self.backend_type = self.ai_backend["type"]
+        
+        logger.info(f"🚀 Unified Agent Service initialized")
+        logger.info(f"   Using AI backend: {self.ai_backend['name']} at {self.base_url}")
+        
+    def _extract_json_from_ai_response(self, response_text: str) -> Optional[str]:
+        """
+        Extract JSON from AI response that may contain extra text
+        Handles markdown code blocks, prefix text, and trailing content
+        """
+        if not response_text:
+            return None
+            
+        # Strip leading/trailing whitespace first
+        cleaned = response_text.strip()
+        
+        # Remove common prefix patterns (with and without leading spaces)
+        prefix_patterns = [
+            "Response:", " Response:", "Here is the analysis:", "Here's the analysis:",
+            "Output:", " Output:", "JSON:", " JSON:", "Result:", " Result:",
+            "Analysis:", " Analysis:", "Summary:", " Summary:", "Here is the JSON:",
+            "Here's the JSON:", "Returning JSON:", "Generated JSON:", "Answer:",
+            "Based on the transcript:", "After analyzing:", "The meeting summary:",
+            "Here is the summary:", "Here's the summary:", "Meeting analysis:",
+            "Solution 1:", "Solution:", "<|end|>", " <|end|>",
+        ]
+        
+        for pattern in prefix_patterns:
+            if pattern.lower() in cleaned.lower():
+                idx = cleaned.lower().find(pattern.lower())
+                cleaned = cleaned[idx + len(pattern):].strip()
+                break
+        
+        # Handle markdown code blocks
+        if '```json' in cleaned:
+            start = cleaned.find('```json') + 7
+            end = cleaned.find('```', start)
+            if end > start:
+                return cleaned[start:end].strip()
+        elif '```' in cleaned:
+            start = cleaned.find('```') + 3
+            end = cleaned.find('```', start)
+            if end > start:
+                potential = cleaned[start:end].strip()
+                if potential.startswith(('json', 'JSON')):
+                    potential = potential[4:].strip()
+                if potential.startswith('{'):
+                    return potential
+        
+        # Extract raw JSON using brace matching
+        json_start = cleaned.find('{')
+        if json_start >= 0:
+            brace_count = 0
+            for i in range(json_start, len(cleaned)):
+                if cleaned[i] == '{':
+                    brace_count += 1
+                elif cleaned[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_candidate = cleaned[json_start:i+1]
+                        # Basic validation - check if it looks like valid JSON
+                        if '"executive"' in json_candidate or '"bullets"' in json_candidate:
+                            return json_candidate
+            
+            # If we couldn't find a complete JSON object, try to find just the opening
+            # and see if we can construct something useful
+            remaining = cleaned[json_start:]
+            if remaining.count('{') > remaining.count('}'):
+                # Incomplete JSON - try to find a reasonable stopping point
+                for end_marker in ['\n\n', 'Solution', '<|end|>', 'QUESTION:', 'ANSWER:']:
+                    if end_marker in remaining:
+                        partial = remaining[:remaining.find(end_marker)]
+                        # Add missing closing braces if needed
+                        open_braces = partial.count('{')
+                        close_braces = partial.count('}')
+                        if open_braces > close_braces:
+                            partial += '}' * (open_braces - close_braces)
+                        return partial
+        
+        return None
     
     async def start_meeting_analysis(self, session_id: str, websocket_callback=None) -> bool:
         """Start progressive meeting analysis for a session"""
@@ -173,7 +289,7 @@ class UnifiedAgentService:
             return 0
     
     async def _generate_progressive_summary(self, session_id: str, interval_info: Dict):
-        """Generate progressive summary using granite3.3:8b"""
+        """Generate progressive plain text summary using Phi-4 Mini for speed"""
         session_info = self.active_sessions[session_id]
         agent = session_info['agent']
         
@@ -187,19 +303,58 @@ class UnifiedAgentService:
                 logger.debug(f"Not enough content for summary (session {session_id})")
                 return
             
-            # Generate summary using granite3.3:8b
-            summary = await self._call_granite_model(transcript, agent, interval_info)
+            # Generate plain text summary using Phi-4 Mini for speed
+            summary_text = await self._call_phi4_for_text_summary(transcript, interval_info)
             
-            if not summary:
-                logger.warning(f"Failed to generate summary for session {session_id}")
+            if not summary_text:
+                logger.warning(f"Failed to generate progressive summary for session {session_id}")
                 return
             
             processing_time = int((time.time() - start_time) * 1000)
             session_info['summary_count'] += 1
             
-            # Send via WebSocket
-            if session_info.get('websocket_callback'):
-                await self._send_summary_update(session_id, session_info, interval_info, summary, processing_time)
+            # Save progressive summary to database (as plain text)
+            await self._save_progressive_text_summary_to_db(
+                session_id, interval_info, summary_text, processing_time
+            )
+            
+            # Send via WebSocket - always broadcast for database-backed sessions
+            websocket_callback = session_info.get('websocket_callback')
+            if websocket_callback:
+                await self._send_text_summary_update(session_id, session_info, interval_info, summary_text, processing_time)
+            else:
+                # Direct broadcast for database-backed sessions
+                # NEW FORMAT: Plain text instead of structured JSON
+                summary_message = {
+                    "type": "progressive_summary",
+                    "session_id": session_id,
+                    "agent": {
+                        "id": str(session_info['agent'].id),
+                        "name": session_info['agent'].name,
+                        "role": "unified"
+                    },
+                    "summary_data": {
+                        "text": summary_text,  # Plain text summary
+                        "word_count": interval_info['current_word_count'],
+                        "interval_used": interval_info['current_interval'],
+                        "next_interval": interval_info.get('next_interval', interval_info['current_interval']),
+                        "model": "phi-4-mini",
+                        "processing_time_ms": processing_time
+                    },
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                # Try to broadcast to /ws/transcription-auto/{session_id} connections
+                from api.websocket_auto_summary import broadcast_progressive_summary
+                await broadcast_progressive_summary(session_id, summary_message)
+                
+                # Also broadcast to /ws/transcription/{session_id} connections
+                try:
+                    from api.websocket_transcription import manager as transcription_manager
+                    await transcription_manager.broadcast_transcription(session_id, summary_message)
+                    logger.info(f"✅ Broadcast progressive summary to transcription WebSocket for {session_id}")
+                except Exception as e:
+                    logger.debug(f"Could not broadcast to transcription WebSocket: {e}")
             
             logger.info(f"Generated progressive summary for session {session_id}")
             logger.info(f"  Word count: {interval_info['current_word_count']}")
@@ -209,19 +364,139 @@ class UnifiedAgentService:
         except Exception as e:
             logger.error(f"Error generating progressive summary: {e}")
     
+    async def _call_phi4_for_text_summary(self, transcript: str, interval_info: Dict) -> Optional[str]:
+        """Call Phi-4 Mini for fast plain text summary generation"""
+        try:
+            import requests
+            
+            # Simple prompt for plain text summary - no JSON required
+            prompt = f"""Summarize this meeting transcript in 2-3 clear sentences. Focus on key decisions, actions, and important points discussed.
+
+TRANSCRIPT:
+{transcript}
+
+SUMMARY:"""
+
+            # Use Phi-4 Mini (port 11437) for speed
+            url = "http://localhost:11437/completion"
+            
+            payload = {
+                "prompt": prompt,
+                "n_predict": 150,  # Shorter for quick summaries
+                "stream": False,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 40
+            }
+            
+            start_time = time.time()
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                timeout=10  # Fast timeout for real-time use
+            )
+            
+            if response.status_code == 200:
+                result = response.json().get("content", "")
+                
+                # Log performance metrics
+                inference_time = time.time() - start_time
+                tokens_generated = len(result.split()) if result else 0
+                tokens_per_sec = tokens_generated / inference_time if inference_time > 0 else 0
+                logger.info(f"⚡ Phi-4 Mini: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
+                
+                # Clean up the response - remove prompt echoes and extra text
+                cleaned_result = result.strip()
+                
+                # Remove common prompt echoes
+                if cleaned_result.lower().startswith("summary:"):
+                    cleaned_result = cleaned_result[8:].strip()
+                
+                # Limit length for real-time display
+                if len(cleaned_result) > 300:
+                    sentences = cleaned_result.split('. ')
+                    cleaned_result = '. '.join(sentences[:3])
+                    if not cleaned_result.endswith('.'):
+                        cleaned_result += '.'
+                
+                if cleaned_result:
+                    logger.info(f"✅ Generated progressive text summary: {cleaned_result[:80]}...")
+                    return cleaned_result
+                else:
+                    logger.warning("Phi-4 returned empty summary")
+                    return None
+            else:
+                logger.error(f"Phi-4 Mini API error: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error calling Phi-4 Mini: {e}")
+            return None
+    
+    async def _get_progressive_summaries(self, session_id: str) -> List[Dict]:
+        """Get progressive summaries for a session to provide context for final summary"""
+        try:
+            from database.database import get_db_session
+            from database.models import RecordingSession
+            
+            db = get_db_session()
+            session = db.query(RecordingSession).filter(
+                RecordingSession.session_id == session_id
+            ).first()
+            
+            if session and session.progressive_summaries:
+                return session.progressive_summaries
+            else:
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error getting progressive summaries: {e}")
+            return []
+        finally:
+            if db:
+                db.close()
+    
     async def _get_session_transcript(self, session_id: str) -> str:
         """Get current transcript for a session"""
         try:
-            from api.simple_recording_fixed import sessions
-            if session_id in sessions:
-                session = sessions[session_id]
-                
-                if 'transcript' in session and session['transcript']:
-                    return session['transcript']
-                
-                if 'transcription_segments' in session and session['transcription_segments']:
-                    segments = session['transcription_segments']
-                    return ' '.join(segment.get('text', '') for segment in segments)
+            # First try to get from live recording transcription buffer
+            from services.live_recording_transcription import live_recording_transcription
+            if hasattr(live_recording_transcription, 'transcript_buffer') and live_recording_transcription.transcript_buffer:
+                if live_recording_transcription.session_id == session_id:
+                    # Get text from buffered segments
+                    transcript_text = ' '.join(
+                        segment.get('text', '') for segment in live_recording_transcription.transcript_buffer
+                    )
+                    if transcript_text:
+                        logger.debug(f"Got transcript from live buffer: {len(transcript_text.split())} words")
+                        return transcript_text
+            
+            # Fallback to session storage
+            try:
+                from api.simple_recording_fixed import sessions
+                if session_id in sessions:
+                    session = sessions[session_id]
+                    
+                    if 'transcript' in session and session['transcript']:
+                        return session['transcript']
+                    
+                    if 'transcription_segments' in session and session['transcription_segments']:
+                        segments = session['transcription_segments']
+                        return ' '.join(segment.get('text', '') for segment in segments)
+            except ImportError:
+                pass
+            
+            # Try from database as last resort
+            from database.database import get_db_session
+            from database.models import RecordingSession
+            db = get_db_session()
+            try:
+                session = db.query(RecordingSession).filter_by(session_id=session_id).first()
+                if session and session.transcript:
+                    return session.transcript
+            finally:
+                db.close()
             
             return ""
             
@@ -254,25 +529,82 @@ RESPOND WITH JSON:
     "title": "Suggested meeting title"
 }}"""
 
-            # Call Ollama API with granite3.3:8b
-            response = await asyncio.to_thread(
-                requests.post,
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": agent.model_name,  # granite3.3:8b
+            # Call AI backend with proper configuration
+            url = f"{self.base_url}{self.endpoint_path}"
+            
+            # Build payload based on backend type
+            if self.backend_type == "llamacpp":
+                payload = {
+                    "prompt": prompt,
+                    "n_predict": 800,  # Increase to get complete responses
+                    "stream": False,
+                    "temperature": agent.model_settings.get("temperature", 0.7),
+                    "top_p": agent.model_settings.get("top_p", 0.9),
+                    "top_k": agent.model_settings.get("top_k", 40)
+                }
+                response_key = "content"
+            else:  # ollama backend
+                payload = {
+                    "model": agent.model_name,
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json",
-                    "options": agent.model_config
-                },
-                timeout=30
+                    "options": {
+                        "temperature": agent.model_settings.get("temperature", 0.7),
+                        "num_predict": 500,
+                        "top_p": agent.model_settings.get("top_p", 0.9),
+                        "top_k": agent.model_settings.get("top_k", 40)
+                    }
+                }
+                response_key = "response"
+            
+            start_time = time.time()
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                timeout=self.ai_backend.get("timeout", 30)
             )
             
             if response.status_code == 200:
-                result = response.json().get("response", "")
+                # Get result based on backend type
+                result = response.json().get(response_key, "")
+                
+                # Log performance metrics
+                inference_time = time.time() - start_time
+                tokens_generated = len(result.split()) if result else 0
+                tokens_per_sec = tokens_generated / inference_time if inference_time > 0 else 0
+                logger.info(f"⚡ {self.backend_type.upper()} inference completed in {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
+                
+                # Log raw response for debugging
+                logger.info(f"Raw AI response (first 500 chars): {result[:500] if result else 'EMPTY'}")
+                
                 try:
-                    return json.loads(result)
-                except json.JSONDecodeError:
+                    # Use helper to extract JSON from AI response
+                    json_str = self._extract_json_from_ai_response(result)
+                    
+                    if json_str:
+                        logger.info(f"Extracted JSON string: {json_str[:200]}...")
+                        parsed = json.loads(json_str)
+                        
+                        # Validate it has expected structure
+                        if isinstance(parsed, dict):
+                            logger.info(f"✅ Successfully parsed AI summary with {len(parsed.get('bullets', []))} bullet points")
+                            if parsed.get('executive'):
+                                logger.info(f"   Executive summary: {parsed['executive'][:100]}...")
+                            if parsed.get('title'):
+                                logger.info(f"   Title: {parsed['title']}")
+                            return parsed
+                        else:
+                            logger.warning(f"Result is not a dict: {type(parsed)}")
+                            raise json.JSONDecodeError("Not a dict", result, 0)
+                    else:
+                        logger.warning(f"No JSON found in response. Response starts with: {result[:100]}")
+                        logger.warning(f"Full response for debugging: {result[:500]}")
+                        raise json.JSONDecodeError("No JSON markers", result, 0)
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON from model response: {e}")
+                    logger.info(f"Response was: {result[:200]}...")
                     # Fallback structured response
                     return {
                         "executive": f"Meeting in progress with {interval_info['current_word_count']} words transcribed.",
@@ -294,7 +626,7 @@ RESPOND WITH JSON:
             return None
     
     async def _generate_final_summary(self, session_id: str) -> Optional[Dict]:
-        """Generate comprehensive final summary"""
+        """Generate comprehensive final summary using Granite 3.3 8B for best quality"""
         session_info = self.active_sessions.get(session_id)
         if not session_info:
             return None
@@ -305,50 +637,86 @@ RESPOND WITH JSON:
         if not transcript:
             return None
         
-        # Use enhanced prompt for final summary
-        final_prompt = f"""{agent.system_prompt}
-
-This is a FINAL COMPREHENSIVE SUMMARY of the entire meeting.
-
-FULL MEETING TRANSCRIPT:
+        # Get progressive summaries to provide additional context
+        progressive_summaries = await self._get_progressive_summaries(session_id)
+        progressive_context = ""
+        if progressive_summaries:
+            progressive_context = "\n\nPROGRESSIVE SUMMARIES DURING MEETING:\n"
+            for i, summary in enumerate(progressive_summaries, 1):
+                progressive_context += f"{i}. {summary.get('text', '')}\n"
+        
+        # Use Granite 3.3 8B (port 11438) for comprehensive analysis
+        final_prompt = f"""TRANSCRIPT:
 {transcript}
+{progressive_context}
 
-Provide a complete analysis including:
-- Comprehensive executive summary
-- All key discussion points
-- Complete list of action items and decisions
-- Final meeting title
+Provide JSON analysis:
 
-RESPOND WITH JSON:
 {{
-    "executive": "Comprehensive executive summary of the entire meeting",
-    "bullets": ["All key points discussed"],
-    "actions": [{{"action": "Complete task list", "owner": "Responsible person", "priority": "high/medium/low"}}],
-    "decisions": ["All important decisions made"],
-    "title": "Descriptive meeting title"
+    "executive": "2-3 sentence summary",
+    "bullets": ["key point 1", "key point 2"],
+    "actions": [{{"action": "task", "owner": "person", "priority": "high"}}],
+    "decisions": ["decision 1"],
+    "title": "Meeting Title"
 }}"""
         
         try:
             import requests
+            
+            # Use Granite 3.3 8B (port 11438) for final comprehensive analysis
+            url = "http://localhost:11438/completion"
+            
+            payload = {
+                "prompt": final_prompt,
+                "n_predict": 600,  # Shorter but focused
+                "stream": False,
+                "temperature": 0.3,  # Lower temperature for better structure
+                "top_p": 0.9,
+                "top_k": 40
+            }
+            
+            start_time = time.time()
             response = await asyncio.to_thread(
                 requests.post,
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": agent.model_name,
-                    "prompt": final_prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {**agent.model_config, "num_predict": 1000}  # Longer for final summary
-                },
-                timeout=60  # Longer timeout for final summary
+                url,
+                json=payload,
+                timeout=90  # Longer timeout for final comprehensive summary
             )
             
             if response.status_code == 200:
-                result = response.json().get("response", "")
-                return json.loads(result)
+                result = response.json().get("content", "")
+                inference_time = time.time() - start_time
+                logger.info(f"⚡ Final summary generated in {inference_time:.1f}s using Granite 3.3 8B")
+                
+                try:
+                    # Use helper to extract JSON from AI response
+                    json_str = self._extract_json_from_ai_response(result)
+                    if json_str:
+                        parsed_result = json.loads(json_str)
+                        logger.info(f"✅ Comprehensive final summary generated with {len(parsed_result.get('bullets', []))} key points")
+                        return parsed_result
+                    else:
+                        raise json.JSONDecodeError("No JSON found", result, 0)
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse final summary JSON, using fallback format")
+                    # Create structured fallback response
+                    return {
+                        "executive": "Final summary generation completed. Please review the transcript for details.",
+                        "bullets": [
+                            "Meeting concluded successfully",
+                            f"Total transcript length: {len(transcript.split())} words",
+                            "Summary processing complete"
+                        ],
+                        "actions": [],
+                        "decisions": [],
+                        "title": f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                    }
                 
         except Exception as e:
             logger.error(f"Error generating final summary: {e}")
+            # Ensure we switch back even on error
+            if dual_model_support:
+                self.base_url = original_url
         
         return None
     
@@ -379,18 +747,20 @@ RESPOND WITH ONLY THE TITLE:"""
             import requests
             response = await asyncio.to_thread(
                 requests.post,
-                "http://localhost:11434/api/generate",
+                "http://localhost:11437/completion",
                 json={
-                    "model": agent.model_name,
                     "prompt": title_prompt,
+                    "n_predict": 20,  # Shorter response
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 20}  # Lower temperature, shorter response
+                    "temperature": 0.3,  # Lower temperature
+                    "top_p": 0.9,
+                    "top_k": 40
                 },
                 timeout=15
             )
             
             if response.status_code == 200:
-                title = response.json().get("response", "").strip()
+                title = response.json().get("content", "").strip()
                 # Clean up the title
                 title = title.replace('"', '').replace('\n', ' ').strip()
                 return title[:100] if title else None
@@ -399,6 +769,90 @@ RESPOND WITH ONLY THE TITLE:"""
             logger.error(f"Error generating meeting title: {e}")
         
         return None
+    
+    async def analyze_meeting(self, session_id: str, transcript: str) -> Dict:
+        """
+        Analyze a meeting transcript (called from simple_recording_db)
+        This is a simpler version for final analysis after recording
+        """
+        try:
+            from database.database import get_db_session
+            from models.unified_agent import UnifiedMeetingAgent
+            
+            db_session = get_db_session()
+            agent = UnifiedMeetingAgent.get_default_agent(db_session)
+            if not agent:
+                agent = UnifiedMeetingAgent.create_default_agent(db_session)
+            
+            # Generate comprehensive analysis
+            prompt = f"""{agent.system_prompt}
+            
+FULL MEETING TRANSCRIPT:
+{transcript}
+
+Provide a comprehensive analysis including:
+- Executive summary (2-3 sentences)
+- Key discussion points (3-5 bullets)
+- Action items with owners
+- Important decisions
+- Suggested meeting title
+
+RESPOND WITH JSON:
+{{
+    "executive": "Executive summary",
+    "bullets": ["Key point 1", "Key point 2"],
+    "actions": [{{"action": "Task", "owner": "Person", "priority": "high"}}],
+    "decisions": ["Decision 1"],
+    "title": "Meeting Title"
+}}"""
+            
+            # Use configured AI backend
+            url = f"{self.base_url}{self.endpoint_path}"
+            
+            if self.backend_type == "llamacpp":
+                payload = {
+                    "prompt": prompt,
+                    "n_predict": 800,
+                    "temperature": 0.7,
+                    "stream": False
+                }
+                response_key = "content"
+            else:
+                payload = {
+                    "model": agent.model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.7, "num_predict": 800}
+                }
+                response_key = "response"
+            
+            import requests
+            response = await asyncio.to_thread(
+                requests.post, url, json=payload, timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json().get(response_key, "")
+                logger.info(f"✅ Meeting analysis completed using {self.backend_type}")
+                
+                # Use helper to extract JSON from AI response
+                json_str = self._extract_json_from_ai_response(result)
+                if json_str:
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse extracted JSON: {e}")
+                        return {}
+                else:
+                    logger.warning("No JSON found in AI response")
+                    return {}
+            
+            db_session.close()
+            
+        except Exception as e:
+            logger.error(f"Error analyzing meeting: {e}")
+            
+        return {}
     
     async def _send_summary_update(self, session_id: str, session_info: Dict, interval_info: Dict, summary: Dict, processing_time: int):
         """Send summary update via WebSocket"""
@@ -417,7 +871,7 @@ RESPOND WITH ONLY THE TITLE:"""
                 "summary_data": {
                     "word_count_at_summary": interval_info['current_word_count'],
                     "interval_used": interval_info['current_interval'],
-                    "next_interval": interval_info['next_interval'],
+                    "next_interval": interval_info.get('next_interval', interval_info['current_interval']),
                     "model_size": "granite3.3:8b",
                     "sections": summary
                 },
@@ -428,6 +882,203 @@ RESPOND WITH ONLY THE TITLE:"""
             
         except Exception as e:
             logger.error(f"Error sending summary update: {e}")
+    
+    async def analyze_meeting(self, session_id: str, transcript: str) -> Dict:
+        """Analyze meeting transcript with unified agent - with timeout protection"""
+        try:
+            # Truncate very long transcripts to avoid timeout
+            if len(transcript) > 5000:
+                transcript = transcript[:5000] + "... [truncated for processing]"
+            
+            db_session = get_db_session()
+            
+            # Get or create default agent
+            agent = UnifiedMeetingAgent.get_default_agent(db_session)
+            if not agent:
+                agent = UnifiedMeetingAgent.create_default_agent(db_session)
+            
+            # Simplified prompt to reduce processing time
+            prompt = f"""Analyze this meeting transcript and provide a brief summary:
+
+TRANSCRIPT:
+{transcript}
+
+Provide:
+1. Brief summary (2-3 sentences)
+2. Key points (3-5 bullets)
+3. Suggested title
+
+RESPOND WITH JSON:
+{{
+    "executive": "Brief summary of the meeting",
+    "bullets": ["Key point 1", "Key point 2", "Key point 3"],
+    "title": "Meeting title"
+}}"""
+
+            # Call GPU llama.cpp with robust timeout handling
+            try:
+                analysis_result = await self._call_llamacpp_with_timeout(
+                    prompt, agent.model_name, timeout=120
+                )
+                
+                if analysis_result:
+                    return {
+                        "success": True,
+                        "analysis": analysis_result,
+                        "agent_id": str(agent.id)
+                    }
+                else:
+                    # Fallback to basic analysis
+                    return await self._create_fallback_analysis(session_id, transcript)
+                    
+            except asyncio.TimeoutError:
+                logger.error(f"AI analysis timed out for session {session_id}")
+                return await self._create_fallback_analysis(session_id, transcript)
+                
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}")
+            return await self._create_fallback_analysis(session_id, transcript)
+        finally:
+            if db_session:
+                db_session.close()
+    
+    async def _call_llamacpp_with_timeout(self, prompt: str, model: str, timeout: int = 120) -> Optional[Dict]:
+        """Call GPU-accelerated llama.cpp with Vulkan (Phi-4 or Granite models)"""
+        try:
+            import aiohttp
+            
+            # Use the appropriate port based on model context
+            # Port 11437: Phi-4 Mini for live summaries
+            # Port 11438: Granite 3.3 8B for final summaries
+            port = 11437  # Default to Phi-4
+            
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+                payload = {
+                    "prompt": prompt,
+                    "n_predict": 500,  # Limit response length
+                    "stream": False,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "top_k": 40
+                }
+                
+                async with session.post(
+                    f"http://localhost:{port}/completion",
+                    json=payload
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        response_text = result.get("content", "")
+                        
+                        # Use helper to extract JSON from AI response
+                        json_str = self._extract_json_from_ai_response(response_text)
+                        if json_str:
+                            try:
+                                return json.loads(json_str)
+                            except json.JSONDecodeError:
+                                logger.warning(f"Failed to parse JSON from llama.cpp response: {response_text[:200]}")
+                                return None
+                        else:
+                            logger.warning(f"No JSON found in llama.cpp response: {response_text[:200]}")
+                            return None
+                    else:
+                        logger.error(f"GPU llama.cpp API error: {response.status}")
+                        return None
+                        
+        except asyncio.TimeoutError:
+            logger.error("GPU llama.cpp request timed out")
+            return None
+        except Exception as e:
+            logger.error(f"GPU llama.cpp call failed: {e}")
+            return None
+    
+    async def _save_progressive_text_summary_to_db(self, session_id: str, interval_info: Dict, summary_text: str, processing_time: int):
+        """Save progressive plain text summary to database"""
+        try:
+            from database.database import get_db_session
+            from database.models import RecordingSession
+            import json
+            
+            db = get_db_session()
+            
+            # Find session by session_id
+            session = db.query(RecordingSession).filter(
+                RecordingSession.session_id == session_id
+            ).first()
+            
+            if not session:
+                logger.warning(f"Session {session_id} not found in database for progressive summary save")
+                return
+            
+            # Create progressive summary entry (plain text format)
+            progressive_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "word_count_at_summary": interval_info.get('current_word_count', 0),
+                "interval_used": interval_info.get('current_interval', 500),
+                "processing_time_ms": processing_time,
+                "text": summary_text,  # Plain text instead of structured sections
+                "model": "phi-4-mini"
+            }
+            
+            # Get existing progressive summaries or initialize empty list
+            if session.progressive_summaries:
+                summaries = session.progressive_summaries if isinstance(session.progressive_summaries, list) else []
+            else:
+                summaries = []
+            
+            # Append new summary
+            summaries.append(progressive_entry)
+            
+            # Update session
+            session.progressive_summaries = summaries
+            
+            # Also update processing_metadata with latest stats
+            metadata = session.processing_metadata or {}
+            metadata.update({
+                "last_progressive_summary": datetime.utcnow().isoformat(),
+                "total_progressive_summaries": len(summaries),
+                "current_word_count": interval_info.get('current_word_count', 0),
+                "model_used": "phi-4-mini"
+            })
+            session.processing_metadata = metadata
+            
+            db.commit()
+            logger.info(f"✅ Saved progressive text summary #{len(summaries)} to database for session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save progressive summary to database: {e}")
+        finally:
+            if db:
+                db.close()
+    
+    async def _create_fallback_analysis(self, session_id: str, transcript: str) -> Dict:
+        """Create basic fallback analysis when AI fails"""
+        word_count = len(transcript.split())
+        duration_estimate = word_count / 150  # Approximate minutes
+        
+        # Extract first few sentences for summary
+        sentences = transcript.split('. ')[:3]
+        brief_text = '. '.join(sentences)[:200] + "..."
+        
+        fallback_analysis = {
+            "executive": f"Meeting recorded with {word_count} words transcribed. {brief_text}",
+            "bullets": [
+                f"Meeting duration: approximately {duration_estimate:.1f} minutes",
+                f"Total words transcribed: {word_count}",
+                "Meeting content captured successfully",
+                "AI analysis temporarily unavailable"
+            ],
+            "actions": [],
+            "decisions": [],
+            "title": f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        }
+        
+        return {
+            "success": True,  # Mark as success even with fallback
+            "analysis": fallback_analysis,
+            "agent_id": "fallback",
+            "fallback": True
+        }
     
     def get_agent_status(self) -> Dict:
         """Get current agent configuration"""

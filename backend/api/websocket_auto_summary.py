@@ -24,6 +24,41 @@ active_connections: Dict[str, Set[WebSocket]] = {}
 session_word_counts: Dict[str, int] = {}
 
 
+async def broadcast_progressive_summary(session_id: str, summary_data: Dict):
+    """
+    Broadcast progressive summary to all connected clients for a session
+    """
+    if session_id not in active_connections:
+        logger.debug(f"No active connections for session {session_id}")
+        return
+    
+    # Don't wrap if already a properly formatted message
+    if isinstance(summary_data, dict) and summary_data.get("type") == "progressive_summary":
+        message = summary_data  # Already formatted correctly
+    else:
+        # Legacy format - wrap it
+        message = {
+            "type": "progressive_summary",
+            "session_id": session_id,
+            "data": summary_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    # Send to all connected clients for this session
+    disconnected = set()
+    for websocket in active_connections[session_id]:
+        try:
+            await websocket.send_json(message)
+            logger.info(f"📡 Broadcast progressive summary to client for session {session_id}")
+        except Exception as e:
+            logger.debug(f"Failed to send to client: {e}")
+            disconnected.add(websocket)
+    
+    # Clean up disconnected clients
+    for ws in disconnected:
+        active_connections[session_id].discard(ws)
+
+
 @router.websocket("/ws/transcription-auto/{session_id}")
 async def websocket_with_auto_summary(websocket: WebSocket, session_id: str):
     """

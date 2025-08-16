@@ -42,13 +42,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Error checking transcription service: {e}")
     
-    # Audio monitoring disabled to allow recording functionality
-    logger.info("📌 Audio level monitoring DISABLED to allow recording functionality")
+    # Audio monitoring disabled - only runs during recording
+    logger.info("🎤 Audio monitoring disabled (only active during recording)")
+    
+    # Audio monitoring via Redis WebSocket
+    logger.info("📌 Audio levels served via Redis WebSocket pipeline")
     
     yield
     
     # Shutdown
     logger.info("👋 Shutting down...")
+    
+    # Audio monitoring cleanup not needed (disabled)
+    
     if audio_monitor_task and not audio_monitor_task.done():
         audio_monitor_task.cancel()
         try:
@@ -73,12 +79,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import transcription service
-try:
-    from services.transcription_service import transcription_service
-except Exception as e:
-    logger.error(f"Failed to import transcription service: {e}")
-    transcription_service = None
+# Transcription service is already imported in lifespan context above
 
 # Auth router
 try:
@@ -112,29 +113,13 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Meeting Management router failed to load: {e}")
 
-# Meeting Intelligence (Real AI)
-try:
-    from api.meeting_intelligence import router as intelligence_router
-    app.include_router(intelligence_router, prefix="/api/meeting-intelligence")
-    logger.info("✅ Meeting Intelligence router loaded")
-except Exception as e:
-    logger.warning(f"⚠️ Meeting Intelligence router failed to load: {e}")
-
-# Meeting Intelligence Simple (Mock for testing)
-try:
-    from api.meeting_intelligence_simple import router as intelligence_simple_router
-    app.include_router(intelligence_simple_router)
-    logger.info("✅ Meeting Intelligence Simple router loaded")
-except Exception as e:
-    logger.warning(f"⚠️ Meeting Intelligence Simple router failed to load: {e}")
-
-# Real Meeting Intelligence (LLM)
+# Meeting Intelligence (Primary)
 try:
     from api.meeting_intelligence_real import router as intelligence_real_router
     app.include_router(intelligence_real_router)
-    logger.info("✅ Meeting Intelligence Real router loaded")
+    logger.info("✅ Meeting Intelligence router loaded")
 except Exception as e:
-    logger.warning(f"⚠️ Meeting Intelligence Real router failed to load: {e}")
+    logger.warning(f"⚠️ Meeting Intelligence router failed to load: {e}")
 
 # AI Settings
 try:
@@ -178,9 +163,9 @@ except Exception as e:
 
 # Simple Recording (Fixed with FFmpeg)
 try:
-    from api.simple_recording_fixed import router as simple_recording_router
+    from api.simple_recording_db import router as simple_recording_router
     app.include_router(simple_recording_router)
-    logger.info("✅ Simple Recording router loaded")
+    logger.info("✅ Simple Recording DB router loaded")
 except Exception as e:
     logger.warning(f"⚠️ Simple Recording router failed to load: {e}")
 
@@ -232,6 +217,30 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Live Transcription router failed to load: {e}")
 
+# Summary Downloads (PDF, DOCX, Text exports)
+try:
+    from api.summary_downloads import router as summary_downloads_router
+    app.include_router(summary_downloads_router)
+    logger.info("✅ Summary Downloads router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Summary Downloads router failed to load: {e}")
+
+# Audio Upload for existing sessions
+try:
+    from api.audio_upload import router as audio_upload_router
+    app.include_router(audio_upload_router)
+    logger.info("✅ Audio Upload router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Audio Upload router failed to load: {e}")
+
+# Email Generation
+try:
+    from api.email_generation import router as email_generation_router
+    app.include_router(email_generation_router)
+    logger.info("✅ Email Generation router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Email Generation router failed to load: {e}")
+
 # Transcription Loop
 try:
     from routers.transcription_loop import router as transcription_loop_router
@@ -240,10 +249,10 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Transcription Loop router failed to load: {e}")
 
-# Analytics (Real)
+# Analytics (Primary)
 try:
-    from api.analytics import router as analytics_router
-    app.include_router(analytics_router)
+    from api.analytics_simple import router as analytics_simple_router
+    app.include_router(analytics_simple_router)
     logger.info("✅ Analytics router loaded")
 except Exception as e:
     logger.warning(f"⚠️ Analytics router failed to load: {e}")
@@ -272,13 +281,8 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Vocabulary Management router failed to load: {e}")
 
-# Meeting Notes (Original)
-try:
-    from api.meeting_notes import router as meeting_notes_router
-    app.include_router(meeting_notes_router)
-    logger.info("✅ Meeting Notes router loaded")
-except Exception as e:
-    logger.warning(f"⚠️ Meeting Notes router failed to load: {e}")
+# Meeting Notes (Legacy - disabled, using Unified)
+# Replaced by meeting_notes_unified router above
 
 # System Configuration
 try:
@@ -360,6 +364,22 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Meeting Intelligence Delta router failed to load: {e}")
 
+# Export Templates (Enhanced export formats)
+try:
+    from api.export_templates import router as export_templates_router
+    app.include_router(export_templates_router)
+    logger.info("✅ Export Templates router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Export Templates router failed to load: {e}")
+
+# Analytics Summary (Dashboard metrics)
+try:
+    from api.analytics_summary import router as analytics_summary_router
+    app.include_router(analytics_summary_router)
+    logger.info("✅ Analytics Summary router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Analytics Summary router failed to load: {e}")
+
 
 # === CORE API ENDPOINTS ===
 
@@ -381,6 +401,7 @@ async def get_status():
         npu_available = os.path.exists("/dev/accel/accel0")
         
         # Transcription Status
+        from services.transcription_service import transcription_service
         transcription_ready = transcription_service and transcription_service.is_ready
         model_loaded = transcription_service.current_model_id if transcription_service else "none"
         
@@ -446,6 +467,7 @@ async def get_system_info():
         npu_available = os.path.exists("/dev/accel/accel0")
         
         # Transcription service info
+        from services.transcription_service import transcription_service
         transcription_ready = transcription_service and transcription_service.is_ready
         model_loaded = transcription_service.current_model_id if transcription_service else "none"
         

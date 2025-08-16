@@ -206,28 +206,8 @@ class TranscriptionService:
     
     def _initialize_npu_whisper(self, model_id: str):
         """Initialize NPU-accelerated Whisper model"""
-        try:
-            # First try WhisperX NPU engine from stt_engine
-            logger.info(f"Attempting to initialize NPU WhisperX for {model_id}")
-            from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
-            engine = WhisperXNPUEngine()
-            logger.info("✅ WhisperX NPU engine initialized for fast transcription")
-            return engine
-        except ImportError as e:
-            logger.warning(f"WhisperX NPU not available: {e}")
-            # Fall back to NPU whisper transcriber
-            try:
-                from npu_whisper_transcriber import NPUWhisperTranscriber
-                engine = NPUWhisperTranscriber()
-                if engine.model_loaded:
-                    logger.info("✅ NPU Whisper transcriber initialized")
-                    return engine
-            except Exception as e2:
-                logger.warning(f"NPU Whisper transcriber failed: {e2}")
-        
-        # Last resort: ONNX CPU
-        logger.warning("Falling back to ONNX CPU transcription")
-        return self._initialize_onnx_cpu(model_id)
+        # Delegate to _initialize_whisperx_npu to avoid duplicate initialization
+        return self._initialize_whisperx_npu()
     
     def _initialize_whisperx_unified(self):
         """Initialize WhisperX unified transcription + diarization"""
@@ -249,7 +229,10 @@ class TranscriptionService:
         try:
             from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
             engine = WhisperXNPUEngine()
-            logger.info("✅ WhisperX NPU engine initialized")
+            # Log only once when actually successfully initialized
+            if not hasattr(self, '_npu_initialized'):
+                logger.info("✅ WhisperX NPU engine initialized")
+                self._npu_initialized = True
             return engine
         except ImportError:
             logger.warning("WhisperX NPU engine not available, falling back to ONNX")

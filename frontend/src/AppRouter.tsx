@@ -50,6 +50,12 @@ import { NetworkStatus } from './components/NetworkStatus';
 import { LogViewer } from './components/LogViewer';
 import { LLMSettingsPage } from './pages/LLMSettingsPage';
 
+// Admin Pages
+import AISettings from './pages/admin/AISettings';
+import Templates from './pages/admin/Templates';
+import MeetingAgents from './pages/admin/MeetingAgents';
+import UnifiedAgent from './pages/admin/UnifiedAgent';
+
 // Protected Route Component
 const ProtectedRoute: React.FC<{ 
   children: React.ReactNode; 
@@ -336,6 +342,26 @@ export const AppRouter: React.FC = () => {
 
         {/* Advanced Features */}
         <Route path="/advanced" element={<Outlet />}>
+          <Route path="unified-agent" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
+              <UnifiedAgent />
+            </ProtectedRoute>
+          } />
+          <Route path="ai-settings" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
+              <AISettings />
+            </ProtectedRoute>
+          } />
+          <Route path="agents" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
+              <MeetingAgents />
+            </ProtectedRoute>
+          } />
+          <Route path="templates" element={
+            <ProtectedRoute requiredRoles={['admin', 'superuser', 'manager']}>
+              <Templates />
+            </ProtectedRoute>
+          } />
           <Route path="collaboration" element={
             <div className="p-6 text-white">
               <RealTimeCollaboration />
@@ -346,7 +372,7 @@ export const AppRouter: React.FC = () => {
               <CustomVocabulary />
             </div>
           } />
-          <Route path="templates" element={
+          <Route path="meeting-templates" element={
             <div className="p-6 text-white">
               <MeetingTemplates />
             </div>

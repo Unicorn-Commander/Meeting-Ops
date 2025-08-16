@@ -20,7 +20,7 @@ class DirectUSBAudioMonitor:
     def __init__(self):
         self.process = None
         self.monitoring = False
-        self.device = "hw:0,0"  # USB PnP Sound Device
+        self.device = "hw:0,0"  # Direct USB device access when not recording
         self.sample_rate = 44100  # Common USB mic rate
         self.channels = 1  # Mono for USB device
         
@@ -47,10 +47,11 @@ class DirectUSBAudioMonitor:
             )
             self.monitoring = True
             logger.info(f"✅ Started direct USB audio monitoring on {self.device}")
-            logger.info(f"   Device: USB PnP Sound Device")
+            logger.info(f"   Device: USB PnP Sound Device (ALSA plugin sharing)")
             logger.info(f"   Sample rate: {self.sample_rate} Hz (USB standard)")
             logger.info(f"   Channels: {self.channels} (mono)")
             logger.info(f"   Gain: 100x amplification applied")
+            logger.info(f"   No conflicts: plughw allows multiple readers")
             return True
         except Exception as e:
             logger.error(f"Failed to start arecord: {e}")

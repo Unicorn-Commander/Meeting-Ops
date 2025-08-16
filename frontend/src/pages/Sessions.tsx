@@ -13,6 +13,7 @@ import { useNavigate } from 'react-router-dom';
 interface Session {
   id: string;
   name: string;
+  title?: string;              // AI-generated title
   description?: string;
   created_at: string;
   updated_at: string;
@@ -22,6 +23,7 @@ interface Session {
   tags?: string[];
   audio_file?: string;
   transcript?: string;
+  summary?: any;               // AI-generated summary
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
@@ -44,6 +46,9 @@ export const Sessions: React.FC = () => {
 
   useEffect(() => {
     fetchSessions();
+    // Refresh sessions every 10 seconds
+    const interval = setInterval(fetchSessions, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -53,15 +58,27 @@ export const Sessions: React.FC = () => {
   const fetchSessions = async () => {
     setLoading(true);
     try {
+      // Remove auth header if not present - backend may not require it
+      const headers: any = {};
+      const token = localStorage.getItem('token');
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions`, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
+        headers
       });
 
       if (response.ok) {
         const data = await response.json();
+        console.log('✅ Sessions fetched:', data.length, 'sessions');
+        console.log('Session data:', data);
         setSessions(data);
+        // Force immediate check
+        console.log('Sessions state will be set to:', data);
+        console.log('First session example:', data[0]);
+      } else {
+        console.error('❌ Failed to fetch sessions:', response.status, response.statusText);
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -71,14 +88,18 @@ export const Sessions: React.FC = () => {
   };
 
   const filterSessions = () => {
+    console.log('🔍 Filtering sessions. Total sessions:', sessions.length);
     let filtered = [...sessions];
 
     // Search filter
     if (searchQuery) {
       filtered = filtered.filter(session =>
         session.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        session.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         session.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        session.participants?.some(p => p.toLowerCase().includes(searchQuery.toLowerCase()))
+        session.transcript?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        session.participants?.some(p => p.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (session.summary?.analysis?.executive && session.summary.analysis.executive.toLowerCase().includes(searchQuery.toLowerCase()))
       );
     }
 
@@ -93,6 +114,7 @@ export const Sessions: React.FC = () => {
     }
 
     // Sort
+    console.log('📊 After filtering:', filtered.length, 'sessions remain');
     filtered.sort((a, b) => {
       let aValue: any, bValue: any;
       
@@ -196,6 +218,64 @@ export const Sessions: React.FC = () => {
     } catch (error) {
       console.error('Failed to download audio:', error);
     }
+  };
+
+  const downloadSummary = (session: Session) => {
+    if (!session.summary) {
+      alert('No summary available for download');
+      return;
+    }
+    
+    let content = `MEETING SUMMARY\n`;
+    content += `===============\n\n`;
+    content += `Meeting: ${session.title || session.name}\n`;
+    content += `Date: ${new Date(session.created_at).toLocaleDateString()}\n`;
+    content += `Duration: ${session.duration ? formatDuration(session.duration) : 'N/A'}\n\n`;
+    
+    if (session.summary.analysis?.executive) {
+      content += `EXECUTIVE SUMMARY\n`;
+      content += `-----------------\n`;
+      content += `${session.summary.analysis.executive}\n\n`;
+    }
+    
+    if (session.summary.analysis?.bullets && session.summary.analysis.bullets.length > 0) {
+      content += `KEY DISCUSSION POINTS\n`;
+      content += `---------------------\n`;
+      session.summary.analysis.bullets.forEach((bullet: string) => {
+        content += `• ${bullet}\n`;
+      });
+      content += '\n';
+    }
+    
+    if (session.summary.analysis?.decisions && session.summary.analysis.decisions.length > 0) {
+      content += `IMPORTANT DECISIONS\n`;
+      content += `-------------------\n`;
+      session.summary.analysis.decisions.forEach((decision: string) => {
+        content += `✓ ${decision}\n`;
+      });
+      content += '\n';
+    }
+    
+    if (session.summary.analysis?.actions && session.summary.analysis.actions.length > 0) {
+      content += `ACTION ITEMS\n`;
+      content += `------------\n`;
+      session.summary.analysis.actions.forEach((action: any) => {
+        content += `□ ${action.action}\n`;
+        if (action.owner) content += `  Owner: ${action.owner}\n`;
+        if (action.priority) content += `  Priority: ${action.priority}\n`;
+        content += '\n';
+      });
+    }
+    
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(session.title || session.name).replace(/\s+/g, '_')}_summary.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const getStatusColor = (status: string) => {
@@ -411,14 +491,26 @@ export const Sessions: React.FC = () => {
                     {/* Header */}
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <h3 className="font-semibold text-white text-lg truncate">{session.name}</h3>
+                        <h3 className="font-semibold text-white text-lg truncate">
+                          {session.title || session.name}
+                        </h3>
+                        {session.title && session.name !== session.title && (
+                          <p className="text-gray-500 text-xs mt-0.5">Original: {session.name}</p>
+                        )}
                         {session.description && (
                           <p className="text-gray-400 text-sm mt-1 line-clamp-2">{session.description}</p>
                         )}
                       </div>
-                      <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
-                        {session.status}
-                      </span>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
+                          {session.status}
+                        </span>
+                        {session.summary && (
+                          <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
+                            AI Summary
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Meta */}
@@ -441,6 +533,24 @@ export const Sessions: React.FC = () => {
                       )}
                     </div>
 
+                    {/* AI Summary Preview */}
+                    {session.summary?.analysis?.executive && (
+                      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
+                          <span className="text-xs text-purple-300 font-medium">AI Summary</span>
+                        </div>
+                        <p className="text-gray-300 text-sm line-clamp-2">
+                          {session.summary.analysis.executive}
+                        </p>
+                        {session.summary.analysis.actions && session.summary.analysis.actions.length > 0 && (
+                          <div className="mt-2 text-xs text-gray-400">
+                            {session.summary.analysis.actions.length} action item{session.summary.analysis.actions.length !== 1 ? 's' : ''}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    
                     {/* Tags */}
                     {session.tags && session.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
@@ -460,11 +570,11 @@ export const Sessions: React.FC = () => {
                     {/* Actions */}
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setSelectedSession(session)}
+                        onClick={() => navigate(`/sessions/${session.id}`)}
                         className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
                       >
                         <Eye className="w-4 h-4" />
-                        View
+                        View Details
                       </button>
                       
                       {session.has_transcript && (
@@ -472,6 +582,16 @@ export const Sessions: React.FC = () => {
                           onClick={() => downloadTranscript(session)}
                           className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
                           title="Download Transcript"
+                        >
+                          <FileText className="w-4 h-4" />
+                        </button>
+                      )}
+                      
+                      {session.summary && (
+                        <button
+                          onClick={() => downloadSummary(session)}
+                          className="p-2 bg-green-700 hover:bg-green-600 text-green-300 rounded transition-colors"
+                          title="Download Summary"
                         >
                           <FileText className="w-4 h-4" />
                         </button>
@@ -501,10 +621,17 @@ export const Sessions: React.FC = () => {
                   <>
                     <div className="flex-1">
                       <div className="flex items-center gap-4 mb-2">
-                        <h3 className="font-semibold text-white text-lg">{session.name}</h3>
+                        <h3 className="font-semibold text-white text-lg">
+                          {session.title || session.name}
+                        </h3>
                         <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
                           {session.status}
                         </span>
+                        {session.summary && (
+                          <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
+                            AI Summary
+                          </span>
+                        )}
                         {session.session_type === 'upload' && (
                           <span className="px-2 py-1 bg-blue-500/20 text-blue-300 text-xs rounded">
                             <Upload className="w-3 h-3 inline mr-1" />
@@ -512,8 +639,16 @@ export const Sessions: React.FC = () => {
                           </span>
                         )}
                       </div>
+                      {session.title && session.name !== session.title && (
+                        <p className="text-gray-500 text-xs mb-1">Original: {session.name}</p>
+                      )}
                       {session.description && (
                         <p className="text-gray-400 text-sm">{session.description}</p>
+                      )}
+                      {session.summary?.analysis?.executive && (
+                        <p className="text-gray-300 text-sm mt-1 line-clamp-1 italic">
+                          {session.summary.analysis.executive}
+                        </p>
                       )}
                       <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
                         <span>{new Date(session.created_at).toLocaleDateString()}</span>
@@ -526,11 +661,11 @@ export const Sessions: React.FC = () => {
                     
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setSelectedSession(session)}
+                        onClick={() => navigate(`/sessions/${session.id}`)}
                         className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
                       >
                         <Eye className="w-4 h-4" />
-                        View
+                        View Details
                       </button>
                       
                       {session.has_transcript && (

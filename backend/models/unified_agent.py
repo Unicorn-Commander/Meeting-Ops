@@ -38,7 +38,7 @@ Be concise, accurate, and focus on actionable insights.""")
     # Model Configuration
     provider_type = Column(String(50), default="ollama")  # ollama, openai, anthropic
     model_name = Column(String(100), default="granite3.3:8b")
-    model_config = Column(JSON, default={
+    model_settings = Column(JSON, default={
         "temperature": 0.7,
         "max_tokens": 1000,
         "top_p": 0.9
@@ -46,9 +46,9 @@ Be concise, accurate, and focus on actionable insights.""")
     
     # Progressive Settings
     progressive_config = Column(JSON, default={
-        "initial_interval": 50,
-        "multiplier": 1.5,
-        "max_interval": 500,
+        "initial_interval": 500,  # Fixed 500 word intervals
+        "multiplier": 1.0,        # No progression, keep it simple
+        "max_interval": 500,      # Same as initial (fixed)
         "enabled": True
     })
     
@@ -91,7 +91,7 @@ Be concise, accurate, and focus on actionable insights.""")
             "system_prompt": self.system_prompt,
             "provider_type": self.provider_type,
             "model_name": self.model_name,
-            "model_config": self.model_config,
+            "model_config": self.model_settings,
             "progressive_config": self.progressive_config,
             "output_template": self.output_template,
             "is_active": self.is_active,
@@ -136,16 +136,16 @@ MEETING TITLE: Suggest a descriptive title based on the meeting content.
 Be accurate, actionable, and focus on what matters most for follow-up.""",
             provider_type="ollama",
             model_name="granite3.3:8b",
-            model_config={
+            model_settings={
                 "temperature": 0.7,
                 "max_tokens": 1000,
                 "top_p": 0.9,
                 "num_predict": 500
             },
             progressive_config={
-                "initial_interval": 50,
-                "multiplier": 1.5,
-                "max_interval": 500,
+                "initial_interval": 500,  # Fixed 500 word intervals
+                "multiplier": 1.0,        # No progression
+                "max_interval": 500,      # Same as initial (fixed)
                 "enabled": True
             },
             is_active=True,

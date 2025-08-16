@@ -41,10 +41,17 @@ export function Sessions() {
 
   const fetchSessions = async () => {
     try {
+      console.log('📋 Fetching sessions from:', `${config.apiUrl}/api/simple/recording-sessions`);
       const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions`);
       if (response.ok) {
         const data = await response.json();
-        setSessions(data.sessions || []);
+        console.log('✅ Sessions API response:', data);
+        // API returns array directly, not wrapped in { sessions: [...] }
+        const sessionsList = Array.isArray(data) ? data : (data.sessions || []);
+        console.log('📊 Setting sessions:', sessionsList.length, 'sessions');
+        setSessions(sessionsList);
+      } else {
+        console.error('❌ Failed to fetch sessions:', response.status, response.statusText);
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
