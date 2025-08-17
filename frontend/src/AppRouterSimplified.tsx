@@ -6,6 +6,8 @@ import LiveRecording from './pages/LiveRecording';
 import { Sessions } from './pages/Sessions';  // Use the correct Sessions component, not the wrapper
 import { SessionDetails } from './pages/SessionDetails';
 import SettingsEnhanced from './pages/SettingsEnhanced';
+import { AgentConfiguration } from './pages/admin/AgentConfiguration';
+import { AgentDashboard } from './pages/admin/AgentDashboard';
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {
@@ -28,6 +30,7 @@ function SimplifiedNavigation() {
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
+    { path: '/admin/agents', label: 'AI Agents', icon: '🤖' },
   ];
 
   return (
@@ -117,6 +120,18 @@ export function AppRouterSimplified() {
       <Route path="/settings" element={
         <ProtectedRoute>
           <SettingsEnhanced />
+        </ProtectedRoute>
+      } />
+      
+      <Route path="/admin/agents" element={
+        <ProtectedRoute>
+          <AgentDashboard />
+        </ProtectedRoute>
+      } />
+      
+      <Route path="/admin/agents-old" element={
+        <ProtectedRoute>
+          <AgentConfiguration />
         </ProtectedRoute>
       } />
       

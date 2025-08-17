@@ -129,13 +129,21 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ AI Settings router failed to load: {e}")
 
-# Agent System
+# Agent System (Legacy)
 try:
     from api.agent_system import router as agent_router
     app.include_router(agent_router)
     logger.info("✅ Agent System router loaded")
 except Exception as e:
     logger.warning(f"⚠️ Agent System router failed to load: {e}")
+
+# Agent Management (Multi-tier system)
+try:
+    from api.agent_management_api import router as agent_management_router
+    app.include_router(agent_management_router)
+    logger.info("✅ Agent Management router loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Agent Management router failed to load: {e}")
 
 # LLM Settings
 try:

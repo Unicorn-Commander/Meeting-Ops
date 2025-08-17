@@ -1,0 +1,367 @@
+"""
+Agent Management API
+Full CRUD operations for multi-tier agent system
+"""
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile
+from sqlalchemy.orm import Session
+from typing import List, Optional, Dict
+from pydantic import BaseModel
+import json
+import uuid
+
+from database.database import get_db
+from services.agent_manager_service import agent_manager
+from models.agent_system import AgentType, AgentPermission
+
+router = APIRouter(prefix="/api/agents", tags=["Agent Management"])
+
+# Pydantic models for requests/responses
+class AgentCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    icon: Optional[str] = "🤖"
+    agent_type: str = "task_template"
+    purpose: Optional[str] = None
+    provider_type: str = "ollama"
+    model_name: str
+    model_endpoint: Optional[str] = None
+    model_settings: Optional[Dict] = None
+    system_prompt: str
+    output_format: str = "text"
+    output_template: Optional[Dict] = None
+    progressive_config: Optional[Dict] = None
+    chat_config: Optional[Dict] = None
+    permission_level: str = "owner"
+    allowed_roles: Optional[List[str]] = ["user", "admin"]
+
+class AgentUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    purpose: Optional[str] = None
+    model_name: Optional[str] = None
+    model_endpoint: Optional[str] = None
+    model_settings: Optional[Dict] = None
+    system_prompt: Optional[str] = None
+    output_format: Optional[str] = None
+    output_template: Optional[Dict] = None
+    progressive_config: Optional[Dict] = None
+    chat_config: Optional[Dict] = None
+    permission_level: Optional[str] = None
+    allowed_roles: Optional[List[str]] = None
+
+class SetDefaultRequest(BaseModel):
+    agent_slug: str
+    pipeline_role: str  # "live" or "final"
+
+# CRUD Endpoints
+
+@router.get("/")
+async def list_agents(
+    agent_type: Optional[str] = None,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db)
+):
+    """List all available agents"""
+    agents = agent_manager.list_agents(
+        agent_type=AgentType(agent_type) if agent_type else None,
+        include_inactive=include_inactive,
+        db=db
+    )
+    return {
+        "agents": [agent.to_dict() for agent in agents],
+        "count": len(agents)
+    }
+
+@router.get("/core")
+async def get_core_agents():
+    """Get the core pipeline agents"""
+    core_agents = agent_manager.get_core_agents()
+    return {
+        "live": core_agents["live"].to_dict() if core_agents.get("live") else None,
+        "final": core_agents["final"].to_dict() if core_agents.get("final") else None
+    }
+
+@router.get("/defaults")
+async def get_default_agents(db: Session = Depends(get_db)):
+    """Get current default agents for pipeline"""
+    defaults = agent_manager.get_default_agents(db)
+    return {
+        "live": defaults["live"].to_dict() if defaults.get("live") else None,
+        "final": defaults["final"].to_dict() if defaults.get("final") else None
+    }
+
+@router.post("/defaults")
+async def set_default_agent(
+    request: SetDefaultRequest,
+    db: Session = Depends(get_db)
+):
+    """Set an agent as default for pipeline role"""
+    success = agent_manager.set_default_agent(
+        request.agent_slug,
+        request.pipeline_role,
+        db
+    )
+    
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to set default agent")
+    
+    return {"success": True, "message": f"Set {request.agent_slug} as default for {request.pipeline_role}"}
+
+@router.get("/{slug}")
+async def get_agent(slug: str, db: Session = Depends(get_db)):
+    """Get specific agent by slug"""
+    agent = agent_manager.get_agent_by_slug(slug, db)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent.to_dict()
+
+@router.post("/")
+async def create_agent(
+    request: AgentCreateRequest,
+    db: Session = Depends(get_db)
+):
+    """Create a new custom agent"""
+    # TODO: Get actual user ID from auth
+    user_id = uuid.uuid4()  # Placeholder
+    
+    agent = agent_manager.create_agent(
+        request.dict(),
+        created_by=user_id,
+        db=db
+    )
+    
+    return {
+        "success": True,
+        "agent": agent.to_dict(),
+        "message": f"Created agent: {agent.name}"
+    }
+
+@router.put("/{slug}")
+async def update_agent(
+    slug: str,
+    request: AgentUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """Update an existing agent"""
+    agent = agent_manager.update_agent(
+        slug,
+        request.dict(exclude_unset=True),
+        db
+    )
+    
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    return {
+        "success": True,
+        "agent": agent.to_dict(),
+        "message": f"Updated agent: {agent.name}"
+    }
+
+@router.delete("/{slug}")
+async def delete_agent(slug: str, db: Session = Depends(get_db)):
+    """Delete (deactivate) an agent"""
+    success = agent_manager.delete_agent(slug, db)
+    
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete agent (may be core agent or not found)"
+        )
+    
+    return {"success": True, "message": f"Deactivated agent: {slug}"}
+
+# Import/Export Endpoints
+
+@router.get("/{slug}/export")
+async def export_agent(slug: str, db: Session = Depends(get_db)):
+    """Export agent configuration"""
+    config = agent_manager.export_agent(slug, db)
+    
+    if not config:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    return config
+
+@router.post("/import")
+async def import_agent(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Import agent from JSON file"""
+    try:
+        content = await file.read()
+        data = json.loads(content)
+        
+        # TODO: Get actual user ID from auth
+        user_id = uuid.uuid4()  # Placeholder
+        
+        agent = agent_manager.import_agent(data, user_id, db)
+        
+        return {
+            "success": True,
+            "agent": agent.to_dict(),
+            "message": f"Imported agent: {agent.name}"
+        }
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON file")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Template Endpoints
+
+@router.get("/templates/")
+async def list_templates(
+    category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List available agent templates"""
+    from models.agent_system import AgentTemplate
+    
+    query = db.query(AgentTemplate)
+    if category:
+        query = query.filter_by(category=category)
+    
+    templates = query.order_by(AgentTemplate.downloads.desc()).all()
+    
+    return {
+        "templates": [t.to_dict() for t in templates],
+        "count": len(templates)
+    }
+
+@router.post("/templates/{template_id}/instantiate")
+async def instantiate_template(
+    template_id: str,
+    name: str,
+    db: Session = Depends(get_db)
+):
+    """Create agent from template"""
+    from models.agent_system import AgentTemplate
+    
+    template = db.query(AgentTemplate).filter_by(id=template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    # Create agent from template data
+    agent_data = template.template_data.copy()
+    agent_data["name"] = name
+    
+    # TODO: Get actual user ID from auth
+    user_id = uuid.uuid4()  # Placeholder
+    
+    agent = agent_manager.create_agent(agent_data, user_id, db)
+    
+    # Increment template downloads
+    template.downloads += 1
+    db.commit()
+    
+    return {
+        "success": True,
+        "agent": agent.to_dict(),
+        "message": f"Created agent from template: {agent.name}"
+    }
+
+# Agent Type Information
+
+@router.get("/types/")
+async def get_agent_types():
+    """Get available agent types and their descriptions"""
+    return {
+        "types": [
+            {
+                "value": AgentType.CORE_LIVE,
+                "label": "Core Live Summary",
+                "description": "Real-time progressive summaries during recording",
+                "icon": "⚡"
+            },
+            {
+                "value": AgentType.CORE_FINAL,
+                "label": "Core Final Analysis",
+                "description": "Comprehensive analysis after recording",
+                "icon": "🎯"
+            },
+            {
+                "value": AgentType.TASK_TEMPLATE,
+                "label": "Task Template",
+                "description": "Custom templates for specific meeting types",
+                "icon": "📋"
+            },
+            {
+                "value": AgentType.CHAT_SINGLE,
+                "label": "Single Meeting Chat",
+                "description": "Chat interface for single meeting context",
+                "icon": "💬"
+            },
+            {
+                "value": AgentType.CHAT_CROSS,
+                "label": "Cross-Meeting Chat",
+                "description": "Chat across multiple meetings",
+                "icon": "🔄"
+            },
+            {
+                "value": AgentType.CHAT_ALL,
+                "label": "All Meetings Chat",
+                "description": "Chat with entire meeting database",
+                "icon": "🌐"
+            },
+            {
+                "value": AgentType.EXPORT,
+                "label": "Export Formatter",
+                "description": "Custom export formatting",
+                "icon": "📤"
+            },
+            {
+                "value": AgentType.ANALYSIS,
+                "label": "Specialized Analysis",
+                "description": "Domain-specific analysis (legal, medical, etc)",
+                "icon": "🔬"
+            }
+        ]
+    }
+
+# Model Performance Information
+
+@router.get("/models/performance")
+async def get_model_performance():
+    """Get performance metrics for available models"""
+    return {
+        "models": [
+            {
+                "name": "qwen3-0.6b",
+                "label": "Qwen3 0.6B (Ultra-Fast)",
+                "tokens_per_second": 123.63,
+                "context_window": 32768,
+                "vram_usage": "~4GB",
+                "best_for": "Live summaries, real-time processing",
+                "endpoint": "http://localhost:11440"
+            },
+            {
+                "name": "phi-4-mini",
+                "label": "Phi-4 Mini",
+                "tokens_per_second": 28.40,
+                "context_window": 8192,
+                "vram_usage": "~3.2GB",
+                "best_for": "Fast summaries, good balance",
+                "endpoint": "http://localhost:11437"
+            },
+            {
+                "name": "qwen3-30b",
+                "label": "Qwen3 30B MoE",
+                "tokens_per_second": 26.54,
+                "context_window": 32768,
+                "vram_usage": "~17.6GB",
+                "best_for": "Premium quality, comprehensive analysis",
+                "endpoint": "http://localhost:11439"
+            },
+            {
+                "name": "granite-3.3-8b",
+                "label": "Granite 3.3 8B",
+                "tokens_per_second": 15.0,
+                "context_window": 32768,
+                "vram_usage": "~5.1GB",
+                "best_for": "Structured output, JSON formatting",
+                "endpoint": "http://localhost:11438"
+            }
+        ]
+    }

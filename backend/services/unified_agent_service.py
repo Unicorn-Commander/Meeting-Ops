@@ -365,21 +365,47 @@ class UnifiedAgentService:
             logger.error(f"Error generating progressive summary: {e}")
     
     async def _call_phi4_for_text_summary(self, transcript: str, interval_info: Dict) -> Optional[str]:
-        """Call Phi-4 Mini for fast plain text summary generation"""
+        """Call fast model for real-time summary generation
+        Now uses the ultra-fast Qwen3-0.6B model from our agent configuration
+        """
         try:
             import requests
+            from database.database import SessionLocal
+            from models.agent_system import MeetingAgent
             
-            # Simple prompt for plain text summary - no JSON required
-            prompt = f"""Summarize this meeting transcript in 2-3 clear sentences. Focus on key decisions, actions, and important points discussed.
+            # Get the live summary agent from database
+            db = SessionLocal()
+            try:
+                live_agent = db.query(MeetingAgent).filter_by(
+                    slug="core-live-summary", 
+                    is_active=True
+                ).first()
+                
+                if live_agent:
+                    # Use agent configuration
+                    url = f"{live_agent.model_endpoint}/completion"
+                    system_prompt = live_agent.system_prompt
+                    logger.info(f"Using {live_agent.name} ({live_agent.model_name}) at {url}")
+                else:
+                    # Fallback to Qwen3-0.6B default
+                    url = "http://localhost:11440/completion"
+                    system_prompt = "You are a fast meeting summarizer. Provide brief, clear summaries."
+                    logger.info("Using fallback Qwen3-0.6B at port 11440")
+            finally:
+                db.close()
+            
+            # Create a clear instruction-following prompt
+            # Truncate transcript if too long for real-time processing
+            if len(transcript) > 2000:
+                transcript = transcript[:2000] + "..."
+            
+            prompt = f"""Below is a meeting transcript. Write a 2-3 sentence summary of the key points.
 
-TRANSCRIPT:
+Meeting transcript:
 {transcript}
 
-SUMMARY:"""
+Brief summary:"""
 
-            # Use Phi-4 Mini (port 11437) for speed
-            url = "http://localhost:11437/completion"
-            
             payload = {
                 "prompt": prompt,
                 "n_predict": 150,  # Shorter for quick summaries
@@ -404,14 +430,30 @@ SUMMARY:"""
                 inference_time = time.time() - start_time
                 tokens_generated = len(result.split()) if result else 0
                 tokens_per_sec = tokens_generated / inference_time if inference_time > 0 else 0
-                logger.info(f"⚡ Phi-4 Mini: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
+                logger.info(f"⚡ Live Summary Model: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
                 
                 # Clean up the response - remove prompt echoes and extra text
                 cleaned_result = result.strip()
                 
-                # Remove common prompt echoes
+                # Remove common prompt echoes and instruction artifacts
                 if cleaned_result.lower().startswith("summary:"):
                     cleaned_result = cleaned_result[8:].strip()
+                
+                # Remove common instruction artifacts from small models
+                if "[Your answer should be" in cleaned_result:
+                    # Extract the actual summary after the instruction
+                    parts = cleaned_result.split("]")
+                    if len(parts) > 1:
+                        cleaned_result = parts[1].strip()
+                
+                # Remove "Final Answer" artifacts
+                if "**Final Answer**" in cleaned_result or "Final Answer:" in cleaned_result:
+                    # Take everything before "Final Answer"
+                    cleaned_result = cleaned_result.split("**Final Answer**")[0].strip()
+                    cleaned_result = cleaned_result.split("Final Answer:")[0].strip()
+                
+                # Clean up any remaining markdown
+                cleaned_result = cleaned_result.replace("**", "")
                 
                 # Limit length for real-time display
                 if len(cleaned_result) > 300:
@@ -424,14 +466,15 @@ SUMMARY:"""
                     logger.info(f"✅ Generated progressive text summary: {cleaned_result[:80]}...")
                     return cleaned_result
                 else:
-                    logger.warning("Phi-4 returned empty summary")
+                    logger.warning("Live model returned empty summary")
                     return None
             else:
-                logger.error(f"Phi-4 Mini API error: {response.status_code}")
+                logger.error(f"Live Summary Model API error: {response.status_code}")
+                logger.error(f"Response: {response.text[:500] if response.text else 'No response text'}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error calling Phi-4 Mini: {e}")
+            logger.error(f"Error calling Live Summary Model: {e}")
             return None
     
     async def _get_progressive_summaries(self, session_id: str) -> List[Dict]:
@@ -854,8 +897,39 @@ RESPOND WITH JSON:
             
         return {}
     
+    async def _send_text_summary_update(self, session_id: str, session_info: Dict, interval_info: Dict, summary_text: str, processing_time: int):
+        """Send plain text summary update via WebSocket"""
+        try:
+            agent = session_info['agent']
+            websocket_callback = session_info['websocket_callback']
+            
+            message = {
+                "type": "progressive_summary",
+                "session_id": session_id,
+                "agent": {
+                    "id": str(agent.id),
+                    "name": agent.name,
+                    "role": "unified"
+                },
+                "summary_data": {
+                    "text": summary_text,  # Plain text summary
+                    "word_count": interval_info['current_word_count'],
+                    "interval_used": interval_info['current_interval'],
+                    "next_interval": interval_info.get('next_interval', interval_info['current_interval']),
+                    "model": agent.model_name,
+                    "processing_time_ms": processing_time
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            await websocket_callback(message)
+            logger.info(f"✅ Sent text summary update via WebSocket for session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Error sending text summary update: {e}")
+    
     async def _send_summary_update(self, session_id: str, session_info: Dict, interval_info: Dict, summary: Dict, processing_time: int):
-        """Send summary update via WebSocket"""
+        """Send summary update via WebSocket (for structured summaries)"""
         try:
             agent = session_info['agent']
             websocket_callback = session_info['websocket_callback']
