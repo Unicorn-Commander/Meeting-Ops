@@ -6,15 +6,23 @@ cd backend
 ./start-backend.sh  # Starts on port 9050
 
 # Or manually:
-source venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 9050 --reload
 
-# Database (PostgreSQL via Docker)
+# Database (PostgreSQL via Docker on port 5433)
 docker compose -f docker-compose-full-stack.yml up -d
-# Connection: postgresql://meetingops:REMOVED@localhost:5432/meeting_sessions
+# Connection: postgresql://meetingops:REMOVED@localhost:5433/meeting_sessions
+
+# LLM (Granite 3.3 2B via llama.cpp Vulkan on port 11437)
+# Started by docker-compose, OpenAI-compatible API
 ```
 
 ## Architecture
+
+### LLM Integration
+- Model: Granite 3.3 2B (Q4_K_M GGUF) on llama.cpp Vulkan
+- API: OpenAI-compatible `/v1/chat/completions` at `http://localhost:11437`
+- Service: `services/unified_llm_service.py` (singleton, `llm_service` global)
+- Used by: ai_chat, ai_insights, unified_agent_service, meeting_notes_service
 
 ### main.py
 Loads 19 routers via `_load_router()` with status tracking:
@@ -26,7 +34,7 @@ Loads 19 routers via `_load_router()` with status tracking:
 ### API Routers (backend/api/)
 | Router | Purpose |
 |--------|---------|
-| simple_recording_db.py | Recording CRUD, audio capture, file management |
+| simple_recording_db.py | Recording CRUD, audio capture, search, vocabulary integration |
 | sessions.py | Session listing and management |
 | meeting_management.py | Meeting operations |
 | meeting_intelligence_real.py | AI-powered meeting analysis |
@@ -37,64 +45,63 @@ Loads 19 routers via `_load_router()` with status tracking:
 | websocket_auto_summary.py | Progressive AI summaries |
 | unified_agent_api.py | Unified agent config |
 | live_transcription.py | Live transcription control |
-| analytics_simple.py | Basic analytics |
-| ai_insights.py | AI insights endpoint |
-| ai_chat.py | AI chat interface |
-| vocabulary.py | Custom vocabulary management |
-| batch_export.py | Batch export |
+| analytics_simple.py | Speaker analytics + duration trends |
+| ai_insights.py | AI insights (keywords, sentiment, action items via LLM) |
+| ai_chat.py | Per-meeting AI chat (real LLM with transcript context) |
+| vocabulary.py | Custom vocabulary CRUD |
+| batch_export.py | PDF/DOCX/TXT/JSON/SRT export |
 | audio_upload.py | Audio file upload |
 | simple_settings.py | Settings management |
 
 ### Services (backend/services/)
 | Service | Purpose | Status |
 |---------|---------|--------|
+| unified_llm_service.py | Granite 3.3 2B via llama.cpp OpenAI API | Working |
+| unified_agent_service.py | Progressive summarization (single model) | Working |
 | working_audio_service.py | USB mic recording via FFmpeg | Working |
 | real_whisper_service.py | NPU-accelerated Whisper | Working |
 | transcription_service.py | Transcription orchestration | Working |
-| unified_agent_service.py | AI agent (granite3.3:8b) | Missing analyze_meeting |
-| unified_llm_service.py | LLM provider abstraction | Working |
-| auto_summarization_service.py | Auto-summarization | Working |
-| live_recording_transcription.py | Live transcription during recording | Parameter issue |
-| live_transcription_service.py | Live transcription service | Working |
-| llm_service.py | Gemma/LLM service | Working |
+| llm_service.py | LLM service (llama.cpp backend) | Working |
 | meeting_notes_service.py | Meeting notes generation | Working |
+| auto_summarization_service.py | Auto-summarization | Working |
+| live_transcription_service.py | Live transcription service | Working |
 | agent_manager_service.py | Agent management | Working |
 | websocket_registry.py | WebSocket connection tracking | Working |
-| whisperx_npu_service.py | WhisperX NPU integration | Working |
-| system_service.py | System info | Working |
-| progressive_interval_manager.py | Summary interval logic | Working |
+| model_providers.py | Model provider config (OpenAI-compatible) | Working |
 | settings_manager.py | Settings persistence | Working |
-| performance_metrics_service.py | Performance tracking | Working |
-| stt_model_manager.py | STT model management | Working |
-| model_providers.py | Model provider config | Working |
 
 ### Database
 ```
-PostgreSQL tables:
-- recording_sessions (id, session_id, title, status, created_at, started_at, ended_at, audio_file, transcript, summary, duration, ...)
+PostgreSQL (port 5433):
+- recording_sessions (id, session_id, name, title, status, created_at, started_at, ended_at, audio_file, transcript, transcript_simple, transcript_diarized, summary, final_summary, duration, ...)
 - transcriptions (id, session_id, text, speaker, start_time, end_time, confidence, created_at)
 - unified_agents (id, name, system_prompt, model_name, config)
+- custom_vocabulary (id, term, expansion, category, priority, is_active, case_sensitive, regex_pattern)
+- vocabulary_sets (id, name, description, terms)
 ```
 
-## Known Issues
+### Config (backend/config/)
+- `ai_backends.py` - Single backend: llama.cpp at localhost:11437
+- `dual_ai_backends.py` - Backward-compat wrapper (same single backend)
 
+## Known Issues
 1. **Transcription segments not saving** - Column name mismatch (timestamp vs created_at)
-2. **analyze_meeting missing** - UnifiedAgentService needs this method implemented
-3. **live_recording_transcription** - start_monitoring parameter mismatch
-4. **Audio file path** - Occasional double-nesting of path components
+2. **live_recording_transcription** - start_monitoring parameter mismatch
+3. **Audio file path** - Occasional double-nesting of path components
 
 ## Testing
 ```bash
-# Health check
-curl http://localhost:9050/health
+# Run all tests (39 pass, 3 skip)
+python3 -m pytest tests/ -v
 
-# Create + record session
-SESSION=$(curl -s -X POST http://localhost:9050/api/simple/recording-sessions \
-  -H "Content-Type: application/json" -d '{"name":"Test"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-curl -X POST http://localhost:9050/api/simple/recording-sessions/$SESSION/start
-sleep 10
-curl -X POST http://localhost:9050/api/simple/recording-sessions/$SESSION/stop
-curl http://localhost:9050/api/simple/recording-sessions/$SESSION
+# Test files:
+# test_auth.py (6 tests) - login, token, protected routes
+# test_health.py (3 tests) - health, status endpoints
+# test_recording.py (8 tests) - CRUD lifecycle
+# test_export.py (3 tests) - transcript download
+# test_analytics.py (4 tests) - summary, sessions, performance
+# test_search_analytics.py (15 tests) - search, analytics, AI insights
+# test_vocabulary.py (3 tests, skipped on SQLite) - vocab CRUD
 ```
 
 ## NPU Performance

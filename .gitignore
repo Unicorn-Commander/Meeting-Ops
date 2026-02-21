@@ -39,6 +39,8 @@ audio_files/
 *.pth
 *.bin
 *.npubin
+*.gguf
+models/
 whisper_models/
 whisper_onnx_cache/
 npu_kernels/

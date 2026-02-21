@@ -891,22 +891,22 @@ export default function LiveRecording() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-6">
+    <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-4 pt-14 md:p-6 md:pt-6">
       {/* Header */}
-      <div className="max-w-7xl mx-auto mb-8">
-        <div className="flex items-center justify-between">
+      <div className="max-w-7xl mx-auto mb-6 md:mb-8">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-white flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center">
+            <h1 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center shrink-0">
                 <Sparkles className="w-6 h-6 text-white" />
               </div>
               Live Recording
             </h1>
-            <p className="text-zinc-400 mt-1">AI-powered live meeting analysis and transcription</p>
+            <p className="text-zinc-400 mt-1 text-sm md:text-base">AI-powered live meeting analysis and transcription</p>
           </div>
-          
+
           {/* Format Toggles */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {Object.entries({
               executive: 'Executive',
               minutes: 'Minutes',
@@ -919,7 +919,7 @@ export default function LiveRecording() {
               <button
                 key={key}
                 onClick={() => toggleFormat(key as keyof SummaryFormats)}
-                className={`px-3 py-1.5 text-xs rounded-full border transition-all ${
+                className={`px-3 py-1.5 text-xs rounded-full border transition-all min-h-[36px] ${
                   summaryFormats[key as keyof SummaryFormats]
                     ? 'bg-zinc-800 border-zinc-700 text-white'
                     : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:text-zinc-200'
@@ -933,11 +933,11 @@ export default function LiveRecording() {
       </div>
 
       {/* Main Content Grid */}
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
         {/* Left: Recording Control & Summaries */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="lg:col-span-2 space-y-4 md:space-y-6">
           {/* Recording Control */}
-          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-8">
+          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-8">
             <div className="flex flex-col items-center">
               {/* Big Record Button */}
               <button
@@ -1151,7 +1151,7 @@ export default function LiveRecording() {
 
           {/* Two Column Layout for Actions & Decisions - Only show if we have structured data */}
           {autoSummary?.actions || autoSummary?.decisions ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
             {/* Action Items */}
             {summaryFormats.actions && autoSummary?.actions && autoSummary.actions.length > 0 && (
               <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
@@ -1350,7 +1350,7 @@ export default function LiveRecording() {
         </div>
 
         {/* Right: Status & Metrics */}
-        <div className="space-y-6">
+        <div className="space-y-4 md:space-y-6">
           {/* Agent & Pipeline Status */}
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
             <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">

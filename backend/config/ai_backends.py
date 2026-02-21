@@ -1,6 +1,6 @@
 """
 AI Backend Configuration
-GPU-accelerated llama.cpp only - Ollama has been deprecated
+Single Granite 3.3 2B on llama.cpp Vulkan via OpenAI-compatible API
 """
 import os
 import logging
@@ -10,30 +10,29 @@ logger = logging.getLogger(__name__)
 # Default to GPU-accelerated backend
 AI_BACKEND = os.getenv("AI_BACKEND", "llamacpp")
 
-# Backend configurations - GPU only
+# Backend configurations - Single Granite 3.3 2B model
 AI_BACKENDS = {
     "llamacpp": {
         "url": os.getenv("LLAMACPP_URL", "http://localhost:11437"),
-        "endpoint": "/completion",
+        "endpoint": "/v1/chat/completions",
         "type": "llamacpp",
-        "name": "GPU-Accelerated LLaMA.cpp",
+        "name": "Granite 3.3 2B (llama.cpp Vulkan)",
+        "model": "granite-3.3-2b-instruct",
         "timeout": 30,
         "health_check": "/health"
     }
-    # Ollama removed - deprecated due to high CPU usage
-    # See /extensions/ollama/ for legacy setup (not recommended)
 }
 
 def get_ai_backend(backend_name: str = None):
-    """Get AI backend configuration with fallback"""
+    """Get AI backend configuration"""
     backend_name = backend_name or AI_BACKEND
-    
+
     if backend_name not in AI_BACKENDS:
         logger.warning(f"Unknown backend {backend_name}, falling back to llamacpp")
         backend_name = "llamacpp"
-    
+
     backend = AI_BACKENDS[backend_name].copy()
-    logger.info(f"🚀 Using AI backend: {backend['name']} at {backend['url']}")
+    logger.info(f"Using AI backend: {backend['name']} at {backend['url']}")
     return backend
 
 def check_backend_health(backend_config: dict) -> bool:
@@ -48,15 +47,15 @@ def check_backend_health(backend_config: dict) -> bool:
         return False
 
 def get_available_backend():
-    """Get GPU backend - only option now"""
+    """Get the Granite 3.3 2B backend"""
     backend_name = "llamacpp"
     backend = AI_BACKENDS[backend_name]
-    
+
     if check_backend_health(backend):
-        logger.info(f"✅ {backend['name']} is available")
+        logger.info(f"{backend['name']} is available")
         return backend_name, backend
-    
+
     # If GPU backend not available, warn but return config anyway
-    logger.warning("⚠️ GPU backend not responding - ensure llama.cpp is running on port 11437")
-    logger.warning("   Start with: ./start-gpu-optimized.sh")
+    logger.warning("GPU backend not responding - ensure llama.cpp is running on port 11437")
+    logger.warning("   Start with: docker compose -f docker-compose-full-stack.yml up -d")
     return backend_name, backend

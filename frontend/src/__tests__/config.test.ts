@@ -26,6 +26,20 @@ describe('config api urls', () => {
     vi.unstubAllGlobals();
   });
 
+  it('has apiUrl property', () => {
+    setLocation('http://localhost:7777');
+    expect(config.apiUrl).toBeDefined();
+    expect(typeof config.apiUrl).toBe('string');
+  });
+
+  it('has apiBaseUrl property', () => {
+    setLocation('http://localhost:7777');
+    expect(config.apiBaseUrl).toBeDefined();
+    expect(typeof config.apiBaseUrl).toBe('string');
+    // apiBaseUrl and apiUrl should return the same value
+    expect(config.apiBaseUrl).toBe(config.apiUrl);
+  });
+
   it('uses localhost backend for local development', () => {
     setLocation('http://localhost:7777');
     expect(config.apiUrl).toBe('http://localhost:9050');

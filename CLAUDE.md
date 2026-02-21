@@ -4,12 +4,12 @@ Part of the Unicorn Commander Suite
 ## Project Overview
 Hardware appliance for AI-powered meeting recording and transcription. NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware for SMBs.
 
-**Status**: Backend ~90% | Frontend ~70% | Auth working | Unified Agent working
+**Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive
 
 ## Quick Start
 
 ```bash
-# Start Docker services
+# Start Docker services (PostgreSQL on 5433, llama.cpp Granite 3.3 2B on 11437)
 docker compose -f docker-compose-full-stack.yml up -d
 
 # Start backend (port 9050)
@@ -17,6 +17,11 @@ cd backend && ./start-backend.sh
 
 # Start frontend (port 7778)
 cd frontend && npm run dev -- --host 0.0.0.0
+
+# Run tests
+cd backend && python3 -m pytest tests/ -v    # 39 pass, 3 skip
+cd frontend && npm run build                  # 0 TS errors
+cd frontend && npx vitest run                 # 23 pass
 ```
 
 **Login**: admin / admin123 (superuser)
@@ -27,21 +32,27 @@ cd frontend && npm run dev -- --host 0.0.0.0
 
 ## Architecture
 
+### LLM: Granite 3.3 2B on llama.cpp Vulkan
+- Model: `granite-3.3-2b-instruct-Q4_K_M.gguf` in `./models/`
+- API: OpenAI-compatible `/v1/chat/completions` at port 11437
+- GPU: AMD 780M iGPU via Vulkan (RADV), ~850 tok/s
+- Used for: summaries, titles, AI chat, insights, sentiment analysis
+
 ### Frontend (React 19 + TypeScript + Vite + TailwindCSS)
-Active router: `AppRouterSimplified.tsx`
+Active router: `AppRouterSimplified.tsx` (mobile-responsive with hamburger menu)
 
 | Route | Page | Purpose |
 |-------|------|---------|
 | /login | Login.tsx | Authentication |
-| /record | LiveRecording.tsx | Live recording + transcription |
-| /sessions | Sessions.tsx | Session list + management |
-| /sessions/:id | SessionDetails.tsx | Playback + transcript + export |
-| /settings | SettingsEnhanced.tsx | System settings |
+| /record | LiveRecording.tsx | Recording + live transcription |
+| /sessions | Sessions.tsx | Session list + search + pagination |
+| /sessions/:id | SessionDetails.tsx | Playback + transcript + export + AI chat |
+| /settings | SettingsEnhanced.tsx | System settings + vocabulary |
 | /admin/agents | AgentDashboard.tsx | AI agent management |
 | /admin/agents-old | AgentConfiguration.tsx | Legacy agent config |
 
 Contexts: AuthContext, ThemeContext, RecordingContext
-Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, SessionCreator, MeetingIntelligenceDashboard
+Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, SessionCreator, Toast, MeetingIntelligenceDashboard
 
 ### Backend (FastAPI + Python 3.13)
 
@@ -51,25 +62,28 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `/health` reports router status and real timestamps
 
 **Key API routers** (in `backend/api/`):
-- `simple_recording_db.py` - Recording CRUD + audio capture
+- `simple_recording_db.py` - Recording CRUD + audio capture + full-text search
 - `sessions.py` - Session management
+- `ai_chat.py` - Per-meeting AI chat (real LLM)
+- `ai_insights.py` - AI-powered insights (keywords, sentiment, action items)
+- `analytics_simple.py` - Speaker analytics + duration trends
+- `batch_export.py` - PDF/DOCX/TXT/JSON/SRT export
+- `vocabulary.py` - Custom vocabulary CRUD
 - `websocket_transcription.py` - Live transcription via WebSocket
 - `websocket_auto_summary.py` - Progressive AI summaries
-- `unified_agent_api.py` - AI agent configuration
-- `meeting_intelligence_real.py` - AI-powered meeting analysis
 
 **Key services** (in `backend/services/`):
+- `unified_llm_service.py` - Granite 3.3 2B via llama.cpp OpenAI API
+- `unified_agent_service.py` - Progressive summarization (single model)
 - `working_audio_service.py` - USB mic audio capture
 - `real_whisper_service.py` - NPU-accelerated Whisper
 - `transcription_service.py` - Transcription orchestration
-- `unified_agent_service.py` - AI agent (granite3.3:8b)
-- `unified_llm_service.py` - LLM provider abstraction
 
 ### Infrastructure
-- PostgreSQL (session/transcript storage)
+- PostgreSQL on port 5433 (session/transcript storage)
 - Redis (real-time pub/sub)
-- Qdrant (vector search - not yet integrated)
-- Docker Compose configs: full-stack, prod, dev
+- llama.cpp Vulkan on port 11437 (Granite 3.3 2B)
+- Qdrant on port 6333 (vector search - not yet integrated)
 
 ### NPU (AMD Phoenix, 16 TOPS)
 - 220x speedup over CPU, 0.0045 RTF
@@ -85,33 +99,26 @@ POST /api/simple/recording-sessions/{id}/start    # Start recording
 POST /api/simple/recording-sessions/{id}/stop     # Stop recording
 GET  /api/simple/recording-sessions               # List sessions
 GET  /api/simple/recording-sessions/{id}          # Get session + transcript
-GET  /api/simple/recording-sessions/{id}/download/audio  # Download WAV
+GET  /api/simple/recording-sessions/search?q=...  # Full-text search
+GET  /api/simple/recording-sessions/{id}/download/audio   # Download WAV
+GET  /api/simple/recording-sessions/{id}/download/summary/pdf   # PDF export
+GET  /api/simple/recording-sessions/{id}/download/summary/docx  # DOCX export
+POST /api/ai-chat/sessions/{id}/messages          # AI chat with meeting context
+GET  /api/analytics/summary                       # Analytics with speaker data
+GET  /api/analytics/speakers                      # Speaker analytics
+GET  /api/analytics/duration-trends               # Duration trends
+GET  /api/ai-insights/{id}                        # AI insights (keywords, sentiment)
 WS   /ws/transcription/{session_id}               # Live transcription
 WS   /ws/audio-levels                             # Audio level monitoring
 GET  /health                                       # Health + router status
-GET  /api/status                                   # System status
 ```
 
 ## Known Issues
 1. Transcription segments not saving to DB (column name mismatch)
-2. UnifiedAgentService.analyze_meeting method incomplete
-3. LiveRecordingTranscription parameter mismatch
-4. PDF/DOCX export not implemented
-5. Full-text/semantic search not implemented
-6. Analytics dashboard visualizations pending
-7. TypeScript build has ~42 errors (functionality works despite errors)
+2. LiveRecordingTranscription parameter mismatch
+3. Qdrant vector search not yet integrated (full-text search available)
 
-## Development Priorities
-1. Fix TypeScript build errors for clean production builds
-2. Fix database column mismatches (transcription segments)
-3. Implement missing analyze_meeting method
-4. Custom vocabulary system (industry acronyms)
-5. Advanced export (PDF/DOCX)
-6. Search & discovery (full-text + semantic)
-7. Per-meeting AI chat
-8. Meeting analytics dashboard
-
-## File Structure (post-cleanup)
+## File Structure
 ```
 UC-Meeting-Ops/
   backend/
@@ -120,21 +127,20 @@ UC-Meeting-Ops/
     services/                  # 22 service modules
     auth/                      # JWT authentication
     database/                  # SQLAlchemy models + connection
-    models/                    # Unified agent model
-    npu_optimization/          # NPU kernels + config
+    models/                    # Unified agent + vocabulary models
+    config/                    # AI backend config
+    tests/                     # 8 test files (39 tests)
     start-backend.sh           # Start script
   frontend/
     src/
-      App.tsx                  # Root component
-      AppRouterSimplified.tsx  # Router (7 routes)
+      App.tsx                  # Root component (+ ToastContainer)
+      AppRouterSimplified.tsx  # Router (7 routes, mobile responsive)
       pages/                   # 7 page components
-      components/              # 6 shared components
+      components/              # 7 shared components (+ Toast.tsx)
       contexts/                # 3 context providers
       hooks/                   # 1 hook (useKeyboardShortcuts)
+      __tests__/               # 4 test files (23 tests)
       config.ts                # API URL configuration
+  models/                      # GGUF model files for llama.cpp
   docker-compose-full-stack.yml
-  docker-compose.prod.yml
-  docker-compose.dev.yml
-  start-meeting-ops.sh
-  stop-stack.sh
 ```

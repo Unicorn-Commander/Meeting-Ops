@@ -1,6 +1,7 @@
 """
-Dual AI Backend Configuration
-Phi-4 for live/progressive summaries, Granite 3.3 for final summaries
+AI Backend Configuration - Single Model
+All tasks use Granite 3.3 2B on llama.cpp Vulkan at port 11437
+(Kept for backward compatibility with unified_agent_service imports)
 """
 import os
 import logging
@@ -8,25 +9,17 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Backend configurations - Dual model setup
+# Single backend configuration - Granite 3.3 2B for all tasks
 AI_BACKENDS = {
-    "phi4_live": {
-        "url": os.getenv("PHI4_URL", "http://localhost:11437"),
-        "endpoint": "/completion",
+    "granite_2b": {
+        "url": os.getenv("LLAMACPP_URL", "http://localhost:11437"),
+        "endpoint": "/v1/chat/completions",
         "type": "llamacpp",
-        "name": "Phi-4 Mini (Live Summaries)",
+        "name": "Granite 3.3 2B (llama.cpp Vulkan)",
+        "model": "granite-3.3-2b-instruct",
         "timeout": 30,
         "health_check": "/health",
-        "use_for": ["progressive", "live", "realtime"]
-    },
-    "granite_final": {
-        "url": os.getenv("GRANITE_URL", "http://localhost:11438"),
-        "endpoint": "/completion",
-        "type": "llamacpp",
-        "name": "Granite 3.3 8B (Final Summaries)",
-        "timeout": 60,
-        "health_check": "/health",
-        "use_for": ["final", "comprehensive", "post_meeting"]
+        "use_for": ["progressive", "live", "realtime", "final", "comprehensive", "post_meeting"]
     }
 }
 
@@ -41,60 +34,21 @@ def check_backend_health(backend_config: dict) -> bool:
         return False
 
 def get_backend_for_task(task_type: str = "progressive"):
-    """
-    Get appropriate backend based on task type
-    
-    Args:
-        task_type: Type of summarization task
-                  - "progressive" / "live" / "realtime" -> Phi-4
-                  - "final" / "comprehensive" / "post_meeting" -> Granite 3.3
-    """
-    # Determine which backend to use
-    if task_type in ["progressive", "live", "realtime"]:
-        backend_name = "phi4_live"
-        backend = AI_BACKENDS["phi4_live"]
-    elif task_type in ["final", "comprehensive", "post_meeting", "analyze_meeting"]:
-        backend_name = "granite_final"
-        backend = AI_BACKENDS["granite_final"]
-    else:
-        # Default to Phi-4 for unknown tasks
-        backend_name = "phi4_live"
-        backend = AI_BACKENDS["phi4_live"]
-    
-    # Check health
+    """Get backend for any task - always returns Granite 3.3 2B"""
+    backend_name = "granite_2b"
+    backend = AI_BACKENDS[backend_name]
+
     if check_backend_health(backend):
-        logger.info(f"✅ Using {backend['name']} for {task_type} task")
-        return backend_name, backend
-    else:
-        # Try fallback
-        other_backend_name = "granite_final" if backend_name == "phi4_live" else "phi4_live"
-        other_backend = AI_BACKENDS[other_backend_name]
-        
-        if check_backend_health(other_backend):
-            logger.warning(f"⚠️ Primary backend unavailable, using {other_backend['name']} as fallback")
-            return other_backend_name, other_backend
-        
-        # Return primary choice anyway even if not responding
-        logger.error(f"❌ No AI backends responding, returning {backend['name']} config anyway")
+        logger.info(f"Using {backend['name']} for {task_type} task")
         return backend_name, backend
 
+    logger.warning(f"Granite 3.3 2B not responding for {task_type} task, returning config anyway")
+    return backend_name, backend
+
 def get_live_summary_backend():
-    """Get backend specifically for live/progressive summaries"""
+    """Get backend for live/progressive summaries"""
     return get_backend_for_task("progressive")
 
 def get_final_summary_backend():
-    """Get backend specifically for final comprehensive summaries"""
+    """Get backend for final comprehensive summaries"""
     return get_backend_for_task("final")
-
-# Example usage in services:
-"""
-# In progressive_interval_manager.py or live services:
-from config.dual_ai_backends import get_live_summary_backend
-backend_name, backend = get_live_summary_backend()
-# Uses Phi-4 on port 11437
-
-# In unified_agent_service.py for final summaries:
-from config.dual_ai_backends import get_final_summary_backend
-backend_name, backend = get_final_summary_backend()
-# Uses Granite 3.3 on port 11438
-"""

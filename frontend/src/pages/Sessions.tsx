@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Plus, Search, Filter, Calendar, Mic, Clock, Users,
   FileText, Download, Trash2, Play, Eye, Tag,
@@ -43,6 +43,64 @@ export const Sessions: React.FC = () => {
   const [sortBy, setSortBy] = useState<'date' | 'name' | 'duration'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [showFilters, setShowFilters] = useState(false);
+  const [searchResults, setSearchResults] = useState<Session[] | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced server-side search
+  const performSearch = useCallback(async (query: string) => {
+    if (!query || query.length < 2) {
+      setSearchResults(null);
+      setIsSearching(false);
+      return;
+    }
+    setIsSearching(true);
+    try {
+      const headers: Record<string, string> = {};
+      const token = localStorage.getItem('token');
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const response = await fetch(
+        `${config.apiBaseUrl}/api/simple/recording-sessions/search?q=${encodeURIComponent(query)}`,
+        { headers }
+      );
+      if (response.ok) {
+        const data = await response.json();
+        // Map search results into Session shape
+        const mapped: Session[] = data.map((r: any) => ({
+          id: r.id,
+          name: r.name,
+          description: r.description || '',
+          created_at: r.created_at,
+          updated_at: r.created_at,
+          status: r.status || 'completed',
+          duration: r.duration || 0,
+          has_transcript: false,
+          has_audio: false,
+          _snippet: r.snippet,
+          _matchField: r.match_field,
+        }));
+        setSearchResults(mapped);
+      }
+    } catch (err) {
+      console.error('Search failed:', err);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  // Handle search input with debounce
+  const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setSearchQuery(value);
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current);
+    }
+    searchTimerRef.current = setTimeout(() => {
+      performSearch(value);
+    }, 300);
+  }, [performSearch]);
 
   useEffect(() => {
     fetchSessions();
@@ -53,7 +111,7 @@ export const Sessions: React.FC = () => {
 
   useEffect(() => {
     filterSessions();
-  }, [sessions, searchQuery, statusFilter, typeFilter, sortBy, sortOrder]);
+  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sortBy, sortOrder]);
 
   const fetchSessions = async () => {
     setLoading(true);
@@ -88,18 +146,19 @@ export const Sessions: React.FC = () => {
   };
 
   const filterSessions = () => {
-    console.log('🔍 Filtering sessions. Total sessions:', sessions.length);
-    let filtered = [...sessions];
+    console.log('Filtering sessions. Total sessions:', sessions.length);
+    
+    // Use server-side search results when a search query is active
+    let filtered = (searchQuery && searchQuery.length >= 2 && searchResults !== null)
+      ? [...searchResults]
+      : [...sessions];
 
-    // Search filter
-    if (searchQuery) {
+    // Client-side name/title filter for short queries (< 2 chars)
+    if (searchQuery && searchQuery.length < 2) {
       filtered = filtered.filter(session =>
         session.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         session.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        session.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        session.transcript?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        session.participants?.some(p => p.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (session.summary?.analysis?.executive && session.summary.analysis.executive.toLowerCase().includes(searchQuery.toLowerCase()))
+        session.description?.toLowerCase().includes(searchQuery.toLowerCase())
       );
     }
 
@@ -369,7 +428,7 @@ export const Sessions: React.FC = () => {
                 type="text"
                 placeholder="Search sessions..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={handleSearchChange}
                 className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
               />
             </div>

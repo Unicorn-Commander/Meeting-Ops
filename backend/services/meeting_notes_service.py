@@ -24,11 +24,11 @@ class MeetingNotesService:
             model_config: Model configuration dict (provider, model_name, etc.)
             redis_client: Optional Redis client for caching
         """
-        # Default to Granite if no config provided
+        # Default to Granite 3.3 2B on llama.cpp Vulkan
         self.model_config = model_config or {
-            "provider": "ollama",
-            "model_name": "granite3.3:8b",
-            "api_endpoint": "http://localhost:11434"
+            "provider": "openai_compatible",
+            "model_name": "granite-3.3-2b-instruct",
+            "api_endpoint": "http://localhost:11437/v1"
         }
         
         self.provider = ModelProviderFactory.create_from_config(self.model_config)

@@ -11,9 +11,17 @@ vi.mock('../components/MeetingIntelligenceDashboard', () => ({
   MeetingIntelligenceDashboard: () => <div>Meeting Intelligence</div>,
 }));
 
+vi.mock('../components/Toast', () => ({
+  showToast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+  },
+}));
+
 describe('Sessions', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ([
@@ -31,8 +39,28 @@ describe('Sessions', () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('renders sessions page', async () => {
+    render(
+      <MemoryRouter>
+        <Sessions />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText('Sessions')).toBeInTheDocument());
+  });
+
+  it('shows "New Session" button', async () => {
+    render(
+      <MemoryRouter>
+        <Sessions />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText('Sessions')).toBeInTheDocument());
+    expect(screen.getByText('New Session')).toBeInTheDocument();
   });
 
   it('renders sessions list after fetching', async () => {

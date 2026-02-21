@@ -3,12 +3,12 @@ Database-backed Simple Recording API
 Fixed version that persists to PostgreSQL
 """
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 import asyncio
 import os
 import json
@@ -25,6 +25,53 @@ from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
 from services.real_whisper_service import real_whisper_service
 from services.unified_agent_service import unified_agent_service
+
+
+# Vocabulary replacement helper
+def apply_vocabulary_replacements(text: str, db_session) -> str:
+    """Apply vocabulary term replacements to transcript text."""
+    if not text:
+        return text
+    try:
+        from models.vocabulary import CustomVocabulary
+        terms = db_session.query(CustomVocabulary).filter(
+            CustomVocabulary.is_active == True
+        ).order_by(CustomVocabulary.priority.desc()).all()
+
+        if not terms:
+            return text
+
+        import re
+        replaced_count = 0
+        for term in terms:
+            if term.regex_pattern:
+                try:
+                    flags = 0 if term.case_sensitive else re.IGNORECASE
+                    new_text = re.sub(term.regex_pattern, term.expansion, text, flags=flags)
+                    if new_text != text:
+                        replaced_count += 1
+                        text = new_text
+                except re.error as e:
+                    logger.warning(f"Invalid regex pattern for term '{term.term}': {e}")
+            else:
+                if term.case_sensitive:
+                    if term.term in text:
+                        text = text.replace(term.term, term.expansion)
+                        replaced_count += 1
+                else:
+                    pattern = re.compile(re.escape(term.term), re.IGNORECASE)
+                    new_text = pattern.sub(term.expansion, text)
+                    if new_text != text:
+                        replaced_count += 1
+                        text = new_text
+
+        if replaced_count > 0:
+            logger.info(f"Applied {replaced_count} vocabulary replacements")
+        return text
+    except Exception as e:
+        logger.warning(f"Vocabulary replacement failed (non-fatal): {e}")
+        return text
+
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording-db"])
 logger = logging.getLogger(__name__)
@@ -112,6 +159,105 @@ async def list_sessions(
         ))
     
     return result
+
+
+class SearchResult(BaseModel):
+    id: str
+    name: str
+    description: str
+    created_at: str
+    status: str
+    duration: float
+    snippet: Optional[str] = None
+    match_field: Optional[str] = None
+
+@router.get("/recording-sessions/search")
+async def search_sessions(
+    q: str = Query(..., min_length=1, description="Search query string"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+) -> List[SearchResult]:
+    """Search recording sessions across name, transcript, and transcript_simple columns.
+    Returns matching sessions with a snippet of the matching text."""
+    
+    search_term = f"%{q}%"
+    
+    sessions = db.query(DBRecordingSession).filter(
+        or_(
+            DBRecordingSession.name.ilike(search_term),
+            DBRecordingSession.title.ilike(search_term),
+            DBRecordingSession.description.ilike(search_term),
+            DBRecordingSession.transcript.ilike(search_term),
+            DBRecordingSession.transcript_simple.ilike(search_term),
+        )
+    ).order_by(desc(DBRecordingSession.created_at)).limit(limit).all()
+    
+    results = []
+    for session in sessions:
+        snippet = None
+        match_field = None
+        q_lower = q.lower()
+        
+        # Determine which field matched and extract a snippet
+        if session.name and q_lower in session.name.lower():
+            snippet = session.name
+            match_field = "name"
+        elif session.title and q_lower in session.title.lower():
+            snippet = session.title
+            match_field = "title"
+        elif session.description and q_lower in session.description.lower():
+            snippet = _extract_snippet(session.description, q)
+            match_field = "description"
+        elif session.transcript_simple and q_lower in session.transcript_simple.lower():
+            snippet = _extract_snippet(session.transcript_simple, q)
+            match_field = "transcript"
+        elif session.transcript and q_lower in str(session.transcript).lower():
+            # transcript may be JSON, extract text for snippet
+            try:
+                trans_data = json.loads(session.transcript) if isinstance(session.transcript, str) else session.transcript
+                if isinstance(trans_data, dict) and "text" in trans_data:
+                    text = trans_data["text"]
+                elif isinstance(trans_data, dict) and "segments" in trans_data:
+                    text = " ".join(seg.get("text", "") for seg in trans_data["segments"])
+                else:
+                    text = str(session.transcript)
+                snippet = _extract_snippet(text, q)
+            except Exception:
+                snippet = _extract_snippet(str(session.transcript), q)
+            match_field = "transcript"
+        
+        results.append(SearchResult(
+            id=session.session_id or str(session.id),
+            name=session.name or session.title or f"Session {session.id}",
+            description=session.description or "",
+            created_at=session.created_at.isoformat() if session.created_at else "",
+            status=session.status or "completed",
+            duration=session.duration or 0.0,
+            snippet=snippet,
+            match_field=match_field,
+        ))
+    
+    return results
+
+
+def _extract_snippet(text: str, query: str, context_chars: int = 80) -> str:
+    """Extract a snippet of text around the first occurrence of the query string."""
+    if not text:
+        return ""
+    idx = text.lower().find(query.lower())
+    if idx == -1:
+        return text[:160] + ("..." if len(text) > 160 else "")
+    
+    start = max(0, idx - context_chars)
+    end = min(len(text), idx + len(query) + context_chars)
+    
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    
+    return snippet
 
 @router.get("/recording-sessions/{session_id}")
 async def get_session(
@@ -451,6 +597,29 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             logger.error(f"Transcription error: {e}")
             session.transcript = json.dumps({"text": f"Transcription error: {str(e)}", "segments": []})
         
+        # Step 1.5: Apply vocabulary replacements to transcript
+        try:
+            if session.transcript_simple:
+                session.transcript_simple = apply_vocabulary_replacements(session.transcript_simple, db)
+
+            if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
+                segments = session.transcript_diarized.get("segments", [])
+                for seg in segments:
+                    if seg.get("text"):
+                        seg["text"] = apply_vocabulary_replacements(seg["text"], db)
+                session.transcript_diarized = session.transcript_diarized
+
+            if transcription_result and "segments" in transcription_result:
+                for seg in transcription_result["segments"]:
+                    if seg.get("text"):
+                        seg["text"] = apply_vocabulary_replacements(seg["text"], db)
+                session.transcript = json.dumps(transcription_result)
+
+            db.flush()
+            logger.info(f"Vocabulary replacements applied for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Vocabulary replacement step failed (non-fatal): {e}")
+
         # Step 2: Generate AI summary with timeout protection
         try:
             if transcription_result and "segments" in transcription_result:

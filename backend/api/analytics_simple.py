@@ -1,11 +1,11 @@
 """
 Simple Analytics API for Integration
-Provides real analytics data from sessions only (no transcription dependencies)
+Provides real analytics data from sessions and transcription segments
 """
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 import logging
@@ -13,7 +13,7 @@ import json
 
 # Database imports
 from database.database import get_db
-from database.models import RecordingSession as DBRecordingSession
+from database.models import RecordingSession as DBRecordingSession, Transcription
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ async def get_analytics_summary(
     time_range: str = "month",  # week, month, quarter, year
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get analytics summary with real session data only"""
+    """Get analytics summary with real session and speaker data"""
     try:
         # Calculate date range
         now = datetime.utcnow()
@@ -44,10 +44,51 @@ async def get_analytics_summary(
             DBRecordingSession.status.in_(["completed", "processing"])
         ).all()
         
-        # Calculate basic stats from session data only
+        # Calculate basic stats from session data
         total_sessions = len(sessions)
         total_duration = sum(s.duration or 0 for s in sessions)
         average_duration = total_duration / total_sessions if total_sessions > 0 else 0
+        
+        # Get session IDs for transcription lookups
+        session_ids = [s.id for s in sessions]
+        
+        # Get real speaker analytics from transcription segments
+        speaking_time = []
+        total_speakers = 0
+        if session_ids:
+            speaker_data = db.query(
+                Transcription.speaker,
+                func.sum(
+                    func.coalesce(Transcription.end_time, 0) -
+                    func.coalesce(Transcription.start_time, 0)
+                ).label("total_time"),
+                func.count(Transcription.id).label("segment_count"),
+            ).filter(
+                Transcription.session_id.in_(session_ids),
+                Transcription.speaker.isnot(None),
+            ).group_by(Transcription.speaker).order_by(
+                desc("total_time")
+            ).all()
+
+            unique_speakers = set()
+            for row in speaker_data:
+                speaker_name = row[0] or "Unknown"
+                talk_seconds = float(row[1] or 0)
+                seg_count = int(row[2] or 0)
+                unique_speakers.add(speaker_name)
+                speaking_time.append({
+                    "speaker": speaker_name,
+                    "duration": round(talk_seconds, 1),
+                    "segments": seg_count,
+                    "percentage": 0,  # calculated below
+                })
+            total_speakers = len(unique_speakers)
+
+            # Calculate percentages
+            total_speaking = sum(s["duration"] for s in speaking_time)
+            if total_speaking > 0:
+                for entry in speaking_time:
+                    entry["percentage"] = round(entry["duration"] / total_speaking * 100, 1)
         
         # Generate daily meeting trends for the time range
         meeting_trends = []
@@ -76,23 +117,23 @@ async def get_analytics_summary(
                         if isinstance(actions, list):
                             action_items["total"] += len(actions)
                             action_items["pending"] += len(actions)
-                except Exception as e:
+                except Exception:
                     continue
         
-        # Session stats (session data only)
+        # Session stats
         session_stats = {
             "total_sessions": total_sessions,
-            "total_duration": int(total_duration),  # in minutes
+            "total_duration": int(total_duration),  # in seconds
             "average_duration": round(average_duration, 1),
-            "total_speakers": 0  # Will be available when transcription system is fixed
+            "total_speakers": total_speakers,
         }
         
         return {
             "time_range": time_range,
             "generated_at": now.isoformat(),
             "session_stats": session_stats,
-            "speaking_time": [],  # Empty until transcription data is available
-            "keywords": [],       # Empty until transcription data is available
+            "speaking_time": speaking_time,
+            "keywords": [],  # populated via ai_insights endpoint
             "meeting_trends": meeting_trends,
             "action_items": action_items
         }
@@ -106,7 +147,7 @@ async def get_session_analytics(
     limit: int = 10,
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """Get recent session analytics with real data"""
+    """Get recent session analytics with real data including speaker counts"""
     try:
         sessions = db.query(DBRecordingSession).filter(
             DBRecordingSession.status.in_(["completed", "processing"])
@@ -114,12 +155,20 @@ async def get_session_analytics(
         
         result = []
         for session in sessions:
+            # Count distinct speakers from transcription segments
+            speaker_count = db.query(
+                func.count(func.distinct(Transcription.speaker))
+            ).filter(
+                Transcription.session_id == session.id,
+                Transcription.speaker.isnot(None),
+            ).scalar() or 0
+
             result.append({
                 "id": session.session_id or str(session.id),
                 "name": session.name or session.title or f"Session {session.id}",
                 "created_at": session.created_at.isoformat() if session.created_at else None,
                 "duration": session.duration or 0,
-                "speakers": 0,  # Will be available when transcription system is fixed
+                "speakers": speaker_count,
                 "status": session.status,
                 "has_ai_summary": bool(session.summary)
             })
@@ -129,6 +178,142 @@ async def get_session_analytics(
     except Exception as e:
         logger.error(f"Failed to get session analytics: {e}")
         raise HTTPException(status_code=500, detail="Failed to get session analytics")
+
+@router.get("/speakers")
+async def get_speaker_analytics(
+    time_range: str = "month",
+    limit: int = 20,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get detailed speaker analytics across sessions"""
+    try:
+        now = datetime.utcnow()
+        if time_range == "week":
+            start_date = now - timedelta(days=7)
+        elif time_range == "month":
+            start_date = now - timedelta(days=30)
+        elif time_range == "quarter":
+            start_date = now - timedelta(days=90)
+        elif time_range == "year":
+            start_date = now - timedelta(days=365)
+        else:
+            start_date = now - timedelta(days=30)
+
+        # Get session IDs in range
+        session_ids = [
+            s.id for s in db.query(DBRecordingSession.id).filter(
+                DBRecordingSession.created_at >= start_date,
+                DBRecordingSession.status.in_(["completed", "processing"]),
+            ).all()
+        ]
+
+        if not session_ids:
+            return {"time_range": time_range, "speakers": [], "total_speakers": 0}
+
+        # Aggregate speaker data
+        rows = db.query(
+            Transcription.speaker,
+            func.sum(
+                func.coalesce(Transcription.end_time, 0) -
+                func.coalesce(Transcription.start_time, 0)
+            ).label("total_time"),
+            func.count(Transcription.id).label("segment_count"),
+            func.count(func.distinct(Transcription.session_id)).label("session_count"),
+            func.avg(Transcription.confidence).label("avg_confidence"),
+        ).filter(
+            Transcription.session_id.in_(session_ids),
+            Transcription.speaker.isnot(None),
+        ).group_by(Transcription.speaker).order_by(
+            desc("total_time")
+        ).limit(limit).all()
+
+        speakers = []
+        for row in rows:
+            speakers.append({
+                "speaker": row[0] or "Unknown",
+                "total_talk_time": round(float(row[1] or 0), 1),
+                "segments": int(row[2] or 0),
+                "sessions_appeared": int(row[3] or 0),
+                "avg_confidence": round(float(row[4] or 0), 3),
+            })
+
+        return {
+            "time_range": time_range,
+            "speakers": speakers,
+            "total_speakers": len(speakers),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get speaker analytics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get speaker analytics")
+
+@router.get("/duration-trends")
+async def get_duration_trends(
+    time_range: str = "month",
+    group_by: str = "day",  # day or week
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get average meeting duration trends grouped by day or week"""
+    try:
+        now = datetime.utcnow()
+        if time_range == "week":
+            start_date = now - timedelta(days=7)
+        elif time_range == "month":
+            start_date = now - timedelta(days=30)
+        elif time_range == "quarter":
+            start_date = now - timedelta(days=90)
+        elif time_range == "year":
+            start_date = now - timedelta(days=365)
+        else:
+            start_date = now - timedelta(days=30)
+
+        sessions = db.query(DBRecordingSession).filter(
+            DBRecordingSession.created_at >= start_date,
+            DBRecordingSession.status.in_(["completed", "processing"]),
+        ).order_by(DBRecordingSession.created_at).all()
+
+        if group_by == "week":
+            # Group by ISO week
+            buckets: Dict[str, List[float]] = {}
+            for s in sessions:
+                key = s.created_at.strftime("%Y-W%W")
+                buckets.setdefault(key, []).append(s.duration or 0)
+            trends = []
+            for key in sorted(buckets.keys()):
+                vals = buckets[key]
+                trends.append({
+                    "period": key,
+                    "sessions": len(vals),
+                    "total_duration": round(sum(vals), 1),
+                    "avg_duration": round(sum(vals) / len(vals), 1) if vals else 0,
+                    "min_duration": round(min(vals), 1) if vals else 0,
+                    "max_duration": round(max(vals), 1) if vals else 0,
+                })
+        else:
+            # Group by day
+            buckets = {}
+            for s in sessions:
+                key = s.created_at.strftime("%Y-%m-%d")
+                buckets.setdefault(key, []).append(s.duration or 0)
+            trends = []
+            for key in sorted(buckets.keys()):
+                vals = buckets[key]
+                trends.append({
+                    "period": key,
+                    "sessions": len(vals),
+                    "total_duration": round(sum(vals), 1),
+                    "avg_duration": round(sum(vals) / len(vals), 1) if vals else 0,
+                    "min_duration": round(min(vals), 1) if vals else 0,
+                    "max_duration": round(max(vals), 1) if vals else 0,
+                })
+
+        return {
+            "time_range": time_range,
+            "group_by": group_by,
+            "trends": trends,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get duration trends: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get duration trends")
 
 @router.get("/performance")
 async def get_performance_metrics(db: Session = Depends(get_db)) -> Dict[str, Any]:

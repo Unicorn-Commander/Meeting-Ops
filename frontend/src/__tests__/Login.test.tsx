@@ -25,6 +25,26 @@ describe('Login', () => {
     mockNavigate.mockClear();
   });
 
+  it('renders login form', () => {
+    render(<Login />);
+    // The form should be visible
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+  });
+
+  it('shows username and password inputs', () => {
+    render(<Login />);
+    const usernameInput = screen.getByLabelText(/username or email/i);
+    const passwordInput = screen.getByLabelText(/password/i);
+    expect(usernameInput).toBeInTheDocument();
+    expect(passwordInput).toBeInTheDocument();
+  });
+
+  it('has submit button', () => {
+    render(<Login />);
+    const submitButton = screen.getByRole('button', { name: /sign in/i });
+    expect(submitButton).toBeInTheDocument();
+  });
+
   it('renders the login form and submits credentials', async () => {
     render(<Login />);
 

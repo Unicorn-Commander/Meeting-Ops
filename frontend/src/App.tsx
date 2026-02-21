@@ -28,10 +28,10 @@ function App() {
           <RecordingProvider>
             <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
               <AppWithShortcuts />
-              <ToastContainer 
+              <ToastContainer
                 position="bottom-right"
                 theme="dark"
-                autoClose={5000}
+                autoClose={3000}
                 hideProgressBar={false}
                 newestOnTop
                 closeOnClick

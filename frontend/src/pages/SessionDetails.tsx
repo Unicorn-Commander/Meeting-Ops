@@ -5,7 +5,7 @@ import {
   Users, Clock, Calendar, FileText, Volume2,
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
-  Upload, Mail, Sparkles, RefreshCw
+  Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send
 } from 'lucide-react';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
@@ -112,6 +112,13 @@ export const SessionDetails: React.FC = () => {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // AI Chat state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessage, setChatMessage] = useState('');
+  const [chatMessages, setChatMessages] = useState<Array<{role: string; content: string}>>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     console.log('🔍 SessionDetails useEffect - sessionId:', sessionId);
@@ -395,6 +402,42 @@ export const SessionDetails: React.FC = () => {
       alert('Failed to upload audio file');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const sendChatMessage = async () => {
+    if (!chatMessage.trim() || chatLoading || !session) return;
+    
+    const userMsg = chatMessage.trim();
+    setChatMessage('');
+    setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setChatLoading(true);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(
+        `${config.apiUrl}/api/ai-chat/sessions/${session.id || sessionId}/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({ message: userMsg })
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        setChatMessages(prev => [...prev, { role: 'assistant', content: data.content }]);
+      } else {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: 'Failed to get a response. Please try again.' }]);
+      }
+    } catch (err) {
+      setChatMessages(prev => [...prev, { role: 'assistant', content: 'Network error. Please check your connection.' }]);
+    } finally {
+      setChatLoading(false);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     }
   };
 
@@ -1267,6 +1310,78 @@ export const SessionDetails: React.FC = () => {
                 </div>
               </div>
             )}
+
+            {/* AI Chat Panel */}
+            <div className="bg-white rounded-lg shadow-sm">
+              <button
+                onClick={() => setChatOpen(!chatOpen)}
+                className="w-full p-4 flex items-center justify-between hover:bg-gray-50 rounded-lg transition-colors"
+              >
+                <h3 className="text-lg font-semibold flex items-center gap-2">
+                  <MessageCircle className="w-5 h-5 text-purple-600" />
+                  AI Chat
+                </h3>
+                <ChevronRight className={`w-5 h-5 text-gray-400 transition-transform ${chatOpen ? 'rotate-90' : ''}`} />
+              </button>
+
+              {chatOpen && (
+                <div className="px-4 pb-4">
+                  {/* Chat messages */}
+                  <div className="border rounded-lg mb-3 max-h-64 overflow-y-auto bg-gray-50">
+                    {chatMessages.length === 0 ? (
+                      <div className="p-4 text-center text-sm text-gray-500">
+                        Ask questions about this meeting.
+                      </div>
+                    ) : (
+                      <div className="p-3 space-y-3">
+                        {chatMessages.map((msg, idx) => (
+                          <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
+                              msg.role === 'user'
+                                ? 'bg-purple-600 text-white'
+                                : 'bg-white border text-gray-700'
+                            }`}>
+                              {msg.content}
+                            </div>
+                          </div>
+                        ))}
+                        {chatLoading && (
+                          <div className="flex justify-start">
+                            <div className="bg-white border rounded-lg px-3 py-2 text-sm text-gray-500">
+                              <div className="flex items-center gap-2">
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-600"></div>
+                                Thinking...
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Chat input */}
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={chatMessage}
+                      onChange={(e) => setChatMessage(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
+                      placeholder="Ask about this meeting..."
+                      disabled={chatLoading}
+                      className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                    <button
+                      onClick={sendChatMessage}
+                      disabled={chatLoading || !chatMessage.trim()}
+                      className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

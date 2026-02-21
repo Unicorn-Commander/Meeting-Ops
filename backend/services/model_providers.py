@@ -468,59 +468,59 @@ class AnthropicProvider(ModelProvider):
 
 class ModelProviderFactory:
     """Factory to create appropriate model provider based on configuration"""
-    
+
     @staticmethod
     def create_provider(
         provider_type: str,
         **kwargs
     ) -> ModelProvider:
         """Create a model provider instance"""
-        
+
         if provider_type == "ollama":
             return OllamaProvider(
                 host=kwargs.get("host", "http://localhost:11434"),
                 model_name=kwargs.get("model_name", "granite3.3:8b")
             )
-        
-        elif provider_type == "openai":
+
+        elif provider_type in ["openai", "llamacpp"]:
             return OpenAIProvider(
-                api_key=kwargs.get("api_key"),
-                model_name=kwargs.get("model_name", "gpt-4"),
-                api_base=kwargs.get("api_base", "https://api.openai.com/v1")
+                api_key=kwargs.get("api_key", "not-needed"),
+                model_name=kwargs.get("model_name", "granite-3.3-2b-instruct"),
+                api_base=kwargs.get("api_base", "http://localhost:11437/v1")
             )
-        
+
         elif provider_type == "anthropic":
             return AnthropicProvider(
                 api_key=kwargs.get("api_key"),
                 model_name=kwargs.get("model_name", "claude-3-opus-20240229")
             )
-        
+
         else:
             raise ValueError(f"Unknown provider type: {provider_type}")
-    
+
     @staticmethod
     def create_from_config(config: Dict[str, Any]) -> ModelProvider:
         """Create provider from a configuration dictionary"""
-        provider_type = config.get("provider", "ollama")
-        
+        provider_type = config.get("provider", "openai_compatible")
+
         if provider_type == "ollama":
             return OllamaProvider(
                 host=config.get("api_endpoint", "http://localhost:11434"),
                 model_name=config.get("model_name", "granite3.3:8b")
             )
-        
-        elif provider_type in ["openai", "openai_compatible"]:
+
+        elif provider_type in ["openai", "openai_compatible", "llamacpp"]:
             return OpenAIProvider(
-                api_key=config.get("api_key", os.getenv("OPENAI_API_KEY", "")),
-                model_name=config.get("model_name", "gpt-4"),
-                api_base=config.get("api_endpoint", "https://api.openai.com/v1")
+                api_key=config.get("api_key", os.getenv("OPENAI_API_KEY", "not-needed")),
+                model_name=config.get("model_name", "granite-3.3-2b-instruct"),
+                api_base=config.get("api_endpoint", "http://localhost:11437/v1")
             )
-        
+
         elif provider_type == "anthropic":
             return AnthropicProvider(
                 api_key=config.get("api_key", os.getenv("ANTHROPIC_API_KEY", "")),
                 model_name=config.get("model_name", "claude-3-opus-20240229")
             )
-        
+
         else:
             raise ValueError(f"Unknown provider type: {provider_type}")
