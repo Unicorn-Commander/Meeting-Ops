@@ -1,109 +1,72 @@
 #!/bin/bash
 # Meeting-Ops Backend Startup Script
 
-echo "🚀 Starting Meeting-Ops Backend with NPU..."
+echo "Starting Meeting-Ops Backend..."
 
-# Load environment variables from .env file (supports both regular and SSO configs)
+# Load environment variables from .env file
 if [ -f ../.env ]; then
-    echo "📄 Loading configuration from parent .env file..."
+    echo "Loading configuration from parent .env file..."
     export $(cat ../.env | grep -v '^#' | xargs)
 elif [ -f .env ]; then
-    echo "📄 Loading configuration from .env file..."
+    echo "Loading configuration from .env file..."
     export $(cat .env | grep -v '^#' | xargs)
 else
-    echo "⚠️ No .env file found, using defaults..."
-    export DATABASE_URL="postgresql://meetingops:REMOVED@localhost:5432/meeting_sessions"
+    echo "No .env file found, using defaults..."
+    export DATABASE_URL="postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions"
     export REDIS_URL="redis://localhost:6379"
     export HOST="0.0.0.0"
     export PORT="9050"
 fi
 
-# Set SSO-related environment variables if using Authentik
-if [ ! -z "$AUTHENTIK_SECRET_KEY" ]; then
-    echo "🔐 SSO Configuration detected (Authentik)"
-    export AUTHENTIK_URL="${AUTHENTIK_URL:-http://authentik-server:9000}"
-    export AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN:-}"
-    export AUTHENTIK_ADMIN_GROUPS="${AUTHENTIK_ADMIN_GROUPS:-admin,Meeting-Ops-Admins}"
-    export AUTHENTIK_VERIFY_SSL="${AUTHENTIK_VERIFY_SSL:-false}"
-    
-    # Development mode for testing without full SSO
-    export DEVELOPMENT_MODE="${DEVELOPMENT_MODE:-false}"
-    
-    if [ "$DEVELOPMENT_MODE" = "true" ]; then
-        echo "⚠️  Running in DEVELOPMENT MODE - using mock authentication"
-    fi
-fi
-
 # Check if NPU is available
 if [ -e /dev/accel/accel0 ]; then
-    echo "⚡ NPU device detected: /dev/accel/accel0"
+    echo "NPU device detected: /dev/accel/accel0"
 else
-    echo "⚠️ NPU device not found - check permissions"
+    echo "NPU device not found - check permissions"
 fi
 
-# Start the NPU-optimized backend
-echo "🎯 Starting NPU backend on ${HOST}:${PORT}..."
-echo "📊 Using Database: ${DATABASE_URL}"
-echo "🔄 Using Redis: ${REDIS_URL}"
-
-# Show authentication mode
-if [ ! -z "$AUTHENTIK_SECRET_KEY" ]; then
-    echo "🔐 Authentication: Authentik SSO"
-    if [ "$DEVELOPMENT_MODE" = "true" ]; then
-        echo "   Mode: Development (mock auth)"
-    else
-        echo "   Mode: Production (full SSO)"
-        echo "   Authentik URL: ${AUTHENTIK_URL}"
-    fi
-else
-    echo "🔑 Authentication: Local (JWT)"
-fi
+# Start the backend
+echo "Starting backend on ${HOST}:${PORT}..."
+echo "Database: ${DATABASE_URL}"
+echo "Redis: ${REDIS_URL}"
 echo ""
 
-# Check if Docker services are running (don't start/stop them)
-echo "🐳 Checking Docker services status..."
-cd /home/ucadmin/Meeting-Ops
+# Check if Docker services are running
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Check if services are running
+echo "Checking Docker services status..."
+
 if ! docker ps | grep -q meetingops-postgres; then
-    echo "⚠️  PostgreSQL not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+    echo "  PostgreSQL not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
 fi
 
 if ! docker ps | grep -q meetingops-redis; then
-    echo "⚠️  Redis not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+    echo "  Redis not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
 fi
 
-# Check for AI inference servers (llama.cpp containers)
-if ! docker ps | grep -q meetingops-llama-phi4; then
-    echo "⚠️  Phi-4 AI server not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
-fi
-if ! docker ps | grep -q meetingops-llama-granite; then
-    echo "⚠️  Granite AI server not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
+if ! docker ps | grep -q meetingops-llama-gpu; then
+    echo "  Granite LLM not running. Start with: docker compose -f docker-compose-full-stack.yml up -d"
 fi
 
-# Wait for services
-echo "⏳ Waiting for services..."
+# Wait for PostgreSQL
+echo "Waiting for PostgreSQL..."
 for i in {1..15}; do
     if docker exec meetingops-postgres pg_isready -U meetingops &>/dev/null; then
-        echo "✅ PostgreSQL ready"
+        echo "PostgreSQL ready"
         break
     fi
     echo -n "."
     sleep 1
 done
 
-cd /home/ucadmin/Meeting-Ops/backend
+cd "$SCRIPT_DIR"
 
-# Kill any existing audio processes that might block the device
-echo "🧹 Cleaning up existing audio processes..."
+# Kill any existing processes that might conflict
 pkill -f arecord 2>/dev/null || true
 pkill -f "uvicorn main:app" 2>/dev/null || true
 sleep 1
 
-# Run database migrations if needed
-echo "🔄 Running database migrations..."
-./venv/bin/python migrate_model_config.py 2>/dev/null || true
-
-# Start the FULL backend (without --reload for production stability)
-echo "🚀 Starting backend with WORKING audio recording (ffmpeg)..."
-./venv/bin/python -m uvicorn main:app --host ${HOST} --port ${PORT}
+# Start the backend
+echo "Starting uvicorn..."
+python3 -m uvicorn main:app --host ${HOST} --port ${PORT}

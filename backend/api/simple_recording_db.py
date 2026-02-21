@@ -922,6 +922,68 @@ async def download_transcript(
         }
     )
 
+@router.get("/recording-sessions/{session_id}/download/summary/pdf")
+async def download_summary_pdf(
+    session_id: str,
+    db: Session = Depends(get_db)
+):
+    """Download meeting summary as PDF"""
+    from fastapi.responses import Response
+
+    session = db.query(DBRecordingSession).filter(
+        DBRecordingSession.session_id == session_id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from api.batch_export import export_to_pdf, ExportOptions
+        options = ExportOptions()
+        pdf_bytes = export_to_pdf(session, options)
+        filename = f"{(session.name or session.title or 'meeting').replace(' ', '_')}_summary.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=501, detail=f"PDF generation not available: {e}")
+    except Exception as e:
+        logger.error(f"PDF generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+@router.get("/recording-sessions/{session_id}/download/summary/docx")
+async def download_summary_docx(
+    session_id: str,
+    db: Session = Depends(get_db)
+):
+    """Download meeting summary as DOCX"""
+    from fastapi.responses import Response
+
+    session = db.query(DBRecordingSession).filter(
+        DBRecordingSession.session_id == session_id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from api.batch_export import export_to_docx, ExportOptions
+        options = ExportOptions()
+        docx_bytes = export_to_docx(session, options)
+        filename = f"{(session.name or session.title or 'meeting').replace(' ', '_')}_summary.docx"
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=501, detail=f"DOCX generation not available: {e}")
+    except Exception as e:
+        logger.error(f"DOCX generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"DOCX generation failed: {str(e)}")
+
 @router.get("/recording-sessions/{session_id}/download/transcript/simple")
 async def download_transcript_simple(
     session_id: str,

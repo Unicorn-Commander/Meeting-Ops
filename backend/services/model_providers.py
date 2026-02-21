@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, AsyncGenerator
 import aiohttp
 import json
-import ollama
 from dataclasses import dataclass
 import os
 import sys
@@ -83,7 +82,11 @@ class OllamaProvider(ModelProvider):
     def __init__(self, host: str = "http://localhost:11434", model_name: str = "granite3.3:8b"):
         self.host = host
         self.model_name = model_name
-        self.client = ollama.AsyncClient(host=host)
+        try:
+            import ollama
+            self.client = ollama.AsyncClient(host=host)
+        except ImportError:
+            raise ImportError("ollama package not installed - use OpenAI-compatible provider instead")
     
     async def generate(
         self,
