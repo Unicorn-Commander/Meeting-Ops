@@ -8,9 +8,9 @@ cd backend
 # Or manually:
 uvicorn main:app --host 0.0.0.0 --port 9050 --reload
 
-# Database (PostgreSQL via Docker on port 5433)
+# Database (PostgreSQL via Docker on port 5434)
 docker compose -f docker-compose-full-stack.yml up -d
-# Connection: postgresql://meetingops:REMOVED@localhost:5433/meeting_sessions
+# Connection: postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions
 
 # LLM (Granite 3.3 2B via llama.cpp Vulkan on port 11437)
 # Started by docker-compose, OpenAI-compatible API
@@ -72,7 +72,7 @@ Loads 19 routers via `_load_router()` with status tracking:
 
 ### Database
 ```
-PostgreSQL (port 5433):
+PostgreSQL (port 5434):
 - recording_sessions (id, session_id, name, title, status, created_at, started_at, ended_at, audio_file, transcript, transcript_simple, transcript_diarized, summary, final_summary, duration, ...)
 - transcriptions (id, session_id, text, speaker, start_time, end_time, confidence, created_at)
 - unified_agents (id, name, system_prompt, model_name, config)
@@ -85,9 +85,8 @@ PostgreSQL (port 5433):
 - `dual_ai_backends.py` - Backward-compat wrapper (same single backend)
 
 ## Known Issues
-1. **Transcription segments not saving** - Column name mismatch (timestamp vs created_at)
-2. **live_recording_transcription** - start_monitoring parameter mismatch
-3. **Audio file path** - Occasional double-nesting of path components
+1. **Audio file path** - Occasional double-nesting of path components
+2. **Qdrant vector search** - Not yet integrated (full-text SQL search available)
 
 ## Testing
 ```bash

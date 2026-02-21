@@ -28,10 +28,10 @@ class CustomVocabulary(Base):
     usage_count = Column(Integer, default=0)
     
     # Metadata
-    created_by = Column(UUID(as_uuid=True), nullable=True)
+    created_by = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+
     # Constraints
     __table_args__ = (
         UniqueConstraint('term', 'category', name='uq_vocabulary_term_category'),
@@ -71,10 +71,10 @@ class VocabularySet(Base):
     settings = Column(JSONB, nullable=True)  # Additional configuration
     
     # Metadata
-    created_by = Column(UUID(as_uuid=True), nullable=True)
+    created_by = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+
     # Relationships
     session_vocabularies = relationship("SessionVocabulary", back_populates="vocabulary_set")
     

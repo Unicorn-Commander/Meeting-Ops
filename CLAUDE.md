@@ -9,7 +9,7 @@ Hardware appliance for AI-powered meeting recording and transcription. NPU accel
 ## Quick Start
 
 ```bash
-# Start Docker services (PostgreSQL on 5433, llama.cpp Granite 3.3 2B on 11437)
+# Start Docker services (PostgreSQL on 5434, llama.cpp Granite 3.3 2B on 11437)
 docker compose -f docker-compose-full-stack.yml up -d
 
 # Start backend (port 9050)
@@ -80,7 +80,7 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `transcription_service.py` - Transcription orchestration
 
 ### Infrastructure
-- PostgreSQL on port 5433 (session/transcript storage)
+- PostgreSQL on port 5434 (session/transcript storage)
 - Redis (real-time pub/sub)
 - llama.cpp Vulkan on port 11437 (Granite 3.3 2B)
 - Qdrant on port 6333 (vector search - not yet integrated)
@@ -107,16 +107,15 @@ POST /api/ai-chat/sessions/{id}/messages          # AI chat with meeting context
 GET  /api/analytics/summary                       # Analytics with speaker data
 GET  /api/analytics/speakers                      # Speaker analytics
 GET  /api/analytics/duration-trends               # Duration trends
-GET  /api/ai-insights/{id}                        # AI insights (keywords, sentiment)
+GET  /api/simple/recording-sessions/{id}/insights  # AI insights (keywords, sentiment)
 WS   /ws/transcription/{session_id}               # Live transcription
 WS   /ws/audio-levels                             # Audio level monitoring
 GET  /health                                       # Health + router status
 ```
 
 ## Known Issues
-1. Transcription segments not saving to DB (column name mismatch)
-2. LiveRecordingTranscription parameter mismatch
-3. Qdrant vector search not yet integrated (full-text search available)
+1. Qdrant vector search not yet integrated (full-text SQL search available)
+2. Audio file path occasional double-nesting of path components
 
 ## File Structure
 ```

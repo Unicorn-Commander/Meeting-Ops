@@ -109,7 +109,7 @@ async def login(
     if not user:
         # Log failed login attempt
         AuthService.log_action(
-            db, 0, "login_failed", 
+            db, None, "login_failed",
             ip_address=request.client.host if request.client else None,
             details={"username": form_data.username}
         )
