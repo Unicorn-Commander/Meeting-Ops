@@ -711,7 +711,7 @@ export default function LiveRecording() {
               console.log('🔍 Summary keys:', summaryContent ? Object.keys(summaryContent) : 'null');
               
               // Force update with a callback to verify it's set
-              setAutoSummary(prev => {
+              setAutoSummary((prev: any) => {
                 console.log('🔄 Previous autoSummary:', prev);
                 console.log('🔄 New autoSummary being set:', summaryContent);
                 return summaryContent;

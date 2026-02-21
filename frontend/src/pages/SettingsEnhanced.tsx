@@ -228,7 +228,7 @@ export default function SettingsEnhanced() {
         // Set default device to first device or USB if found
         const defaultDevice = mappedDevices.find(d => d.isDefault) || mappedDevices.find(d => d.isUSB) || mappedDevices[0];
         if (defaultDevice && !settings.defaultDevice) {
-          setSettings(prev => ({
+          setSettings((prev: any) => ({
             ...prev,
             defaultDevice: defaultDevice.id,
             sampleRate: '44100' // Default rate
@@ -265,7 +265,7 @@ export default function SettingsEnhanced() {
       if (response.ok) {
         const info = await response.json();
         setNetworkInfo(info);
-        setSettings(prev => ({
+        setSettings((prev: any) => ({
           ...prev,
           hostname: info.hostname || prev.hostname,
           ipAddress: info.ipAddress || prev.ipAddress,

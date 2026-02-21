@@ -553,7 +553,7 @@ const AgentEditModal: React.FC<AgentEditModalProps> = ({
       const [parent, child] = field.split('.');
       setEditedAgent(prev => ({
         ...prev,
-        [parent]: { ...prev[parent as keyof Agent], [child]: value }
+        [parent]: { ...(prev[parent as keyof Agent] as Record<string, unknown>), [child]: value }
       }));
     } else {
       setEditedAgent(prev => ({ ...prev, [field]: value }));

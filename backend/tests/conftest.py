@@ -1,50 +1,76 @@
 import os
+import sys
 import tempfile
 
+# Create temp SQLite DB and set env BEFORE pytest collects anything else.
+_db_fd, _db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
+os.close(_db_fd)
+os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
+
+# Ensure backend root is on sys.path
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 import pytest
-from fastapi.testclient import TestClient
-from pytest import MonkeyPatch
+
+
+def pytest_configure(config):
+    """Ensure DATABASE_URL points to test SQLite before any imports."""
+    os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 
 
 @pytest.fixture(scope="session")
 def app():
-    db_fd, db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
-    os.close(db_fd)
+    """Create a test FastAPI app with an isolated SQLite database."""
+    # Force reload database module to pick up SQLite URL
+    import importlib
 
-    mp = MonkeyPatch()
-    mp.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    # Reload database.models first (owns Base), then database.database (imports Base)
+    if "database.models" in sys.modules:
+        importlib.reload(sys.modules["database.models"])
+    if "database.database" in sys.modules:
+        importlib.reload(sys.modules["database.database"])
 
-    from database.database import init_database, SessionLocal
-    init_database()
+    from database.database import engine, SessionLocal
+    from database.models import Base
+
+    # Import ALL models BEFORE create_all so they register with Base.metadata
+    from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
+
+    # Create all tables in the test SQLite DB
+    Base.metadata.create_all(bind=engine)
 
     # Seed admin user for auth tests
-    from auth.models import User
     from auth.utils import get_password_hash
 
     db = SessionLocal()
-    if not db.query(User).filter(User.username == "admin").first():
-        user = User(
-            email="admin@meeting-ops.local",
-            username="admin",
-            hashed_password=get_password_hash("admin123"),
-            is_active=True,
-            is_verified=True,
-            is_superuser=True,
-        )
-        db.add(user)
-        db.commit()
-    db.close()
+    try:
+        if not db.query(User).filter(User.username == "admin").first():
+            user = User(
+                email="admin@meeting-ops.local",
+                username="admin",
+                hashed_password=get_password_hash("admin123"),
+                is_active=True,
+                is_verified=True,
+                is_superuser=True,
+            )
+            db.add(user)
+            db.commit()
+    finally:
+        db.close()
 
     from main import app as fastapi_app
-
     yield fastapi_app
 
-    mp.undo()
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    # Cleanup temp DB
+    if os.path.exists(_db_path):
+        os.remove(_db_path)
 
 
 @pytest.fixture()
 def client(app):
+    from fastapi.testclient import TestClient
+
     with TestClient(app) as test_client:
         yield test_client

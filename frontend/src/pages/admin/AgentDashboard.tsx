@@ -530,7 +530,7 @@ export const AgentDashboard: React.FC = () => {
                       <span className="text-2xl">{agent.icon || '🤖'}</span>
                       <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
                       {agent.is_core && (
-                        <Shield className="w-4 h-4 text-purple-400" title="Core Agent" />
+                        <Shield className="w-4 h-4 text-purple-400" aria-label="Core Agent" />
                       )}
                     </div>
                     

@@ -283,7 +283,7 @@ export const SessionDetails: React.FC = () => {
     if ((summarySource as Session['final_summary'])?.executive) {
       content += `EXECUTIVE SUMMARY\n`;
       content += `-----------------\n`;
-      content += `${(summarySource as Session['final_summary']).executive}\n\n`;
+      content += `${(summarySource as Session['final_summary'])?.executive}\n\n`;
     }
     
     const bullets = (summarySource as Session['final_summary'])?.bullets || [];
@@ -334,13 +334,13 @@ export const SessionDetails: React.FC = () => {
     if (!sessionId) return;
     
     try {
-      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
+      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session?.id || sessionId}/download/audio`);
       if (response.ok) {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `recording_${(session.name || session.title || session.id).toString().replace(/\s+/g, '_')}.wav`;
+        a.download = `recording_${(session?.name || session?.title || session?.id || sessionId).toString().replace(/\s+/g, '_')}.wav`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -908,7 +908,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Generated Emails Section */}
-            {(generatedEmails.length > 0 || session?.generated_emails?.length > 0) && (
+            {(generatedEmails.length > 0 || (session?.generated_emails?.length ?? 0) > 0) && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                   <Mail className="w-5 h-5 text-green-600" />
@@ -1076,7 +1076,7 @@ export const SessionDetails: React.FC = () => {
                   filteredSegments.map((segment, index) => (
                     <div
                       key={index}
-                      ref={el => segmentRefs.current[index] = el}
+                      ref={(el: HTMLDivElement | null) => { segmentRefs.current[index] = el; }}
                       onClick={() => handleSegmentClick(segment)}
                       className={`p-4 rounded-lg cursor-pointer transition-all ${
                         activeSegment === index
