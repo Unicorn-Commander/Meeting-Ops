@@ -12,20 +12,17 @@
     "build:docker": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "test": "vitest run",
     "setup:https": "bash setup-https.sh",
     "setup:magic-cert": "bash generate-magic-unicorn-cert.sh"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "@radix-ui/react-separator": "^1.1.7",
     "@radix-ui/react-slot": "^1.2.3",
     "@types/react-router-dom": "^5.3.3",
-    "chart.js": "^4.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
-    "express": "^5.1.0",
-    "http-proxy-middleware": "^3.0.5",
     "jspdf": "^3.0.1",
     "lucide-react": "^0.525.0",
     "react": "^19.1.0",
@@ -33,7 +30,6 @@
     "react-router-dom": "^7.7.1",
     "react-toastify": "^11.0.5",
     "recharts": "^3.1.2",
-    "socket.io-client": "^4.8.1",
     "tailwind-merge": "^3.3.1",
     "tailwindcss": "^3.4.17"
   },
@@ -48,10 +44,14 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.3.0",
+    "jsdom": "^26.1.0",
     "postcss": "^8.5.6",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.35.1",
     "vite": "^7.0.6",
-    "vite-tsconfig-paths": "^5.1.4"
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^2.1.8"
   }
 }

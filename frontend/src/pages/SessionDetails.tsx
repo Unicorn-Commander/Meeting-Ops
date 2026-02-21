@@ -136,13 +136,21 @@ export const SessionDetails: React.FC = () => {
         const data = await response.json();
         console.log('✅ Session data received:', data);
         
-        // Normalize transcription data - prefer transcription_segments if available
+        // Normalize transcription data - prefer transcription_segments, then diarized segments
+        if (!data.transcription) {
+          data.transcription = {};
+        }
+
         if (data.transcription_segments && data.transcription_segments.length > 0) {
-          if (!data.transcription) {
-            data.transcription = {};
-          }
           data.transcription.segments = data.transcription_segments;
           console.log('📝 Found', data.transcription_segments.length, 'transcription segments');
+        } else if (data.transcript_diarized?.segments?.length) {
+          data.transcription.segments = data.transcript_diarized.segments;
+          console.log('📝 Found', data.transcript_diarized.segments.length, 'diarized segments');
+        }
+
+        if (!data.transcription.text && data.transcript_simple) {
+          data.transcription.text = data.transcript_simple;
         }
         
         // Check if we have transcript text
@@ -225,7 +233,7 @@ export const SessionDetails: React.FC = () => {
   };
 
   const downloadTranscript = () => {
-    if (!session?.transcription && !session?.transcript) return;
+    if (!session?.transcription && !session?.transcript && !session?.transcript_simple) return;
     
     let content = '';
     
@@ -236,6 +244,8 @@ export const SessionDetails: React.FC = () => {
       ).join('\n\n');
     } else if (session.transcript) {
       content = session.transcript;
+    } else if (session.transcript_simple) {
+      content = session.transcript_simple;
     } else if (session.transcription?.text) {
       content = session.transcription.text;
     }
@@ -257,7 +267,7 @@ export const SessionDetails: React.FC = () => {
   };
 
   const downloadSummary = () => {
-    if (!session?.summary) {
+    if (!session?.summary && !session?.final_summary) {
       alert('No summary available for download');
       return;
     }
@@ -268,35 +278,41 @@ export const SessionDetails: React.FC = () => {
     content += `Date: ${formatDate(session.created_at)}\n`;
     content += `Duration: ${session.duration ? formatTime(session.duration) : 'N/A'}\n\n`;
     
-    if (session.summary.analysis?.executive) {
+    const summarySource = session.final_summary || session.summary?.analysis || session.summary || {};
+
+    if ((summarySource as Session['final_summary'])?.executive) {
       content += `EXECUTIVE SUMMARY\n`;
       content += `-----------------\n`;
-      content += `${session.summary.analysis.executive}\n\n`;
+      content += `${(summarySource as Session['final_summary']).executive}\n\n`;
     }
     
-    if (session.summary.analysis?.bullets && session.summary.analysis.bullets.length > 0) {
+    const bullets = (summarySource as Session['final_summary'])?.bullets || [];
+    if (bullets.length > 0) {
       content += `KEY DISCUSSION POINTS\n`;
       content += `---------------------\n`;
-      session.summary.analysis.bullets.forEach((bullet: string) => {
+      bullets.forEach((bullet: string) => {
         content += `• ${bullet}\n`;
       });
       content += '\n';
     }
     
-    if (session.summary.analysis?.decisions && session.summary.analysis.decisions.length > 0) {
+    const decisions = (summarySource as Session['final_summary'])?.decisions || [];
+    if (decisions.length > 0) {
       content += `IMPORTANT DECISIONS\n`;
       content += `-------------------\n`;
-      session.summary.analysis.decisions.forEach((decision: string) => {
+      decisions.forEach((decision: string) => {
         content += `✓ ${decision}\n`;
       });
       content += '\n';
     }
     
-    if (session.summary.analysis?.actions && session.summary.analysis.actions.length > 0) {
+    const actions = (summarySource as Session['final_summary'])?.actions || [];
+    if (actions.length > 0) {
       content += `ACTION ITEMS\n`;
       content += `------------\n`;
-      session.summary.analysis.actions.forEach((action: any) => {
-        content += `□ ${action.action}\n`;
+      actions.forEach((action: any) => {
+        const actionText = typeof action === 'string' ? action : action.action;
+        content += `□ ${actionText}\n`;
         if (action.owner) content += `  Owner: ${action.owner}\n`;
         if (action.priority) content += `  Priority: ${action.priority}\n`;
         content += '\n';
@@ -315,16 +331,16 @@ export const SessionDetails: React.FC = () => {
   };
 
   const downloadAudio = async () => {
-    if (!session?.audio_file) return;
+    if (!sessionId) return;
     
     try {
-      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`);
+      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
       if (response.ok) {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `recording_${session.name.replace(/\s+/g, '_')}.wav`;
+        a.download = `recording_${(session.name || session.title || session.id).toString().replace(/\s+/g, '_')}.wav`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -466,14 +482,26 @@ export const SessionDetails: React.FC = () => {
     );
   }
 
-  const filteredSegments = session.transcription?.segments?.filter(seg => {
+  const segments = session.transcription?.segments
+    || session.transcription_segments
+    || session.transcript_diarized?.segments
+    || [];
+
+  const filteredSegments = segments.filter(seg => {
     const matchesSpeaker = selectedSpeaker === 'all' || seg.speaker === selectedSpeaker;
     const matchesSearch = !searchTerm || seg.text.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesSpeaker && matchesSearch;
-  }) || [];
+  });
 
-  const speakers = session.transcription?.speakers || 
-    [...new Set(session.transcription?.segments?.map(s => s.speaker || 'Speaker') || [])];
+  const speakers = session.transcription?.speakers
+    || [...new Set(segments.map(s => s.speaker || 'Speaker'))];
+
+  const transcriptText = session.transcript
+    || session.transcript_simple
+    || session.transcription?.text
+    || '';
+
+  const hasTranscript = Boolean(transcriptText || segments.length > 0);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -483,7 +511,7 @@ export const SessionDetails: React.FC = () => {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <button
-                onClick={() => navigate('/recording/sessions')}
+                onClick={() => navigate('/sessions')}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <ArrowLeft className="w-5 h-5" />
@@ -544,7 +572,7 @@ export const SessionDetails: React.FC = () => {
               {/* Generate Emails Button */}
               <button
                 onClick={generateEmails}
-                disabled={generatingEmail || !session.transcript}
+                disabled={generatingEmail || !(session.transcript || session.transcript_simple || session.transcription?.text || session.transcription?.segments?.length)}
                 className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
               >
                 {generatingEmail ? (
@@ -581,7 +609,7 @@ export const SessionDetails: React.FC = () => {
                     
                     <button
                       onClick={downloadTranscript}
-                      disabled={!session.transcript && !session.transcript_simple}
+                      disabled={!hasTranscript}
                       className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
                     >
                       <FileText className="w-4 h-4 text-blue-600" />
@@ -590,18 +618,20 @@ export const SessionDetails: React.FC = () => {
                     
                     <button
                       onClick={async () => {
-                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/transcript`);
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/transcript`);
                         if (response.ok) {
                           const blob = await response.blob();
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = url;
-                          a.download = `transcript_with_speakers_${session.id}.txt`;
+                          a.download = `transcript_with_speakers_${session.id || sessionId}.txt`;
                           a.click();
                           URL.revokeObjectURL(url);
+                        } else {
+                          downloadTranscript();
                         }
                       }}
-                      disabled={!session.transcript_diarized && !session.transcription_segments}
+                      disabled={segments.length === 0}
                       className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
                     >
                       <Users className="w-4 h-4 text-green-600" />
@@ -619,13 +649,13 @@ export const SessionDetails: React.FC = () => {
                     
                     <button
                       onClick={async () => {
-                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/minutes`);
+                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/minutes`);
                         if (response.ok) {
                           const blob = await response.blob();
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = url;
-                          a.download = `minutes_${session.id}.txt`;
+                          a.download = `minutes_${session.id || sessionId}.txt`;
                           a.click();
                           URL.revokeObjectURL(url);
                         }
@@ -702,22 +732,23 @@ export const SessionDetails: React.FC = () => {
                 {(session.final_summary || session.summary) ? (
                   <div className="space-y-4">
                     {/* Executive Summary */}
-                    {(session.final_summary?.executive || session.summary?.analysis?.executive) && (
+                    {(session.final_summary?.executive || session.summary?.executive || session.summary?.analysis?.executive) && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Executive Summary</h3>
                         <p className="text-gray-700 bg-gray-50 p-4 rounded-lg">
-                          {session.final_summary?.executive || session.summary.analysis.executive}
+                          {session.final_summary?.executive || session.summary?.executive || session.summary?.analysis?.executive}
                         </p>
                       </div>
                     )}
                     
                     {/* Key Discussion Points */}
                     {((session.final_summary?.bullets && session.final_summary.bullets.length > 0) || 
+                      (session.summary?.bullets && session.summary.bullets.length > 0) ||
                       (session.summary?.analysis?.bullets && session.summary.analysis.bullets.length > 0)) && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Key Discussion Points</h3>
                         <ul className="space-y-2">
-                          {(session.final_summary?.bullets || session.summary?.analysis?.bullets || []).map((bullet: string, idx: number) => (
+                          {(session.final_summary?.bullets || session.summary?.bullets || session.summary?.analysis?.bullets || []).map((bullet: string, idx: number) => (
                             <li key={idx} className="flex items-start gap-2">
                               <span className="text-purple-600 mt-1.5">•</span>
                               <span className="text-gray-700">{bullet}</span>
@@ -729,13 +760,14 @@ export const SessionDetails: React.FC = () => {
                     
                     {/* Action Items */}
                     {((session.final_summary?.actions && session.final_summary.actions.length > 0) ||
+                      (session.summary?.actions && session.summary.actions.length > 0) ||
                       (session.summary?.analysis?.actions && session.summary.analysis.actions.length > 0)) && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Action Items</h3>
                         <div className="space-y-2">
-                          {(session.final_summary?.actions || session.summary?.analysis?.actions || []).map((action: any, idx: number) => (
+                          {(session.final_summary?.actions || session.summary?.actions || session.summary?.analysis?.actions || []).map((action: any, idx: number) => (
                             <div key={idx} className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded">
-                              <p className="text-gray-800 font-medium">{action.action}</p>
+                              <p className="text-gray-800 font-medium">{action.action || action}</p>
                               {action.owner && (
                                 <p className="text-sm text-gray-600 mt-1">Owner: {action.owner}</p>
                               )}
@@ -756,11 +788,12 @@ export const SessionDetails: React.FC = () => {
                     
                     {/* Important Decisions */}
                     {((session.final_summary?.decisions && session.final_summary.decisions.length > 0) ||
+                      (session.summary?.decisions && session.summary.decisions.length > 0) ||
                       (session.summary?.analysis?.decisions && session.summary.analysis.decisions.length > 0)) && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Important Decisions</h3>
                         <ul className="space-y-2">
-                          {(session.final_summary?.decisions || session.summary?.analysis?.decisions || []).map((decision: string, idx: number) => (
+                          {(session.final_summary?.decisions || session.summary?.decisions || session.summary?.analysis?.decisions || []).map((decision: string, idx: number) => (
                             <li key={idx} className="flex items-start gap-2">
                               <span className="text-green-600 mt-1.5">✓</span>
                               <span className="text-gray-700">{decision}</span>
@@ -929,7 +962,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Audio Player */}
-            {session.audio_file && (
+            {(session.audio_file || sessionId) && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                   <Volume2 className="w-5 h-5 text-purple-600" />
@@ -938,12 +971,12 @@ export const SessionDetails: React.FC = () => {
                 
                 <audio
                   ref={audioRef}
-                  src={`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`}
+                  src={`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                   onError={(e) => {
                     console.error('Audio load error:', e);
-                    console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/audio`);
+                    console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
                   }}
                   className="hidden"
                 />
@@ -1021,10 +1054,10 @@ export const SessionDetails: React.FC = () => {
               
               <div ref={transcriptRef} className="space-y-3 max-h-96 overflow-y-auto">
                 {/* Show full transcript text if available */}
-                {filteredSegments.length === 0 && (session.transcript || session.transcription?.text) ? (
+                {filteredSegments.length === 0 && transcriptText ? (
                   <div className="p-4 rounded-lg bg-gray-50">
                     <p className="text-gray-700 whitespace-pre-wrap">
-                      {session.transcript || session.transcription?.text}
+                      {transcriptText}
                     </p>
                   </div>
                 ) : filteredSegments.length === 0 && session.status === 'processing' ? (
