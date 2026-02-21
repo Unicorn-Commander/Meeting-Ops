@@ -4,7 +4,7 @@
 ```bash
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0   # Dev server on port 7778
+npm run dev -- --host 0.0.0.0   # Dev server on port 7777
 npm run build                    # Production build (0 TS errors)
 npx vitest run                   # Run tests (23 pass)
 ```

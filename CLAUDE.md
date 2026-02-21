@@ -15,7 +15,7 @@ docker compose -f docker-compose-full-stack.yml up -d
 # Start backend (port 9050)
 cd backend && ./start-backend.sh
 
-# Start frontend (port 7778)
+# Start frontend (port 7777)
 cd frontend && npm run dev -- --host 0.0.0.0
 
 # Run tests
@@ -27,7 +27,7 @@ cd frontend && npx vitest run                 # 23 pass
 **Login**: admin / admin123 (superuser)
 
 **Access**:
-- Frontend: http://your-server-ip:7778
+- Frontend: http://your-server-ip:7777
 - Backend API docs: http://your-server-ip:9050/docs
 
 ## Architecture
