@@ -25,9 +25,9 @@ docker compose -f docker-compose-full-stack.yml up -d
 - Used by: ai_chat, ai_insights, unified_agent_service, meeting_notes_service
 
 ### main.py
-Loads 19 routers via `_load_router()` with status tracking:
+Loads 21 routers via `_load_router()` with status tracking:
 - **Required** (3): auth, recording (simple_recording_db), sessions - fail fast on error
-- **Optional** (16): all others - log warning, report in /health
+- **Optional** (18): all others (including satellite_api, websocket_satellite) - log warning, report in /health
 
 `/health` returns `{"status": "healthy"|"degraded", "routers_loaded": N, "routers_failed": [...]}` with real timestamps.
 
@@ -52,6 +52,9 @@ Loads 19 routers via `_load_router()` with status tracking:
 | batch_export.py | PDF/DOCX/TXT/JSON/SRT export |
 | audio_upload.py | Audio file upload |
 | simple_settings.py | Settings management |
+| satellite_api.py | Satellite device CRUD, heartbeat, audio/transcript upload |
+| websocket_satellite.py | Real-time audio streaming from satellite devices |
+| websocket_remote_audio.py | Companion app remote audio WebSocket |
 
 ### Services (backend/services/)
 | Service | Purpose | Status |

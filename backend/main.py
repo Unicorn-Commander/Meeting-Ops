@@ -123,6 +123,9 @@ _load_router(app, "simple_settings", "api.simple_settings")
 _load_router(app, "satellite_api", "api.satellite_api")
 _load_router(app, "websocket_satellite", "api.websocket_satellite")
 
+# === COMPANION APP ROUTERS (optional) ===
+_load_router(app, "websocket_remote_audio", "api.websocket_remote_audio")
+
 
 # === CORE API ENDPOINTS ===
 

@@ -73,6 +73,7 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `websocket_auto_summary.py` - Progressive AI summaries
 - `satellite_api.py` - Satellite device CRUD, heartbeat, audio/transcript upload
 - `websocket_satellite.py` - Real-time audio streaming from satellite devices
+- `websocket_remote_audio.py` - Companion app remote audio WebSocket
 
 **Key services** (in `backend/services/`):
 - `unified_llm_service.py` - Granite 3.3 2B via llama.cpp OpenAI API
@@ -126,6 +127,8 @@ POST /api/satellites/{device_id}/start-recording    # Trigger recording
 POST /api/satellites/{device_id}/stop-recording     # Stop recording
 GET  /api/satellites/rooms                          # List rooms with satellites
 WS   /ws/satellite/{device_id}/audio               # Real-time satellite audio stream
+# Companion App
+WS   /ws/remote-audio/{session_id}                  # Remote audio stream from companion app
 ```
 
 ## Known Issues
@@ -155,7 +158,9 @@ UC-Meeting-Ops/
       hooks/                   # 1 hook (useKeyboardShortcuts)
       __tests__/               # 4 test files (23 tests)
       config.ts                # API URL configuration
-  docs/                        # Design documents (satellite-devices-design.md)
+  docs/                        # Design documents
+    companion-app-design.md    # Mac/PC companion app architecture
+    satellite-devices-design.md # ESP32/RPi satellite device specs
   models/                      # GGUF model files for llama.cpp
   docker-compose-full-stack.yml
 ```

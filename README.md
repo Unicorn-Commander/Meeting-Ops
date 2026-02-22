@@ -34,7 +34,7 @@ Meeting-Ops is a self-hosted meeting intelligence appliance. Plug in a USB mic, 
 | **LLM** | [llama.cpp](https://github.com/ggerganov/llama.cpp) + Vulkan | Granite 3.3 2B (IBM) for summaries, chat, insights at ~850 tok/s |
 | **Speaker ID** | NumPy acoustic clustering | Lightweight diarization without PyTorch, 303x realtime |
 | **Frontend** | React 19 + TypeScript + Tailwind | Mobile-responsive SPA with live WebSocket updates |
-| **Backend** | FastAPI + Python 3.13 | 19 API routers, WebSocket streaming, JWT auth |
+| **Backend** | FastAPI + Python 3.13 | 21 API routers, WebSocket streaming, JWT auth |
 | **Database** | PostgreSQL + Redis + Qdrant | Session storage, real-time pub/sub, vector search |
 
 > **Why Vulkan?** On AMD Phoenix (780M iGPU), Vulkan is **2.4x faster** than ROCm for LLM inference (~850 tok/s vs ~350 tok/s). No ROCm install needed — just the RADV Mesa driver that ships with Linux.
@@ -75,6 +75,19 @@ Meeting-Ops is a self-hosted meeting intelligence appliance. Plug in a USB mic, 
 - **Per-meeting AI chat** — ask questions about any recorded meeting ("What were the action items?")
 - **AI insights** — keywords, sentiment analysis, action items, decisions
 - **Custom vocabulary** — define domain-specific terms for better transcription accuracy
+
+### Cross-Meeting Intelligence (RAG)
+- **Cross-meeting AI chat** — ask questions across all recorded meetings, not just one
+- **Hybrid search** (semantic + BM25 keyword) for precise retrieval across your entire meeting library
+- **Speaker-aware transcript chunking** for better context in AI answers
+- **Source citations** — AI answers link back to the specific meetings where information was found
+
+### Multi-Room & Remote Recording
+- **Satellite device support** — ESP32-S3 (~$15/node) and Raspberry Pi for multi-room recording
+- **Companion app support** — Mac/PC menu bar app for remote meeting capture
+- **Store-and-forward mode** — devices record offline and upload when WiFi is available
+- **WebSocket real-time streaming** — binary PCM audio from any device to the server
+- **Room management** — assign devices to rooms, track status via heartbeat
 
 ### Session Management
 - **Full-text search** — find meetings by content, title, or description
@@ -158,36 +171,35 @@ Open `http://your-server-ip:7777` and log in:
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────┐
-                    │       React 19 Frontend          │
-                    │    TypeScript + Tailwind + Vite   │
-                    │         Port 7777                 │
-                    └──────────┬──────────────────┬────┘
-                               │ REST/WS          │ WS
-                    ┌──────────▼──────────────────▼────┐
-                    │       FastAPI Backend             │
-                    │   19 Routers • JWT Auth • WS      │
-                    │         Port 9050                 │
-                    └──┬─────┬─────┬──────┬───────┬────┘
-                       │     │     │      │       │
-              ┌────────▼┐ ┌─▼───┐ │  ┌───▼────┐  │
-              │PostgreSQL│ │Redis│ │  │llama.cpp│  │
-              │  :5434   │ │:6379│ │  │ Vulkan  │  │
-              │ Sessions │ │Pub/ │ │  │Granite  │  │
-              │Transcripts│ Sub │ │  │3.3 2B   │  │
-              └──────────┘ └─────┘ │  │ :11437  │  │
-                                   │  └─────────┘  │
-                          ┌────────▼─────┐  ┌──────▼──────┐
-                          │ whisper.cpp   │  │ PipeWire    │
-                          │ Vulkan STT    │  │ + ffmpeg    │
-                          │ large-v3-turbo│  │ Audio       │
-                          │ :8178         │  │ Capture     │
-                          └───────────────┘  └──────┬──────┘
-                                                    │
-                                              ┌─────▼─────┐
-                                              │ USB Mic /  │
-                                              │ Built-in   │
-                                              └────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                     Remote Devices                               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐                  │
+│  │ ESP32-S3 │  │  RPi 5   │  │ Mac/PC       │                  │
+│  │ Satellite│  │ Satellite│  │ Companion App│                  │
+│  │   $15    │  │  $130    │  │ (Swift/etc)  │                  │
+│  └────┬─────┘  └────┬─────┘  └──────┬───────┘                  │
+│       │ WS/HTTP      │ WS/HTTP       │ WS                       │
+└───────┼──────────────┼───────────────┼──────────────────────────┘
+        │              │               │
+┌───────▼──────────────▼───────────────▼──────────────────────────┐
+│                  Meeting-Ops Server                               │
+│  ┌──────────────────────────────────────────────────────┐       │
+│  │              FastAPI Backend (21 Routers)              │       │
+│  │   REST API • WebSockets • JWT Auth • Port 9050        │       │
+│  └───┬────────┬──────────┬──────────┬──────────┬────────┘       │
+│      │        │          │          │          │                 │
+│  ┌───▼──┐ ┌──▼──┐ ┌─────▼────┐ ┌───▼───┐ ┌───▼───┐           │
+│  │Postgre│ │Redis│ │llama.cpp │ │whisper│ │Qdrant │           │
+│  │SQL    │ │     │ │Vulkan    │ │.cpp   │ │Vector │           │
+│  │:5434  │ │:6381│ │Granite2B │ │Vulkan │ │Search │           │
+│  │       │ │     │ │:11437    │ │:8178  │ │:6335  │           │
+│  └───────┘ └─────┘ └──────────┘ └───────┘ └───────┘           │
+│                                                                  │
+│  ┌──────────────────────────┐  ┌────────────┐                   │
+│  │   React 19 Frontend      │  │ USB Mic /  │                   │
+│  │   Port 7777              │  │ Built-in   │                   │
+│  └──────────────────────────┘  └────────────┘                   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Services & Ports
@@ -195,9 +207,9 @@ Open `http://your-server-ip:7777` and log in:
 | Service | Port | Purpose |
 |---------|------|---------|
 | Frontend (Vite) | 7777 | React SPA |
-| Backend (FastAPI) | 9050 | REST API + WebSockets |
+| Backend (FastAPI) | 9050 | REST API + WebSockets (21 routers) |
 | PostgreSQL | 5434 | Session & transcript storage |
-| Redis | 6379 | Real-time pub/sub, recording state |
+| Redis | 6381 | Real-time pub/sub, recording state |
 | Qdrant | 6335 | Vector search (semantic meeting search) |
 | llama.cpp (Vulkan) | 11437 | Granite 3.3 2B LLM (OpenAI-compatible API) |
 | whisper-server (Vulkan) | 8178 | Speech-to-text (large-v3-turbo) |
@@ -233,6 +245,8 @@ USB Mic → PipeWire → ffmpeg (44.1kHz mono WAV)
 | `api/batch_export.py` | PDF (reportlab), DOCX (python-docx), TXT, JSON, SRT export |
 | `api/analytics_simple.py` | Speaker analytics, duration trends |
 | `api/vocabulary.py` | Custom vocabulary management |
+| `api/satellite_api.py` | Satellite device CRUD, heartbeat, audio/transcript upload |
+| `api/websocket_satellite.py` | Real-time audio streaming from satellite devices |
 
 ---
 
@@ -333,6 +347,54 @@ curl -X POST "http://localhost:9050/api/simple/storage/cleanup?days=90&dry_run=t
   -H "Authorization: Bearer $TOKEN"
 ```
 
+### Cross-Meeting RAG
+
+```bash
+# Ask questions across ALL meetings (not just one)
+curl -X POST http://localhost:9050/api/ai-chat/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What did we discuss about the budget across all meetings?"}'
+```
+
+### Satellite Devices
+
+```bash
+# Register a satellite device
+curl -X POST http://localhost:9050/api/satellites/register \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"device_id":"esp32-office-01","name":"Office ESP32","room_name":"Main Office","device_type":"esp32-s3"}'
+
+# List all satellites
+curl http://localhost:9050/api/satellites \
+  -H "Authorization: Bearer $TOKEN"
+
+# Device heartbeat
+curl -X POST http://localhost:9050/api/satellites/{device_id}/heartbeat \
+  -H "Authorization: Bearer $TOKEN"
+
+# Upload recorded audio (store-and-forward)
+curl -X POST http://localhost:9050/api/satellites/{device_id}/upload-audio \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@recording.wav"
+
+# Upload transcript (RPi local STT)
+curl -X POST http://localhost:9050/api/satellites/{device_id}/transcript \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"transcript_text": "...", "segments": [...]}'
+
+# Satellite audio streaming (real-time)
+# WebSocket: ws://localhost:9050/ws/satellite/{device_id}/audio
+# Sends binary PCM frames (16kHz, 16-bit, mono)
+
+# Remote audio streaming (companion app)
+# WebSocket: ws://localhost:9050/ws/remote-audio/{session_id}?token=JWT_TOKEN
+# Sends binary PCM frames (16kHz, 16-bit, mono)
+# Receives JSON transcription results
+```
+
 ### WebSocket (Live Transcription)
 
 ```javascript
@@ -348,7 +410,7 @@ ws.onmessage = (event) => {
 
 ```bash
 curl http://localhost:9050/health
-# {"status":"healthy","routers_loaded":19,"routers_failed":[],...}
+# {"status":"healthy","routers_loaded":21,"routers_failed":[],...}
 ```
 
 ---
@@ -409,7 +471,7 @@ The 780M iGPU runs **both** whisper.cpp and llama.cpp simultaneously via Vulkan 
 DATABASE_URL=postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions
 
 # Optional
-REDIS_URL=redis://localhost:6379          # Default
+REDIS_URL=redis://localhost:6381          # Default (host port mapped from container 6379)
 CORS_ORIGINS=                              # Comma-separated origins (default: RFC1918 regex)
 SECRET_KEY=your-jwt-secret                 # For JWT tokens
 ```
@@ -422,7 +484,7 @@ docker compose -f docker-compose-full-stack.yml up -d
 
 This starts:
 - **PostgreSQL** (port 5434) — session and transcript storage
-- **Redis** (port 6379) — real-time pub/sub
+- **Redis** (port 6381) — real-time pub/sub
 - **llama.cpp Vulkan** (port 11437) — Granite 3.3 2B Q4_K_M with OpenAI-compatible API
 
 The whisper.cpp STT server runs as a systemd user service (or manually) on port 8178.
@@ -447,16 +509,19 @@ pactl set-source-volume <source-name> 200%
 ```
 UC-Meeting-Ops/
   backend/
-    main.py                              # FastAPI app, loads 19 routers
-    api/                                 # 19 API router modules
+    main.py                              # FastAPI app, loads 21 routers
+    api/                                 # 21 API router modules
       simple_recording_db.py             #   Recording CRUD + search + always-on
-      ai_chat.py                         #   Per-meeting AI chat
+      ai_chat.py                         #   Per-meeting AI chat + cross-meeting RAG
       ai_insights.py                     #   AI keyword/sentiment analysis
       batch_export.py                    #   PDF/DOCX/TXT/JSON/SRT export
       analytics_simple.py               #   Speaker & duration analytics
       vocabulary.py                      #   Custom vocabulary CRUD
       websocket_transcription.py         #   Live transcription WebSocket
       websocket_auto_summary.py          #   Progressive AI summaries
+      satellite_api.py                   #   Satellite device management
+      websocket_satellite.py             #   Satellite audio WebSocket
+      websocket_remote_audio.py          #   Companion app audio WebSocket
     services/                            # Core service modules
       always_on_recorder.py              #   Continuous recording + auto-segmentation
       live_recording_transcription.py    #   Real-time chunk transcription
@@ -488,6 +553,8 @@ UC-Meeting-Ops/
     set-mic-gain.sh                      # USB mic gain persistence
   docs/
     always-on-recording-design.md        # Always-on architecture design
+    companion-app-design.md              # Mac/PC companion app architecture
+    satellite-devices-design.md          # ESP32/RPi satellite device specs
   docker-compose-full-stack.yml          # Infrastructure services
 ```
 
@@ -510,11 +577,16 @@ UC-Meeting-Ops/
 - [x] Always-on continuous recording mode with LLM context splitting
 - [x] Custom vocabulary
 - [x] Storage management (configurable retention, dry-run cleanup)
+- [x] Multi-room satellite device backend (ESP32-S3, RPi support)
+- [x] Companion app backend (remote audio WebSocket)
+- [x] Cross-meeting RAG (hybrid search, AI answers with citations)
+- [x] Chat history persistence (PostgreSQL)
 
-### Planned
-- [ ] Multi-room recording (multiple mic sources)
-- [ ] Satellite recording devices (record offline, upload later)
-- [ ] Browser extension for client-side recording + upload
+### In Progress / Planned
+- [ ] Companion app client (macOS Swift -- designed, not yet built)
+- [ ] ESP32-S3 firmware (designed, not yet built)
+- [ ] Raspberry Pi satellite service (designed, not yet built)
+- [ ] Hybrid search with sparse BM25 vectors
 
 ---
 

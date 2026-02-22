@@ -1,10 +1,10 @@
 """
-Semantic Search Service
+Semantic Search Service — Hybrid (Dense + Sparse BM25)
 Vector-based meeting search using Qdrant + fastembed.
 
-Indexes meeting transcripts and summaries as vector embeddings,
-enabling natural language queries like "find meetings about budget planning"
-instead of exact keyword matches.
+Indexes meeting transcripts and summaries as both dense (BAAI/bge-small-en-v1.5)
+and sparse (Qdrant/bm25) vector embeddings. Queries use Reciprocal Rank Fusion
+(RRF) to combine semantic similarity with keyword relevance.
 
 Uses fastembed (CPU) for embedding generation — fast enough for our scale
 (tens to hundreds of meetings, not millions of documents).
@@ -22,9 +22,10 @@ QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6335"))
 COLLECTION_NAME = "meeting_transcripts"
 
-# Embedding model (384-dim, fast on CPU)
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-EMBEDDING_DIM = 384
+# Embedding models
+DENSE_MODEL = "BAAI/bge-small-en-v1.5"   # 384-dim, fast on CPU
+DENSE_DIM = 384
+SPARSE_MODEL = "Qdrant/bm25"             # BM25 sparse via fastembed
 
 # Chunk settings for long transcripts
 CHUNK_SIZE = 400  # words per chunk
@@ -43,11 +44,17 @@ SPEAKER_PATTERN = re.compile(
 
 
 class SemanticSearchService:
-    """Manages vector indexing and semantic search for meeting transcripts."""
+    """Manages hybrid vector indexing and search for meeting transcripts.
+
+    Uses dense (semantic) + sparse (BM25 keyword) vectors with Reciprocal
+    Rank Fusion for better recall than either method alone.
+    """
 
     def __init__(self):
         self._client = None
-        self._embedder = None
+        self._dense_embedder = None
+        self._sparse_embedder = None
+        self._hybrid_enabled = False  # Set True after successful collection setup
         self._initialized = False
 
     def _get_client(self):
@@ -61,43 +68,121 @@ class SemanticSearchService:
             )
         return self._client
 
-    def _get_embedder(self):
-        """Lazy-init embedding model."""
-        if self._embedder is None:
+    def _get_dense_embedder(self):
+        """Lazy-init dense embedding model (BAAI/bge-small-en-v1.5, 384-dim)."""
+        if self._dense_embedder is None:
             from fastembed import TextEmbedding
-            self._embedder = TextEmbedding(EMBEDDING_MODEL)
-            logger.info(f"Loaded embedding model: {EMBEDDING_MODEL}")
-        return self._embedder
+            self._dense_embedder = TextEmbedding(DENSE_MODEL)
+            logger.info(f"Loaded dense embedding model: {DENSE_MODEL}")
+        return self._dense_embedder
+
+    def _get_sparse_embedder(self):
+        """Lazy-init sparse BM25 embedding model (Qdrant/bm25)."""
+        if self._sparse_embedder is None:
+            try:
+                from fastembed import SparseTextEmbedding
+                self._sparse_embedder = SparseTextEmbedding(SPARSE_MODEL)
+                logger.info(f"Loaded sparse embedding model: {SPARSE_MODEL}")
+            except Exception as e:
+                logger.warning(f"Failed to load sparse embedder: {e}")
+                self._sparse_embedder = None
+        return self._sparse_embedder
+
+    # Backward-compatible aliases
+    def _get_embedder(self):
+        return self._get_dense_embedder()
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a list of texts."""
-        embedder = self._get_embedder()
+        """Generate dense embeddings for a list of texts."""
+        embedder = self._get_dense_embedder()
         return [e.tolist() for e in embedder.embed(texts)]
 
-    def ensure_collection(self):
-        """Create the Qdrant collection if it doesn't exist.
+    def _sparse_embed(self, texts: List[str]) -> list:
+        """Generate sparse BM25 embeddings for a list of texts.
 
-        TODO: Hybrid search (dense + sparse BM25) - fastembed has SparseTextEmbedding
-        with model "Qdrant/bm25", but adding sparse_vectors_config to an existing
-        Qdrant collection requires recreation (would destroy existing 25+ points).
-        When it's acceptable to recreate (e.g. after a full reindex), add:
-          sparse_vectors_config={"bm25": SparseVectorParams(index=SparseIndexParams())}
-        to create_collection, generate sparse embeddings at index time, and use
-        Qdrant prefetch + RRF fusion at query time. See:
-        https://qdrant.tech/documentation/concepts/hybrid-queries/
+        Returns list of sparse embedding objects (with .indices and .values),
+        or None if sparse embedder is unavailable.
+        """
+        embedder = self._get_sparse_embedder()
+        if embedder is None:
+            return None
+        try:
+            return list(embedder.embed(texts))
+        except Exception as e:
+            logger.warning(f"Sparse embedding failed: {e}")
+            return None
+
+    def ensure_collection(self):
+        """Create or recreate the Qdrant collection with hybrid vector support.
+
+        The collection uses named vectors:
+        - "dense": 384-dim COSINE (BAAI/bge-small-en-v1.5 semantic embeddings)
+        - "sparse": BM25 sparse vectors (keyword matching via fastembed)
+
+        If the collection exists but lacks sparse vector config, it is
+        deleted and recreated. All data is reindexed afterward.
         """
         client = self._get_client()
         collections = [c.name for c in client.get_collections().collections]
-        if COLLECTION_NAME not in collections:
-            from qdrant_client.models import VectorParams, Distance
+
+        needs_creation = False
+
+        if COLLECTION_NAME in collections:
+            # Check if the existing collection already has hybrid config
+            info = client.get_collection(COLLECTION_NAME)
+            vectors_config = info.config.params.vectors
+
+            # Named vectors will be a dict; unnamed will be a VectorParams
+            has_named_dense = (
+                isinstance(vectors_config, dict) and "dense" in vectors_config
+            )
+            has_sparse = bool(
+                info.config.params.sparse_vectors
+                and "sparse" in info.config.params.sparse_vectors
+            )
+
+            if has_named_dense and has_sparse:
+                # Already hybrid — nothing to do
+                self._hybrid_enabled = True
+                self._initialized = True
+                logger.info("Qdrant collection already has hybrid config")
+                return
+
+            # Old collection (dense-only or wrong config) — delete and recreate
+            logger.info(
+                "Deleting old Qdrant collection to recreate with hybrid vectors "
+                f"(had named_dense={has_named_dense}, sparse={has_sparse})"
+            )
+            client.delete_collection(COLLECTION_NAME)
+            needs_creation = True
+        else:
+            needs_creation = True
+
+        if needs_creation:
+            from qdrant_client.models import (
+                VectorParams, Distance,
+                SparseVectorParams, SparseIndexParams,
+            )
             client.create_collection(
                 collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(
-                    size=EMBEDDING_DIM,
-                    distance=Distance.COSINE,
-                ),
+                vectors_config={
+                    "dense": VectorParams(
+                        size=DENSE_DIM,
+                        distance=Distance.COSINE,
+                    ),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(
+                        index=SparseIndexParams(),
+                    ),
+                },
             )
-            logger.info(f"Created Qdrant collection: {COLLECTION_NAME}")
+            self._hybrid_enabled = True
+            logger.info(
+                f"Created Qdrant collection '{COLLECTION_NAME}' with hybrid "
+                f"vectors (dense {DENSE_DIM}-dim COSINE + sparse BM25)"
+            )
+
         self._initialized = True
 
     def _chunk_text(self, text: str) -> List[Dict]:
@@ -246,9 +331,9 @@ class SemanticSearchService:
                       transcript: Optional[str], summary: Optional[str],
                       created_at: Optional[str] = None):
         """
-        Index a meeting session into Qdrant.
+        Index a meeting session into Qdrant with hybrid (dense + sparse) vectors.
         Chunks long transcripts and indexes each chunk as a separate point.
-        Also indexes the summary as its own point.
+        Also indexes the summary and title as their own points.
         """
         self.ensure_collection()
         client = self._get_client()
@@ -265,7 +350,6 @@ class SemanticSearchService:
             ),
         )
 
-        points_to_upsert = []
         texts_to_embed = []
         payloads = []
 
@@ -319,32 +403,118 @@ class SemanticSearchService:
             logger.debug(f"No content to index for session {session_id}")
             return 0
 
-        # Generate embeddings
-        embeddings = self._embed(texts_to_embed)
+        # Generate dense embeddings
+        dense_embeddings = self._embed(texts_to_embed)
 
-        # Build points
-        from qdrant_client.models import PointStruct
+        # Generate sparse (BM25) embeddings
+        sparse_embeddings = self._sparse_embed(texts_to_embed)
+
+        # Build points with named vectors
+        from qdrant_client.models import PointStruct, SparseVector
         import uuid
 
         points = []
-        for emb, payload in zip(embeddings, payloads):
+        for i, (dense_emb, payload) in enumerate(zip(dense_embeddings, payloads)):
+            vector_dict = {
+                "dense": dense_emb,
+            }
+
+            # Add sparse vector if available
+            if sparse_embeddings is not None and i < len(sparse_embeddings):
+                sparse = sparse_embeddings[i]
+                vector_dict["sparse"] = SparseVector(
+                    indices=sparse.indices.tolist(),
+                    values=sparse.values.tolist(),
+                )
+
             points.append(PointStruct(
                 id=str(uuid.uuid4()),
-                vector=emb,
+                vector=vector_dict,
                 payload=payload,
             ))
 
         # Upsert to Qdrant
         client.upsert(collection_name=COLLECTION_NAME, points=points)
-        logger.info(f"Indexed session {session_id}: {len(points)} points "
-                     f"({len([p for p in payloads if p['content_type'] == 'transcript'])} transcript, "
-                     f"{len([p for p in payloads if p['content_type'] == 'summary'])} summary, "
-                     f"{len([p for p in payloads if p['content_type'] == 'title'])} title)")
+        has_sparse = sparse_embeddings is not None
+        logger.info(
+            f"Indexed session {session_id}: {len(points)} points "
+            f"({len([p for p in payloads if p['content_type'] == 'transcript'])} transcript, "
+            f"{len([p for p in payloads if p['content_type'] == 'summary'])} summary, "
+            f"{len([p for p in payloads if p['content_type'] == 'title'])} title) "
+            f"[hybrid={'yes' if has_sparse else 'no'}]"
+        )
         return len(points)
+
+    def _hybrid_query(self, query: str, limit: int):
+        """Execute a hybrid (dense + sparse) query using Qdrant prefetch + RRF fusion.
+
+        Falls back to dense-only if sparse embedder is unavailable or the
+        collection doesn't have sparse vectors configured.
+
+        Returns (points_list, search_mode_str).
+        """
+        client = self._get_client()
+
+        # Dense embedding (always available)
+        query_dense = self._embed([query])[0]
+
+        # Try sparse embedding
+        sparse_result = self._sparse_embed([query])
+        use_hybrid = (
+            self._hybrid_enabled
+            and sparse_result is not None
+            and len(sparse_result) > 0
+        )
+
+        if use_hybrid:
+            try:
+                from qdrant_client.models import (
+                    Prefetch, FusionQuery, Fusion, SparseVector,
+                )
+
+                sparse = sparse_result[0]
+                query_sparse = SparseVector(
+                    indices=sparse.indices.tolist(),
+                    values=sparse.values.tolist(),
+                )
+
+                query_result = client.query_points(
+                    collection_name=COLLECTION_NAME,
+                    prefetch=[
+                        Prefetch(
+                            query=query_dense,
+                            using="dense",
+                            limit=limit * 3,
+                        ),
+                        Prefetch(
+                            query=query_sparse,
+                            using="sparse",
+                            limit=limit * 3,
+                        ),
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=limit,
+                )
+                return query_result.points, "hybrid"
+
+            except Exception as e:
+                logger.warning(
+                    f"Hybrid query failed, falling back to dense-only: {e}"
+                )
+
+        # Fallback: dense-only search
+        query_result = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_dense,
+            using="dense",
+            limit=limit,
+        )
+        return query_result.points, "dense"
 
     def search(self, query: str, limit: int = 10) -> List[Dict]:
         """
-        Semantic search across all indexed meetings.
+        Hybrid semantic search across all indexed meetings.
+        Uses dense + sparse BM25 with RRF fusion for best recall.
         Returns matching sessions with relevance scores and snippets.
         """
         self.ensure_collection()
@@ -355,17 +525,8 @@ class SemanticSearchService:
         if info.points_count == 0:
             return []
 
-        # Embed the query
-        query_embedding = self._embed([query])[0]
-
-        # Search Qdrant (v1.17+ API: query_points instead of search)
-        from qdrant_client.models import models
-        query_result = client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_embedding,
-            limit=limit * 3,  # Over-fetch to deduplicate by session
-        )
-        results = query_result.points
+        # Hybrid query: dense + sparse with RRF fusion
+        results, search_mode = self._hybrid_query(query, limit=limit * 3)
 
         # Deduplicate by session_id, keeping the best score
         seen_sessions = {}
@@ -392,7 +553,7 @@ class SemanticSearchService:
 
     def search_chunks(self, query: str, limit: int = 10) -> List[Dict]:
         """
-        Semantic search returning individual chunks (not deduplicated by session).
+        Hybrid semantic search returning individual chunks (not deduplicated by session).
         Used by RAG pipeline to retrieve relevant context across all meetings.
         Returns chunks with full text, session metadata, and relevance scores.
         """
@@ -403,17 +564,11 @@ class SemanticSearchService:
         if info.points_count == 0:
             return []
 
-        query_embedding = self._embed([query])[0]
-
-        from qdrant_client.models import models
-        query_result = client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_embedding,
-            limit=limit,
-        )
+        # Hybrid query: dense + sparse with RRF fusion
+        results, search_mode = self._hybrid_query(query, limit=limit)
 
         chunks = []
-        for hit in query_result.points:
+        for hit in results:
             chunks.append({
                 "session_id": hit.payload.get("session_id", ""),
                 "title": hit.payload.get("title", ""),
@@ -444,7 +599,7 @@ class SemanticSearchService:
         logger.info(f"Deleted vectors for session {session_id}")
 
     def get_stats(self) -> Dict:
-        """Get collection statistics."""
+        """Get collection statistics including hybrid search status."""
         try:
             client = self._get_client()
             collections = [c.name for c in client.get_collections().collections]
@@ -455,12 +610,27 @@ class SemanticSearchService:
                     "points_count": 0,
                 }
             info = client.get_collection(COLLECTION_NAME)
+
+            # Detect vector configuration
+            vectors_config = info.config.params.vectors
+            has_named_dense = (
+                isinstance(vectors_config, dict) and "dense" in vectors_config
+            )
+            has_sparse = bool(
+                info.config.params.sparse_vectors
+                and "sparse" in info.config.params.sparse_vectors
+            )
+            search_mode = "hybrid" if (has_named_dense and has_sparse) else "dense-only"
+
             return {
                 "initialized": True,
                 "collection": COLLECTION_NAME,
                 "points_count": info.points_count,
                 "indexed_vectors_count": info.indexed_vectors_count,
                 "status": str(info.status),
+                "search_mode": search_mode,
+                "dense_model": DENSE_MODEL,
+                "sparse_model": SPARSE_MODEL if has_sparse else None,
             }
         except Exception as e:
             return {
@@ -469,7 +639,11 @@ class SemanticSearchService:
             }
 
     def reindex_all(self, db_session) -> Dict:
-        """Reindex all completed sessions from the database."""
+        """Reindex all completed sessions from the database.
+
+        Recreates the collection with hybrid vectors if needed, then
+        indexes all sessions with both dense and sparse embeddings.
+        """
         from database.models import RecordingSession
         sessions = db_session.query(RecordingSession).filter(
             RecordingSession.status.in_(["completed", "failed"])
@@ -516,6 +690,7 @@ class SemanticSearchService:
             "sessions_indexed": indexed,
             "sessions_skipped": skipped,
             "total_points": total_points,
+            "search_mode": "hybrid" if self._hybrid_enabled else "dense-only",
         }
 
 
