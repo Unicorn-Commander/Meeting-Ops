@@ -7,7 +7,7 @@ import os
 import json
 from typing import Dict, List, Optional, Any
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,7 @@ class LLMEndpoint(BaseModel):
     priority: int = 1  # Lower number = higher priority
     description: Optional[str] = None
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 class LLMConfig(BaseModel):
     """Main LLM configuration"""

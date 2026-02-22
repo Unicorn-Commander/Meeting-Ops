@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 from database.database import get_db
 from auth.service import AuthService
@@ -42,8 +42,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     role: Optional[str] = None  # Will be populated from organization role or superuser status
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None

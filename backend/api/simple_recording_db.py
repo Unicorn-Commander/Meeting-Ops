@@ -5,7 +5,7 @@ Fixed version that persists to PostgreSQL
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
@@ -1178,6 +1178,90 @@ async def download_transcript_simple(
             "Content-Disposition": f"attachment; filename={filename}"
         }
     )
+
+
+# === Storage Management ===
+
+@router.get("/storage/stats")
+async def get_storage_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get storage usage statistics"""
+    import glob
+    recordings_dir = "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+
+    # Count files and total size
+    wav_files = glob.glob(os.path.join(recordings_dir, "**", "*.wav"), recursive=True)
+    total_size = sum(os.path.getsize(f) for f in wav_files if os.path.exists(f))
+
+    # Get session counts
+    total_sessions = db.query(DBRecordingSession).count()
+    sessions_with_audio = db.query(DBRecordingSession).filter(
+        DBRecordingSession.audio_file.isnot(None)
+    ).count()
+
+    return {
+        "recordings_dir": recordings_dir,
+        "total_files": len(wav_files),
+        "total_size_bytes": total_size,
+        "total_size_mb": round(total_size / (1024 * 1024), 1),
+        "total_sessions": total_sessions,
+        "sessions_with_audio": sessions_with_audio
+    }
+
+
+@router.post("/storage/cleanup")
+async def cleanup_old_recordings(
+    days: int = Query(default=90, ge=1, le=365, description="Delete recordings older than N days"),
+    dry_run: bool = Query(default=True, description="If true, only report what would be deleted"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete WAV files older than N days. Keeps transcripts and summaries."""
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Find old sessions with audio files
+    old_sessions = db.query(DBRecordingSession).filter(
+        DBRecordingSession.created_at < cutoff,
+        DBRecordingSession.audio_file.isnot(None),
+        DBRecordingSession.status.in_(["completed", "failed"])
+    ).all()
+
+    results = []
+    freed_bytes = 0
+
+    for session in old_sessions:
+        audio_path = session.audio_file
+        file_size = 0
+        if audio_path and os.path.exists(audio_path):
+            file_size = os.path.getsize(audio_path)
+            freed_bytes += file_size
+
+            if not dry_run:
+                os.unlink(audio_path)
+                session.audio_file = None
+                # Keep everything else (transcript, summary, title, etc.)
+
+        results.append({
+            "session_id": session.session_id,
+            "name": session.name,
+            "created_at": session.created_at.isoformat() if session.created_at else None,
+            "file_size_mb": round(file_size / (1024 * 1024), 1),
+            "action": "deleted" if not dry_run else "would_delete"
+        })
+
+    if not dry_run:
+        db.commit()
+
+    return {
+        "dry_run": dry_run,
+        "cutoff_date": cutoff.isoformat(),
+        "sessions_affected": len(results),
+        "space_freed_mb": round(freed_bytes / (1024 * 1024), 1),
+        "details": results
+    }
 
 
 # === Always-On Recording Mode ===

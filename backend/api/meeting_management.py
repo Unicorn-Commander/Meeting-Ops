@@ -381,7 +381,7 @@ async def update_transcript(
 @router.get("/recording-sessions/{session_id}/export")
 async def export_session(
     session_id: str,
-    format: str = Query(default="txt", regex="^(txt|json|pdf|docx|srt)$"),
+    format: str = Query(default="txt", pattern="^(txt|json|pdf|docx|srt)$"),
     db: Session = Depends(get_db) if get_db else None,
     current_user = Depends(get_current_user) if get_current_user else None
 ):
@@ -527,7 +527,7 @@ async def get_npu_status():
 # Analytics Endpoints
 @router.get("/analytics/meetings")
 async def get_meeting_analytics(
-    range: str = Query(default="week", regex="^(week|month|quarter|year|all)$"),
+    range: str = Query(default="week", pattern="^(week|month|quarter|year|all)$"),
     db: Session = Depends(get_db) if get_db else None,
     current_user = Depends(get_current_user) if get_current_user else None
 ):

@@ -1,6 +1,6 @@
 """Database models for Meeting-Ops"""
 from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime, timezone
 import uuid

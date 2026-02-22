@@ -439,7 +439,7 @@ async def get_session_vocabulary(
 @router.get("/export")
 async def export_vocabulary(
     set_id: Optional[UUID] = None,
-    format: str = Query("json", regex="^(json|csv)$"),
+    format: str = Query("json", pattern="^(json|csv)$"),
     db: Session = Depends(get_db)
 ):
     """Export vocabulary terms or sets"""

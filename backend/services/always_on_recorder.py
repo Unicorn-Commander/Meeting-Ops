@@ -22,6 +22,8 @@ class AlwaysOnRecorder:
     - IDLE: Listening for speech, not recording
     - RECORDING: Speech detected, actively recording a meeting
     - SILENCE_GAP: Speech stopped, counting silence before finalizing
+    - CHECKING_CONTEXT: Silence threshold reached, waiting for post-gap speech
+      to ask LLM whether it's the same meeting or a new one
     - FINALIZING: Wrapping up session, processing transcript
     """
 
@@ -44,6 +46,14 @@ class AlwaysOnRecorder:
         self.speech_chunks = 0
         self.meetings_created = 0
 
+        # Context checking state (LLM-based meeting boundary detection)
+        self.context_check_speech_chunks = 0  # Speech chunks received after gap
+        self.context_check_max_wait_chunks = 8  # 8 * 15s = 2 min max wait for speech
+        self.context_check_wait_chunks = 0  # Total chunks waited in CHECKING_CONTEXT
+        self.context_check_speech_needed = 2  # Need 2 chunks of speech for LLM check
+        self.pre_gap_transcript: Optional[str] = None  # Transcript before the gap
+        self.gap_duration_minutes: float = 0.0  # Duration of the silence gap
+
     async def start(self, device_id: Optional[str] = None):
         """Enable always-on mode"""
         if self.is_enabled:
@@ -63,7 +73,7 @@ class AlwaysOnRecorder:
         self.is_enabled = False
 
         # If currently recording, stop gracefully
-        if self.state in ("RECORDING", "SILENCE_GAP") and self.current_session_id:
+        if self.state in ("RECORDING", "SILENCE_GAP", "CHECKING_CONTEXT") and self.current_session_id:
             await self._finalize_meeting()
 
         if self.monitor_task:
@@ -155,17 +165,86 @@ class AlwaysOnRecorder:
                     else:
                         self.consecutive_silent += 1
                         if self.consecutive_silent >= self.silence_threshold_chunks:
-                            logger.info(
-                                f"Silence threshold reached ({self.silence_threshold_chunks} chunks) "
-                                "- finalizing meeting"
-                            )
-                            if self.speech_chunks >= self.min_meeting_chunks:
-                                await self._finalize_meeting()
-                            else:
+                            if self.speech_chunks < self.min_meeting_chunks:
                                 logger.info(
                                     f"Meeting too short ({self.speech_chunks} chunks), discarding"
                                 )
                                 await self._discard_meeting()
+                                self.state = "IDLE"
+                                self.speech_chunks = 0
+                                self.consecutive_silent = 0
+                            else:
+                                # Transition to CHECKING_CONTEXT instead of immediate finalize
+                                self.gap_duration_minutes = (
+                                    self.consecutive_silent * self.chunk_duration
+                                ) / 60.0
+                                self.pre_gap_transcript = self._get_transcript_text(
+                                    last_n_words=200
+                                )
+                                self.context_check_speech_chunks = 0
+                                self.context_check_wait_chunks = 0
+                                self.state = "CHECKING_CONTEXT"
+                                logger.info(
+                                    f"Silence threshold reached ({self.consecutive_silent} chunks, "
+                                    f"{self.gap_duration_minutes:.1f} min) - entering CHECKING_CONTEXT, "
+                                    f"waiting for post-gap speech to query LLM"
+                                )
+
+                elif self.state == "CHECKING_CONTEXT":
+                    self.context_check_wait_chunks += 1
+
+                    if has_speech:
+                        self.context_check_speech_chunks += 1
+                        self.speech_chunks += 1
+                        logger.info(
+                            f"CHECKING_CONTEXT: post-gap speech chunk "
+                            f"{self.context_check_speech_chunks}/"
+                            f"{self.context_check_speech_needed}"
+                        )
+
+                        if self.context_check_speech_chunks >= self.context_check_speech_needed:
+                            # We have enough post-gap speech, ask the LLM
+                            post_gap_text = self._get_transcript_text(
+                                last_n_words=200
+                            )
+                            is_same = await self._check_context_continuity(
+                                self.pre_gap_transcript,
+                                post_gap_text,
+                                self.gap_duration_minutes,
+                            )
+
+                            if is_same:
+                                # LLM says same meeting - reset silence and keep recording
+                                logger.info(
+                                    "LLM context check: SAME meeting - "
+                                    "merging, continuing recording"
+                                )
+                                self.consecutive_silent = 0
+                                self.state = "RECORDING"
+                            else:
+                                # LLM says new meeting - finalize old, start new
+                                logger.info(
+                                    "LLM context check: NEW meeting - "
+                                    "finalizing previous meeting and starting new one"
+                                )
+                                await self._finalize_meeting()
+                                # Start a new meeting for the post-gap speech
+                                await self._start_new_meeting()
+                                self.state = "RECORDING"
+                                self.speech_chunks = self.context_check_speech_chunks
+                                self.consecutive_silent = 0
+
+                    else:
+                        # Still silence during context check
+                        if self.context_check_wait_chunks >= self.context_check_max_wait_chunks:
+                            # Waited too long with no speech - meeting truly ended
+                            logger.info(
+                                f"CHECKING_CONTEXT: no speech after "
+                                f"{self.context_check_wait_chunks} chunks "
+                                f"({self.context_check_wait_chunks * self.chunk_duration}s) "
+                                f"- finalizing meeting (silence timeout)"
+                            )
+                            await self._finalize_meeting()
                             self.state = "IDLE"
                             self.speech_chunks = 0
                             self.consecutive_silent = 0
@@ -191,6 +270,134 @@ class AlwaysOnRecorder:
             return False
         db = 20 * np.log10(rms)
         return db > self.speech_threshold_db
+
+    def _get_transcript_text(self, last_n_words: int = 200) -> str:
+        """Extract the last N words from the live transcription buffer.
+
+        The transcript buffer lives on the live_recording_transcription singleton
+        and contains dicts with a 'text' key for each transcribed segment.
+        """
+        try:
+            from services.live_recording_transcription import (
+                live_recording_transcription,
+            )
+
+            buffer = live_recording_transcription.transcript_buffer
+            if not buffer:
+                return ""
+
+            # Collect text from segments in reverse until we have enough words
+            words: list[str] = []
+            for segment in reversed(buffer):
+                text = segment.get("text", "").strip()
+                if text:
+                    segment_words = text.split()
+                    words = segment_words + words
+                    if len(words) >= last_n_words:
+                        break
+
+            # Trim to the requested number of words (keep the last N)
+            if len(words) > last_n_words:
+                words = words[-last_n_words:]
+
+            return " ".join(words)
+        except Exception as e:
+            logger.error(f"Error extracting transcript text: {e}")
+            return ""
+
+    async def _check_context_continuity(
+        self,
+        before_text: str,
+        after_text: str,
+        gap_duration_minutes: float,
+    ) -> bool:
+        """Ask the LLM whether speech before and after a silence gap belongs
+        to the same meeting or a new one.
+
+        Returns True if the LLM determines it is the SAME meeting (merge),
+        False if it is a NEW meeting or the LLM is unavailable (finalize).
+        """
+        # If we don't have enough text on either side, fall back to simple behavior
+        if not before_text or not after_text:
+            logger.info(
+                "Context check: insufficient transcript text on one side of gap, "
+                "falling back to finalize"
+            )
+            return False
+
+        try:
+            from services.unified_llm_service import llm_service
+
+            # Re-check availability in case server came back up
+            if not llm_service.llamacpp_available:
+                llm_service._check_available()
+
+            if not llm_service.llamacpp_available:
+                logger.warning(
+                    "Context check: LLM unavailable, falling back to finalize"
+                )
+                return False
+
+            system_prompt = (
+                "You analyze meeting transcripts. Given text spoken before and "
+                "after a silence gap, determine if this is the SAME meeting "
+                "resuming or a NEW different meeting starting. Consider topic "
+                "continuity, speaker context, and conversational flow. Respond "
+                "with exactly one word: SAME or NEW"
+            )
+
+            user_prompt = (
+                f"BEFORE SILENCE GAP:\n{before_text}\n\n"
+                f"[{gap_duration_minutes:.1f} minute silence gap]\n\n"
+                f"AFTER SILENCE GAP:\n{after_text}"
+            )
+
+            # Run the synchronous _call_llm in a thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: llm_service._call_llm(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=10,
+                    temperature=0.1,
+                ),
+            )
+
+            if not response:
+                logger.warning(
+                    "Context check: LLM returned empty response, falling back to finalize"
+                )
+                return False
+
+            # Parse the response - look for SAME or NEW
+            decision = response.strip().upper().split()[0] if response.strip() else ""
+            # Strip punctuation from the decision word
+            decision = decision.strip(".,!?;:")
+
+            if decision == "SAME":
+                logger.info(
+                    f"Context check LLM decision: SAME (raw response: '{response.strip()}')"
+                )
+                return True
+            elif decision == "NEW":
+                logger.info(
+                    f"Context check LLM decision: NEW (raw response: '{response.strip()}')"
+                )
+                return False
+            else:
+                logger.warning(
+                    f"Context check: unclear LLM response '{response.strip()}', "
+                    "defaulting to NEW (finalize)"
+                )
+                return False
+
+        except Exception as e:
+            logger.error(
+                f"Context check: LLM call failed ({e}), falling back to finalize",
+                exc_info=True,
+            )
+            return False
 
     async def _start_new_meeting(self):
         """Create a new session and start recording"""
