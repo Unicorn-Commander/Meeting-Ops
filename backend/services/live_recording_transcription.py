@@ -44,6 +44,9 @@ def _is_hallucination(text: str) -> bool:
     words = cleaned.split()
     if len(words) <= 3 and len(set(words)) == 1:
         return True
+    # Catch dots-only output (Whisper outputs "......" on amplified noise)
+    if all(c in '.… ' for c in text.strip()):
+        return True
     return False
 
 
@@ -186,13 +189,23 @@ class LiveRecordingTranscriptionService:
                                 self.last_position += chunk_samples
                                 continue
 
+                            # Normalize audio for Whisper (USB mics often output very low levels)
+                            peak = np.max(np.abs(chunk_data))
+                            if 0 < peak < 0.1:
+                                # Audio is very quiet, normalize to ~0.5 peak
+                                gain = 0.5 / peak
+                                chunk_data_normalized = chunk_data * gain
+                                logger.info(f"Applied {gain:.1f}x gain (peak was {peak:.4f})")
+                            else:
+                                chunk_data_normalized = chunk_data
+
                             # Save chunk to temporary WAV file
                             tmp_fd, tmp_path = tempfile.mkstemp(suffix='.wav')
                             os.close(tmp_fd)
 
                             if use_whisper_server:
                                 # Whisper-server handles resampling via ffmpeg (--convert flag)
-                                sf.write(tmp_path, chunk_data, recording_sample_rate)
+                                sf.write(tmp_path, chunk_data_normalized, recording_sample_rate)
                                 try:
                                     result = await asyncio.get_event_loop().run_in_executor(
                                         None,
@@ -205,7 +218,7 @@ class LiveRecordingTranscriptionService:
                                 # CPU fallback: resample to 16kHz first
                                 import librosa
                                 chunk_resampled = librosa.resample(
-                                    chunk_data,
+                                    chunk_data_normalized,
                                     orig_sr=recording_sample_rate,
                                     target_sr=target_sample_rate
                                 )
