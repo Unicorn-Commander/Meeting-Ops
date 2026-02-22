@@ -7,7 +7,7 @@ Chat history stored in memory (dict keyed by session_id).
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 import json
 import logging
@@ -27,7 +27,7 @@ _chat_history: Dict[str, List[Dict[str, Any]]] = {}
 
 # Request/Response Models
 class SendMessageRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=5000)
     context: Optional[Dict[str, Any]] = {}
 
 

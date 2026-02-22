@@ -84,9 +84,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # In production: set CORS_ORIGINS env var. For LAN appliance: allow frontend port.
+    allow_origins=_cors_origins or [],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?$" if not _cors_origins else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

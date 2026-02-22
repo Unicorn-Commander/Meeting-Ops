@@ -144,7 +144,7 @@ async def list_sessions(
         if session.transcript:
             try:
                 transcription_data = json.loads(session.transcript) if isinstance(session.transcript, str) else session.transcript
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 transcription_data = {"text": session.transcript} if session.transcript else None
         
         result.append(SessionResponse(
@@ -786,7 +786,7 @@ async def delete_session(
     if session.audio_file and os.path.exists(session.audio_file):
         try:
             os.remove(session.audio_file)
-        except:
+        except OSError:
             pass
     
     # Delete transcriptions
@@ -908,11 +908,11 @@ async def download_transcript(
                         transcript += f"[{speaker}]: {text}\n\n"
                 else:
                     transcript += str(session.transcript)
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 transcript += str(session.transcript) if session.transcript else "No transcription available."
         else:
             transcript += "No transcription available."
-    
+
     filename = f"{(session.name or session.title or 'recording').replace(' ', '_')}_transcript_with_speakers.txt"
     return Response(
         content=transcript,
@@ -1027,11 +1027,11 @@ async def download_transcript_simple(
                     transcript += trans_data["text"]
                 else:
                     transcript += str(session.transcript)
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 transcript += str(session.transcript) if session.transcript else "No transcription available."
         else:
             transcript += "No transcription available."
-    
+
     filename = f"{(session.name or session.title or 'recording').replace(' ', '_')}_transcript_simple.txt"
     return Response(
         content=transcript,

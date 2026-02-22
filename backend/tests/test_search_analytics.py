@@ -3,8 +3,24 @@ import json
 
 
 # ---------------------------------------------------------------------------
-# Helper to create a session with transcript content
+# Helpers
 # ---------------------------------------------------------------------------
+def _get_token(client):
+    """Helper to log in and return access token."""
+    response = client.post(
+        "/api/auth/login",
+        data={"username": "admin", "password": "admin123"},
+    )
+    data = response.json()
+    assert "access_token" in data, f"Login failed (HTTP {response.status_code}): {data}"
+    return data["access_token"]
+
+
+def _auth_headers(client):
+    """Return Authorization headers dict."""
+    return {"Authorization": f"Bearer {_get_token(client)}"}
+
+
 def _create_session_with_transcript(client, name="Test Meeting", transcript_text=""):
     """Create a session and then manually set transcript fields via the DB."""
     resp = client.post(
@@ -133,8 +149,9 @@ class TestAnalytics:
 # ---------------------------------------------------------------------------
 class TestAIInsights:
     def test_insights_returns_defaults_for_no_transcription(self, client):
+        headers = _auth_headers(client)
         session_id = _create_session_with_transcript(client, name="Empty Session")
-        resp = client.get(f"/api/simple/recording-sessions/{session_id}/insights")
+        resp = client.get(f"/api/simple/recording-sessions/{session_id}/insights", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "summary" in data
@@ -146,15 +163,24 @@ class TestAIInsights:
 
         client.delete(f"/api/simple/recording-sessions/{session_id}")
 
+    def test_insights_401_without_auth(self, client):
+        session_id = _create_session_with_transcript(client, name="No Auth Test")
+        resp = client.get(f"/api/simple/recording-sessions/{session_id}/insights")
+        assert resp.status_code == 401
+        client.delete(f"/api/simple/recording-sessions/{session_id}")
+
     def test_insights_404_for_missing_session(self, client):
+        headers = _auth_headers(client)
         resp = client.get(
-            "/api/simple/recording-sessions/nonexistent-uuid-12345/insights"
+            "/api/simple/recording-sessions/nonexistent-uuid-12345/insights",
+            headers=headers,
         )
         assert resp.status_code == 404
 
     def test_insights_response_schema(self, client):
+        headers = _auth_headers(client)
         session_id = _create_session_with_transcript(client, name="Schema Test")
-        resp = client.get(f"/api/simple/recording-sessions/{session_id}/insights")
+        resp = client.get(f"/api/simple/recording-sessions/{session_id}/insights", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
         # Check all expected top-level fields
@@ -171,9 +197,11 @@ class TestAIInsights:
         client.delete(f"/api/simple/recording-sessions/{session_id}")
 
     def test_regenerate_insights(self, client):
+        headers = _auth_headers(client)
         session_id = _create_session_with_transcript(client, name="Regen Test")
         resp = client.post(
-            f"/api/simple/recording-sessions/{session_id}/insights/regenerate"
+            f"/api/simple/recording-sessions/{session_id}/insights/regenerate",
+            headers=headers,
         )
         assert resp.status_code == 200
 

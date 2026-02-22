@@ -12,6 +12,8 @@ import json
 
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession, Transcription
+from auth.dependencies import get_current_user
+from auth.models import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
@@ -69,11 +71,12 @@ class MeetingInsightsResponse(BaseModel):
 async def get_meeting_insights(
     session_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get AI-generated insights for a recording session.
-    
+
     Looks up sessions by session_id (UUID string) first, then by integer id.
-    Does NOT require authentication so it works in tests and general use.
+    Requires authentication.
     """
     try:
         # Find by session_id (UUID) first
@@ -144,9 +147,10 @@ async def get_meeting_insights(
 async def regenerate_insights(
     session_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Force regeneration of AI insights for a session"""
-    return await get_meeting_insights(session_id, db)
+    """Force regeneration of AI insights for a session. Requires authentication."""
+    return await get_meeting_insights(session_id, db, current_user)
 
 
 # ---------------------------------------------------------------------------
