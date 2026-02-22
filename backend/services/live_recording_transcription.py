@@ -47,9 +47,11 @@ def _is_hallucination(text: str) -> bool:
     return False
 
 
-def _chunk_has_speech(audio: np.ndarray, threshold_db: float = -40.0) -> bool:
+def _chunk_has_speech(audio: np.ndarray, threshold_db: float = -75.0) -> bool:
     """Check if audio chunk has enough energy to contain speech.
-    Returns False for silence/near-silence to avoid sending to Whisper.
+    Returns False for near-digital-silence to avoid sending to Whisper.
+    Threshold is very permissive (-75dB) since USB mics often output low levels
+    (typical speech at -50 to -67dB RMS). Only filters true digital silence.
     """
     if len(audio) == 0:
         return False
@@ -180,7 +182,7 @@ class LiveRecordingTranscriptionService:
 
                             # Skip silent chunks to avoid Whisper hallucinations
                             if not _chunk_has_speech(chunk_data):
-                                logger.debug(f"Skipping silent chunk at position {self.last_position}")
+                                logger.info(f"Skipping silent chunk at position {self.last_position}")
                                 self.last_position += chunk_samples
                                 continue
 
@@ -250,7 +252,7 @@ class LiveRecordingTranscriptionService:
 
                                     # Filter known Whisper hallucinations
                                     if _is_hallucination(text):
-                                        logger.debug(f"Filtered hallucination: '{text}'")
+                                        logger.info(f"Filtered hallucination: '{text}'")
                                         continue
 
                                     # Adjust timestamps to absolute position in recording
