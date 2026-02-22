@@ -24,6 +24,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { config } from '../config';
+import { useAuth } from '../contexts/AuthContext';
 
 interface SummaryFormats {
   executive: boolean;
@@ -174,7 +175,15 @@ export default function LiveRecording() {
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [llmModelName, setLlmModelName] = useState<string>('Granite 3.3 2B');
   const [sttModelName, setSttModelName] = useState<string>('Whisper large-v3-turbo');
-  
+
+  // Always-on recording mode
+  const { token } = useAuth();
+  const [alwaysOnEnabled, setAlwaysOnEnabled] = useState(false);
+  const [alwaysOnState, setAlwaysOnState] = useState<string>('IDLE');
+  const [alwaysOnSessionId, setAlwaysOnSessionId] = useState<string | null>(null);
+  const [alwaysOnMeetings, setAlwaysOnMeetings] = useState(0);
+  const alwaysOnPollRef = useRef<NodeJS.Timeout | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioWsRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -511,6 +520,119 @@ export default function LiveRecording() {
     fetchSettings();
     loadActiveAgent();
   }, []);
+
+  // Always-on mode: toggle and status polling
+  const getAuthHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
+  };
+
+  const toggleAlwaysOn = async () => {
+    try {
+      if (alwaysOnEnabled) {
+        // Stop always-on mode
+        const res = await fetch(`${config.apiUrl}/api/simple/always-on/stop`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+        });
+        if (res.ok) {
+          setAlwaysOnEnabled(false);
+          setAlwaysOnState('IDLE');
+          setAlwaysOnSessionId(null);
+          // Stop polling
+          if (alwaysOnPollRef.current) {
+            clearInterval(alwaysOnPollRef.current);
+            alwaysOnPollRef.current = null;
+          }
+        }
+      } else {
+        // Start always-on mode
+        const res = await fetch(`${config.apiUrl}/api/simple/always-on/start`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ device_id: selectedDevice || undefined }),
+        });
+        if (res.ok) {
+          setAlwaysOnEnabled(true);
+          setAlwaysOnState('IDLE');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to toggle always-on mode:', error);
+    }
+  };
+
+  // Poll always-on status every 5 seconds when enabled
+  useEffect(() => {
+    if (alwaysOnEnabled) {
+      const pollStatus = async () => {
+        try {
+          const res = await fetch(`${config.apiUrl}/api/simple/always-on/status`, {
+            headers: getAuthHeaders(),
+          });
+          if (res.ok) {
+            const status = await res.json();
+            setAlwaysOnState(status.state || 'IDLE');
+            setAlwaysOnSessionId(status.current_session_id || null);
+            setAlwaysOnMeetings(status.meetings_created || 0);
+
+            // If always-on started recording, connect to its WebSocket for live transcription
+            if (status.state === 'RECORDING' && status.current_session_id && !wsRef.current) {
+              const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${status.current_session_id}`;
+              const ws = new WebSocket(wsUrl);
+              ws.onmessage = (event) => {
+                try {
+                  const data = JSON.parse(event.data);
+                  if (data.type === 'transcription' || data.type === 'transcript_segment') {
+                    const text = data.segment?.text || data.text || '';
+                    if (text.trim()) {
+                      setLiveTranscript(prev => [...prev, text]);
+                    }
+                  }
+                } catch (e) {
+                  console.error('Error parsing always-on WebSocket message:', e);
+                }
+              };
+              wsRef.current = ws;
+            }
+
+            // If it stopped recording, clean up WebSocket
+            if (status.state === 'IDLE' && wsRef.current) {
+              wsRef.current.close();
+              wsRef.current = null;
+            }
+
+            // If disabled externally
+            if (!status.enabled) {
+              setAlwaysOnEnabled(false);
+              setAlwaysOnState('IDLE');
+              setAlwaysOnSessionId(null);
+              if (alwaysOnPollRef.current) {
+                clearInterval(alwaysOnPollRef.current);
+                alwaysOnPollRef.current = null;
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Failed to poll always-on status:', error);
+        }
+      };
+
+      // Poll immediately, then every 5 seconds
+      pollStatus();
+      alwaysOnPollRef.current = setInterval(pollStatus, 5000);
+
+      return () => {
+        if (alwaysOnPollRef.current) {
+          clearInterval(alwaysOnPollRef.current);
+          alwaysOnPollRef.current = null;
+        }
+      };
+    }
+  }, [alwaysOnEnabled]);
 
   const formatDuration = (seconds: number) => {
     const hrs = Math.floor(seconds / 3600);
@@ -988,16 +1110,53 @@ export default function LiveRecording() {
                   </select>
                 </div>
               )}
+              {/* Always-On Mode Toggle */}
+              {!isRecording && (
+                <div className="flex items-center gap-3 mb-6">
+                  <button
+                    onClick={toggleAlwaysOn}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      alwaysOnEnabled ? 'bg-green-600' : 'bg-zinc-700'
+                    }`}
+                    title={alwaysOnEnabled ? 'Click to disable always-on mode' : 'Click to enable always-on mode'}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      alwaysOnEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`} />
+                  </button>
+                  <span className="text-sm text-zinc-400">
+                    Always-On Mode
+                    {alwaysOnEnabled && alwaysOnState === 'IDLE' && (
+                      <span className="ml-2 text-green-400 inline-flex items-center gap-1">
+                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse inline-block" />
+                        Listening...
+                      </span>
+                    )}
+                    {alwaysOnEnabled && alwaysOnState === 'RECORDING' && (
+                      <span className="ml-2 text-red-400 inline-flex items-center gap-1">
+                        <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse inline-block" />
+                        Auto-recording
+                      </span>
+                    )}
+                  </span>
+                  {alwaysOnMeetings > 0 && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
+                      {alwaysOnMeetings} meeting{alwaysOnMeetings !== 1 ? 's' : ''} captured
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* Big Record Button */}
               <button
                 onClick={isRecording ? stopRecording : startRecording}
-                disabled={audioDevices.length === 0 || isProcessing}
+                disabled={audioDevices.length === 0 || isProcessing || alwaysOnEnabled}
                 className={`relative w-32 h-32 rounded-full transition-all transform hover:scale-105 ${
-                  isRecording 
-                    ? 'bg-red-600 hover:bg-red-500 animate-pulse' 
+                  isRecording
+                    ? 'bg-red-600 hover:bg-red-500 animate-pulse'
                     : 'bg-gradient-to-br from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500'
-                } ${(audioDevices.length === 0 || isProcessing) ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={isProcessing ? 'Processing...' : (isRecording ? 'Click to stop recording' : 'Click to start recording')}
+                } ${(audioDevices.length === 0 || isProcessing || alwaysOnEnabled) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={alwaysOnEnabled ? 'Disable always-on mode first' : (isProcessing ? 'Processing...' : (isRecording ? 'Click to stop recording' : 'Click to start recording'))}
               >
                 <div className="absolute inset-0 flex items-center justify-center">
                   {isProcessing ? (

@@ -73,6 +73,9 @@ def apply_vocabulary_replacements(text: str, db_session) -> str:
         return text
 
 
+from auth.dependencies import get_current_user
+from auth.models import User
+
 import redis.asyncio as aioredis
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording-db"])
@@ -1175,3 +1178,40 @@ async def download_transcript_simple(
             "Content-Disposition": f"attachment; filename={filename}"
         }
     )
+
+
+# === Always-On Recording Mode ===
+
+@router.post("/always-on/start")
+async def start_always_on(
+    body: Optional[StartRecordingRequest] = None,
+    current_user: User = Depends(get_current_user),
+):
+    """Enable always-on recording mode. The system will listen continuously
+    and automatically create meeting sessions when speech is detected."""
+    from services.always_on_recorder import always_on_recorder
+
+    device_id = body.device_id if body else None
+    result = await always_on_recorder.start(device_id=device_id)
+    return result
+
+
+@router.post("/always-on/stop")
+async def stop_always_on(
+    current_user: User = Depends(get_current_user),
+):
+    """Disable always-on recording mode"""
+    from services.always_on_recorder import always_on_recorder
+
+    result = await always_on_recorder.stop()
+    return result
+
+
+@router.get("/always-on/status")
+async def get_always_on_status(
+    current_user: User = Depends(get_current_user),
+):
+    """Get always-on recording status"""
+    from services.always_on_recorder import always_on_recorder
+
+    return always_on_recorder.get_status()
