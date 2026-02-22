@@ -93,6 +93,11 @@ class LiveRecordingTranscriptionService:
                 return
             logger.info(f"Whisper-server unavailable, falling back to CPU: model={transcription_service.current_model_id}")
 
+        # Speaker diarization (lightweight, numpy-based)
+        from services.speaker_diarization_onnx import diarize_audio, assign_speakers_to_transcript
+        use_diarization = True
+        logger.info("Speaker diarization enabled (acoustic feature clustering)")
+
         # Wait for file to be created (up to 10 seconds)
         file_wait_count = 0
         while not os.path.exists(self.current_file) and file_wait_count < 10:
@@ -170,8 +175,32 @@ class LiveRecordingTranscriptionService:
                                 finally:
                                     os.unlink(tmp_path)
 
+                            # Run speaker diarization on the chunk (in parallel with processing)
+                            diar_segments = []
+                            if use_diarization and result and (result.get("segments") or result.get("text")):
+                                try:
+                                    import librosa
+                                    chunk_16k = librosa.resample(
+                                        chunk_data,
+                                        orig_sr=recording_sample_rate,
+                                        target_sr=target_sample_rate
+                                    )
+                                    diar_segments = await asyncio.get_event_loop().run_in_executor(
+                                        None, diarize_audio, chunk_16k, target_sample_rate
+                                    )
+                                    if diar_segments:
+                                        speaker_ids = set(s.speaker for s in diar_segments)
+                                        logger.info(f"Diarization: {len(speaker_ids)} speaker(s) in chunk")
+                                except Exception as e:
+                                    logger.debug(f"Diarization skipped: {e}")
+
                             if result and result.get("segments"):
-                                for segment in result["segments"]:
+                                # Assign speakers to transcript segments
+                                enriched = result["segments"]
+                                if diar_segments:
+                                    enriched = assign_speakers_to_transcript(enriched, diar_segments)
+
+                                for segment in enriched:
                                     text = segment.get("text", "").strip()
                                     if not text or len(text) < 3:
                                         continue
