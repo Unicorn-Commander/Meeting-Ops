@@ -35,7 +35,7 @@ Meeting-Ops is a self-hosted meeting intelligence appliance. Plug in a USB mic, 
 | **Speaker ID** | NumPy acoustic clustering | Lightweight diarization without PyTorch, 303x realtime |
 | **Frontend** | React 19 + TypeScript + Tailwind | Mobile-responsive SPA with live WebSocket updates |
 | **Backend** | FastAPI + Python 3.13 | 19 API routers, WebSocket streaming, JWT auth |
-| **Database** | PostgreSQL + Redis | Session storage, real-time pub/sub |
+| **Database** | PostgreSQL + Redis + Qdrant | Session storage, real-time pub/sub, vector search |
 
 > **Why Vulkan?** On AMD Phoenix (780M iGPU), Vulkan is **2.4x faster** than ROCm for LLM inference (~850 tok/s vs ~350 tok/s). No ROCm install needed — just the RADV Mesa driver that ships with Linux.
 
@@ -198,6 +198,7 @@ Open `http://your-server-ip:7777` and log in:
 | Backend (FastAPI) | 9050 | REST API + WebSockets |
 | PostgreSQL | 5434 | Session & transcript storage |
 | Redis | 6379 | Real-time pub/sub, recording state |
+| Qdrant | 6335 | Vector search (semantic meeting search) |
 | llama.cpp (Vulkan) | 11437 | Granite 3.3 2B LLM (OpenAI-compatible API) |
 | whisper-server (Vulkan) | 8178 | Speech-to-text (large-v3-turbo) |
 
@@ -316,6 +317,19 @@ curl http://localhost:9050/api/simple/recording-sessions/{id}/insights \
 curl http://localhost:9050/api/analytics/summary \
   -H "Authorization: Bearer $TOKEN"
 curl http://localhost:9050/api/analytics/speakers \
+  -H "Authorization: Bearer $TOKEN"
+
+# Semantic search (natural language, vector similarity)
+curl "http://localhost:9050/api/simple/recording-sessions/semantic-search?q=budget+planning+discussion&limit=5"
+
+# Reindex all sessions into vector store
+curl -X POST http://localhost:9050/api/simple/semantic-search/reindex \
+  -H "Authorization: Bearer $TOKEN"
+
+# Storage management
+curl http://localhost:9050/api/simple/storage/stats \
+  -H "Authorization: Bearer $TOKEN"
+curl -X POST "http://localhost:9050/api/simple/storage/cleanup?days=90&dry_run=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -486,23 +500,21 @@ UC-Meeting-Ops/
 - [x] Speaker diarization (acoustic clustering)
 - [x] LLM summaries & chat (Granite 3.3 2B via llama.cpp Vulkan)
 - [x] PDF/DOCX export (reportlab + python-docx)
-- [x] Full-text search
+- [x] Full-text search + semantic/vector search (Qdrant + fastembed)
 - [x] Analytics & speaker insights
 - [x] Mobile responsive UI
 - [x] JWT authentication
 - [x] Audio device selection
 - [x] Whisper hallucination filtering
 - [x] Auto-stop idle recordings
-- [x] Always-on continuous recording mode
+- [x] Always-on continuous recording mode with LLM context splitting
 - [x] Custom vocabulary
+- [x] Storage management (configurable retention, dry-run cleanup)
 
 ### Planned
-- [ ] Qdrant semantic/vector search ("find meetings about budget")
 - [ ] Multi-room recording (multiple mic sources)
-- [ ] LLM-based meeting segmentation (context-aware splitting)
 - [ ] Satellite recording devices (record offline, upload later)
 - [ ] Browser extension for client-side recording + upload
-- [ ] Storage management (auto-cleanup old recordings)
 
 ---
 
