@@ -83,6 +83,7 @@ class CreateSessionRequest(BaseModel):
 class SessionResponse(BaseModel):
     id: str
     name: str
+    title: Optional[str] = None
     description: str
     created_at: str
     status: str
@@ -150,6 +151,7 @@ async def list_sessions(
         result.append(SessionResponse(
             id=session.session_id or str(session.id),
             name=session.name or session.title or f"Session {session.id}",
+            title=session.title,
             description=session.description or "",
             created_at=session.created_at.isoformat() if session.created_at else datetime.utcnow().isoformat(),
             status=session.status or "completed",
