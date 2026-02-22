@@ -96,7 +96,6 @@ export default function LiveRecording() {
       try {
         return JSON.parse(stored);
       } catch (e) {
-        console.error('Failed to parse stored session:', e);
         localStorage.removeItem('activeRecordingSession');
       }
     }
@@ -110,16 +109,13 @@ export default function LiveRecording() {
       try {
         const summary = JSON.parse(stored);
         // Only load if it's a valid summary structure
-        if (summary && typeof summary === 'object' && 
+        if (summary && typeof summary === 'object' &&
             (summary.executive || summary.bullets || summary.actions || summary.decisions)) {
-          console.log('📋 Loaded valid stored summary from localStorage');
           return summary;
         } else {
-          console.log('⚠️ Invalid summary structure in localStorage, clearing it');
           localStorage.removeItem('lastMeetingSummary');
         }
       } catch (e) {
-        console.error('Failed to parse stored summary:', e);
         localStorage.removeItem('lastMeetingSummary');
       }
     }
@@ -144,15 +140,6 @@ export default function LiveRecording() {
   });
   const [liveTranscript, setLiveTranscript] = useState<string[]>([]);
   const [autoSummary, setAutoSummary] = useState<any>(getStoredSummary());
-  
-  // Debug logging for autoSummary changes
-  useEffect(() => {
-    console.log('🔍🔍🔍 autoSummary state changed:', autoSummary);
-    console.log('Has executive?', !!autoSummary?.executive);
-    console.log('Has bullets?', !!autoSummary?.bullets);
-    console.log('Has actions?', !!autoSummary?.actions);
-    console.log('Has decisions?', !!autoSummary?.decisions);
-  }, [autoSummary]);
   const [wordCount, setWordCount] = useState(0);
   const [nextUpdateWords, setNextUpdateWords] = useState(500);
   const [activeAgent, setActiveAgent] = useState<UnifiedAgent | null>(null);
@@ -200,7 +187,6 @@ export default function LiveRecording() {
         const summary = JSON.parse(stored);
         // Remove invalid summary structure
         if (summary && summary.type === 'progressive_trigger') {
-          console.log('🧹 Clearing invalid progressive_trigger from localStorage');
           localStorage.removeItem('lastMeetingSummary');
           setAutoSummary(null);
         }
@@ -229,8 +215,6 @@ export default function LiveRecording() {
   // Reconnect to existing session if stored
   useEffect(() => {
     if (storedSession && storedSession.isRecording && storedSession.id) {
-      console.log('Reconnecting to existing session:', storedSession.id);
-      
       // Reconnect to enhanced WebSocket that provides both transcription and auto-summaries
       const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${storedSession.id}`;
       const ws = new WebSocket(wsUrl);
@@ -242,14 +226,11 @@ export default function LiveRecording() {
           if (data.type === 'transcription') {
             const text = data.segment?.text || data.text || '';
             if (text.trim()) {
-              console.log('Live transcription (reconnected):', text);
               setLiveTranscript(prev => [...prev, text]);
             }
           } 
           // Handle progressive summaries from backend agent system
           else if (data.type === 'progressive_summary') {
-            console.log('🤖 Progressive summary received (reconnection):', data);
-            
             // Handle both old and new formats
             let summaryContent, wordCount, nextInterval;
             
@@ -278,12 +259,10 @@ export default function LiveRecording() {
                 modelSize: 'Legacy Format'
               });
             } else {
-              console.warn('Unknown progressive summary format in reconnection:', data);
               return;
             }
-            
+
             if (summaryContent) {
-              console.log('📊 Setting autoSummary with progressive summary:', summaryContent);
               setAutoSummary(summaryContent);
               
               // Persist summary to localStorage
@@ -306,9 +285,8 @@ export default function LiveRecording() {
           }
           // Handle legacy auto_summary format for backwards compatibility
           else if (data.type === 'auto_summary') {
-            console.log('Auto-summary received (legacy):', data);
             setAutoSummary(data.summary);
-            
+
             // Update word count info if provided
             if (data.word_count) {
               setWordCount(data.word_count);
@@ -326,30 +304,20 @@ export default function LiveRecording() {
               summary: data.summary
             } : null);
           } 
-          // Handle progressive trigger notifications
+          // Handle progressive trigger notifications (just a notification, not a summary)
           else if (data.type === 'progressive_trigger') {
-            console.log('⏳ Progressive summary trigger received at', data.word_count, 'words');
-            // Don't store this as a summary - it's just a notification
-            // The actual summary should come separately
-          } 
-          else if (data.type === 'status') {
-            console.log('Transcription status:', data.data);
-          } else {
-            // Log any unhandled message types
-            console.log('🔍 Unhandled WebSocket message type:', data.type, 'Full message:', data);
+            // No action needed
           }
+          // Status and other messages are silently ignored
         } catch (e) {
-          console.error('Error parsing WebSocket message:', e);
+          // Silently ignore parse errors in reconnection handler
         }
       };
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-      };
       wsRef.current = ws;
-      
+
       // Audio levels are already connected via the always-on WebSocket
     }
-    
+
     return () => {
       if (wsRef.current) wsRef.current.close();
       // Keep audio levels WebSocket running
@@ -365,7 +333,7 @@ export default function LiveRecording() {
         const audioWs = new WebSocket(`${config.wsEndpoints.base}/ws/audio-levels`);
         
         audioWs.onopen = () => {
-          console.log('Connected to audio level monitoring');
+          // Connected
         };
         
         audioWs.onmessage = (event) => {
@@ -375,16 +343,15 @@ export default function LiveRecording() {
               setAudioLevel(data.level || data.audio_level || 0);
             }
           } catch (e) {
-            console.error('Error parsing audio level:', e);
+            // Ignore malformed audio level messages
           }
         };
         
-        audioWs.onerror = (error) => {
-          console.debug('Audio level WebSocket error (this is normal on first load):', error);
+        audioWs.onerror = () => {
+          // Normal on first load, will reconnect
         };
-        
+
         audioWs.onclose = (event) => {
-          console.debug('Audio level WebSocket closed, reconnecting in 3s...');
           reconnectTimer = setTimeout(() => {
             if (audioWsRef.current === audioWs) {
               connectAudioLevels();
@@ -394,7 +361,6 @@ export default function LiveRecording() {
         
         audioWsRef.current = audioWs;
       } catch (error) {
-        console.debug('Failed to create audio WebSocket, retrying in 3s...');
         reconnectTimer = setTimeout(connectAudioLevels, 3000);
       }
     };
@@ -436,7 +402,7 @@ export default function LiveRecording() {
           }
         }
       } catch (error) {
-        console.error('Failed to fetch audio devices:', error);
+        // Audio devices not available
       }
     };
     checkDevices();
@@ -484,7 +450,7 @@ export default function LiveRecording() {
           }
         }
       } catch (error) {
-        console.debug('Failed to fetch model info, using default:', error);
+        // Use default model names
       }
     };
     fetchModelInfo();
@@ -500,20 +466,19 @@ export default function LiveRecording() {
           setSummarySettings(settings);
         }
       } catch (error) {
-        console.error('Failed to fetch summary settings:', error);
+        // Use default summary settings
       }
     };
-    
+
     const loadActiveAgent = async () => {
       try {
         const response = await fetch(`${config.apiUrl}/api/unified-agent/agent`);
         if (response.ok) {
           const agent = await response.json();
           setActiveAgent(agent);
-          console.log('Unified agent loaded:', agent);
         }
       } catch (error) {
-        console.error('Failed to load unified agent:', error);
+        // Agent not available
       }
     };
     
@@ -561,7 +526,7 @@ export default function LiveRecording() {
         }
       }
     } catch (error) {
-      console.error('Failed to toggle always-on mode:', error);
+      // Always-on toggle failed
     }
   };
 
@@ -593,7 +558,7 @@ export default function LiveRecording() {
                     }
                   }
                 } catch (e) {
-                  console.error('Error parsing always-on WebSocket message:', e);
+                  // Ignore malformed messages
                 }
               };
               wsRef.current = ws;
@@ -617,7 +582,7 @@ export default function LiveRecording() {
             }
           }
         } catch (error) {
-          console.error('Failed to poll always-on status:', error);
+          // Polling failed, will retry
         }
       };
 
@@ -666,7 +631,6 @@ export default function LiveRecording() {
   };
 
   const startRecording = async () => {
-    console.log('Starting recording...');
     setIsProcessing(true);
     try {
       // Create session
@@ -681,17 +645,12 @@ export default function LiveRecording() {
       
       if (!response.ok) {
         const error = await response.text();
-        console.error('Failed to create session:', error);
         throw new Error(`Failed to create session: ${error}`);
       }
       const session = await response.json();
-      console.log('Session created:', session);
-      
+
       // Connect to enhanced WebSocket BEFORE starting recording
       const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${session.id}`;
-      console.log('🔌 Connecting to WebSocket FIRST:', wsUrl);
-      console.log('📊 Session ID:', session.id);
-      console.log('⚙️ Summary settings:', summarySettings);
       const ws = new WebSocket(wsUrl);
       
       // Wait for WebSocket to connect before proceeding
@@ -702,24 +661,19 @@ export default function LiveRecording() {
         
         ws.onopen = () => {
           clearTimeout(timeout);
-          console.log('✅ WebSocket connected successfully to:', wsUrl);
           // Send initial message to register connection
           ws.send(JSON.stringify({
             type: 'register',
             session_id: session.id
           }));
-          console.log('📤 Sent registration message for session:', session.id);
           resolve();
         };
-        
-        ws.onerror = (error) => {
+
+        ws.onerror = () => {
           clearTimeout(timeout);
-          console.error('❌ WebSocket connection error:', error);
           reject(new Error('WebSocket connection failed'));
         };
       });
-      
-      console.log('✅ WebSocket connected! Now starting recording...');
       
       // NOW start the actual recording (after WebSocket is connected)
       const startResponse = await fetch(
@@ -733,13 +687,11 @@ export default function LiveRecording() {
       
       if (!startResponse.ok) {
         const error = await startResponse.text();
-        console.error('Failed to start recording:', error);
         ws.close(); // Close WebSocket if recording fails
         throw new Error(`Failed to start recording: ${error}`);
       }
-      
-      const startData = await startResponse.json();
-      console.log('Recording started AFTER WebSocket connected:', startData);
+
+      await startResponse.json();
       
       const newSession = {
         id: session.id,
@@ -761,60 +713,33 @@ export default function LiveRecording() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('📨 WebSocket message received:', data);
-          console.log('📨 Message type:', data.type);
-          
           // Handle live transcription segments - check multiple formats
           if (data.type === 'transcription' || data.type === 'transcript_segment') {
             const text = data.segment?.text || data.text || data.transcript || '';
             if (text.trim()) {
-              console.log('Live transcription received:', text);
               setLiveTranscript(prev => [...prev, text]);
-              
+
               // Update word count if provided
               if (data.word_count !== undefined) {
-                console.log('📊 Word count update from backend:', data.word_count);
                 setWordCount(data.word_count);
               } else if (data.segment_word_count !== undefined) {
-                // Use segment word count if provided
-                console.log('📊 Segment word count:', data.segment_word_count);
                 setWordCount(prev => prev + data.segment_word_count);
               } else {
                 // Count words locally as fallback
                 const words = text.split(/\s+/).filter((w: string) => w.length > 0).length;
-                console.log('📊 Local word count fallback:', words);
                 setWordCount(prev => prev + words);
               }
             }
           } 
           // Handle progressive summaries from backend agent system
           else if (data.type === 'progressive_summary') {
-            console.log('🎯🎯🎯 PROGRESSIVE SUMMARY RECEIVED! 🎯🎯🎯');
-            console.log('🤖 Progressive summary received:', data);
-            console.log('📦 Full data structure:', JSON.stringify(data, null, 2));
-            
-            // Log to help debug
-            console.error('PROGRESSIVE SUMMARY DEBUG:', {
-              hasData: !!data,
-              hasSummaryData: !!data.summary_data,
-              dataKeys: Object.keys(data),
-              summaryDataKeys: data.summary_data ? Object.keys(data.summary_data) : 'none'
-            });
-            
             // Handle both old and new formats
-            let summaryData, summaryContent, wordCount, nextInterval;
-            
+            let summaryContent, wordCount, nextInterval;
+
             if (data.summary_data) {
               // NEW unified agent format
-              console.log('📊 Using NEW format - Agent:', data.agent);
-              console.log('📊 Summary data structure:', data.summary_data);
-              
-              summaryData = data.summary_data;
-              
               // Check if it's the new plain text format or structured format
               if (data.summary_data.text && typeof data.summary_data.text === 'string') {
-                // New plain text format for progressive summaries
-                console.log('📝 Plain text progressive summary:', data.summary_data.text);
                 summaryContent = {
                   executive: data.summary_data.text,
                   bullets: [],
@@ -823,8 +748,6 @@ export default function LiveRecording() {
                 };
                 wordCount = data.summary_data.word_count || data.summary_data.word_count_at_summary;
               } else if (data.summary_data.sections) {
-                // Structured format (for final summaries)
-                console.log('📋 Structured sections content:', data.summary_data.sections);
                 summaryContent = data.summary_data.sections;
                 wordCount = data.summary_data.word_count_at_summary;
               } else {
@@ -843,7 +766,6 @@ export default function LiveRecording() {
               });
             } else if (data.data) {
               // OLD format compatibility
-              console.log('📊 Using OLD format - Data:', data.data);
               summaryContent = data.data.summary || data.data;
               wordCount = data.data.word_count || wordCount;
               nextInterval = data.data.next_interval || 500;
@@ -855,21 +777,11 @@ export default function LiveRecording() {
                 modelSize: 'Legacy Format'
               });
             } else {
-              console.warn('Unknown progressive summary format:', data);
               return;
             }
-            
+
             if (summaryContent) {
-              console.log('📊 Setting autoSummary from WebSocket (new session):', summaryContent);
-              console.log('🔍 Summary content type:', typeof summaryContent);
-              console.log('🔍 Summary keys:', summaryContent ? Object.keys(summaryContent) : 'null');
-              
-              // Force update with a callback to verify it's set
-              setAutoSummary((prev: any) => {
-                console.log('🔄 Previous autoSummary:', prev);
-                console.log('🔄 New autoSummary being set:', summaryContent);
-                return summaryContent;
-              });
+              setAutoSummary(summaryContent);
               
               // Persist summary to localStorage
               localStorage.setItem('lastMeetingSummary', JSON.stringify(summaryContent));
@@ -877,37 +789,27 @@ export default function LiveRecording() {
               
               // Update word count info
               if (wordCount) {
-                console.log('📝 Updating word count to:', wordCount);
                 setWordCount(wordCount);
               }
               if (nextInterval) {
                 setNextUpdateWords(nextInterval);
               }
               
-              setSessionData(prev => {
-                const updated = prev ? {
-                  ...prev,
-                  summary: summaryContent
-                } : null;
-                console.log('💾 Updated session data with progressive summary:', updated?.summary);
-                return updated;
-              });
+              setSessionData(prev => prev ? {
+                ...prev,
+                summary: summaryContent
+              } : null);
             }
           }
           // Handle legacy auto_summary format for backwards compatibility
           else if (data.type === 'auto_summary') {
-            console.log('🤖 Auto-summary received (legacy):', data);
-            console.log('📊 Summary data structure:', data.summary);
-            
             setAutoSummary(data.summary);
-            
+
             // Update word count info if provided
             if (data.word_count) {
-              console.log('📝 Updating word count to:', data.word_count);
               setWordCount(data.word_count);
             }
             if (data.next_update) {
-              console.log('⏰ Next update info:', data.next_update);
               // Extract number from "in 500 words"
               const match = data.next_update.match(/(\d+)/);
               if (match) {
@@ -915,46 +817,23 @@ export default function LiveRecording() {
               }
             }
             
-            setSessionData(prev => {
-              const updated = prev ? {
-                ...prev,
-                summary: data.summary
-              } : null;
-              console.log('💾 Updated session data with summary:', updated?.summary);
-              return updated;
-            });
-          } 
-          else if (data.type === 'status') {
-            console.log('Transcription status:', data.data);
+            setSessionData(prev => prev ? {
+              ...prev,
+              summary: data.summary
+            } : null);
           }
+          // Status and other messages are silently ignored
         } catch (e) {
-          console.error('Error parsing WebSocket message:', e);
+          // Ignore malformed WebSocket messages
         }
       };
-      ws.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
-        console.error('WebSocket URL was:', wsUrl);
-      };
-      
-      ws.onclose = (event) => {
-        console.log('🔌 WebSocket closed:', event.code, event.reason);
-        console.log('Was connected to:', wsUrl);
-        if (event.code !== 1000) {
-          console.error('Abnormal WebSocket closure. Code:', event.code);
-        }
-      };
-      
       wsRef.current = ws;
-      
+
       // Audio levels are already connected via the always-on WebSocket
-      
+
       setIsRecording(true);
       setDuration(0);
-      
-      // Show success feedback
-      console.log('Recording started successfully!');
     } catch (error: any) {
-      console.error('Failed to start recording:', error);
       alert(`Failed to start recording: ${error.message}`);
       setIsRecording(false);
     } finally {
@@ -963,12 +842,8 @@ export default function LiveRecording() {
   };
 
   const stopRecording = async () => {
-    if (!sessionData) {
-      console.error('No session data to stop');
-      return;
-    }
-    
-    console.log('Stopping recording...');
+    if (!sessionData) return;
+
     setIsProcessing(true);
     try {
       const stopResponse = await fetch(
@@ -976,9 +851,7 @@ export default function LiveRecording() {
         { method: 'POST' }
       );
       
-      if (!stopResponse.ok) {
-        console.error('Stop response not ok');
-      }
+      // Continue cleanup even if stop request fails
       
       // Clean up transcription WebSocket only (keep audio levels running)
       if (wsRef.current) {
@@ -1012,7 +885,7 @@ export default function LiveRecording() {
               }
             }
           } catch (error) {
-            console.error('Failed to fetch final summary:', error);
+            // Final summary fetch failed, non-critical
           }
         }, 3000); // Give backend time to generate final summary
       }
@@ -1034,7 +907,7 @@ export default function LiveRecording() {
         }));
       }
     } catch (error) {
-      console.error('Failed to stop recording:', error);
+      // Stop recording failed
     } finally {
       setIsProcessing(false);
     }
@@ -1324,7 +1197,7 @@ export default function LiveRecording() {
                                 body: JSON.stringify(newSettings)
                               });
                             } catch (error) {
-                              console.error('Failed to update settings:', error);
+                              // Settings update failed
                             }
                           }}
                           className="sr-only peer"
@@ -1785,19 +1658,49 @@ export default function LiveRecording() {
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
             <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
             <div className="space-y-2">
-              <button 
+              <button
                 className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
                 disabled={!sessionData || isRecording}
+                onClick={async () => {
+                  if (!sessionData?.id) return;
+                  try {
+                    const response = await fetch(
+                      `${config.apiBaseUrl}/api/simple/recording-sessions/${sessionData.id}/download/summary/pdf`,
+                      { headers: { 'Authorization': `Bearer ${token}` } }
+                    );
+                    if (!response.ok) throw new Error('Export failed');
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `meeting-summary.pdf`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (err) {
+                    console.error('Export error:', err);
+                  }
+                }}
               >
                 Export Summary
               </button>
-              <button 
+              <button
                 className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
-                disabled={!sessionData || isRecording}
+                disabled={!autoSummary}
+                onClick={() => {
+                  if (autoSummary) {
+                    const text = typeof autoSummary === 'string'
+                      ? autoSummary
+                      : autoSummary.executive || JSON.stringify(autoSummary, null, 2);
+                    navigator.clipboard.writeText(text);
+                  }
+                }}
               >
-                Email Action Items
+                Copy Action Items
               </button>
-              <button className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors">
+              <button
+                className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
+                onClick={() => { window.location.hash = '#/sessions'; }}
+              >
                 View All Sessions
               </button>
             </div>

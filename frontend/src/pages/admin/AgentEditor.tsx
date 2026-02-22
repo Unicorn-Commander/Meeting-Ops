@@ -100,6 +100,7 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
   const [activeTab, setActiveTab] = useState<'basic' | 'model' | 'prompt' | 'output' | 'permissions'>('basic');
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     // Apply model preset when model changes
@@ -148,27 +149,32 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
 
   const handleSave = async () => {
     if (!validateAgent()) return;
-    
+
     setSaving(true);
+    setSaveError(null);
     try {
-      const endpoint = editedAgent.id.startsWith('agent-') 
+      const endpoint = editedAgent.id.startsWith('agent-')
         ? `${config.apiUrl}/api/agents/`
         : `${config.apiUrl}/api/agents/${editedAgent.slug}`;
-      
+
       const method = editedAgent.id.startsWith('agent-') ? 'POST' : 'PUT';
-      
+
       const response = await fetch(endpoint, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editedAgent)
       });
-      
+
       if (response.ok) {
         const savedAgent = await response.json();
         onSave(savedAgent);
+      } else {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        setSaveError(`Failed to save agent (${response.status}): ${errorText}`);
       }
     } catch (error) {
       console.error('Error saving agent:', error);
+      setSaveError('Failed to save agent: ' + (error as Error).message);
     } finally {
       setSaving(false);
     }
@@ -604,22 +610,30 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-zinc-800 flex gap-4">
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl font-medium transition-colors disabled:opacity-50"
-          >
-            <Save className="w-5 h-5" />
-            {saving ? 'Saving...' : 'Save Agent'}
-          </button>
-          
-          <button
-            onClick={onCancel}
-            className="px-6 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl font-medium transition-colors"
-          >
-            Cancel
-          </button>
+        <div className="p-6 border-t border-zinc-800">
+          {saveError && (
+            <div className="mb-4 p-3 bg-red-900/50 border border-red-500/30 rounded-lg flex items-center gap-2 text-red-200 text-sm">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {saveError}
+            </div>
+          )}
+          <div className="flex gap-4">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl font-medium transition-colors disabled:opacity-50"
+            >
+              <Save className="w-5 h-5" />
+              {saving ? 'Saving...' : 'Save Agent'}
+            </button>
+
+            <button
+              onClick={onCancel}
+              className="px-6 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl font-medium transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       </div>
     </div>

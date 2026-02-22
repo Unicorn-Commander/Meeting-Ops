@@ -199,7 +199,7 @@ export const AgentDashboard: React.FC = () => {
       is_active: false,
       is_default_live: false,
       is_default_final: false,
-      provider_type: 'ollama',
+      provider_type: 'llamacpp',
       model_name: 'granite-3.3-2b-instruct',
       model_settings: {
         temperature: 0.7,
@@ -628,7 +628,35 @@ export const AgentDashboard: React.FC = () => {
                   <h3 className="font-medium text-white mb-2">{template.name}</h3>
                   <p className="text-sm text-zinc-400 mb-4">{template.description}</p>
                   <button
-                    onClick={() => {/* Handle template instantiation */}}
+                    onClick={() => {
+                      const newAgent: Agent = {
+                        id: `agent-${Date.now()}`,
+                        name: template.name || 'New Agent',
+                        slug: (template.name || 'new-agent').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+                        description: template.description || '',
+                        icon: '🤖',
+                        agent_type: AgentType.ANALYSIS,
+                        purpose: template.description || '',
+                        is_core: false,
+                        is_active: false,
+                        is_default_live: false,
+                        is_default_final: false,
+                        provider_type: 'llamacpp',
+                        model_name: template.model_name || 'granite-3.3-2b-instruct',
+                        model_settings: template.model_settings || {
+                          temperature: 0.7,
+                          max_tokens: 1024,
+                          top_p: 0.9,
+                          context_window: 8192
+                        },
+                        system_prompt: template.system_prompt || '',
+                        output_format: template.output_format || 'text',
+                        permission_level: 'owner'
+                      };
+                      setSelectedAgent(newAgent);
+                      setShowEditor(true);
+                      setStatus({ type: 'success', message: `Template "${template.name}" applied — customize and save` });
+                    }}
                     className="w-full px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-white transition-colors"
                   >
                     Use Template

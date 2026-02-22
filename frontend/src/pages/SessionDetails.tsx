@@ -120,6 +120,10 @@ export const SessionDetails: React.FC = () => {
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // AI Insights state
+  const [insights, setInsights] = useState<any>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+
   useEffect(() => {
     console.log('🔍 SessionDetails useEffect - sessionId:', sessionId);
     if (sessionId) {
@@ -129,6 +133,38 @@ export const SessionDetails: React.FC = () => {
       setError('No session ID provided in URL');
       setLoading(false);
     }
+  }, [sessionId]);
+
+  // Fetch AI insights from the real backend endpoint
+  useEffect(() => {
+    if (!sessionId) return;
+    const fetchInsights = async () => {
+      setInsightsLoading(true);
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(
+          `${config.apiUrl}/api/simple/recording-sessions/${sessionId}/insights`,
+          {
+            headers: {
+              ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+            }
+          }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setInsights(data);
+        } else {
+          console.warn('Failed to fetch AI insights:', response.status);
+          setInsights(null);
+        }
+      } catch (err) {
+        console.warn('AI insights fetch error:', err);
+        setInsights(null);
+      } finally {
+        setInsightsLoading(false);
+      }
+    };
+    fetchInsights();
   }, [sessionId]);
 
   const fetchSession = async () => {
@@ -714,28 +750,60 @@ export const SessionDetails: React.FC = () => {
                     
                     <button
                       onClick={async () => {
-                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/pdf`);
-                        if (response.status === 501) {
-                          alert('PDF export not yet implemented');
+                        try {
+                          const token = localStorage.getItem('token');
+                          const response = await fetch(
+                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/pdf`,
+                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
+                          );
+                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.pdf`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        } catch (err) {
+                          console.error('PDF export error:', err);
+                          alert('PDF export failed. Please try again.');
                         }
                       }}
-                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2 opacity-50"
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
                     >
                       <FileSpreadsheet className="w-4 h-4 text-red-600" />
-                      Summary (PDF) - Coming Soon
+                      Summary (PDF)
                     </button>
-                    
+
                     <button
                       onClick={async () => {
-                        const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/docx`);
-                        if (response.status === 501) {
-                          alert('DOCX export not yet implemented');
+                        try {
+                          const token = localStorage.getItem('token');
+                          const response = await fetch(
+                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/docx`,
+                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
+                          );
+                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.docx`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        } catch (err) {
+                          console.error('DOCX export error:', err);
+                          alert('DOCX export failed. Please try again.');
                         }
                       }}
-                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2 opacity-50"
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
                     >
                       <FileText className="w-4 h-4 text-blue-600" />
-                      Summary (DOCX) - Coming Soon
+                      Summary (DOCX)
                     </button>
                   </div>
                 </div>
@@ -1005,59 +1073,63 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Audio Player */}
-            {(session.audio_file || sessionId) && (
-              <div className="bg-white rounded-lg shadow-sm p-6">
-                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                  <Volume2 className="w-5 h-5 text-purple-600" />
-                  Audio Playback
-                </h2>
-                
-                <audio
-                  ref={audioRef}
-                  src={`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`}
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                  onError={(e) => {
-                    console.error('Audio load error:', e);
-                    console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
-                  }}
-                  className="hidden"
-                />
-                
-                <div className="space-y-4">
-                  {/* Controls */}
-                  <div className="flex items-center gap-4">
-                    <button
-                      onClick={togglePlayPause}
-                      className="p-3 bg-purple-600 text-white rounded-full hover:bg-purple-700 transition-colors"
-                    >
-                      {isPlaying ? (
-                        <Pause className="w-6 h-6" />
-                      ) : (
-                        <Play className="w-6 h-6" />
-                      )}
-                    </button>
-                    
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3">
-                        <span className="text-sm text-gray-500 w-12">
-                          {formatTime(currentTime)}
-                        </span>
-                        <div className="flex-1 bg-gray-200 rounded-full h-2 relative">
-                          <div
-                            className="absolute top-0 left-0 h-full bg-purple-600 rounded-full"
-                            style={{ width: `${(currentTime / duration) * 100}%` }}
-                          />
+            <div className="bg-white rounded-lg shadow-sm p-6">
+              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <Volume2 className="w-5 h-5 text-purple-600" />
+                Audio Playback
+              </h2>
+
+              {session.audio_file ? (
+                <>
+                  <audio
+                    ref={audioRef}
+                    src={`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`}
+                    onTimeUpdate={handleTimeUpdate}
+                    onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+                    onError={(e) => {
+                      console.error('Audio load error:', e);
+                      console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
+                    }}
+                    className="hidden"
+                  />
+
+                  <div className="space-y-4">
+                    {/* Controls */}
+                    <div className="flex items-center gap-4">
+                      <button
+                        onClick={togglePlayPause}
+                        className="p-3 bg-purple-600 text-white rounded-full hover:bg-purple-700 transition-colors"
+                      >
+                        {isPlaying ? (
+                          <Pause className="w-6 h-6" />
+                        ) : (
+                          <Play className="w-6 h-6" />
+                        )}
+                      </button>
+
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-gray-500 w-12">
+                            {formatTime(currentTime)}
+                          </span>
+                          <div className="flex-1 bg-gray-200 rounded-full h-2 relative">
+                            <div
+                              className="absolute top-0 left-0 h-full bg-purple-600 rounded-full"
+                              style={{ width: `${(currentTime / duration) * 100}%` }}
+                            />
+                          </div>
+                          <span className="text-sm text-gray-500 w-12">
+                            {formatTime(duration)}
+                          </span>
                         </div>
-                        <span className="text-sm text-gray-500 w-12">
-                          {formatTime(duration)}
-                        </span>
                       </div>
                     </div>
                   </div>
-                </div>
-              </div>
-            )}
+                </>
+              ) : (
+                <p className="text-gray-500 text-center py-4">No audio recording available</p>
+              )}
+            </div>
 
             {/* Transcript */}
             <div className="bg-white rounded-lg shadow-sm p-6">
@@ -1222,52 +1294,109 @@ export const SessionDetails: React.FC = () => {
             )}
             
             {/* AI Insights */}
-            <div className="bg-white rounded-lg shadow-sm p-6">
-              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <Brain className="w-5 h-5 text-purple-600" />
-                AI Insights
-              </h3>
-              
-              <div className="space-y-4">
-                <div>
-                  <p className="text-sm font-medium text-gray-600 mb-1">Key Topics</p>
-                  <div className="flex flex-wrap gap-2">
-                    {['Meeting Notes', 'Action Items', 'NPU Performance'].map((topic) => (
-                      <span
-                        key={topic}
-                        className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
-                      >
-                        {topic}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                
-                <div>
-                  <p className="text-sm font-medium text-gray-600 mb-1">Sentiment</p>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 bg-gray-200 rounded-full h-2">
-                      <div className="h-full bg-green-500 rounded-full" style={{ width: '75%' }} />
-                    </div>
-                    <span className="text-sm text-gray-600">Positive</span>
-                  </div>
-                </div>
-                
-                <div>
-                  <p className="text-sm font-medium text-gray-600 mb-1">Speaking Time</p>
-                  <div className="space-y-2">
-                    {speakers.slice(0, 3).map((speaker, idx) => (
-                      <div key={idx} className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600">{speaker}</span>
-                        <span className="text-sm font-medium">
-                          {Math.round(Math.random() * 40 + 20)}%
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+            {insightsLoading && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Brain className="w-5 h-5 text-purple-600" />
+                  AI Insights
+                </h3>
+                <div className="flex items-center justify-center py-6">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-600"></div>
+                  <span className="ml-2 text-sm text-gray-500">Loading insights...</span>
                 </div>
               </div>
-            </div>
+            )}
+            {!insightsLoading && insights && (
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Brain className="w-5 h-5 text-purple-600" />
+                  AI Insights
+                </h3>
+
+                <div className="space-y-4">
+                  {insights.keywords && insights.keywords.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Key Topics</p>
+                      <div className="flex flex-wrap gap-2">
+                        {insights.keywords.map((topic: string) => (
+                          <span
+                            key={topic}
+                            className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
+                          >
+                            {topic}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {insights.sentiment && (
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Sentiment</p>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-gray-200 rounded-full h-2">
+                          <div
+                            className={`h-full rounded-full ${
+                              insights.sentiment.overall === 'positive' ? 'bg-green-500' :
+                              insights.sentiment.overall === 'negative' ? 'bg-red-500' :
+                              'bg-yellow-500'
+                            }`}
+                            style={{ width: `${Math.round((insights.sentiment.score ?? 0.5) * 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-sm text-gray-600 capitalize">
+                          {insights.sentiment.overall || 'Neutral'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {insights.speaker_insights && insights.speaker_insights.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Speaking Time</p>
+                      <div className="space-y-2">
+                        {insights.speaker_insights.map((si: any, idx: number) => (
+                          <div key={idx} className="flex items-center justify-between">
+                            <span className="text-sm text-gray-600">{si.speaker}</span>
+                            <span className="text-sm font-medium">
+                              {Math.round(si.talk_percentage ?? 0)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {insights.action_items && insights.action_items.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Action Items</p>
+                      <ul className="space-y-1">
+                        {insights.action_items.map((item: any, idx: number) => (
+                          <li key={idx} className="text-sm text-gray-700 flex items-start gap-1">
+                            <span className="text-yellow-500 mt-0.5">&#9632;</span>
+                            <span>{typeof item === 'string' ? item : item.action || item.text || JSON.stringify(item)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {insights.key_decisions && insights.key_decisions.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Key Decisions</p>
+                      <ul className="space-y-1">
+                        {insights.key_decisions.map((decision: any, idx: number) => (
+                          <li key={idx} className="text-sm text-gray-700 flex items-start gap-1">
+                            <span className="text-green-600 mt-0.5">&#10003;</span>
+                            <span>{typeof decision === 'string' ? decision : decision.text || JSON.stringify(decision)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Processing Info */}
             {session.transcription && (

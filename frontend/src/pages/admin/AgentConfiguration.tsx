@@ -172,7 +172,7 @@ export const AgentConfiguration: React.FC = () => {
     const defaultAgents: Agent[] = Object.entries(AGENT_TEMPLATES).map(([key, template], index) => ({
       id: `agent-${key}`,
       ...template,
-      provider_type: 'ollama',
+      provider_type: 'llamacpp',
       status: 'active' as const,
       created_at: new Date().toISOString(),
       is_default: index === 0,
@@ -218,7 +218,7 @@ export const AgentConfiguration: React.FC = () => {
     const newAgent: Agent = {
       id: `agent-${Date.now()}`,
       ...templateData,
-      provider_type: 'ollama',
+      provider_type: 'llamacpp',
       status: 'inactive',
       created_at: new Date().toISOString(),
       tags: [templateData.use_case],
@@ -265,19 +265,72 @@ export const AgentConfiguration: React.FC = () => {
     }
   };
 
-  const toggleAgentStatus = (agentId: string) => {
-    setAgents(prev => prev.map(agent => 
-      agent.id === agentId 
-        ? { ...agent, status: agent.status === 'active' ? 'inactive' : 'active' }
-        : agent
+  const toggleAgentStatus = async (agentId: string) => {
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) return;
+    const newStatus = agent.status === 'active' ? 'inactive' : 'active';
+    // Optimistically update local state
+    setAgents(prev => prev.map(a =>
+      a.id === agentId ? { ...a, status: newStatus } : a
     ));
+    try {
+      const response = await fetch(`${config.apiUrl}/api/unified-agent/agents/${agentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...agent, status: newStatus })
+      });
+      if (response.ok) {
+        setStatus(`Agent "${agent.name}" ${newStatus === 'active' ? 'activated' : 'deactivated'}`);
+        setTimeout(() => setStatus(''), 3000);
+      } else {
+        // Revert on failure
+        setAgents(prev => prev.map(a =>
+          a.id === agentId ? { ...a, status: agent.status } : a
+        ));
+        setStatus(`Failed to update agent "${agent.name}" status`);
+        setTimeout(() => setStatus(''), 3000);
+      }
+    } catch (error) {
+      console.error('Error toggling agent status:', error);
+      // Revert on failure
+      setAgents(prev => prev.map(a =>
+        a.id === agentId ? { ...a, status: agent.status } : a
+      ));
+      setStatus(`Error updating agent "${agent.name}" status`);
+      setTimeout(() => setStatus(''), 3000);
+    }
   };
 
-  const setDefaultAgent = (agentId: string) => {
-    setAgents(prev => prev.map(agent => ({
-      ...agent,
-      is_default: agent.id === agentId
+  const setDefaultAgent = async (agentId: string) => {
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) return;
+    const previousAgents = [...agents];
+    // Optimistically update local state
+    setAgents(prev => prev.map(a => ({
+      ...a,
+      is_default: a.id === agentId
     })));
+    try {
+      const response = await fetch(`${config.apiUrl}/api/unified-agent/agents/${agentId}/set-default`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (response.ok) {
+        setStatus(`"${agent.name}" set as default agent`);
+        setTimeout(() => setStatus(''), 3000);
+      } else {
+        // Revert on failure
+        setAgents(previousAgents);
+        setStatus(`Failed to set "${agent.name}" as default`);
+        setTimeout(() => setStatus(''), 3000);
+      }
+    } catch (error) {
+      console.error('Error setting default agent:', error);
+      // Revert on failure
+      setAgents(previousAgents);
+      setStatus(`Error setting "${agent.name}" as default`);
+      setTimeout(() => setStatus(''), 3000);
+    }
   };
 
   const getUseCaseColor = (useCase: string) => {
@@ -647,6 +700,7 @@ const AgentEditModal: React.FC<AgentEditModalProps> = ({
                     onChange={(e) => updateField('provider_type', e.target.value)}
                     className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-purple-500"
                   >
+                    <option value="llamacpp">llama.cpp Vulkan (Local)</option>
                     <option value="ollama">Ollama (Local)</option>
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>

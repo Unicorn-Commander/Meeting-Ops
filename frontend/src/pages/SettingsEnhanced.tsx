@@ -1,26 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   Settings as SettingsIcon,
   Mic,
   Cpu,
-  Database,
-  Users,
-  Key,
-  Bell,
-  Globe,
-  Shield,
   Save,
   ChevronRight,
   Wifi,
   Network,
-  HardDrive,
   Monitor,
-  Server,
   Lock,
   RefreshCw,
   CheckCircle,
   AlertCircle,
-  Volume2,
   BookOpen,
   Plus,
   Trash2
@@ -49,6 +40,7 @@ const SETTINGS_KEY = 'meeting-ops-settings';
 export default function SettingsEnhanced() {
   const [activeSection, setActiveSection] = useState('audio');
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
   const [networkInfo, setNetworkInfo] = useState<any>({});
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error' | 'backend-pending'>('idle');
@@ -96,7 +88,7 @@ export default function SettingsEnhanced() {
     authentikUrl: 'https://authentik.local',
     authentikClientId: 'meeting-ops',
     authentikClientSecret: '',
-    authentikRedirectUri: 'http://localhost:7778/auth/callback',
+    authentikRedirectUri: 'http://localhost:7777/auth/callback',
     
     // Network Settings
     hostname: 'meeting-ops',
@@ -215,20 +207,15 @@ export default function SettingsEnhanced() {
     // App Settings
     { id: 'audio', title: 'Audio & Recording', icon: Mic, description: 'Audio devices and recording configuration', category: 'app' },
     { id: 'ai', title: 'AI & Transcription', icon: Cpu, description: 'AI models and processing options', category: 'app' },
-    { id: 'export', title: 'Export & Sharing', icon: Database, description: 'Export formats and automation', category: 'app' },
     { id: 'vocabulary', title: 'Custom Vocabulary', icon: BookOpen, description: 'Industry terms and acronyms for transcription', category: 'app' },
-    
+
     // Admin Settings
     { id: 'authentik', title: 'Authentication (Authentik)', icon: Lock, description: 'Authentik SSO configuration', category: 'admin' },
-    { id: 'users', title: 'Users & Roles', icon: Users, description: 'User management and permissions', category: 'admin' },
-    { id: 'api', title: 'API & Webhooks', icon: Key, description: 'API keys and webhook endpoints', category: 'admin' },
-    
+
     // System Settings
     { id: 'network', title: 'Network Configuration', icon: Network, description: 'Ethernet, IP, DNS settings', category: 'system' },
     { id: 'wifi', title: 'WiFi Settings', icon: Wifi, description: 'Wireless network configuration', category: 'system' },
-    { id: 'system', title: 'System & Startup', icon: Server, description: 'Boot options and system behavior', category: 'system' },
     { id: 'performance', title: 'Performance & NPU', icon: Monitor, description: 'Hardware acceleration and limits', category: 'system' },
-    { id: 'backup', title: 'Backup & Updates', icon: RefreshCw, description: 'Backup settings and system updates', category: 'system' },
   ];
 
   useEffect(() => {
@@ -301,7 +288,8 @@ export default function SettingsEnhanced() {
         }));
         
         setAudioDevices(mappedDevices);
-        
+        setAudioDeviceError(null);
+
         // Set default device to first device or USB if found
         const defaultDevice = mappedDevices.find(d => d.isDefault) || mappedDevices.find(d => d.isUSB) || mappedDevices[0];
         if (defaultDevice && !settings.defaultDevice) {
@@ -314,25 +302,9 @@ export default function SettingsEnhanced() {
       }
     } catch (error) {
       console.error('Failed to fetch audio devices:', error);
-      // Fallback to detected hardware
-      setAudioDevices([
-        {
-          id: 'hw:0,0',
-          name: 'USB PnP Sound Device (C-Media)',
-          sampleRates: [44100, 48000],
-          channels: 1,
-          isDefault: true,
-          isUSB: true
-        },
-        {
-          id: 'hw:2,0',
-          name: 'HD-Audio Generic (Built-in)',
-          sampleRates: [16000, 44100, 48000],
-          channels: 2,
-          isDefault: false,
-          isUSB: false
-        }
-      ]);
+      // Show empty list — the UI will display an error state
+      setAudioDevices([]);
+      setAudioDeviceError('Could not detect audio devices. Check that PipeWire is running and the backend is reachable.');
     }
   };
 
@@ -441,6 +413,25 @@ export default function SettingsEnhanced() {
       case 'audio':
         return (
           <div className="space-y-6">
+            {/* Audio Device Error */}
+            {audioDeviceError && audioDevices.length === 0 && (
+              <div className="bg-red-900/20 border border-red-800 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-red-400 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm text-red-200 font-medium">Audio Device Detection Failed</p>
+                    <p className="text-xs text-red-300 mt-1">{audioDeviceError}</p>
+                    <button
+                      onClick={() => { setAudioDeviceError(null); fetchAudioDevices(); }}
+                      className="mt-2 px-3 py-1 bg-red-800 hover:bg-red-700 text-red-100 rounded text-xs transition-colors"
+                    >
+                      Retry Detection
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Audio Device Selection */}
             <div>
               <label className="block text-sm font-medium text-zinc-300 mb-2">
@@ -665,7 +656,17 @@ export default function SettingsEnhanced() {
                     </p>
                   </div>
 
-                  <button className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors">
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch(settings.authentikUrl, { mode: 'no-cors' });
+                        alert('Connection test completed — request sent to ' + settings.authentikUrl);
+                      } catch (err) {
+                        alert('Connection failed: ' + (err as Error).message);
+                      }
+                    }}
+                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
+                  >
                     Test Connection
                   </button>
                 </div>
@@ -868,9 +869,6 @@ export default function SettingsEnhanced() {
                     </select>
                   </div>
 
-                  <button className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors">
-                    Scan for Networks
-                  </button>
                 </div>
               )}
             </div>
@@ -963,15 +961,15 @@ export default function SettingsEnhanced() {
 
             {/* Hardware Info */}
             <div className="bg-zinc-800/50 rounded-lg p-4 mt-6">
-              <h4 className="text-sm font-medium text-zinc-300 mb-3">Hardware Information</h4>
+              <h4 className="text-sm font-medium text-zinc-300 mb-3">Reference Hardware (Configured For)</h4>
               <div className="space-y-2 text-xs">
                 <div className="flex justify-between">
                   <span className="text-zinc-400">CPU:</span>
-                  <span className="text-zinc-200">AMD Ryzen 9 7940HS</span>
+                  <span className="text-zinc-200">AMD Ryzen 7 8845HS</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-zinc-400">NPU:</span>
-                  <span className="text-zinc-200">AMD Phoenix (16 TOPS)</span>
+                  <span className="text-zinc-200">AMD Hawk Point (16 TOPS)</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-zinc-400">RAM:</span>

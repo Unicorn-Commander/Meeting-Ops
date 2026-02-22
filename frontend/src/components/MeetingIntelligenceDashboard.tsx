@@ -89,6 +89,19 @@ export const MeetingIntelligenceDashboard: React.FC<{
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Static color class mapping for Tailwind (dynamic class names are not compiled)
+  const colorClasses: Record<string, { bg: string; text: string; border: string }> = {
+    purple: { bg: 'bg-purple-500/20', text: 'text-purple-400', border: 'border-purple-500' },
+    blue: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500' },
+    red: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500' },
+    yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500' },
+    green: { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500' },
+    orange: { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500' },
+    indigo: { bg: 'bg-indigo-500/20', text: 'text-indigo-400', border: 'border-indigo-500' },
+    pink: { bg: 'bg-pink-500/20', text: 'text-pink-400', border: 'border-pink-500' },
+    cyan: { bg: 'bg-cyan-500/20', text: 'text-cyan-400', border: 'border-cyan-500' },
+  };
+
   // Template configurations - live notes vs final reports
   const templates: TemplateConfig[] = useMemo(() => [
     // LIVE TEMPLATES - Real-time notes during conversation
@@ -375,10 +388,12 @@ export const MeetingIntelligenceDashboard: React.FC<{
   useEffect(() => {
     if (!meetingData.sessionId || isRecording || realNotes) return;
 
+    // TODO: /api/meeting-notes/session/{id} endpoint does not exist yet.
+    // When implemented, this should fetch previously generated notes for the session.
     const fetchNotes = async () => {
       setNotesLoading(true);
       try {
-        const response = await fetch(`${config.apiBaseUrl}/api/meeting-notes/session/${meetingData.sessionId}`, {
+        const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${meetingData.sessionId}`, {
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('token')}`
           }
@@ -386,7 +401,10 @@ export const MeetingIntelligenceDashboard: React.FC<{
 
         if (response.ok) {
           const data = await response.json();
-          setRealNotes(data.notes);
+          // Use summary data from the session if available
+          if (data.summary) {
+            setRealNotes(data.summary);
+          }
         }
       } catch (error) {
         console.error('[MeetingIntelligence] Failed to fetch notes:', error);
@@ -476,6 +494,8 @@ export const MeetingIntelligenceDashboard: React.FC<{
       return;
     }
 
+    // TODO: /api/meeting-intelligence/live-notes endpoint does not exist yet.
+    // This is a placeholder for future live notes generation functionality.
     console.log('[MeetingIntelligence] Generating live notes with transcript length:', meetingData.transcript.length);
     setNotesLoading(true);
     try {
@@ -512,6 +532,8 @@ export const MeetingIntelligenceDashboard: React.FC<{
       return;
     }
 
+    // TODO: /api/meeting-intelligence/final-report endpoint does not exist yet.
+    // This is a placeholder for future final report generation functionality.
     setReportLoading(true);
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence/final-report`, {
@@ -887,7 +909,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
                     onClick={() => toggleTemplate(template.id)}
                     className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors ${
                       isActive
-                        ? `bg-${template.color}-500/20 text-${template.color}-400 border border-${template.color}-500`
+                        ? `${colorClasses[template.color]?.bg} ${colorClasses[template.color]?.text} border ${colorClasses[template.color]?.border}`
                         : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                     }`}
                   >
@@ -944,7 +966,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
               return (
                 <div key={templateId} className="bg-gray-900/50 rounded-lg border border-gray-800 flex flex-col h-[300px]">
                   <div className="flex items-center justify-between p-3 border-b border-gray-800 flex-shrink-0">
-                    <h4 className={`flex items-center gap-2 text-sm font-semibold text-${template.color}-400`}>
+                    <h4 className={`flex items-center gap-2 text-sm font-semibold ${colorClasses[template.color]?.text || 'text-gray-400'}`}>
                       <Icon className="w-4 h-4" />
                       {template.name}
                       {isRecording && (

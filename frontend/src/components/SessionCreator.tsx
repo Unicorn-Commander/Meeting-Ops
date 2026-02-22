@@ -1,20 +1,10 @@
 import React, { useState, useRef } from 'react';
 import {
-  Plus, Upload, FileText, FileAudio, FileVideo, 
-  Calendar, Users, Clock, Tag, X, Check,
-  AlertCircle, Loader2, Paperclip, Trash2,
-  Mic, Play, FolderOpen
+  Plus, Upload, FileAudio,
+  X, Loader2, Trash2,
+  Mic
 } from 'lucide-react';
 import { config } from '../config';
-
-interface Document {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  file?: File;
-  url?: string;
-}
 
 interface SessionCreatorProps {
   onClose: () => void;
@@ -31,14 +21,17 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
   const [description, setDescription] = useState('');
   const [participants, setParticipants] = useState<string[]>(['']);
   const [tags, setTags] = useState<string[]>(['']);
-  const [documents, setDocuments] = useState<Document[]>([]);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [sessionType, setSessionType] = useState<'live' | 'upload'>('live');
   const [creating, setCreating] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
   const audioInputRef = useRef<HTMLInputElement>(null);
-  const docInputRef = useRef<HTMLInputElement>(null);
+
+  const colorClasses: Record<string, { border: string; bg: string; text: string }> = {
+    purple: { border: 'border-purple-500', bg: 'bg-purple-500/10', text: 'text-purple-400' },
+    blue: { border: 'border-blue-500', bg: 'bg-blue-500/10', text: 'text-blue-400' },
+  };
 
   const sessionTypes = [
     {
@@ -105,36 +98,12 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
     }
   };
 
-  const handleDocumentUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    
-    const newDocuments: Document[] = files.map(file => ({
-      id: Date.now().toString() + Math.random(),
-      name: file.name,
-      type: file.type,
-      size: file.size,
-      file
-    }));
-
-    setDocuments([...documents, ...newDocuments]);
-  };
-
-  const removeDocument = (id: string) => {
-    setDocuments(documents.filter(doc => doc.id !== id));
-  };
-
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-  };
-
-  const getFileIcon = (type: string) => {
-    if (type.startsWith('audio/')) return FileAudio;
-    if (type.startsWith('video/')) return FileVideo;
-    return FileText;
   };
 
   const createSession = async () => {
@@ -198,33 +167,6 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
           throw new Error('Failed to upload audio file');
         }
         setUploadProgress(50);
-      }
-
-      // Upload documents if any
-      if (documents.length > 0) {
-        console.log('[SessionCreator] Uploading documents...');
-        for (const doc of documents) {
-          if (doc.file) {
-            const formData = new FormData();
-            formData.append('document', doc.file);
-
-            const docResponse = await fetch(
-              `${config.apiBaseUrl}/api/simple/recording-sessions/${session.id}/upload-document`,
-              {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${localStorage.getItem('token')}`
-                },
-                body: formData
-              }
-            );
-
-            if (!docResponse.ok) {
-              console.warn(`Failed to upload document: ${doc.name}`);
-            }
-          }
-        }
-        setUploadProgress(75);
       }
 
       setUploadProgress(100);
@@ -299,13 +241,13 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
                   onClick={() => setSessionType(type.id as 'live' | 'upload')}
                   className={`p-4 rounded-lg border-2 text-left transition-all ${
                     isSelected
-                      ? `border-${type.color}-500 bg-${type.color}-500/10`
+                      ? `${colorClasses[type.color]?.border} ${colorClasses[type.color]?.bg}`
                       : 'border-gray-700 bg-gray-800/50 hover:border-gray-600'
                   }`}
                 >
                   <div className="flex items-center gap-3 mb-2">
                     <Icon className={`w-5 h-5 ${
-                      isSelected ? `text-${type.color}-400` : 'text-gray-400'
+                      isSelected ? colorClasses[type.color]?.text || 'text-gray-400' : 'text-gray-400'
                     }`} />
                     <h3 className={`font-semibold ${
                       isSelected ? 'text-white' : 'text-gray-300'
@@ -468,57 +410,6 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
             </div>
           </div>
         )}
-
-        {/* Document Attachments */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <label className="text-sm font-medium text-gray-300">
-              Document Attachments
-            </label>
-            <button
-              onClick={() => docInputRef.current?.click()}
-              className="flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300"
-            >
-              <Paperclip className="w-3 h-3" />
-              Attach
-            </button>
-            <input
-              ref={docInputRef}
-              type="file"
-              multiple
-              onChange={handleDocumentUpload}
-              className="hidden"
-            />
-          </div>
-          
-          {documents.length > 0 ? (
-            <div className="space-y-2">
-              {documents.map(doc => {
-                const Icon = getFileIcon(doc.type);
-                return (
-                  <div key={doc.id} className="flex items-center gap-3 p-3 bg-gray-800/50 rounded-lg">
-                    <Icon className="w-5 h-5 text-blue-400" />
-                    <div className="flex-1">
-                      <p className="text-white font-medium text-sm">{doc.name}</p>
-                      <p className="text-xs text-gray-400">{formatFileSize(doc.size)}</p>
-                    </div>
-                    <button
-                      onClick={() => removeDocument(doc.id)}
-                      className="p-1 text-red-400 hover:text-red-300"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="text-center py-8 border border-gray-700 rounded-lg">
-              <Paperclip className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-              <p className="text-sm text-gray-400">No documents attached</p>
-            </div>
-          )}
-        </div>
 
         {/* Upload Progress */}
         {creating && uploadProgress > 0 && (

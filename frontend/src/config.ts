@@ -202,7 +202,6 @@ export const config = {
   
   // External service URLs (configurable)
   externalServices: {
-    ollama: import.meta.env.VITE_OLLAMA_URL || 'http://localhost:11434',
     inferenceServer: import.meta.env.VITE_INFERENCE_URL || 'http://localhost:8080',
   }
 };

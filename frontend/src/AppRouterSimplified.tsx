@@ -114,7 +114,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
             href={`#${item.path}`}
             onClick={onClose}
             className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
-              location === item.path
+              (item.path === '/' ? location === item.path : location.startsWith(item.path))
                 ? 'bg-zinc-800 text-white'
                 : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
             }`}
