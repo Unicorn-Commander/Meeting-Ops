@@ -118,6 +118,7 @@ export const SessionDetails: React.FC = () => {
   const [chatMessage, setChatMessage] = useState('');
   const [chatMessages, setChatMessages] = useState<Array<{role: string; content: string}>>([]);
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatHistoryLoaded, setChatHistoryLoaded] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // AI Insights state
@@ -134,6 +135,39 @@ export const SessionDetails: React.FC = () => {
       setLoading(false);
     }
   }, [sessionId]);
+
+  // Load persisted chat history from server when chat panel is opened
+  useEffect(() => {
+    if (!chatOpen || chatHistoryLoaded || !sessionId || !session) return;
+    const loadChatHistory = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(
+          `${config.apiUrl}/api/ai-chat/sessions/${session.id || sessionId}/messages`,
+          {
+            headers: {
+              ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+            }
+          }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          // Validate that we got actual chat messages (not other data)
+          if (Array.isArray(data) && data.length > 0 && data[0].role && data[0].content) {
+            setChatMessages(data.map((msg: any) => ({
+              role: msg.role,
+              content: msg.content,
+            })));
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to load chat history:', err);
+      } finally {
+        setChatHistoryLoaded(true);
+      }
+    };
+    loadChatHistory();
+  }, [chatOpen, chatHistoryLoaded, sessionId, session]);
 
   // Fetch AI insights from the real backend endpoint
   useEffect(() => {

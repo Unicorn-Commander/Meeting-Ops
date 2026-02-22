@@ -348,6 +348,61 @@ class RAGResponse(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
+def _format_history_for_prompt(history: List[Dict[str, Any]], max_chars: int = 1500) -> str:
+    """Format chat history for inclusion in LLM prompts.
+    Truncates older messages first if total exceeds max_chars."""
+    lines = []
+    total = 0
+    # Process from newest to oldest, then reverse
+    for msg in reversed(history):
+        role_label = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"][:300]  # Cap individual messages
+        line = f"{role_label}: {content}"
+        if total + len(line) > max_chars:
+            break
+        lines.insert(0, line)
+        total += len(line) + 1  # +1 for newline
+    return "\n".join(lines)
+
+
+def _rewrite_query_with_history(
+    current_query: str,
+    history: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Use LLM to rewrite a follow-up question as a standalone search query.
+    Returns the rewritten query, or None if rewriting fails or is unnecessary."""
+    history_text = _format_history_for_prompt(history, max_chars=800)
+    if not history_text:
+        return None
+
+    rewrite_prompt = (
+        f"Given this conversation history:\n{history_text}\n\n"
+        f'The user\'s follow-up question is: "{current_query}"\n\n'
+        "Rewrite this as a standalone search query that captures the full intent, "
+        "resolving any pronouns or references from the conversation. "
+        "Output ONLY the rewritten query, nothing else."
+    )
+
+    try:
+        rewritten = llm_service._call_llm(
+            system_prompt=(
+                "You rewrite follow-up questions into standalone search queries. "
+                "Output only the rewritten query with no explanation or preamble."
+            ),
+            user_prompt=rewrite_prompt,
+            max_tokens=100,
+            temperature=0.1,
+        )
+        if rewritten and len(rewritten.strip()) > 3:
+            # Strip quotes the LLM might wrap the query in
+            result = rewritten.strip().strip('"').strip("'")
+            return result
+    except Exception as e:
+        logger.warning(f"Query rewrite failed, using original query: {e}")
+
+    return None
+
+
 @router.post("/rag/query", response_model=RAGResponse)
 async def rag_query(
     request: RAGQueryRequest,
@@ -355,10 +410,13 @@ async def rag_query(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Cross-meeting RAG query. Searches Qdrant for relevant chunks across ALL
-    meetings, assembles context, and sends to Granite 3.3 2B for an answer
-    citing which meeting each fact comes from.
+    Cross-meeting RAG query with multi-turn conversation support.
+    Searches Qdrant for relevant chunks across ALL meetings, assembles context,
+    and sends to Granite 3.3 2B for an answer citing which meeting each fact
+    comes from. Uses chat history for query rewriting and conversational context.
     """
+    import time
+
     try:
         from services.semantic_search_service import semantic_search
     except ImportError:
@@ -367,10 +425,25 @@ async def rag_query(
             detail="Semantic search service is not available. Ensure Qdrant is running."
         )
 
-    # 1. Search for relevant chunks
+    # 1. Load recent chat history for conversational context
+    rag_history = _load_history(db, session_key=RAG_SESSION_KEY, limit=6)
+
+    # 2. Rewrite query using history context (if there IS history)
+    search_query = request.message
+    rewritten_query = None
+    if rag_history:
+        rewritten = _rewrite_query_with_history(request.message, rag_history)
+        if rewritten and rewritten.lower() != request.message.lower():
+            rewritten_query = rewritten
+            search_query = rewritten
+            logger.info(
+                f"RAG query rewritten: '{request.message}' -> '{search_query}'"
+            )
+
+    # 3. Search for relevant chunks using (possibly rewritten) query
     try:
         chunks = semantic_search.search_chunks(
-            query=request.message,
+            query=search_query,
             limit=request.limit * 3,  # Over-fetch, then trim to context budget
         )
     except Exception as e:
@@ -378,13 +451,25 @@ async def rag_query(
         raise HTTPException(status_code=503, detail=f"Semantic search failed: {str(e)}")
 
     if not chunks:
+        # Still save to history even if no results
+        _save_message(db, session_key=RAG_SESSION_KEY, role="user", content=request.message)
+        no_results_answer = (
+            "No indexed meetings found matching your query. "
+            "Please ensure meetings have been recorded and indexed in the semantic search system."
+        )
+        _save_message(db, session_key=RAG_SESSION_KEY, role="assistant", content=no_results_answer)
         return RAGResponse(
-            answer="No indexed meetings found. Please ensure meetings have been recorded and indexed in the semantic search system.",
+            answer=no_results_answer,
             sources=[],
-            metadata={"chunks_found": 0}
+            metadata={
+                "chunks_found": 0,
+                "rewritten_query": rewritten_query,
+            }
         )
 
-    # 2. Assemble context within token budget
+    # 4. Assemble context within token budget (reduced from 12000 to 9000 to
+    #    make room for ~1500 chars of chat history in the prompt)
+    context_budget = 9000 if rag_history else RAG_CONTEXT_MAX_CHARS
     context_parts = []
     total_chars = 0
     seen_sources = {}  # session_id -> best RAGSource
@@ -409,9 +494,9 @@ async def rag_query(
 
         block = f"{header}\n{text}\n"
 
-        if total_chars + len(block) > RAG_CONTEXT_MAX_CHARS:
+        if total_chars + len(block) > context_budget:
             # Try to fit a truncated version
-            remaining = RAG_CONTEXT_MAX_CHARS - total_chars
+            remaining = context_budget - total_chars
             if remaining > 200:  # Only include if we can fit something useful
                 block = f"{header}\n{text[:remaining - len(header) - 10]}...\n"
                 context_parts.append(block)
@@ -432,7 +517,7 @@ async def rag_query(
 
     context_text = "\n".join(context_parts)
 
-    # 3. Build prompts
+    # 5. Build system prompt with context AND conversation history
     system_prompt = (
         "You are a meeting analyst for Meeting-Ops. Answer the user's question "
         "using ONLY the meeting excerpts provided below. Cite which meeting each "
@@ -442,24 +527,19 @@ async def rag_query(
         f"{context_text}"
     )
 
-    # Include recent RAG chat history for conversational context
-    rag_history = _load_history(db, session_key=RAG_SESSION_KEY, limit=6)
-    user_prompt = request.message
     if rag_history:
-        history_text = "\n".join([
-            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:300]}"
-            for m in rag_history
-        ])
-        user_prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.message}"
+        history_text = _format_history_for_prompt(rag_history)
+        system_prompt += (
+            f"\n\nPrevious conversation for context:\n{history_text}"
+        )
 
-    # 4. Call LLM
-    import time
+    # 6. Call LLM
     start_time = time.time()
 
     try:
         answer = llm_service._call_llm(
             system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            user_prompt=request.message,
             max_tokens=800,
             temperature=0.3  # Lower temperature for factual RAG answers
         )
@@ -472,16 +552,17 @@ async def rag_query(
     if not answer:
         answer = "The AI model is currently unavailable. Please ensure the LLM service is running."
 
-    # 5. Persist to DB
+    # 7. Persist to DB
     _save_message(db, session_key=RAG_SESSION_KEY, role="user", content=request.message)
     _save_message(db, session_key=RAG_SESSION_KEY, role="assistant", content=answer)
 
-    # 6. Build response
+    # 8. Build response
     sources = sorted(seen_sources.values(), key=lambda s: s.score, reverse=True)
 
     logger.info(
         f"RAG query answered in {inference_time:.2f}s, "
         f"{len(chunks)} chunks searched, {len(sources)} source meetings"
+        f"{f', query rewritten to: {search_query}' if rewritten_query else ''}"
     )
 
     return RAGResponse(
@@ -492,6 +573,8 @@ async def rag_query(
             "chunks_retrieved": len(chunks),
             "context_chars": total_chars,
             "source_meetings": len(sources),
+            "rewritten_query": rewritten_query,
+            "history_length": len(rag_history),
         }
     )
 

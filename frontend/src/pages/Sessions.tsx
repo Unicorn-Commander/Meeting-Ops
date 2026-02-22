@@ -29,6 +29,13 @@ interface Session {
   session_type?: 'live' | 'upload';
 }
 
+interface RagMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: {session_id: string; title: string; score: number}[];
+  rewrittenQuery?: string | null;
+}
+
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -47,11 +54,12 @@ export const Sessions: React.FC = () => {
   const [isSearching, setIsSearching] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Cross-meeting RAG state
-  const [ragAnswer, setRagAnswer] = useState<string | null>(null);
-  const [ragSources, setRagSources] = useState<{session_id: string; title: string; score: number}[]>([]);
+  // Cross-meeting RAG chat state (multi-turn)
+  const [ragMessages, setRagMessages] = useState<RagMessage[]>([]);
   const [ragLoading, setRagLoading] = useState(false);
   const [showRagPanel, setShowRagPanel] = useState(false);
+  const [ragFollowUp, setRagFollowUp] = useState('');
+  const ragEndRef = useRef<HTMLDivElement>(null);
 
   // Debounced server-side search (keyword + semantic)
   const performSearch = useCallback(async (query: string) => {
@@ -149,13 +157,13 @@ export const Sessions: React.FC = () => {
     }, 300);
   }, [performSearch]);
 
-  // Cross-meeting RAG query
-  const askAiAboutMeetings = useCallback(async () => {
-    if (!searchQuery || searchQuery.length < 2) return;
+  // Cross-meeting RAG query (multi-turn)
+  const sendRagMessage = useCallback(async (message: string) => {
+    if (!message || message.length < 2) return;
     setRagLoading(true);
     setShowRagPanel(true);
-    setRagAnswer(null);
-    setRagSources([]);
+    // Add user message to conversation
+    setRagMessages(prev => [...prev, { role: 'user', content: message }]);
     try {
       const token = localStorage.getItem('token');
       const res = await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/query`, {
@@ -164,23 +172,84 @@ export const Sessions: React.FC = () => {
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ message: searchQuery, limit: 5 }),
+        body: JSON.stringify({ message, limit: 5 }),
       });
       if (res.ok) {
         const data = await res.json();
-        setRagAnswer(data.answer || 'No answer generated.');
-        setRagSources(data.sources || []);
+        setRagMessages(prev => [...prev, {
+          role: 'assistant',
+          content: data.answer || 'No answer generated.',
+          sources: data.sources || [],
+          rewrittenQuery: data.metadata?.rewritten_query || null,
+        }]);
       } else {
         const errText = await res.text();
-        setRagAnswer(`Error: ${res.status} - ${errText}`);
+        setRagMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `Error: ${res.status} - ${errText}`,
+        }]);
       }
     } catch (err) {
       console.error('RAG query failed:', err);
-      setRagAnswer('Failed to reach the AI service. Is the backend running?');
+      setRagMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Failed to reach the AI service. Is the backend running?',
+      }]);
     } finally {
       setRagLoading(false);
+      setRagFollowUp('');
+      setTimeout(() => ragEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     }
-  }, [searchQuery]);
+  }, []);
+
+  // Initial RAG query from search bar
+  const askAiAboutMeetings = useCallback(async () => {
+    if (!searchQuery || searchQuery.length < 2) return;
+    // Clear previous conversation when starting a new topic from search
+    setRagMessages([]);
+    // Also clear server-side history for a fresh start
+    try {
+      const token = localStorage.getItem('token');
+      await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
+        method: 'DELETE',
+        headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+      });
+    } catch { /* ignore */ }
+    sendRagMessage(searchQuery);
+  }, [searchQuery, sendRagMessage]);
+
+  // Handle follow-up submit
+  const handleRagFollowUp = useCallback(() => {
+    if (!ragFollowUp.trim() || ragLoading) return;
+    sendRagMessage(ragFollowUp.trim());
+  }, [ragFollowUp, ragLoading, sendRagMessage]);
+
+  // Load persisted RAG chat history from server on mount
+  useEffect(() => {
+    const loadRagHistory = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const res = await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
+          headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          // Validate that we got actual chat messages (not other data)
+          if (Array.isArray(data) && data.length > 0 && data[0].role && data[0].content) {
+            const restored: RagMessage[] = data.map((msg: any) => ({
+              role: msg.role as 'user' | 'assistant',
+              content: msg.content,
+            }));
+            setRagMessages(restored);
+            setShowRagPanel(true);
+          }
+        }
+      } catch {
+        // Ignore - history loading is best-effort
+      }
+    };
+    loadRagHistory();
+  }, []);
 
   useEffect(() => {
     fetchSessions();
@@ -605,54 +674,114 @@ export const Sessions: React.FC = () => {
           )}
         </div>
 
-        {/* RAG Answer Panel */}
+        {/* RAG Chat Panel (multi-turn) */}
         {showRagPanel && (
           <div className="bg-gray-900 rounded-lg border border-fuchsia-800/50 p-4 mb-6">
             <div className="flex items-start justify-between mb-3">
               <div className="flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-fuchsia-400" />
-                <h3 className="text-lg font-semibold text-fuchsia-300">AI Answer</h3>
-                {searchQuery && (
-                  <span className="text-sm text-gray-500 ml-2">for "{searchQuery}"</span>
-                )}
+                <h3 className="text-lg font-semibold text-fuchsia-300">AI Chat</h3>
+                <span className="text-xs text-gray-500">across all meetings</span>
               </div>
-              <button
-                onClick={() => setShowRagPanel(false)}
-                className="p-1 text-gray-400 hover:text-white rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {ragMessages.length > 0 && (
+                  <button
+                    onClick={async () => {
+                      setRagMessages([]);
+                      try {
+                        const token = localStorage.getItem('token');
+                        await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
+                          method: 'DELETE',
+                          headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                        });
+                      } catch { /* ignore */ }
+                    }}
+                    className="px-2 py-1 text-xs text-gray-400 hover:text-white border border-gray-700 rounded transition-colors"
+                    title="Clear conversation"
+                  >
+                    Clear
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowRagPanel(false)}
+                  className="p-1 text-gray-400 hover:text-white rounded transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            {ragLoading ? (
-              <div className="flex items-center gap-3 py-4">
-                <Loader2 className="w-5 h-5 text-fuchsia-400 animate-spin" />
-                <span className="text-gray-400">Searching meetings and generating answer...</span>
-              </div>
-            ) : (
-              <>
-                <div className="text-gray-200 text-sm whitespace-pre-wrap leading-relaxed mb-3">
-                  {ragAnswer}
-                </div>
-                {ragSources.length > 0 && (
-                  <div className="border-t border-gray-800 pt-3 mt-3">
-                    <p className="text-xs text-gray-500 mb-2">Sources:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {ragSources.map((src, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => navigate(`/sessions/${src.session_id}`)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg border border-gray-700 transition-colors"
-                        >
-                          <FileText className="w-3 h-3 text-fuchsia-400" />
-                          {src.title || 'Untitled'}
-                          <span className="text-gray-500">({Math.round(src.score * 100)}%)</span>
-                        </button>
-                      ))}
+            {/* Conversation history */}
+            <div className="max-h-96 overflow-y-auto space-y-3 mb-3">
+              {ragMessages.map((msg, idx) => (
+                <div key={idx}>
+                  {msg.role === 'user' ? (
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] bg-fuchsia-700/30 border border-fuchsia-700/50 rounded-lg px-3 py-2 text-sm text-gray-200">
+                        {msg.content}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </>
+                  ) : (
+                    <div className="space-y-2">
+                      {msg.rewrittenQuery && (
+                        <p className="text-xs text-gray-500 italic">
+                          Searched for: "{msg.rewrittenQuery}"
+                        </p>
+                      )}
+                      <div className="text-gray-200 text-sm whitespace-pre-wrap leading-relaxed">
+                        {msg.content}
+                      </div>
+                      {msg.sources && msg.sources.length > 0 && (
+                        <div className="border-t border-gray-800 pt-2 mt-2">
+                          <p className="text-xs text-gray-500 mb-1.5">Sources:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {msg.sources.map((src, sidx) => (
+                              <button
+                                key={sidx}
+                                onClick={() => navigate(`/sessions/${src.session_id}`)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg border border-gray-700 transition-colors"
+                              >
+                                <FileText className="w-3 h-3 text-fuchsia-400" />
+                                {src.title || 'Untitled'}
+                                <span className="text-gray-500">({Math.round(src.score * 100)}%)</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {ragLoading && (
+                <div className="flex items-center gap-3 py-2">
+                  <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
+                  <span className="text-gray-400 text-sm">Searching meetings and generating answer...</span>
+                </div>
+              )}
+              <div ref={ragEndRef} />
+            </div>
+
+            {/* Follow-up input */}
+            {ragMessages.length > 0 && (
+              <div className="flex gap-2 border-t border-gray-800 pt-3">
+                <input
+                  type="text"
+                  value={ragFollowUp}
+                  onChange={(e) => setRagFollowUp(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRagFollowUp(); } }}
+                  placeholder="Ask a follow-up question..."
+                  disabled={ragLoading}
+                  className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-400 focus:outline-none focus:border-fuchsia-500 disabled:opacity-50"
+                />
+                <button
+                  onClick={handleRagFollowUp}
+                  disabled={ragLoading || !ragFollowUp.trim()}
+                  className="px-4 py-2 bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 text-white rounded-lg text-sm transition-colors"
+                >
+                  Send
+                </button>
+              </div>
             )}
           </div>
         )}
