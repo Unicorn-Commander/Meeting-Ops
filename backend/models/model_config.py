@@ -5,7 +5,7 @@ Similar to OpenWebUI's parameter system
 """
 from sqlalchemy import Column, String, Integer, Float, Boolean, JSON, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 try:
@@ -39,8 +39,8 @@ class ModelProvider(Base):
     # Relations
     models = relationship("ModelConfiguration", back_populates="provider")
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class ModelConfiguration(Base):
@@ -118,8 +118,8 @@ class ModelConfiguration(Base):
     is_active = Column(Boolean, default=True)
     is_default = Column(Boolean, default=False)  # Default for its category
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     created_by = Column(Integer, ForeignKey("users.id"))
 
 
@@ -145,7 +145,7 @@ class ModelParameterSet(Base):
     
     is_system = Column(Boolean, default=False)  # System-provided vs user-created
     created_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class ModelExecutionLog(Base):
@@ -180,7 +180,7 @@ class ModelExecutionLog(Base):
     quality_score = Column(Float)  # If we implement quality scoring
     user_feedback = Column(String(50))  # 'good', 'bad', 'neutral'
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # Default model configurations

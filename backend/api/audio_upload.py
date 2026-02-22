@@ -9,7 +9,7 @@ from database.models import RecordingSession as DBRecordingSession
 import os
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import asyncio
 
@@ -69,7 +69,7 @@ async def upload_audio(
         # Update session with audio file path
         session.audio_file = audio_path
         session.status = "processing"
-        session.updated_at = datetime.utcnow()
+        session.updated_at = datetime.now(timezone.utc)
         db.commit()
         
         logger.info(f"Audio uploaded for session {session_id}: {audio_path}")
@@ -185,7 +185,7 @@ async def process_uploaded_audio(session_id: str, audio_file: str, db_session_id
                             "actions": analysis.get("actions", []),
                             "decisions": analysis.get("decisions", []),
                             "title": analysis.get("title", ""),
-                            "generated_at": datetime.utcnow().isoformat()
+                            "generated_at": datetime.now(timezone.utc).isoformat()
                         }
                         session.final_summary = final_summary
                         session.summary = json.dumps(analysis)
@@ -229,13 +229,13 @@ async def process_uploaded_audio(session_id: str, audio_file: str, db_session_id
             "processing_time_ms": int(processing_duration * 1000),
             "transcription_model": "whisper-large-v3",
             "ai_model": "granite3.3:8b",
-            "processing_completed_at": datetime.utcnow().isoformat()
+            "processing_completed_at": datetime.now(timezone.utc).isoformat()
         })
         session.processing_metadata = metadata
         
         # Mark as completed
         session.status = "completed"
-        session.updated_at = datetime.utcnow()
+        session.updated_at = datetime.now(timezone.utc)
         
         db.commit()
         logger.info(f"✅ Successfully processed uploaded audio for session {session_id}")
@@ -247,7 +247,7 @@ async def process_uploaded_audio(session_id: str, audio_file: str, db_session_id
         logger.error(f"Critical error processing uploaded audio: {e}")
         try:
             session.status = "error"
-            session.updated_at = datetime.utcnow()
+            session.updated_at = datetime.now(timezone.utc)
             db.commit()
         except:
             pass

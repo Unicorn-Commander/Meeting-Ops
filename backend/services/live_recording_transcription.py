@@ -82,6 +82,11 @@ class LiveRecordingTranscriptionService:
         self.session_word_counts = {}  # Track word counts per session
         self.triggered_intervals = {}  # Track triggered summary intervals
 
+        # Auto-stop on prolonged silence
+        self.consecutive_silent_chunks = 0
+        self.max_silent_chunks = 20  # 20 chunks * 15s = 5 minutes of silence
+        self.auto_stop_triggered = False
+
     async def start_monitoring(self, audio_file: str, session_id: str):
         """Start monitoring a recording file for live transcription"""
         self.current_file = audio_file
@@ -89,6 +94,8 @@ class LiveRecordingTranscriptionService:
         self.last_position = 0
         self.is_active = True
         self.transcript_buffer = []
+        self.consecutive_silent_chunks = 0
+        self.auto_stop_triggered = False
 
         logger.info(f"Starting live transcription monitoring")
         logger.info(f"   File: {audio_file}")
@@ -185,9 +192,20 @@ class LiveRecordingTranscriptionService:
 
                             # Skip silent chunks to avoid Whisper hallucinations
                             if not _chunk_has_speech(chunk_data):
-                                logger.info(f"Skipping silent chunk at position {self.last_position}")
+                                self.consecutive_silent_chunks += 1
+                                logger.info(f"Skipping silent chunk at position {self.last_position} "
+                                            f"(silence: {self.consecutive_silent_chunks}/{self.max_silent_chunks})")
                                 self.last_position += chunk_samples
+
+                                # Check if silence threshold exceeded for auto-stop
+                                if self.consecutive_silent_chunks >= self.max_silent_chunks:
+                                    await self._trigger_auto_stop()
                                 continue
+
+                            # Speech detected - reset silence counter
+                            if self.consecutive_silent_chunks > 0:
+                                logger.info(f"Speech resumed after {self.consecutive_silent_chunks} silent chunks")
+                            self.consecutive_silent_chunks = 0
 
                             # Normalize audio for Whisper (USB mics often output very low levels)
                             peak = np.max(np.abs(chunk_data))
@@ -359,6 +377,64 @@ class LiveRecordingTranscriptionService:
                 logger.error(f"Live transcription error: {e}")
                 await asyncio.sleep(2)
     
+    async def _trigger_auto_stop(self):
+        """Trigger auto-stop due to prolonged silence.
+        Sets is_active=False to exit the monitoring loop, publishes a Redis
+        event so the recording API can finalize the session, and broadcasts
+        a WebSocket message so the frontend can update its UI.
+        """
+        if self.auto_stop_triggered:
+            return  # Prevent duplicate triggers
+
+        self.auto_stop_triggered = True
+        silence_duration = self.consecutive_silent_chunks * 15  # seconds
+        logger.warning(
+            f"Auto-stopping recording due to prolonged silence "
+            f"({silence_duration}s / {self.consecutive_silent_chunks} chunks) "
+            f"for session {self.session_id}"
+        )
+
+        # Stop the monitoring loop
+        self.is_active = False
+
+        # Publish auto-stop event to Redis so the recording API can finalize
+        try:
+            if not self.redis_client:
+                self.redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
+
+            channel = f"recording:{self.session_id}:auto-stop"
+            message = json.dumps({
+                "session_id": self.session_id,
+                "reason": "prolonged_silence",
+                "silent_chunks": self.consecutive_silent_chunks,
+                "silence_duration_seconds": silence_duration,
+                "timestamp": time.time(),
+            })
+            await self.redis_client.publish(channel, message)
+            logger.info(f"Published auto-stop event to Redis channel: {channel}")
+        except Exception as e:
+            logger.error(f"Failed to publish auto-stop event to Redis: {e}")
+
+        # Broadcast auto-stop notification via WebSocket
+        try:
+            from api.websocket_auto_summary import broadcast_transcription_segment
+            await broadcast_transcription_segment(
+                self.session_id,
+                {
+                    "text": "",
+                    "type": "auto_stop",
+                    "reason": "prolonged_silence",
+                    "silence_duration_seconds": silence_duration,
+                    "start": float(self.last_position / 44100),
+                    "end": float(self.last_position / 44100),
+                    "speaker": None,
+                    "confidence": 1.0,
+                }
+            )
+            logger.info(f"Broadcast auto-stop WebSocket notification for session {self.session_id}")
+        except Exception as e:
+            logger.error(f"Failed to broadcast auto-stop via WebSocket: {e}")
+
     async def _check_and_trigger_summary(self, session_id: str, total_words: int):
         """Check if we should trigger a progressive summary"""
         # Fixed 500-word intervals for progressive summaries

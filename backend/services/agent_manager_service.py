@@ -5,7 +5,7 @@ Manages multi-tier agent system with core pipeline + custom agents
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from sqlalchemy.orm import Session
@@ -200,7 +200,7 @@ Format as structured JSON.""",
             if field in updates:
                 setattr(agent, field, updates[field])
         
-        agent.updated_at = datetime.utcnow()
+        agent.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(agent)
         
@@ -219,7 +219,7 @@ Format as structured JSON.""",
         
         # Soft delete by deactivating
         agent.is_active = False
-        agent.updated_at = datetime.utcnow()
+        agent.updated_at = datetime.now(timezone.utc)
         db.commit()
         
         logger.info(f"Deactivated agent: {agent.name} ({agent.slug})")
@@ -312,7 +312,7 @@ Format as structured JSON.""",
             response_time_ms=session_data.get("response_time_ms"),
             success=session_data.get("success", True),
             error_message=session_data.get("error_message"),
-            completed_at=datetime.utcnow()
+            completed_at=datetime.now(timezone.utc)
         )
         
         db.add(session)
@@ -321,7 +321,7 @@ Format as structured JSON.""",
         agent = db.query(MeetingAgent).filter_by(id=agent_id).first()
         if agent:
             agent.usage_count += 1
-            agent.last_used = datetime.utcnow()
+            agent.last_used = datetime.now(timezone.utc)
             
             # Update performance metrics
             if session_data.get("response_time_ms"):

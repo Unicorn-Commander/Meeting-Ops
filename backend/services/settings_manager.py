@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -185,7 +185,7 @@ class SettingsManager:
 
             if setting:
                 setting.value = stored_value
-                setting.updated_at = datetime.utcnow()
+                setting.updated_at = datetime.now(timezone.utc)
             else:
                 # Create new setting if it doesn't exist
                 category = key.split('.')[0] if '.' in key else 'general'
@@ -225,7 +225,7 @@ class SettingsManager:
 
                 if setting:
                     setting.value = stored_value
-                    setting.updated_at = datetime.utcnow()
+                    setting.updated_at = datetime.now(timezone.utc)
                 else:
                     setting = Settings(
                         key=full_key,
@@ -327,7 +327,7 @@ class SettingsManager:
         """Export all settings for backup"""
         return {
             "settings": self.get_all_settings(),
-            "export_date": datetime.utcnow().isoformat(),
+            "export_date": datetime.now(timezone.utc).isoformat(),
             "version": "1.0"
         }
     

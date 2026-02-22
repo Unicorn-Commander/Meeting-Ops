@@ -7,7 +7,7 @@ import asyncio
 import time
 import logging
 from typing import Dict, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from services.system_service import SystemService
@@ -140,7 +140,7 @@ class AutoSummarizationService:
                         if websocket_callback:
                             await websocket_callback({
                                 "type": "auto_summary",
-                                "timestamp": datetime.utcnow().isoformat(),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "summary": summary,
                                 "trigger_mode": settings.summaryTriggerMode,
                                 "trigger_reason": trigger_reason,
@@ -200,7 +200,7 @@ class AutoSummarizationService:
             
             # Generate summary using LLM service
             summary_data = {
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "transcript_length": current_length,
                 "summary": "Meeting in progress...",
                 "key_points": [],
@@ -327,7 +327,7 @@ class AutoSummarizationService:
             # Generate comprehensive final summary
             final_summary = {
                 "type": "final",
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "total_words": len(full_transcript.split()),
                 "periodic_summaries_count": len(self.summary_history.get(session_id, [])),
                 "summary": "Complete meeting summary...",

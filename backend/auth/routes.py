@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr, field_validator
 
 from database.database import get_db
 from auth.service import AuthService
@@ -22,8 +22,9 @@ class UserCreate(BaseModel):
     organization_id: Optional[int] = None
     role: str = "user"
     
-    @validator('username')
-    def username_alphanumeric(cls, v):
+    @field_validator('username')
+    @classmethod
+    def username_alphanumeric(cls, v: str):
         if not v.replace('_', '').isalnum():
             raise ValueError('Username must be alphanumeric')
         if len(v) < 3 or len(v) > 30:

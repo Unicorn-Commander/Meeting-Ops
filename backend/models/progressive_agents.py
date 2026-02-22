@@ -5,7 +5,7 @@ from sqlalchemy import Column, String, Text, Boolean, Integer, DateTime, TIMESTA
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
@@ -32,8 +32,8 @@ class MeetingAgent(Base):
     sections = Column(JSONB, default={})  # Agent-specific output sections
     prompts = Column(JSONB, default={})  # System prompts
     is_active = Column(Boolean, default=False)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
-    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 class AIProvider(Base):
     """AI Provider database model"""
@@ -48,8 +48,8 @@ class AIProvider(Base):
     capabilities = Column(JSONB, default={})
     performance_config = Column(JSONB, default={})  # Model mappings, performance settings
     is_active = Column(Boolean, default=False)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
-    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 class ProgressiveSummary(Base):
     """Progressive Summary history model"""
@@ -65,7 +65,7 @@ class ProgressiveSummary(Base):
     model_size = Column(String(20), nullable=False)
     sections = Column(JSONB, nullable=False)
     processing_time_ms = Column(Integer)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    created_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     agent = relationship("MeetingAgent")
@@ -81,8 +81,8 @@ class ProgressiveSessionState(Base):
     current_interval = Column(Integer, nullable=False)
     last_summary_at = Column(Integer, default=0)
     total_summaries = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
-    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Unique constraint
     __table_args__ = (UniqueConstraint('session_id', 'agent_id', name='unique_session_agent'),)

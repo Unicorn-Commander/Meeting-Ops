@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -88,7 +88,7 @@ class AuthService:
             return None
         
         # Check if account is locked
-        if user.locked_until and user.locked_until > datetime.utcnow():
+        if user.locked_until and user.locked_until > datetime.now(timezone.utc):
             logger.warning(f"Login attempt for locked account: {username}")
             return None
         
@@ -99,7 +99,7 @@ class AuthService:
             
             # Lock account if too many failed attempts
             if user.failed_login_attempts >= auth_config.MAX_LOGIN_ATTEMPTS:
-                user.locked_until = datetime.utcnow() + timedelta(
+                user.locked_until = datetime.now(timezone.utc) + timedelta(
                     minutes=auth_config.LOCKOUT_DURATION_MINUTES
                 )
                 logger.warning(f"Account locked due to failed login attempts: {username}")
@@ -110,7 +110,7 @@ class AuthService:
         # Reset failed login attempts on successful login
         user.failed_login_attempts = 0
         user.locked_until = None
-        user.last_login = datetime.utcnow()
+        user.last_login = datetime.now(timezone.utc)
         db.commit()
         
         # Log successful login
@@ -179,7 +179,7 @@ class AuthService:
         if avatar_url is not None:
             user.avatar_url = avatar_url
         
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(user)
         
@@ -203,7 +203,7 @@ class AuthService:
         
         # Update password
         user.hashed_password = get_password_hash(new_password)
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.commit()
         
         # Log password change
@@ -221,7 +221,7 @@ class AuthService:
         # Generate new API key
         api_key = generate_api_key()
         user.api_key = api_key
-        user.api_key_created_at = datetime.utcnow()
+        user.api_key_created_at = datetime.now(timezone.utc)
         db.commit()
         
         # Log API key generation
@@ -243,7 +243,7 @@ class AuthService:
 
         # Update password
         user.hashed_password = get_password_hash(new_password)
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.commit()
 
         # Log password reset

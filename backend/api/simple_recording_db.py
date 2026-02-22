@@ -5,7 +5,7 @@ Fixed version that persists to PostgreSQL
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
@@ -73,8 +73,16 @@ def apply_vocabulary_replacements(text: str, db_session) -> str:
         return text
 
 
+import redis.asyncio as aioredis
+
 router = APIRouter(prefix="/api/simple", tags=["simple-recording-db"])
 logger = logging.getLogger(__name__)
+
+# Redis URL (matches docker-compose port)
+_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6381")
+
+# Track auto-stop monitor tasks so they can be cancelled on manual stop
+_auto_stop_tasks: Dict[str, asyncio.Task] = {}
 
 class CreateSessionRequest(BaseModel):
     name: str
@@ -107,7 +115,7 @@ async def create_session(
         title=request.name,  # Use name as title
         description=request.description or "",
         status="active",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         duration=0.0
     )
     
@@ -153,7 +161,7 @@ async def list_sessions(
             name=session.name or session.title or f"Session {session.id}",
             title=session.title,
             description=session.description or "",
-            created_at=session.created_at.isoformat() if session.created_at else datetime.utcnow().isoformat(),
+            created_at=session.created_at.isoformat() if session.created_at else datetime.now(timezone.utc).isoformat(),
             status=session.status or "completed",
             duration=session.duration or 0.0,
             audio_file=session.audio_file,
@@ -381,6 +389,108 @@ class StartRecordingRequest(BaseModel):
     device_id: Optional[str] = None
 
 
+async def _monitor_auto_stop(session_id: str, db_session_id: int):
+    """Background task that listens for an auto-stop Redis event from the
+    LiveRecordingTranscriptionService and finalizes the recording when
+    prolonged silence is detected.
+
+    Subscribes to ``recording:{session_id}:auto-stop`` and, on receipt,
+    stops the audio capture, updates the DB session, and schedules
+    background transcription processing.
+    """
+    redis_client = None
+    pubsub = None
+    try:
+        redis_client = await aioredis.from_url(_REDIS_URL, decode_responses=True)
+        pubsub = redis_client.pubsub()
+        channel = f"recording:{session_id}:auto-stop"
+        await pubsub.subscribe(channel)
+        logger.info(f"Auto-stop monitor subscribed to {channel}")
+
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+
+            logger.warning(f"Auto-stop event received for session {session_id}")
+
+            try:
+                event_data = json.loads(message["data"])
+                silence_secs = event_data.get("silence_duration_seconds", "unknown")
+                logger.info(f"  Reason: prolonged silence ({silence_secs}s)")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            # 1. Stop ffmpeg recording (graceful SIGINT -> WAV header)
+            from services.working_audio_service import audio_service as _audio_svc
+            success, audio_file = _audio_svc.stop_recording(session_id)
+            if not success:
+                logger.error(f"Auto-stop: failed to stop audio capture: {audio_file}")
+
+            # 2. Stop live transcription monitoring (already set is_active=False,
+            #    but cancel the task explicitly for clean shutdown)
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                await live_recording_transcription.stop_monitoring()
+                logger.info(f"Auto-stop: stopped live transcription for {session_id}")
+            except Exception as e:
+                logger.error(f"Auto-stop: error stopping live transcription: {e}")
+
+            # 3. Update the DB session
+            from database.database import SessionLocal
+            db = SessionLocal()
+            try:
+                session = db.query(DBRecordingSession).filter(
+                    DBRecordingSession.session_id == session_id
+                ).first()
+                if session:
+                    session.status = "processing"
+                    session.ended_at = datetime.now(timezone.utc)
+                    if session.started_at:
+                        session.duration = (session.ended_at - session.started_at).total_seconds()
+                    if not session.audio_file and audio_file:
+                        session.audio_file = audio_file
+                    db.commit()
+                    logger.info(f"Auto-stop: session {session_id} marked as processing")
+
+                    # 4. Schedule background transcription + AI processing
+                    asyncio.create_task(
+                        process_recording(
+                            session_id=session.session_id,
+                            audio_file=audio_file if success else (session.audio_file or ""),
+                            db_session_id=session.id,
+                        )
+                    )
+                    logger.info(f"Auto-stop: scheduled background processing for {session_id}")
+                else:
+                    logger.error(f"Auto-stop: session {session_id} not found in DB")
+            except Exception as e:
+                logger.error(f"Auto-stop: DB error finalizing session: {e}")
+                db.rollback()
+            finally:
+                db.close()
+
+            # Clean up our task reference and exit the listener
+            _auto_stop_tasks.pop(session_id, None)
+            break
+
+    except asyncio.CancelledError:
+        logger.info(f"Auto-stop monitor cancelled for session {session_id}")
+    except Exception as e:
+        logger.error(f"Auto-stop monitor error for session {session_id}: {e}")
+    finally:
+        if pubsub:
+            try:
+                await pubsub.unsubscribe()
+                await pubsub.close()
+            except Exception:
+                pass
+        if redis_client:
+            try:
+                await redis_client.close()
+            except Exception:
+                pass
+
+
 @router.post("/recording-sessions/{session_id}/start")
 async def start_recording(
     session_id: str,
@@ -406,7 +516,7 @@ async def start_recording(
     
     # Update database with correct column names
     session.status = "recording"
-    session.started_at = datetime.utcnow()
+    session.started_at = datetime.now(timezone.utc)
     session.audio_file = file_path  # Note: column is audio_file, not audio_file_path
     db.commit()
     
@@ -438,6 +548,17 @@ async def start_recording(
     except Exception as e:
         logger.error(f"Failed to start unified agent: {e}")
     
+    # Start auto-stop monitor (listens for prolonged silence event from live transcription)
+    try:
+        task = asyncio.create_task(
+            _monitor_auto_stop(session_id, session.id)
+        )
+        _auto_stop_tasks[session_id] = task
+        logger.info(f"Started auto-stop monitor for session {session_id} "
+                     f"(silence threshold: {20 * 15}s)")
+    except Exception as e:
+        logger.error(f"Failed to start auto-stop monitor: {e}")
+
     return {
         "status": "recording",
         "session_id": session_id,
@@ -460,16 +581,22 @@ async def stop_recording(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
+    # Cancel the auto-stop monitor if it's running (manual stop takes priority)
+    auto_stop_task = _auto_stop_tasks.pop(session_id, None)
+    if auto_stop_task and not auto_stop_task.done():
+        auto_stop_task.cancel()
+        logger.info(f"Cancelled auto-stop monitor for session {session_id} (manual stop)")
+
     try:
         # Stop recording
         success, audio_file = audio_service.stop_recording(session_id)
-        
+
         if not success:
             raise HTTPException(status_code=500, detail=f"Failed to stop recording: {audio_file}")
-        
+
         # Update session in database
         session.status = "processing"
-        session.ended_at = datetime.utcnow()
+        session.ended_at = datetime.now(timezone.utc)
         if session.started_at:
             session.duration = (session.ended_at - session.started_at).total_seconds()
         
@@ -658,7 +785,7 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                             "title": analysis.get("title", ""),
                             "minutes": analysis.get("minutes", ""),  # Meeting minutes
                             "tasks": analysis.get("tasks", []),  # Task list
-                            "generated_at": datetime.utcnow().isoformat()
+                            "generated_at": datetime.now(timezone.utc).isoformat()
                         }
                         session.final_summary = final_summary
                         
@@ -679,21 +806,21 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                         session.summary = json.dumps({
                             "executive": f"Meeting recorded with {len(full_text.split())} words transcribed.",
                             "bullets": ["Meeting content captured successfully", "AI analysis unavailable"],
-                            "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                            "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
                         })
                 else:
                     logger.warning("No transcript text available for AI analysis")
                     session.summary = json.dumps({
                         "executive": "Meeting recorded but no transcription available.",
                         "bullets": ["Audio file captured", "Transcription failed"],
-                        "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                        "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
                     })
             else:
                 logger.warning("No transcription available for AI analysis")
                 session.summary = json.dumps({
                     "executive": "Meeting recorded but transcription failed.",
                     "bullets": ["Audio file saved", "Transcription processing failed"],
-                    "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                    "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
                 })
                 
         except asyncio.TimeoutError:
@@ -701,14 +828,14 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             session.summary = json.dumps({
                 "executive": "Meeting recorded successfully. AI analysis timed out.",
                 "bullets": ["Audio and transcript captured", "AI processing unavailable"],
-                "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
             })
         except Exception as e:
             logger.error(f"AI analysis error: {e}")
             session.summary = json.dumps({
                 "executive": "Meeting recorded successfully. AI analysis failed.",
                 "bullets": ["Audio and transcript captured", f"AI error: {str(e)[:100]}"],
-                "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
             })
         
         # Step 3: Update metadata with processing stats
@@ -736,13 +863,13 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             "processing_time_ms": int(processing_duration * 1000) if processing_duration > 0 else 0,
             "transcription_model": "whisper-large-v3",
             "ai_model": "granite3.3:8b",
-            "processing_completed_at": datetime.utcnow().isoformat()
+            "processing_completed_at": datetime.now(timezone.utc).isoformat()
         })
         session.processing_metadata = metadata
         
         # Step 4: ALWAYS mark as completed (never leave in processing)
         session.status = "completed"
-        session.updated_at = datetime.utcnow()
+        session.updated_at = datetime.now(timezone.utc)
         
         try:
             db.commit()
@@ -765,9 +892,9 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                 session.summary = json.dumps({
                     "executive": "Meeting recorded but processing failed.",
                     "bullets": ["Audio file captured", f"Processing error: {str(e)[:100]}"],
-                    "title": f"Meeting {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                    "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
                 })
-                session.updated_at = datetime.utcnow()
+                session.updated_at = datetime.now(timezone.utc)
                 db.commit()
                 logger.info(f"Marked session {session_id} as completed despite errors")
         except Exception as commit_error:

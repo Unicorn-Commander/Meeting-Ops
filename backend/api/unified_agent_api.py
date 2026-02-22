@@ -2,6 +2,7 @@
 Unified Agent API
 Simple endpoints for single meeting agent management
 """
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from typing import Dict, Optional
@@ -61,8 +62,7 @@ async def update_agent(
             setattr(agent, field, value)
     
     # Update timestamp
-    from datetime import datetime
-    agent.updated_at = datetime.utcnow()
+    agent.updated_at = datetime.now(timezone.utc)
     
     db.commit()
     db.refresh(agent)

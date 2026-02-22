@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 import logging
 import json
@@ -95,7 +95,7 @@ async def create_batch_export(
             format=request.format,
             status="pending",
             progress=0,
-            createdAt=datetime.utcnow(),
+            createdAt=datetime.now(timezone.utc),
             options=request.options.dict()
         )
         
@@ -271,7 +271,7 @@ async def process_export_job(
         
         job.status = "completed"
         job.progress = 100
-        job.completedAt = datetime.utcnow()
+        job.completedAt = datetime.now(timezone.utc)
         
         # Send email if requested
         if options.emailTo:

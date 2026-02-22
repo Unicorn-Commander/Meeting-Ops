@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import jwt
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class AuthRecoveryMiddleware(BaseHTTPMiddleware):
                         
                         # Check if token is about to expire
                         exp = datetime.fromtimestamp(payload['exp'])
-                        if exp - datetime.utcnow() < timedelta(minutes=5):
+                        if exp - datetime.now(timezone.utc) < timedelta(minutes=5):
                             # Token expires soon, add refresh header
                             response = await call_next(request)
                             response.headers["X-Token-Expires-Soon"] = "true"
@@ -123,7 +123,7 @@ class SessionRecoveryMiddleware(BaseHTTPMiddleware):
                 session_id = self._extract_session_id(request.url.path)
                 if session_id:
                     self.failed_sessions[session_id] = {
-                        'time': datetime.utcnow(),
+                        'time': datetime.now(timezone.utc),
                         'error_count': self.failed_sessions.get(session_id, {}).get('error_count', 0) + 1
                     }
                     
@@ -148,7 +148,7 @@ class SessionRecoveryMiddleware(BaseHTTPMiddleware):
         
     def _cleanup_old_sessions(self):
         """Remove old failed session records"""
-        cutoff = datetime.utcnow() - timedelta(hours=1)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         self.failed_sessions = {
             sid: info for sid, info in self.failed_sessions.items()
             if info['time'] > cutoff

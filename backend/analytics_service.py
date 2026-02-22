@@ -3,8 +3,7 @@
 Meeting Analytics Service
 Provides analytics and insights on meeting data
 """
-
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from sqlalchemy import func, and_, or_
 from sqlalchemy.orm import Session
@@ -27,7 +26,7 @@ class AnalyticsService:
         """Get comprehensive meeting analytics for the specified time range"""
         
         # Calculate date range
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         if time_range == 'week':
             start_date = end_date - timedelta(days=7)
         elif time_range == 'month':

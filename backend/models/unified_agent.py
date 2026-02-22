@@ -3,7 +3,7 @@ Unified Meeting Agent Model
 Simplified single-agent approach inspired by Open WebUI
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Text, JSON, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from database.models import Base
@@ -78,8 +78,8 @@ Be concise, accurate, and focus on actionable insights.""")
     is_default = Column(Boolean, default=True)
     
     # Metadata
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     def to_dict(self):
         """Convert to dictionary for API responses"""

@@ -5,7 +5,7 @@ import json
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 
 from services.model_providers import ModelProviderFactory, ModelParameters
@@ -176,7 +176,7 @@ class MeetingNotesService:
             "participants": ["Name 1", "Name 2"],
             "sentiment": "positive/neutral/negative",
             "topics": ["Topic 1", "Topic 2"],
-            "lastUpdated": "{datetime.utcnow().isoformat()}",
+            "lastUpdated": "{datetime.now(timezone.utc).isoformat()}",
             "isIncremental": false
         }}
         
@@ -255,7 +255,7 @@ class MeetingNotesService:
             "participants": [],
             "sentiment": "neutral",
             "topics": [],
-            "lastUpdated": datetime.utcnow().isoformat(),
+            "lastUpdated": datetime.now(timezone.utc).isoformat(),
             "isIncremental": False
         }
     
@@ -271,7 +271,7 @@ class MeetingNotesService:
             "participants": [],
             "sentiment": "neutral",
             "topics": [],
-            "lastUpdated": datetime.utcnow().isoformat(),
+            "lastUpdated": datetime.now(timezone.utc).isoformat(),
             "isIncremental": False
         }
     
@@ -290,7 +290,7 @@ class MeetingNotesBuffer:
         self.service = service
         self.transcript_buffer = []
         self.last_notes = None
-        self.last_update_time = datetime.utcnow()
+        self.last_update_time = datetime.now(timezone.utc)
         self.update_interval = 30  # seconds
         self.min_words = 50  # minimum words before generating notes
     
@@ -299,7 +299,7 @@ class MeetingNotesBuffer:
         if text.strip():
             self.transcript_buffer.append({
                 "text": text,
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.now(timezone.utc)
             })
     
     def get_full_transcript(self) -> str:
@@ -319,7 +319,7 @@ class MeetingNotesBuffer:
     
     def should_update_notes(self) -> bool:
         """Check if notes should be updated based on time and content"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         time_since_update = (now - self.last_update_time).total_seconds()
         
         if time_since_update < self.update_interval:
@@ -349,7 +349,7 @@ class MeetingNotesBuffer:
                 notes = await self.service.generate_meeting_notes(full_transcript)
             
             self.last_notes = notes
-            self.last_update_time = datetime.utcnow()
+            self.last_update_time = datetime.now(timezone.utc)
             
             return notes
             
@@ -361,4 +361,4 @@ class MeetingNotesBuffer:
         """Clear the buffer"""
         self.transcript_buffer = []
         self.last_notes = None
-        self.last_update_time = datetime.utcnow()
+        self.last_update_time = datetime.now(timezone.utc)

@@ -6,7 +6,7 @@ import json
 import asyncio
 from typing import Dict, Set, Optional, List
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.whisperx_npu_service import whisperx_service
 from services.auto_summarization_service import auto_summarization_service
@@ -41,7 +41,7 @@ async def broadcast_progressive_summary(session_id: str, summary_data: Dict):
             "type": "progressive_summary",
             "session_id": session_id,
             "data": summary_data,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     # Send to all connected clients for this session
@@ -155,7 +155,7 @@ async def websocket_with_auto_summary(websocket: WebSocket, session_id: str):
                         await websocket.send_json({
                             "type": "manual_summary",
                             "summary": summary,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                     else:
                         await websocket.send_json({
@@ -205,7 +205,7 @@ async def websocket_with_auto_summary(websocket: WebSocket, session_id: str):
                 # Send keepalive
                 await websocket.send_json({
                     "type": "keepalive",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
     except WebSocketDisconnect:
@@ -270,7 +270,7 @@ async def broadcast_transcription_segment(session_id: str, segment: Dict):
                 await websocket.send_json({
                     "type": "transcription",
                     "segment": segment,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "word_count": session_word_counts[session_id],  # Total words so far
                     "segment_word_count": word_count  # Words in this segment
                 })

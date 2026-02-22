@@ -4,7 +4,7 @@ Session management API endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from database.database import get_db
 from database.models import RecordingSession
@@ -66,7 +66,7 @@ async def create_session(
         description=session_data.get("description", ""),
         participants=session_data.get("participants", []),
         status="pending",
-        created_at=datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
     db.add(session)
     db.commit()

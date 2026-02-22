@@ -10,7 +10,7 @@ import os
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 import redis.asyncio as redis
 
 try:
@@ -219,7 +219,7 @@ async def meeting_notes_websocket(
                             "type": "notes_update",
                             "notes": notes,
                             "provider": current_provider,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                 
                 # Listen for incoming messages
@@ -252,7 +252,7 @@ async def meeting_notes_websocket(
                             "type": "notes_update",
                             "notes": notes,
                             "provider": current_provider,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                 
             except WebSocketDisconnect:

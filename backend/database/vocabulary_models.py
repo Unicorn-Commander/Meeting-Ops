@@ -1,7 +1,7 @@
 """Vocabulary system database models"""
 from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey, Table
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from database.database import Base
 
@@ -24,8 +24,8 @@ class VocabularyTerm(Base):
     priority = Column(Integer, default=0)  # Higher priority = prefer this expansion
     context_hints = Column(JSON, default=list)  # Words that suggest this meaning
     created_by = Column(Integer)  # User ID who created this
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Relationship to sets
     sets = relationship("VocabularySet", secondary=vocabulary_set_terms, back_populates="terms")
@@ -52,8 +52,8 @@ class VocabularySet(Base):
     is_active = Column(Boolean, default=True)
     industry = Column(String(50))  # defense, medical, finance, tech
     created_by = Column(Integer)  # User ID
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Relationship to terms
     terms = relationship("VocabularyTerm", secondary=vocabulary_set_terms, back_populates="sets")

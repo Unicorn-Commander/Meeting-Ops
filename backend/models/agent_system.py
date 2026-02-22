@@ -3,7 +3,7 @@ Enhanced Agent System Models
 Multi-tier agent architecture supporting core pipeline + custom agents
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from sqlalchemy import Column, String, Text, JSON, Boolean, DateTime, Integer, Float, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
@@ -96,8 +96,8 @@ class MeetingAgent(Base):
     # Ownership and Metadata
     created_by = Column(UUID(as_uuid=True))  # User who created
     organization_id = Column(UUID(as_uuid=True))  # For multi-tenant
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Import/Export Support
     version = Column(String(20), default="1.0.0")
@@ -219,8 +219,8 @@ class AgentTemplate(Base):
     downloads = Column(Integer, default=0)
     rating = Column(Float)
     created_by = Column(UUID(as_uuid=True))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     def to_dict(self):
         return {
@@ -263,7 +263,7 @@ class AgentSession(Base):
     error_message = Column(Text)
     
     # Timestamps
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime)
     
     # Relationships

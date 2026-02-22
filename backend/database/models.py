@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 Base = declarative_base()
@@ -16,7 +16,7 @@ class Settings(Base):
     key = Column(String(100), nullable=False)
     value = Column(Text)
     description = Column(String(500))
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class RecordingSession(Base):
     """Recording session model"""
@@ -27,7 +27,7 @@ class RecordingSession(Base):
     name = Column(String(200))
     description = Column(Text)
     meeting_type = Column(String(100))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = Column(DateTime)  # Changed from start_time
     ended_at = Column(DateTime)    # Changed from end_time
     duration = Column(Float, default=0)
@@ -45,7 +45,7 @@ class RecordingSession(Base):
     ai_insights = Column(JSON)  # Legacy field for compatibility
     processing_metadata = Column(JSON)  # Processing stats and metadata (renamed from metadata)
     generated_emails = Column(JSON)  # Generated follow-up emails
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     def to_dict(self):
         return {
@@ -72,7 +72,7 @@ class Transcription(Base):
     start_time = Column(Float)  # Start time in seconds
     end_time = Column(Float)    # End time in seconds
     confidence = Column(Float)  # Transcription confidence
-    created_at = Column(DateTime, default=datetime.utcnow)  # Creation timestamp
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # Creation timestamp
     
     # REMOVED: These columns don't exist in actual database:
     # duration_seconds = Column(Float)  # ❌ REMOVED
@@ -138,4 +138,4 @@ class AudioFile(Base):
     duration_seconds = Column(Float)
     sample_rate = Column(Integer)
     channels = Column(Integer)
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

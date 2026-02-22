@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List
 import os
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import jwt
 from pydantic import BaseModel
 
@@ -72,7 +72,7 @@ class AuthentikAuth:
                 uid=uid or username,
                 groups=groups,
                 is_admin=is_admin,
-                authenticated_at=datetime.utcnow()
+                authenticated_at=datetime.now(timezone.utc)
             )
             
             logger.info(f"Authenticated user: {username} (admin: {is_admin}, groups: {groups})")
@@ -131,7 +131,7 @@ class AuthentikAuth:
                 user.full_name = authentik_user.name
                 user.is_active = True
                 user.is_superuser = authentik_user.is_admin
-                user.last_login = datetime.utcnow()
+                user.last_login = datetime.now(timezone.utc)
             else:
                 # Create new user
                 user = User(
@@ -141,8 +141,8 @@ class AuthentikAuth:
                     is_active=True,
                     is_superuser=authentik_user.is_admin,
                     hashed_password="",  # No password needed for SSO users
-                    created_at=datetime.utcnow(),
-                    last_login=datetime.utcnow()
+                    created_at=datetime.now(timezone.utc),
+                    last_login=datetime.now(timezone.utc)
                 )
                 db.add(user)
             
@@ -178,7 +178,7 @@ async def get_current_user(request: Request) -> AuthentikUser:
                 uid="dev-uid",
                 groups=["admin"],
                 is_admin=True,
-                authenticated_at=datetime.utcnow()
+                authenticated_at=datetime.now(timezone.utc)
             )
         
         raise HTTPException(

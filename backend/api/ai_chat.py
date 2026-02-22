@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 
@@ -187,7 +187,7 @@ async def send_chat_message(
     _chat_history[session_id].append({
         "role": "user",
         "content": request.message,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
     # Build user prompt including recent chat history for context
@@ -224,7 +224,7 @@ async def send_chat_message(
         _chat_history[session_id].append({
             "role": "assistant",
             "content": response_text,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
         # Trim history if it gets too long (keep last 20 messages)

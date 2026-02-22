@@ -7,7 +7,7 @@ and transcription efficiency.
 
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from collections import defaultdict
@@ -81,7 +81,7 @@ class PerformanceMetricsService:
             rtf = processing_time / audio_duration if audio_duration > 0 else 0
             
             metric = ModelPerformanceMetric(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 session_id=session_id,
                 model_id=model_id,
                 model_name=model_name,
@@ -108,7 +108,7 @@ class PerformanceMetricsService:
             stats['invocation_count'] += 1
             stats['rtf_samples'].append(rtf)
             stats['confidence_samples'].append(confidence_avg)
-            stats['last_used'] = datetime.utcnow()
+            stats['last_used'] = datetime.now(timezone.utc)
             
             # Keep only last 100 samples for efficiency
             if len(stats['rtf_samples']) > 100:
@@ -217,7 +217,7 @@ class PerformanceMetricsService:
     def get_recent_metrics(self, hours: int = 24, model_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get recent performance metrics"""
         try:
-            cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             
             filtered_metrics = []
             for metric in self.metrics_buffer:
@@ -334,7 +334,7 @@ class PerformanceMetricsService:
             return {
                 "models": comparison,
                 "winners": winners,
-                "comparison_timestamp": datetime.utcnow().isoformat()
+                "comparison_timestamp": datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -372,7 +372,7 @@ class PerformanceMetricsService:
             # Update or create setting
             if existing_setting:
                 existing_setting.value = all_metrics
-                existing_setting.updated_at = datetime.utcnow()
+                existing_setting.updated_at = datetime.now(timezone.utc)
             else:
                 new_setting = Settings(
                     key="performance.metrics_data",

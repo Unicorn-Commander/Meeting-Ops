@@ -7,7 +7,7 @@ import json
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from redis import Redis
@@ -135,7 +135,7 @@ class GemmaService:
                 result = json.loads(response_text)
 
                 # Add metadata
-                result['generated_at'] = datetime.utcnow().isoformat()
+                result['generated_at'] = datetime.now(timezone.utc).isoformat()
                 result['model'] = self.model
 
                 # Cache the result
@@ -208,7 +208,7 @@ class GemmaService:
 
             if response_text:
                 result = json.loads(response_text)
-                result['lastUpdated'] = datetime.utcnow().isoformat()
+                result['lastUpdated'] = datetime.now(timezone.utc).isoformat()
                 result['isIncremental'] = True
                 return result
             else:
@@ -325,7 +325,7 @@ class GemmaService:
             "participants": [],
             "sentiment": "neutral",
             "topics": [],
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "error": True
         }
 
@@ -361,7 +361,7 @@ class MeetingNotesBuffer:
         self.buffer_duration = buffer_duration
         self.min_words = min_words
         self.buffer = []
-        self.last_generation = datetime.utcnow()
+        self.last_generation = datetime.now(timezone.utc)
         self.current_notes = None
 
     async def add_segment(self, segment: Dict) -> Optional[Dict]:
@@ -377,7 +377,7 @@ class MeetingNotesBuffer:
         self.buffer.append(segment)
 
         # Check if we should generate notes
-        time_elapsed = (datetime.utcnow() - self.last_generation).seconds
+        time_elapsed = (datetime.now(timezone.utc) - self.last_generation).seconds
         word_count = sum(len(s.get('text', '').split()) for s in self.buffer)
 
         if time_elapsed >= self.buffer_duration and word_count >= self.min_words:
@@ -404,7 +404,7 @@ class MeetingNotesBuffer:
 
         # Clear buffer and reset timer
         self.buffer = []
-        self.last_generation = datetime.utcnow()
+        self.last_generation = datetime.now(timezone.utc)
 
         return self.current_notes
 

@@ -15,6 +15,9 @@ else
     echo "PipeWire audio: not available (recording may use direct ALSA)"
 fi
 
+# Set mic gain if script exists
+[ -x "../scripts/set-mic-gain.sh" ] && ../scripts/set-mic-gain.sh &
+
 # Load environment variables from .env file
 if [ -f ../.env ]; then
     echo "Loading configuration from parent .env file..."

@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from typing import Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -206,7 +206,7 @@ class UnifiedAgentService:
                 'agent': agent,
                 'config': config,
                 'websocket_callback': websocket_callback,
-                'started_at': datetime.utcnow(),
+                'started_at': datetime.now(timezone.utc),
                 'summary_count': 0
             }
 
@@ -380,7 +380,7 @@ class UnifiedAgentService:
                         "model": self.model_name,
                         "processing_time_ms": processing_time
                     },
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
 
                 # Try to broadcast to /ws/transcription-auto/{session_id} connections
@@ -718,7 +718,7 @@ RESPOND WITH JSON:
                     "model": self.model_name,
                     "processing_time_ms": processing_time
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
             await websocket_callback(message)
@@ -748,7 +748,7 @@ RESPOND WITH JSON:
                     "model_size": self.model_name,
                     "sections": summary
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
             await websocket_callback(message)
@@ -775,7 +775,7 @@ RESPOND WITH JSON:
 
             # Create progressive summary entry (plain text format)
             progressive_entry = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "word_count_at_summary": interval_info.get('current_word_count', 0),
                 "interval_used": interval_info.get('current_interval', 500),
                 "processing_time_ms": processing_time,
@@ -798,7 +798,7 @@ RESPOND WITH JSON:
             # Also update processing_metadata with latest stats
             metadata = session.processing_metadata or {}
             metadata.update({
-                "last_progressive_summary": datetime.utcnow().isoformat(),
+                "last_progressive_summary": datetime.now(timezone.utc).isoformat(),
                 "total_progressive_summaries": len(summaries),
                 "current_word_count": interval_info.get('current_word_count', 0),
                 "model_used": self.model_name

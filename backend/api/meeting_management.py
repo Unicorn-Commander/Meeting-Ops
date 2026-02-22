@@ -4,7 +4,7 @@ Complete Meeting Management API endpoints for the frontend
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import json
 import os
@@ -71,7 +71,7 @@ async def create_session(
         "id": session_id,
         "name": session_data.name,
         "description": session_data.description,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "created",
         "start_time": None,
         "audio_chunks": []
@@ -81,7 +81,7 @@ async def create_session(
         "id": session_id,
         "name": session_data.name,
         "description": session_data.description,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "created"
     }
 
@@ -214,7 +214,7 @@ async def start_recording(
     
     # Update session status
     active_recordings[session_id]["status"] = "recording"
-    active_recordings[session_id]["start_time"] = datetime.utcnow().isoformat()
+    active_recordings[session_id]["start_time"] = datetime.now(timezone.utc).isoformat()
     
     # TODO: Start actual audio recording here
     # For now, just return success
@@ -233,11 +233,11 @@ async def stop_recording(
     # Calculate duration
     if active_recordings[session_id].get("start_time"):
         start = datetime.fromisoformat(active_recordings[session_id]["start_time"])
-        duration = (datetime.utcnow() - start).total_seconds()
+        duration = (datetime.now(timezone.utc) - start).total_seconds()
         active_recordings[session_id]["duration"] = int(duration)
     
     active_recordings[session_id]["status"] = "completed"
-    active_recordings[session_id]["end_time"] = datetime.utcnow().isoformat()
+    active_recordings[session_id]["end_time"] = datetime.now(timezone.utc).isoformat()
     
     # TODO: Stop actual audio recording and trigger transcription
     
@@ -534,7 +534,7 @@ async def get_meeting_analytics(
     """Get meeting analytics for a time range"""
     try:
         # Calculate date range
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         if range == "week":
             start_date = end_date - timedelta(days=7)
         elif range == "month":

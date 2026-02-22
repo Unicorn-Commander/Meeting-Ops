@@ -12,7 +12,7 @@ from database.database import get_db
 from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary
 from auth.dependencies import get_current_user
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ async def update_vocabulary_term(
     for field, value in term_data.dict(exclude_unset=True).items():
         setattr(term, field, value)
     
-    term.updated_at = datetime.utcnow()
+    term.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(term)
     
@@ -292,7 +292,7 @@ async def update_vocabulary_set(
             value = [UUID(vid) for vid in value]
         setattr(vocab_set, field, value)
     
-    vocab_set.updated_at = datetime.utcnow()
+    vocab_set.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(vocab_set)
     
@@ -338,7 +338,7 @@ async def add_term_to_set(
     
     if term_id not in vocab_set.vocab_ids:
         vocab_set.vocab_ids = vocab_set.vocab_ids + [term_id]
-        vocab_set.updated_at = datetime.utcnow()
+        vocab_set.updated_at = datetime.now(timezone.utc)
         db.commit()
     
     return {"message": "Term added to set successfully"}
@@ -358,7 +358,7 @@ async def remove_term_from_set(
     
     if vocab_set.vocab_ids and term_id in vocab_set.vocab_ids:
         vocab_set.vocab_ids = [vid for vid in vocab_set.vocab_ids if vid != term_id]
-        vocab_set.updated_at = datetime.utcnow()
+        vocab_set.updated_at = datetime.now(timezone.utc)
         db.commit()
     
     return {"message": "Term removed from set successfully"}

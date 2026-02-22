@@ -6,7 +6,7 @@ Provides real analytics data from sessions and transcription segments
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
 import logging
 import json
@@ -26,7 +26,7 @@ async def get_analytics_summary(
     """Get analytics summary with real session and speaker data"""
     try:
         # Calculate date range
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if time_range == "week":
             start_date = now - timedelta(days=7)
         elif time_range == "month":
@@ -187,7 +187,7 @@ async def get_speaker_analytics(
 ) -> Dict[str, Any]:
     """Get detailed speaker analytics across sessions"""
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if time_range == "week":
             start_date = now - timedelta(days=7)
         elif time_range == "month":
@@ -254,7 +254,7 @@ async def get_duration_trends(
 ) -> Dict[str, Any]:
     """Get average meeting duration trends grouped by day or week"""
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if time_range == "week":
             start_date = now - timedelta(days=7)
         elif time_range == "month":
@@ -321,7 +321,7 @@ async def get_performance_metrics(db: Session = Depends(get_db)) -> Dict[str, An
     try:
         # Get recent completed sessions for performance analysis
         recent_sessions = db.query(DBRecordingSession).filter(
-            DBRecordingSession.created_at >= datetime.utcnow() - timedelta(days=7),
+            DBRecordingSession.created_at >= datetime.now(timezone.utc) - timedelta(days=7),
             DBRecordingSession.status == "completed"
         ).all()
         
@@ -342,7 +342,7 @@ async def get_performance_metrics(db: Session = Depends(get_db)) -> Dict[str, An
         
         return {
             "npu": npu_metrics,
-            "generated_at": datetime.utcnow().isoformat()
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
