@@ -19,7 +19,7 @@ cd backend && ./start-backend.sh
 cd frontend && npm run dev -- --host 0.0.0.0
 
 # Run tests
-cd backend && python3 -m pytest tests/ -v    # 39 pass, 3 skip
+cd backend && python3 -m pytest tests/ -v    # 40 pass, 3 skip
 cd frontend && npm run build                  # 0 TS errors
 cd frontend && npx vitest run                 # 23 pass
 ```
@@ -56,9 +56,9 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 
 ### Backend (FastAPI + Python 3.13)
 
-**main.py** loads 21 routers with status tracking:
+**main.py** loads 22 routers with status tracking:
 - 3 required (auth, recording, sessions) - fail fast
-- 18 optional (agent, AI, analytics, satellite, etc.) - log warning on failure
+- 19 optional (agent, AI, analytics, satellite, etc.) - log warning on failure
 - `/health` reports router status and real timestamps
 
 **Key API routers** (in `backend/api/`):
@@ -86,7 +86,7 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - PostgreSQL on port 5434 (session/transcript storage)
 - Redis (real-time pub/sub)
 - llama.cpp Vulkan on port 11437 (Granite 3.3 2B)
-- Qdrant on port 6333 (vector search - not yet integrated)
+- Qdrant on port 6335 (hybrid vector search — dense + BM25 sparse)
 
 ### NPU (AMD Phoenix, 16 TOPS)
 - 220x speedup over CPU, 0.0045 RTF
@@ -107,6 +107,9 @@ GET  /api/simple/recording-sessions/{id}/download/audio   # Download WAV
 GET  /api/simple/recording-sessions/{id}/download/summary/pdf   # PDF export
 GET  /api/simple/recording-sessions/{id}/download/summary/docx  # DOCX export
 POST /api/ai-chat/sessions/{id}/messages          # AI chat with meeting context
+POST /api/ai-chat/rag/query                       # Cross-meeting RAG query (multi-turn)
+GET  /api/ai-chat/rag/history                     # RAG chat history
+GET  /api/simple/recording-sessions/semantic-search?q=...  # Hybrid semantic search (Qdrant)
 GET  /api/analytics/summary                       # Analytics with speaker data
 GET  /api/analytics/speakers                      # Speaker analytics
 GET  /api/analytics/duration-trends               # Duration trends
@@ -131,16 +134,32 @@ WS   /ws/satellite/{device_id}/audio               # Real-time satellite audio s
 WS   /ws/remote-audio/{session_id}                  # Remote audio stream from companion app
 ```
 
+### MCP Server (Model Context Protocol)
+Standalone MCP server for external AI agent access to Meeting-Ops data.
+- Location: `mcp/meeting_ops_mcp.py`
+- Transport: stdio (for Claude Desktop, Open WebUI, etc.)
+- 8 tools: search_meetings, ask_about_meetings, list_meetings, get_meeting_details, get_meeting_transcript, chat_with_meeting, get_analytics, get_meeting_insights
+- 2 resources: meetings://list, meetings://{session_id}
+- 2 prompts: meeting_analysis, cross_meeting_research
+- Config: `MEETING_OPS_URL`, `MEETING_OPS_USER`, `MEETING_OPS_PASS` env vars
+
+```bash
+# Run standalone
+python3 mcp/meeting_ops_mcp.py
+
+# Claude Desktop config (~/.claude/claude_desktop_config.json)
+# { "mcpServers": { "meeting-ops": { "command": "python3", "args": ["/path/to/mcp/meeting_ops_mcp.py"] } } }
+```
+
 ## Known Issues
-1. Qdrant vector search not yet integrated (full-text SQL search available)
-2. Audio file path occasional double-nesting of path components
+1. Audio file path occasional double-nesting of path components
 
 ## File Structure
 ```
 UC-Meeting-Ops/
   backend/
-    main.py                    # FastAPI app, 21 routers
-    api/                       # 21 API routers (incl. satellite_api, websocket_satellite)
+    main.py                    # FastAPI app, 22 routers
+    api/                       # 22 API routers (incl. satellite, remote audio)
     services/                  # 22 service modules
     auth/                      # JWT authentication
     database/                  # SQLAlchemy models + connection
@@ -158,6 +177,8 @@ UC-Meeting-Ops/
       hooks/                   # 1 hook (useKeyboardShortcuts)
       __tests__/               # 4 test files (23 tests)
       config.ts                # API URL configuration
+  mcp/
+    meeting_ops_mcp.py         # MCP server for external AI agents (8 tools)
   docs/                        # Design documents
     companion-app-design.md    # Mac/PC companion app architecture
     satellite-devices-design.md # ESP32/RPi satellite device specs
