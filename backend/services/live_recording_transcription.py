@@ -1,7 +1,8 @@
 """
 Live Recording Transcription Service
-Processes chunks of audio during recording for real-time transcription
-Uses NPU-accelerated transcription_service (WhisperX NPU)
+Processes chunks of audio during recording for real-time transcription.
+Primary: whisper.cpp server (Vulkan iGPU, large-v3-turbo, ~9.6x realtime)
+Fallback: transcription_service (CPU faster-whisper)
 """
 
 import asyncio
@@ -25,7 +26,8 @@ class LiveRecordingTranscriptionService:
     """
     Service that monitors an active recording and transcribes chunks
     in real-time for live transcription display.
-    Uses the NPU-accelerated transcription_service for fast inference.
+    Primary: whisper.cpp HTTP server (Vulkan iGPU) on port 8178
+    Fallback: local transcription_service (CPU faster-whisper)
     """
 
     def __init__(self):
@@ -69,7 +71,7 @@ class LiveRecordingTranscriptionService:
         logger.info("Stopped live transcription monitoring")
 
     async def _monitor_and_transcribe(self):
-        """Monitor recording file and transcribe new chunks using NPU service"""
+        """Monitor recording file and transcribe new chunks via whisper-server (Vulkan iGPU)"""
         chunk_duration = 15  # 15-second chunks for good accuracy
         chunk_overlap = 2   # 2-second overlap for continuity
         recording_sample_rate = 44100  # Recording at 44.1kHz
@@ -78,15 +80,18 @@ class LiveRecordingTranscriptionService:
         overlap_samples = chunk_overlap * recording_sample_rate
         min_chunk_duration = 3  # Minimum chunk size to avoid bad transcriptions
 
-        # Import NPU transcription service (works on AMD, no CUDA needed)
-        from services.transcription_service import transcription_service
-        from api.websocket_transcription import broadcast_transcription_update
+        # Try whisper-server (Vulkan iGPU, ~9.6x realtime) first, fallback to CPU
+        from services.whisper_server_client import whisper_server_client
+        use_whisper_server = whisper_server_client.is_available()
 
-        if not transcription_service.is_ready:
-            logger.error("Transcription service not ready - live transcription disabled")
-            return
-
-        logger.info(f"Using NPU transcription service: model={transcription_service.current_model_id}, ready={transcription_service.is_ready}")
+        if use_whisper_server:
+            logger.info("Using whisper-server (Vulkan iGPU large-v3-turbo) for live transcription")
+        else:
+            from services.transcription_service import transcription_service
+            if not transcription_service.is_ready:
+                logger.error("No transcription backend available - live transcription disabled")
+                return
+            logger.info(f"Whisper-server unavailable, falling back to CPU: model={transcription_service.current_model_id}")
 
         # Wait for file to be created (up to 10 seconds)
         file_wait_count = 0
@@ -131,28 +136,39 @@ class LiveRecordingTranscriptionService:
 
                             logger.info(f"Processing chunk: {chunk_duration_actual:.1f}s of audio from position {self.last_position}")
 
-                            # Resample from 44.1kHz to 16kHz for Whisper
-                            import librosa
-                            chunk_resampled = librosa.resample(
-                                chunk_data,
-                                orig_sr=recording_sample_rate,
-                                target_sr=target_sample_rate
-                            )
-
                             # Save chunk to temporary WAV file
                             tmp_fd, tmp_path = tempfile.mkstemp(suffix='.wav')
                             os.close(tmp_fd)
-                            sf.write(tmp_path, chunk_resampled, target_sample_rate)
 
-                            # Transcribe using NPU transcription service
-                            try:
-                                result = await asyncio.get_event_loop().run_in_executor(
-                                    None,
-                                    transcription_service.transcribe_file,
-                                    tmp_path
+                            if use_whisper_server:
+                                # Whisper-server handles resampling via ffmpeg (--convert flag)
+                                sf.write(tmp_path, chunk_data, recording_sample_rate)
+                                try:
+                                    result = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        whisper_server_client.transcribe_file,
+                                        tmp_path
+                                    )
+                                finally:
+                                    os.unlink(tmp_path)
+                            else:
+                                # CPU fallback: resample to 16kHz first
+                                import librosa
+                                chunk_resampled = librosa.resample(
+                                    chunk_data,
+                                    orig_sr=recording_sample_rate,
+                                    target_sr=target_sample_rate
                                 )
-                            finally:
-                                os.unlink(tmp_path)
+                                sf.write(tmp_path, chunk_resampled, target_sample_rate)
+                                try:
+                                    from services.transcription_service import transcription_service as ts_fallback
+                                    result = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        ts_fallback.transcribe_file,
+                                        tmp_path
+                                    )
+                                finally:
+                                    os.unlink(tmp_path)
 
                             if result and result.get("segments"):
                                 for segment in result["segments"]:

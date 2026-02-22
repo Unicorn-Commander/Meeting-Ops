@@ -102,21 +102,29 @@ async def get_model_info():
     except Exception as e:
         llm_info["error"] = str(e)
 
-    # Get STT model info from transcription_service
-    stt_info = {}
+    # Get whisper-server (Vulkan iGPU) status
+    whisper_server_info = {"available": False}
     try:
-        from services.transcription_service import transcription_service
-        stt_info = transcription_service.get_current_model_info()
+        from services.whisper_server_client import whisper_server_client
+        ws_available = whisper_server_client.is_available()
+        whisper_server_info = {
+            "available": ws_available,
+            "model": "large-v3-turbo",
+            "backend": "whisper.cpp Vulkan (780M iGPU)",
+            "endpoint": whisper_server_client.base_url,
+            "speed": "~9.6x realtime",
+            "rtf": 0.104,
+        }
     except Exception as e:
-        stt_info = {"error": str(e)}
+        whisper_server_info["error"] = str(e)
 
-    # Get available STT models
-    stt_available = []
+    # Get fallback STT model info from transcription_service
+    stt_fallback = {}
     try:
         from services.transcription_service import transcription_service
-        stt_available = transcription_service.get_available_models()
-    except Exception:
-        pass
+        stt_fallback = transcription_service.get_current_model_info()
+    except Exception as e:
+        stt_fallback = {"error": str(e)}
 
     return {
         "llm": {
@@ -130,8 +138,11 @@ async def get_model_info():
             "context_window": 8192,
             "vram_usage": "~1.5GB"
         },
-        "stt": stt_info,
-        "stt_available": stt_available,
+        "stt": {
+            "primary": whisper_server_info,
+            "fallback": stt_fallback,
+            "active": "whisper-server-vulkan" if whisper_server_info.get("available") else "cpu-fallback",
+        },
         "available_llm_models": [
             {
                 "name": "granite-3.3-2b-instruct",

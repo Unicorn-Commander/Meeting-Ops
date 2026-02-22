@@ -172,6 +172,7 @@ export default function LiveRecording() {
   const [audioDevices, setAudioDevices] = useState<any[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [llmModelName, setLlmModelName] = useState<string>('Granite 3.3 2B');
+  const [sttModelName, setSttModelName] = useState<string>('Whisper large-v3-turbo');
   
   const wsRef = useRef<WebSocket | null>(null);
   const audioWsRef = useRef<WebSocket | null>(null);
@@ -463,6 +464,14 @@ export default function LiveRecording() {
           const data = await response.json();
           const label = data.llm?.model_label || data.llm?.model || 'Granite 3.3 2B';
           setLlmModelName(label);
+          // Set STT model name based on active backend
+          if (data.stt?.active === 'whisper-server-vulkan') {
+            const model = data.stt?.primary?.model || 'large-v3-turbo';
+            setSttModelName(`Whisper ${model} (Vulkan)`);
+          } else {
+            const fallbackName = data.stt?.fallback?.name || 'WhisperX NPU';
+            setSttModelName(fallbackName);
+          }
         }
       } catch (error) {
         console.debug('Failed to fetch model info, using default:', error);
@@ -1417,7 +1426,7 @@ export default function LiveRecording() {
                 <div className="text-sm font-medium text-green-300">
                   {isRecording ? 'Live' : 'Ready'}
                 </div>
-                <div className="text-xs text-orange-300">WhisperX NPU</div>
+                <div className="text-xs text-orange-300">{sttModelName}</div>
               </div>
               
               {/* AI Model Status */}
