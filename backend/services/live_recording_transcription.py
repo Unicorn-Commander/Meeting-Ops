@@ -22,6 +22,43 @@ logger = logging.getLogger(__name__)
 # Redis URL from environment (default matches docker-compose port 6381)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6381")
 
+# Known Whisper hallucination patterns (case-insensitive, stripped)
+# These appear when Whisper processes silence or near-silence
+_HALLUCINATION_PATTERNS = {
+    "thank you", "thank you.", "thank you!", "thank you for watching",
+    "thank you for watching.", "thanks for watching", "thanks for watching.",
+    "thanks", "thanks.", "bye", "bye.", "bye bye", "bye bye.",
+    "goodbye", "goodbye.", "you", "you.", "the end", "the end.",
+    "subscribe", "subscribe.", "please subscribe",
+    "like and subscribe", "see you next time",
+    "subtitles by", "subtitles made by", "amara.org",
+}
+
+
+def _is_hallucination(text: str) -> bool:
+    """Check if transcribed text is a known Whisper hallucination."""
+    cleaned = text.strip().lower().rstrip("!.,?")
+    if cleaned in _HALLUCINATION_PATTERNS:
+        return True
+    # Catch repeated single-word outputs
+    words = cleaned.split()
+    if len(words) <= 3 and len(set(words)) == 1:
+        return True
+    return False
+
+
+def _chunk_has_speech(audio: np.ndarray, threshold_db: float = -40.0) -> bool:
+    """Check if audio chunk has enough energy to contain speech.
+    Returns False for silence/near-silence to avoid sending to Whisper.
+    """
+    if len(audio) == 0:
+        return False
+    rms = np.sqrt(np.mean(audio ** 2))
+    if rms < 1e-10:
+        return False
+    db = 20 * np.log10(rms)
+    return db > threshold_db
+
 class LiveRecordingTranscriptionService:
     """
     Service that monitors an active recording and transcribes chunks
@@ -141,6 +178,12 @@ class LiveRecordingTranscriptionService:
 
                             logger.info(f"Processing chunk: {chunk_duration_actual:.1f}s of audio from position {self.last_position}")
 
+                            # Skip silent chunks to avoid Whisper hallucinations
+                            if not _chunk_has_speech(chunk_data):
+                                logger.debug(f"Skipping silent chunk at position {self.last_position}")
+                                self.last_position += chunk_samples
+                                continue
+
                             # Save chunk to temporary WAV file
                             tmp_fd, tmp_path = tempfile.mkstemp(suffix='.wav')
                             os.close(tmp_fd)
@@ -205,6 +248,11 @@ class LiveRecordingTranscriptionService:
                                     if not text or len(text) < 3:
                                         continue
 
+                                    # Filter known Whisper hallucinations
+                                    if _is_hallucination(text):
+                                        logger.debug(f"Filtered hallucination: '{text}'")
+                                        continue
+
                                     # Adjust timestamps to absolute position in recording
                                     seg_start = segment.get("start", 0)
                                     seg_end = segment.get("end", 0)
@@ -251,7 +299,7 @@ class LiveRecordingTranscriptionService:
                             elif result and result.get("text"):
                                 # Result has text but no segments - broadcast as single segment
                                 text = result["text"].strip()
-                                if text and len(text) >= 3:
+                                if text and len(text) >= 3 and not _is_hallucination(text):
                                     broadcast_segment = {
                                         "text": text,
                                         "start": float(self.last_position / recording_sample_rate),

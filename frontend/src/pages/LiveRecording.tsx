@@ -20,7 +20,8 @@ import {
   Brain,
   Target,
   MessageSquare,
-  Zap
+  Zap,
+  RotateCcw
 } from 'lucide-react';
 import { config } from '../config';
 
@@ -1015,7 +1016,7 @@ export default function LiveRecording() {
               {/* Status */}
               <div className="mt-6 text-center">
                 <div className="text-2xl font-semibold text-white">
-                  {isRecording ? 'Recording...' : 'Ready to Record'}
+                  {isRecording ? 'Recording...' : (sessionData && !sessionData.isRecording ? 'Recording Complete' : 'Ready to Record')}
                 </div>
                 {isRecording && (
                   <div className="text-4xl font-mono text-zinc-300 mt-2">
@@ -1027,6 +1028,26 @@ export default function LiveRecording() {
                     <AlertCircle className="w-4 h-4" />
                     No audio device detected
                   </div>
+                )}
+                {/* New Recording button - shown after recording stops */}
+                {sessionData && !isRecording && !isProcessing && (
+                  <button
+                    onClick={() => {
+                      setSessionData(null);
+                      setLiveTranscript([]);
+                      setAutoSummary(null);
+                      setDuration(0);
+                      setProgressiveData(null);
+                      startTimeRef.current = null;
+                      localStorage.removeItem('activeRecordingSession');
+                      localStorage.removeItem('lastMeetingSummary');
+                      localStorage.removeItem('lastMeetingTimestamp');
+                    }}
+                    className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-300 hover:text-white transition-colors text-sm"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    New Recording
+                  </button>
                 )}
               </div>
               
