@@ -46,6 +46,10 @@ class RecordingSession(Base):
     processing_metadata = Column(JSON)  # Processing stats and metadata (renamed from metadata)
     generated_emails = Column(JSON)  # Generated follow-up emails
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # Satellite device fields
+    source_device_id = Column(String(100), nullable=True)  # Which satellite recorded this
+    source_type = Column(String(50), default="local_mic")  # "local_mic", "satellite_stream", "satellite_upload", "satellite_transcript", "companion_app"
+    room_name = Column(String(200), nullable=True)  # Physical room name
     
     def to_dict(self):
         return {
@@ -139,3 +143,37 @@ class AudioFile(Base):
     sample_rate = Column(Integer)
     channels = Column(Integer)
     uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ChatHistory(Base):
+    """Persisted AI chat history for per-meeting and cross-meeting RAG conversations."""
+    __tablename__ = "chat_history"
+
+    id = Column(Integer, primary_key=True)
+    # session_id for per-meeting chat, or "__rag__" for cross-meeting RAG chat
+    session_key = Column(String(200), nullable=False, index=True)
+    role = Column(String(20), nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)
+    metadata_json = Column(Text, nullable=True)  # JSON string for extra metadata
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SatelliteDevice(Base):
+    """Satellite recording device (ESP32-S3, Raspberry Pi, companion app)"""
+    __tablename__ = "satellite_devices"
+
+    id = Column(Integer, primary_key=True)
+    device_id = Column(String(100), unique=True, nullable=False)
+    name = Column(String(200))
+    room_name = Column(String(200))
+    device_type = Column(String(50))  # "esp32", "esp32-s3", "rpi4", "rpi5", "companion-app"
+    capabilities = Column(Text)  # JSON string: {"audio": true, "local_stt": false, "vad": false, "sd_card": true}
+    ip_address = Column(String(50))
+    last_heartbeat = Column(DateTime)
+    status = Column(String(50), default="offline")  # "online", "offline", "recording", "uploading", "error"
+    firmware_version = Column(String(50))
+    config = Column(Text)  # JSON string: {"sample_rate": 16000, "bit_depth": 16, "channels": 1, "stream_mode": "websocket"}
+    api_key = Column(String(200))  # Hashed API key for device authentication
+    current_session_id = Column(String(100), nullable=True)  # Active recording session
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))

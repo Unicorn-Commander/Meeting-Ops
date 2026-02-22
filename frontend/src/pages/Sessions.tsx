@@ -3,7 +3,7 @@ import {
   Plus, Search, Filter, Calendar, Mic, Clock, Users,
   FileText, Download, Trash2, Play, Eye, Tag,
   ChevronDown, Grid, List, SortAsc, SortDesc,
-  Upload, FolderOpen, Star, Archive
+  Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
@@ -46,6 +46,12 @@ export const Sessions: React.FC = () => {
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cross-meeting RAG state
+  const [ragAnswer, setRagAnswer] = useState<string | null>(null);
+  const [ragSources, setRagSources] = useState<{session_id: string; title: string; score: number}[]>([]);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [showRagPanel, setShowRagPanel] = useState(false);
 
   // Debounced server-side search (keyword + semantic)
   const performSearch = useCallback(async (query: string) => {
@@ -142,6 +148,39 @@ export const Sessions: React.FC = () => {
       performSearch(value);
     }, 300);
   }, [performSearch]);
+
+  // Cross-meeting RAG query
+  const askAiAboutMeetings = useCallback(async () => {
+    if (!searchQuery || searchQuery.length < 2) return;
+    setRagLoading(true);
+    setShowRagPanel(true);
+    setRagAnswer(null);
+    setRagSources([]);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ message: searchQuery, limit: 5 }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRagAnswer(data.answer || 'No answer generated.');
+        setRagSources(data.sources || []);
+      } else {
+        const errText = await res.text();
+        setRagAnswer(`Error: ${res.status} - ${errText}`);
+      }
+    } catch (err) {
+      console.error('RAG query failed:', err);
+      setRagAnswer('Failed to reach the AI service. Is the backend running?');
+    } finally {
+      setRagLoading(false);
+    }
+  }, [searchQuery]);
 
   useEffect(() => {
     fetchSessions();
@@ -474,6 +513,23 @@ export const Sessions: React.FC = () => {
               />
             </div>
 
+            {/* Ask AI - Cross-meeting RAG */}
+            {searchQuery && searchQuery.length >= 2 && (
+              <button
+                onClick={askAiAboutMeetings}
+                disabled={ragLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 text-white rounded-lg transition-colors whitespace-nowrap"
+                title="Ask AI about all meetings"
+              >
+                {ragLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <MessageSquare className="w-4 h-4" />
+                )}
+                Ask AI
+              </button>
+            )}
+
             {/* View Mode Toggle */}
             <div className="flex items-center bg-gray-800 rounded-lg">
               <button
@@ -548,6 +604,58 @@ export const Sessions: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* RAG Answer Panel */}
+        {showRagPanel && (
+          <div className="bg-gray-900 rounded-lg border border-fuchsia-800/50 p-4 mb-6">
+            <div className="flex items-start justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-fuchsia-400" />
+                <h3 className="text-lg font-semibold text-fuchsia-300">AI Answer</h3>
+                {searchQuery && (
+                  <span className="text-sm text-gray-500 ml-2">for "{searchQuery}"</span>
+                )}
+              </div>
+              <button
+                onClick={() => setShowRagPanel(false)}
+                className="p-1 text-gray-400 hover:text-white rounded transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {ragLoading ? (
+              <div className="flex items-center gap-3 py-4">
+                <Loader2 className="w-5 h-5 text-fuchsia-400 animate-spin" />
+                <span className="text-gray-400">Searching meetings and generating answer...</span>
+              </div>
+            ) : (
+              <>
+                <div className="text-gray-200 text-sm whitespace-pre-wrap leading-relaxed mb-3">
+                  {ragAnswer}
+                </div>
+                {ragSources.length > 0 && (
+                  <div className="border-t border-gray-800 pt-3 mt-3">
+                    <p className="text-xs text-gray-500 mb-2">Sources:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {ragSources.map((src, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => navigate(`/sessions/${src.session_id}`)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg border border-gray-700 transition-colors"
+                        >
+                          <FileText className="w-3 h-3 text-fuchsia-400" />
+                          {src.title || 'Untitled'}
+                          <span className="text-gray-500">({Math.round(src.score * 100)}%)</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         {/* Sessions */}
         {loading ? (

@@ -119,6 +119,10 @@ _load_router(app, "batch_export", "api.batch_export")
 _load_router(app, "audio_upload", "api.audio_upload")
 _load_router(app, "simple_settings", "api.simple_settings")
 
+# === SATELLITE DEVICE ROUTERS (optional) ===
+_load_router(app, "satellite_api", "api.satellite_api")
+_load_router(app, "websocket_satellite", "api.websocket_satellite")
+
 
 # === CORE API ENDPOINTS ===
 

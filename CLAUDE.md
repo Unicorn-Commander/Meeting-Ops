@@ -56,9 +56,9 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 
 ### Backend (FastAPI + Python 3.13)
 
-**main.py** loads 19 routers with status tracking:
+**main.py** loads 21 routers with status tracking:
 - 3 required (auth, recording, sessions) - fail fast
-- 16 optional (agent, AI, analytics, etc.) - log warning on failure
+- 18 optional (agent, AI, analytics, satellite, etc.) - log warning on failure
 - `/health` reports router status and real timestamps
 
 **Key API routers** (in `backend/api/`):
@@ -71,6 +71,8 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `vocabulary.py` - Custom vocabulary CRUD
 - `websocket_transcription.py` - Live transcription via WebSocket
 - `websocket_auto_summary.py` - Progressive AI summaries
+- `satellite_api.py` - Satellite device CRUD, heartbeat, audio/transcript upload
+- `websocket_satellite.py` - Real-time audio streaming from satellite devices
 
 **Key services** (in `backend/services/`):
 - `unified_llm_service.py` - Granite 3.3 2B via llama.cpp OpenAI API
@@ -111,6 +113,19 @@ GET  /api/simple/recording-sessions/{id}/insights  # AI insights (keywords, sent
 WS   /ws/transcription/{session_id}               # Live transcription
 WS   /ws/audio-levels                             # Audio level monitoring
 GET  /health                                       # Health + router status
+# Satellite Devices
+POST /api/satellites/register                      # Register satellite device
+GET  /api/satellites                               # List all satellites
+GET  /api/satellites/{device_id}                   # Get satellite details
+PUT  /api/satellites/{device_id}                   # Update satellite config
+DELETE /api/satellites/{device_id}                  # Remove satellite
+POST /api/satellites/{device_id}/heartbeat         # Device heartbeat
+POST /api/satellites/{device_id}/upload-audio       # Upload WAV (store-and-forward)
+POST /api/satellites/{device_id}/transcript         # Upload transcript (local STT)
+POST /api/satellites/{device_id}/start-recording    # Trigger recording
+POST /api/satellites/{device_id}/stop-recording     # Stop recording
+GET  /api/satellites/rooms                          # List rooms with satellites
+WS   /ws/satellite/{device_id}/audio               # Real-time satellite audio stream
 ```
 
 ## Known Issues
@@ -121,8 +136,8 @@ GET  /health                                       # Health + router status
 ```
 UC-Meeting-Ops/
   backend/
-    main.py                    # FastAPI app, 19 routers
-    api/                       # 19 API routers
+    main.py                    # FastAPI app, 21 routers
+    api/                       # 21 API routers (incl. satellite_api, websocket_satellite)
     services/                  # 22 service modules
     auth/                      # JWT authentication
     database/                  # SQLAlchemy models + connection
@@ -140,6 +155,7 @@ UC-Meeting-Ops/
       hooks/                   # 1 hook (useKeyboardShortcuts)
       __tests__/               # 4 test files (23 tests)
       config.ts                # API URL configuration
+  docs/                        # Design documents (satellite-devices-design.md)
   models/                      # GGUF model files for llama.cpp
   docker-compose-full-stack.yml
 ```

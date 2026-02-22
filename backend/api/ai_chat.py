@@ -1,7 +1,7 @@
 """
-AI Chat API - Per-meeting AI chat using real LLM inference.
+AI Chat API - Per-meeting AI chat + cross-meeting RAG chat using real LLM inference.
 Loads session transcript as context and sends to Granite 3.3 2B via unified_llm_service.
-Chat history stored in memory (dict keyed by session_id).
+Chat history persisted to PostgreSQL (chat_history table).
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,7 +13,7 @@ import json
 import logging
 
 from database.database import get_db
-from database.models import RecordingSession as DBRecordingSession
+from database.models import RecordingSession as DBRecordingSession, ChatHistory
 from auth.dependencies import get_current_user
 from auth.models import User
 from services.unified_llm_service import llm_service
@@ -21,8 +21,52 @@ from services.unified_llm_service import llm_service
 router = APIRouter(prefix="/api/ai-chat", tags=["AI Chat"])
 logger = logging.getLogger(__name__)
 
-# In-memory chat history keyed by session_id
-_chat_history: Dict[str, List[Dict[str, Any]]] = {}
+
+# ---- Chat history persistence helpers ----
+
+def _load_history(db: Session, session_key: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Load chat history from PostgreSQL, most recent `limit` messages."""
+    rows = (
+        db.query(ChatHistory)
+        .filter(ChatHistory.session_key == session_key)
+        .order_by(ChatHistory.id.desc())
+        .limit(limit)
+        .all()
+    )
+    rows.reverse()  # Oldest first
+    result = []
+    for row in rows:
+        entry = {
+            "role": row.role,
+            "content": row.content,
+            "timestamp": row.created_at.isoformat() if row.created_at else datetime.now(timezone.utc).isoformat(),
+        }
+        if row.metadata_json:
+            try:
+                entry["metadata"] = json.loads(row.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result.append(entry)
+    return result
+
+
+def _save_message(db: Session, session_key: str, role: str, content: str,
+                  metadata: Optional[Dict] = None):
+    """Save a single chat message to PostgreSQL."""
+    msg = ChatHistory(
+        session_key=session_key,
+        role=role,
+        content=content,
+        metadata_json=json.dumps(metadata) if metadata else None,
+    )
+    db.add(msg)
+    db.commit()
+
+
+def _clear_history(db: Session, session_key: str):
+    """Delete all chat history for a session key."""
+    db.query(ChatHistory).filter(ChatHistory.session_key == session_key).delete()
+    db.commit()
 
 
 # Request/Response Models
@@ -179,21 +223,14 @@ async def send_chat_message(
     # Build system prompt with meeting context
     system_prompt = _build_system_prompt(session, transcript, summary)
 
-    # Get or create chat history for this session
-    if session_id not in _chat_history:
-        _chat_history[session_id] = []
+    # Save user message to DB
+    _save_message(db, session_key=session_id, role="user", content=request.message)
 
-    # Add user message to history
-    _chat_history[session_id].append({
-        "role": "user",
-        "content": request.message,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
+    # Load recent chat history from DB for conversational context
+    history = _load_history(db, session_key=session_id, limit=20)
 
-    # Build user prompt including recent chat history for context
-    history = _chat_history[session_id]
+    # Build user prompt including recent chat history
     if len(history) > 1:
-        # Include last few exchanges for conversational context
         recent = history[-6:]  # Last 3 exchanges (user + assistant)
         history_text = "\n".join([
             f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
@@ -220,16 +257,11 @@ async def send_chat_message(
         if not response_text:
             response_text = "I'm sorry, the AI model is currently unavailable. Please ensure the LLM service is running and try again."
 
-        # Store assistant response in history
-        _chat_history[session_id].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        # Save assistant response to DB
+        _save_message(db, session_key=session_id, role="assistant", content=response_text)
 
-        # Trim history if it gets too long (keep last 20 messages)
-        if len(_chat_history[session_id]) > 20:
-            _chat_history[session_id] = _chat_history[session_id][-20:]
+        # Reload history length for metadata
+        history = _load_history(db, session_key=session_id, limit=20)
 
         logger.info(f"AI chat response generated for session {session_id} in {inference_time:.2f}s")
 
@@ -245,7 +277,7 @@ async def send_chat_message(
             metadata={
                 "response_time_ms": int(inference_time * 1000),
                 "transcript_length": len(transcript),
-                "history_length": len(_chat_history[session_id])
+                "history_length": len(history)
             }
         )
 
@@ -257,10 +289,11 @@ async def send_chat_message(
 @router.get("/sessions/{session_id}/messages", response_model=List[ChatMessage])
 async def get_chat_messages(
     session_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get chat history for a specific recording session."""
-    history = _chat_history.get(session_id, [])
+    """Get chat history for a specific recording session (from PostgreSQL)."""
+    history = _load_history(db, session_key=session_id, limit=50)
 
     messages = []
     for i, msg in enumerate(history):
@@ -276,12 +309,215 @@ async def get_chat_messages(
 
 
 @router.delete("/sessions/{session_id}/messages")
-async def clear_chat_history(
+async def delete_chat_history(
     session_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Clear chat history for a specific recording session."""
-    if session_id in _chat_history:
-        del _chat_history[session_id]
-
+    _clear_history(db, session_key=session_id)
     return {"message": "Chat history cleared"}
+
+
+# ============================================================
+# Cross-Meeting RAG Chat
+# ============================================================
+
+# Session key for cross-meeting RAG chat history in DB
+RAG_SESSION_KEY = "__rag__"
+
+# Max context budget in characters (~4000 tokens * 3 chars/token)
+RAG_CONTEXT_MAX_CHARS = 12000
+
+
+class RAGQueryRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=5000)
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+class RAGSource(BaseModel):
+    session_id: str
+    title: str
+    score: float
+    content_type: str = ""
+
+
+class RAGResponse(BaseModel):
+    answer: str
+    sources: List[RAGSource]
+    metadata: Dict[str, Any] = {}
+
+
+@router.post("/rag/query", response_model=RAGResponse)
+async def rag_query(
+    request: RAGQueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Cross-meeting RAG query. Searches Qdrant for relevant chunks across ALL
+    meetings, assembles context, and sends to Granite 3.3 2B for an answer
+    citing which meeting each fact comes from.
+    """
+    try:
+        from services.semantic_search_service import semantic_search
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic search service is not available. Ensure Qdrant is running."
+        )
+
+    # 1. Search for relevant chunks
+    try:
+        chunks = semantic_search.search_chunks(
+            query=request.message,
+            limit=request.limit * 3,  # Over-fetch, then trim to context budget
+        )
+    except Exception as e:
+        logger.error(f"RAG search failed: {e}")
+        raise HTTPException(status_code=503, detail=f"Semantic search failed: {str(e)}")
+
+    if not chunks:
+        return RAGResponse(
+            answer="No indexed meetings found. Please ensure meetings have been recorded and indexed in the semantic search system.",
+            sources=[],
+            metadata={"chunks_found": 0}
+        )
+
+    # 2. Assemble context within token budget
+    context_parts = []
+    total_chars = 0
+    seen_sources = {}  # session_id -> best RAGSource
+
+    for chunk in chunks:
+        # Format chunk with meeting metadata
+        title = chunk.get("title", "Untitled")
+        session_id = chunk.get("session_id", "")
+        content_type = chunk.get("content_type", "transcript")
+        text = chunk.get("text", "")
+        speakers = chunk.get("speakers", [])
+        created_at = chunk.get("created_at", "")
+        score = chunk.get("score", 0.0)
+
+        # Build context block
+        header = f"[Meeting: {title}"
+        if created_at:
+            header += f" | Date: {created_at[:10]}"
+        if speakers:
+            header += f" | Speakers: {', '.join(speakers)}"
+        header += f" | Type: {content_type}]"
+
+        block = f"{header}\n{text}\n"
+
+        if total_chars + len(block) > RAG_CONTEXT_MAX_CHARS:
+            # Try to fit a truncated version
+            remaining = RAG_CONTEXT_MAX_CHARS - total_chars
+            if remaining > 200:  # Only include if we can fit something useful
+                block = f"{header}\n{text[:remaining - len(header) - 10]}...\n"
+                context_parts.append(block)
+                total_chars += len(block)
+            break
+
+        context_parts.append(block)
+        total_chars += len(block)
+
+        # Track source meetings
+        if session_id not in seen_sources or score > seen_sources[session_id].score:
+            seen_sources[session_id] = RAGSource(
+                session_id=session_id,
+                title=title,
+                score=score,
+                content_type=content_type,
+            )
+
+    context_text = "\n".join(context_parts)
+
+    # 3. Build prompts
+    system_prompt = (
+        "You are a meeting analyst for Meeting-Ops. Answer the user's question "
+        "using ONLY the meeting excerpts provided below. Cite which meeting each "
+        "fact comes from by referencing its title. If the excerpts do not contain "
+        "enough information to answer, say so honestly.\n\n"
+        "Meeting Excerpts:\n"
+        f"{context_text}"
+    )
+
+    # Include recent RAG chat history for conversational context
+    rag_history = _load_history(db, session_key=RAG_SESSION_KEY, limit=6)
+    user_prompt = request.message
+    if rag_history:
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:300]}"
+            for m in rag_history
+        ])
+        user_prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.message}"
+
+    # 4. Call LLM
+    import time
+    start_time = time.time()
+
+    try:
+        answer = llm_service._call_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=800,
+            temperature=0.3  # Lower temperature for factual RAG answers
+        )
+    except Exception as e:
+        logger.error(f"RAG LLM call failed: {e}")
+        raise HTTPException(status_code=503, detail=f"LLM inference failed: {str(e)}")
+
+    inference_time = time.time() - start_time
+
+    if not answer:
+        answer = "The AI model is currently unavailable. Please ensure the LLM service is running."
+
+    # 5. Persist to DB
+    _save_message(db, session_key=RAG_SESSION_KEY, role="user", content=request.message)
+    _save_message(db, session_key=RAG_SESSION_KEY, role="assistant", content=answer)
+
+    # 6. Build response
+    sources = sorted(seen_sources.values(), key=lambda s: s.score, reverse=True)
+
+    logger.info(
+        f"RAG query answered in {inference_time:.2f}s, "
+        f"{len(chunks)} chunks searched, {len(sources)} source meetings"
+    )
+
+    return RAGResponse(
+        answer=answer,
+        sources=sources,
+        metadata={
+            "response_time_ms": int(inference_time * 1000),
+            "chunks_retrieved": len(chunks),
+            "context_chars": total_chars,
+            "source_meetings": len(sources),
+        }
+    )
+
+
+@router.get("/rag/history")
+async def get_rag_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get the cross-meeting RAG chat history (from PostgreSQL)."""
+    history = _load_history(db, session_key=RAG_SESSION_KEY, limit=50)
+    messages = []
+    for i, msg in enumerate(history):
+        messages.append({
+            "id": f"rag-msg-{i}",
+            "role": msg["role"],
+            "content": msg["content"],
+        })
+    return messages
+
+
+@router.delete("/rag/history")
+async def clear_rag_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Clear cross-meeting RAG chat history."""
+    _clear_history(db, session_key=RAG_SESSION_KEY)
+    return {"message": "RAG chat history cleared"}

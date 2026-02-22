@@ -27,8 +27,19 @@ EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384
 
 # Chunk settings for long transcripts
-CHUNK_SIZE = 500  # words per chunk
+CHUNK_SIZE = 400  # words per chunk
 CHUNK_OVERLAP = 50  # overlapping words between chunks
+
+# Speaker label patterns for speaker-aware chunking
+import re
+SPEAKER_PATTERN = re.compile(
+    r'^(?:'
+    r'(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?):\s'  # "Speaker 1: ..." or "John: ..."
+    r'|'
+    r'\[(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]\s'  # "[Speaker 1] ..." or "[John] ..."
+    r')',
+    re.MULTILINE
+)
 
 
 class SemanticSearchService:
@@ -64,7 +75,17 @@ class SemanticSearchService:
         return [e.tolist() for e in embedder.embed(texts)]
 
     def ensure_collection(self):
-        """Create the Qdrant collection if it doesn't exist."""
+        """Create the Qdrant collection if it doesn't exist.
+
+        TODO: Hybrid search (dense + sparse BM25) - fastembed has SparseTextEmbedding
+        with model "Qdrant/bm25", but adding sparse_vectors_config to an existing
+        Qdrant collection requires recreation (would destroy existing 25+ points).
+        When it's acceptable to recreate (e.g. after a full reindex), add:
+          sparse_vectors_config={"bm25": SparseVectorParams(index=SparseIndexParams())}
+        to create_collection, generate sparse embeddings at index time, and use
+        Qdrant prefetch + RRF fusion at query time. See:
+        https://qdrant.tech/documentation/concepts/hybrid-queries/
+        """
         client = self._get_client()
         collections = [c.name for c in client.get_collections().collections]
         if COLLECTION_NAME not in collections:
@@ -79,19 +100,147 @@ class SemanticSearchService:
             logger.info(f"Created Qdrant collection: {COLLECTION_NAME}")
         self._initialized = True
 
-    def _chunk_text(self, text: str) -> List[str]:
-        """Split text into overlapping chunks by word count."""
+    def _chunk_text(self, text: str) -> List[Dict]:
+        """
+        Split text into overlapping chunks. Returns list of dicts with
+        'text' and 'speakers' keys.
+
+        Speaker-aware: if the text has speaker labels (e.g. "Speaker 1: ..."
+        or "[Speaker 1] ..."), splits on speaker turn boundaries first, then
+        merges turns into ~CHUNK_SIZE-word chunks with overlap.
+
+        Falls back to plain word-count splitting for unlabelled text.
+        """
+        # Detect speaker-labelled transcript
+        has_speakers = bool(SPEAKER_PATTERN.search(text))
+
+        if has_speakers:
+            return self._chunk_speaker_text(text)
+        else:
+            return self._chunk_plain_text(text)
+
+    def _chunk_plain_text(self, text: str) -> List[Dict]:
+        """Plain word-count chunking (no speaker labels)."""
         words = text.split()
         if len(words) <= CHUNK_SIZE:
-            return [text]
+            return [{"text": text, "speakers": []}]
         chunks = []
         start = 0
         while start < len(words):
             end = start + CHUNK_SIZE
             chunk = " ".join(words[start:end])
-            chunks.append(chunk)
+            chunks.append({"text": chunk, "speakers": []})
             start = end - CHUNK_OVERLAP
         return chunks
+
+    def _chunk_speaker_text(self, text: str) -> List[Dict]:
+        """
+        Speaker-aware chunking. Splits on speaker turn boundaries,
+        then groups turns into ~CHUNK_SIZE-word chunks with CHUNK_OVERLAP
+        word overlap. Keeps speaker labels in the chunk text.
+        """
+        # Split into speaker turns. Each turn starts with a speaker label.
+        lines = text.split("\n")
+        turns = []  # list of (speaker_name, turn_text)
+        current_speaker = ""
+        current_lines = []
+
+        for line in lines:
+            # Check for speaker label at start of line
+            m = re.match(
+                r'^(?:(\[?(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]?):\s*(.*))',
+                line
+            )
+            if not m:
+                # Also try bracket format: [Speaker 1] text
+                m = re.match(
+                    r'^\[(Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]\s*(.*)',
+                    line
+                )
+                if m:
+                    # Reformat to have bracket speaker
+                    speaker = m.group(1)
+                    rest = m.group(2)
+                else:
+                    speaker = None
+                    rest = None
+            else:
+                speaker = m.group(1).strip("[]")
+                rest = m.group(2)
+
+            if speaker:
+                # Save previous turn
+                if current_lines:
+                    turns.append((current_speaker, "\n".join(current_lines)))
+                current_speaker = speaker
+                current_lines = [line]  # keep original line with label
+            else:
+                # Continuation of current speaker's turn
+                if line.strip():
+                    current_lines.append(line)
+
+        # Don't forget the last turn
+        if current_lines:
+            turns.append((current_speaker, "\n".join(current_lines)))
+
+        if not turns:
+            return self._chunk_plain_text(text)
+
+        # Now merge turns into chunks of ~CHUNK_SIZE words
+        chunks = []
+        current_chunk_turns = []
+        current_word_count = 0
+        current_speakers = set()
+
+        for speaker, turn_text in turns:
+            turn_words = len(turn_text.split())
+
+            # If adding this turn exceeds the limit and we already have content,
+            # finalize the current chunk
+            if current_word_count + turn_words > CHUNK_SIZE and current_chunk_turns:
+                chunk_text = "\n".join(current_chunk_turns)
+                chunks.append({
+                    "text": chunk_text,
+                    "speakers": sorted(current_speakers),
+                })
+
+                # Overlap: keep the last few turns that fit within CHUNK_OVERLAP words
+                overlap_turns = []
+                overlap_words = 0
+                overlap_speakers = set()
+                for ot_speaker, ot_text in reversed(list(zip(
+                    [s for s, _ in zip([speaker for speaker, _ in turns], turns)],
+                    current_chunk_turns
+                ))):
+                    ot_words = len(ot_text.split())
+                    if overlap_words + ot_words > CHUNK_OVERLAP:
+                        break
+                    overlap_turns.insert(0, ot_text)
+                    overlap_words += ot_words
+
+                current_chunk_turns = overlap_turns
+                current_word_count = overlap_words
+                # Re-extract speakers from overlap turns
+                current_speakers = set()
+                for ot in overlap_turns:
+                    m2 = re.match(r'^(?:(\[?(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]?):\s)', ot)
+                    if m2:
+                        current_speakers.add(m2.group(1).strip("[]"))
+
+            current_chunk_turns.append(turn_text)
+            current_word_count += turn_words
+            if speaker:
+                current_speakers.add(speaker)
+
+        # Finalize the last chunk
+        if current_chunk_turns:
+            chunk_text = "\n".join(current_chunk_turns)
+            chunks.append({
+                "text": chunk_text,
+                "speakers": sorted(current_speakers),
+            })
+
+        return chunks if chunks else [{"text": text, "speakers": []}]
 
     def index_session(self, session_id: str, title: str,
                       transcript: Optional[str], summary: Optional[str],
@@ -123,15 +272,18 @@ class SemanticSearchService:
         # Index transcript chunks
         if transcript and len(transcript.strip()) > 10:
             chunks = self._chunk_text(transcript)
-            for i, chunk in enumerate(chunks):
-                texts_to_embed.append(chunk)
+            for i, chunk_data in enumerate(chunks):
+                chunk_text = chunk_data["text"]
+                chunk_speakers = chunk_data.get("speakers", [])
+                texts_to_embed.append(chunk_text)
                 payloads.append({
                     "session_id": session_id,
                     "title": title or "",
                     "content_type": "transcript",
                     "chunk_index": i,
                     "total_chunks": len(chunks),
-                    "text": chunk[:500],  # Store first 500 chars for snippet
+                    "text": chunk_text,  # Store full chunk text for RAG retrieval
+                    "speakers": chunk_speakers,
                     "created_at": created_at or "",
                 })
 
@@ -144,7 +296,8 @@ class SemanticSearchService:
                 "content_type": "summary",
                 "chunk_index": 0,
                 "total_chunks": 1,
-                "text": summary[:500],
+                "text": summary,  # Store full summary text for RAG retrieval
+                "speakers": [],
                 "created_at": created_at or "",
             })
 
@@ -158,6 +311,7 @@ class SemanticSearchService:
                 "chunk_index": 0,
                 "total_chunks": 1,
                 "text": title,
+                "speakers": [],
                 "created_at": created_at or "",
             })
 
@@ -235,6 +389,43 @@ class SemanticSearchService:
         )[:limit]
 
         return results_list
+
+    def search_chunks(self, query: str, limit: int = 10) -> List[Dict]:
+        """
+        Semantic search returning individual chunks (not deduplicated by session).
+        Used by RAG pipeline to retrieve relevant context across all meetings.
+        Returns chunks with full text, session metadata, and relevance scores.
+        """
+        self.ensure_collection()
+        client = self._get_client()
+
+        info = client.get_collection(COLLECTION_NAME)
+        if info.points_count == 0:
+            return []
+
+        query_embedding = self._embed([query])[0]
+
+        from qdrant_client.models import models
+        query_result = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_embedding,
+            limit=limit,
+        )
+
+        chunks = []
+        for hit in query_result.points:
+            chunks.append({
+                "session_id": hit.payload.get("session_id", ""),
+                "title": hit.payload.get("title", ""),
+                "content_type": hit.payload.get("content_type", ""),
+                "chunk_index": hit.payload.get("chunk_index", 0),
+                "text": hit.payload.get("text", ""),
+                "speakers": hit.payload.get("speakers", []),
+                "score": round(float(hit.score), 4),
+                "created_at": hit.payload.get("created_at", ""),
+            })
+
+        return chunks
 
     def delete_session(self, session_id: str):
         """Remove all indexed points for a session."""
