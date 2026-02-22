@@ -47,7 +47,7 @@ export const Sessions: React.FC = () => {
   const [isSearching, setIsSearching] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debounced server-side search
+  // Debounced server-side search (keyword + semantic)
   const performSearch = useCallback(async (query: string) => {
     if (!query || query.length < 2) {
       setSearchResults(null);
@@ -61,28 +61,69 @@ export const Sessions: React.FC = () => {
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      const response = await fetch(
-        `${config.apiBaseUrl}/api/simple/recording-sessions/search?q=${encodeURIComponent(query)}`,
-        { headers }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        // Map search results into Session shape
-        const mapped: Session[] = data.map((r: any) => ({
-          id: r.id,
-          name: r.name,
-          description: r.description || '',
-          created_at: r.created_at,
-          updated_at: r.created_at,
-          status: r.status || 'completed',
-          duration: r.duration || 0,
-          has_transcript: false,
-          has_audio: false,
-          _snippet: r.snippet,
-          _matchField: r.match_field,
-        }));
-        setSearchResults(mapped);
+
+      // Run keyword search and semantic search in parallel
+      const [keywordRes, semanticRes] = await Promise.allSettled([
+        fetch(
+          `${config.apiBaseUrl}/api/simple/recording-sessions/search?q=${encodeURIComponent(query)}`,
+          { headers }
+        ),
+        fetch(
+          `${config.apiBaseUrl}/api/simple/recording-sessions/semantic-search?q=${encodeURIComponent(query)}&limit=10`,
+          { headers }
+        ),
+      ]);
+
+      const seenIds = new Set<string>();
+      const merged: Session[] = [];
+
+      // Process keyword results first (exact matches)
+      if (keywordRes.status === 'fulfilled' && keywordRes.value.ok) {
+        const data = await keywordRes.value.json();
+        for (const r of data) {
+          if (!seenIds.has(r.id)) {
+            seenIds.add(r.id);
+            merged.push({
+              id: r.id,
+              name: r.name,
+              description: r.description || '',
+              created_at: r.created_at,
+              updated_at: r.created_at,
+              status: r.status || 'completed',
+              duration: r.duration || 0,
+              has_transcript: false,
+              has_audio: false,
+              _snippet: r.snippet,
+              _matchField: r.match_field,
+            } as Session);
+          }
+        }
       }
+
+      // Append semantic results that weren't in keyword results
+      if (semanticRes.status === 'fulfilled' && semanticRes.value.ok) {
+        const data = await semanticRes.value.json();
+        for (const r of (data.results || [])) {
+          if (!seenIds.has(r.session_id) && r.score > 0.3) {
+            seenIds.add(r.session_id);
+            merged.push({
+              id: r.session_id,
+              name: r.title || 'Untitled',
+              description: r.snippet || '',
+              created_at: r.created_at || '',
+              updated_at: r.created_at || '',
+              status: 'completed',
+              duration: 0,
+              has_transcript: false,
+              has_audio: false,
+              _snippet: r.snippet,
+              _matchField: `semantic (${Math.round(r.score * 100)}% match)`,
+            } as Session);
+          }
+        }
+      }
+
+      setSearchResults(merged);
     } catch (err) {
       console.error('Search failed:', err);
     } finally {
@@ -426,7 +467,7 @@ export const Sessions: React.FC = () => {
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 type="text"
-                placeholder="Search sessions..."
+                placeholder="Search sessions (keyword + semantic)..."
                 value={searchQuery}
                 onChange={handleSearchChange}
                 className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"

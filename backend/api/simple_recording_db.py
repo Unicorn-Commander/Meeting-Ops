@@ -253,6 +253,51 @@ async def search_sessions(
     return results
 
 
+# === Semantic / Vector Search (Qdrant) ===
+
+@router.get("/recording-sessions/semantic-search")
+async def semantic_search_sessions(
+    q: str = Query(..., min_length=1, description="Natural language search query"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Semantic search across meetings using vector similarity.
+    Understands meaning, not just keywords — e.g. 'meetings about budget planning'
+    will match transcripts discussing finances even without the exact words."""
+    try:
+        from services.semantic_search_service import semantic_search
+        results = semantic_search.search(query=q, limit=limit)
+        return {"query": q, "results": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Semantic search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Semantic search failed: {str(e)}")
+
+
+@router.post("/semantic-search/reindex")
+async def reindex_all_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Reindex all completed sessions into the vector store.
+    Run this once to backfill, then new sessions are indexed automatically."""
+    try:
+        from services.semantic_search_service import semantic_search
+        result = semantic_search.reindex_all(db)
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.error(f"Reindex error: {e}")
+        raise HTTPException(status_code=500, detail=f"Reindex failed: {str(e)}")
+
+
+@router.get("/semantic-search/stats")
+async def get_semantic_search_stats():
+    """Get vector search index statistics."""
+    try:
+        from services.semantic_search_service import semantic_search
+        return semantic_search.get_stats()
+    except Exception as e:
+        return {"initialized": False, "error": str(e)}
+
+
 def _extract_snippet(text: str, query: str, context_chars: int = 80) -> str:
     """Extract a snippet of text around the first occurrence of the query string."""
     if not text:
@@ -881,6 +926,20 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             logger.info(f"   Title: {session.title}")
             logger.info(f"   Has transcript: {bool(session.transcript)}")
             logger.info(f"   Has summary: {bool(session.summary)}")
+
+            # Step 5: Index into vector store for semantic search
+            try:
+                from services.semantic_search_service import semantic_search
+                semantic_search.index_session(
+                    session_id=session.session_id or str(session.id),
+                    title=session.title or session.name or "",
+                    transcript=session.transcript_simple or "",
+                    summary=session.summary or "",
+                    created_at=session.created_at.isoformat() if session.created_at else "",
+                )
+                logger.info(f"   Indexed in vector store for semantic search")
+            except Exception as e:
+                logger.warning(f"Vector indexing failed (non-fatal): {e}")
         except Exception as e:
             logger.error(f"Failed to commit session updates: {e}")
             db.rollback()
