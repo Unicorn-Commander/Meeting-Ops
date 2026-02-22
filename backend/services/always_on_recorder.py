@@ -432,6 +432,8 @@ class AlwaysOnRecorder:
                 session_id, device_id=self.device_id
             )
             if success:
+                # Normalize path to prevent double-nesting
+                file_path = os.path.normpath(os.path.abspath(file_path))
                 self.current_session_id = session_id
                 logger.info(
                     f"Auto-started recording: session={session_id}, file={file_path}"
@@ -475,6 +477,10 @@ class AlwaysOnRecorder:
             success, result = audio_service.stop_recording(session_id)
 
             if success:
+                # Normalize path to prevent double-nesting
+                if result:
+                    result = os.path.normpath(os.path.abspath(result))
+
                 # Update session in DB
                 from database.database import SessionLocal
                 from database.models import RecordingSession
@@ -491,8 +497,11 @@ class AlwaysOnRecorder:
                         session.ended_at = datetime.now(timezone.utc)
                         session.audio_file = result
                         if session.started_at:
+                            started = session.started_at
+                            if started.tzinfo is None:
+                                started = started.replace(tzinfo=timezone.utc)
                             session.duration = (
-                                datetime.now(timezone.utc) - session.started_at
+                                datetime.now(timezone.utc) - started
                             ).total_seconds()
                         db.commit()
 

@@ -47,14 +47,15 @@ async def upload_audio(
     
     # Validate file size
     file_size = 0
-    audio_dir = "/home/ucadmin/Meeting-Ops/backend/recordings"
+    from services.working_audio_service import audio_service as _as
+    audio_dir = _as.RECORDINGS_DIR
     os.makedirs(audio_dir, exist_ok=True)
     
     # Generate unique filename
     file_extension = os.path.splitext(file.filename)[1] or ".wav"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     audio_filename = f"uploaded_{session_id}_{timestamp}{file_extension}"
-    audio_path = os.path.join(audio_dir, audio_filename)
+    audio_path = os.path.normpath(os.path.join(audio_dir, audio_filename))
     
     try:
         # Save uploaded file

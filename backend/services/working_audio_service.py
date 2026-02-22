@@ -111,6 +111,9 @@ class WorkingAudioService:
 
         return None
 
+    # Canonical recordings directory (single source of truth)
+    RECORDINGS_DIR = "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+
     def start_recording(self, session_id: str, output_dir: Optional[str] = None,
                         device_id: Optional[str] = None) -> tuple[bool, str]:
         """
@@ -120,20 +123,21 @@ class WorkingAudioService:
             output_dir: Output directory for WAV files
             device_id: PulseAudio/PipeWire source name (e.g. 'alsa_input.usb-...')
                        If None, auto-detects (prefers USB mic)
-        Returns: (success, filepath_or_error)
+        Returns: (success, absolute_filepath_or_error)
         """
         if self.is_recording:
             return False, "Already recording another session"
 
         # Default output directory
         if output_dir is None:
-            output_dir = "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+            output_dir = self.RECORDINGS_DIR
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Generate filename
+        # Generate filename and build absolute path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = os.path.join(output_dir, f"recording_{session_id}_{timestamp}.wav")
+        filename = f"recording_{session_id}_{timestamp}.wav"
+        output_file = os.path.normpath(os.path.join(output_dir, filename))
 
         # Use specified device or auto-detect
         source = device_id if device_id else self._find_pulse_source()

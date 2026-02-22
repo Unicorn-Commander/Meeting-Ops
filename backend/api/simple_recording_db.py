@@ -471,6 +471,8 @@ async def _monitor_auto_stop(session_id: str, db_session_id: int):
             # 1. Stop ffmpeg recording (graceful SIGINT -> WAV header)
             from services.working_audio_service import audio_service as _audio_svc
             success, audio_file = _audio_svc.stop_recording(session_id)
+            if success and audio_file:
+                audio_file = os.path.normpath(os.path.abspath(audio_file))
             if not success:
                 logger.error(f"Auto-stop: failed to stop audio capture: {audio_file}")
 
@@ -494,7 +496,13 @@ async def _monitor_auto_stop(session_id: str, db_session_id: int):
                     session.status = "processing"
                     session.ended_at = datetime.now(timezone.utc)
                     if session.started_at:
-                        session.duration = (session.ended_at - session.started_at).total_seconds()
+                        started = session.started_at
+                        ended = session.ended_at
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=timezone.utc)
+                        if ended.tzinfo is None:
+                            ended = ended.replace(tzinfo=timezone.utc)
+                        session.duration = (ended - started).total_seconds()
                     if not session.audio_file and audio_file:
                         session.audio_file = audio_file
                     db.commit()
@@ -558,10 +566,13 @@ async def start_recording(
     # Start recording with audio service (it will generate the file path)
     device_id = body.device_id if body else None
     success, file_path = audio_service.start_recording(session_id, device_id=device_id)
-    
+
     if not success:
         raise HTTPException(status_code=500, detail=f"Failed to start recording: {file_path}")
-    
+
+    # Normalize the audio file path to prevent double-nesting
+    file_path = os.path.normpath(os.path.abspath(file_path))
+
     # Update database with correct column names
     session.status = "recording"
     session.started_at = datetime.now(timezone.utc)
@@ -642,12 +653,23 @@ async def stop_recording(
         if not success:
             raise HTTPException(status_code=500, detail=f"Failed to stop recording: {audio_file}")
 
+        # Normalize the audio file path to prevent double-nesting
+        if audio_file:
+            audio_file = os.path.normpath(os.path.abspath(audio_file))
+
         # Update session in database
         session.status = "processing"
         session.ended_at = datetime.now(timezone.utc)
         if session.started_at:
-            session.duration = (session.ended_at - session.started_at).total_seconds()
-        
+            # Handle mixed naive/aware datetimes (from before timezone migration)
+            started = session.started_at
+            ended = session.ended_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=timezone.utc)
+            session.duration = (ended - started).total_seconds()
+
         # Save the audio file path if not already set
         if not session.audio_file and audio_file:
             session.audio_file = audio_file
@@ -1022,11 +1044,12 @@ async def download_audio(
     
     if not os.path.exists(session.audio_file):
         logger.warning(f"Audio file not found: {session.audio_file}")
-        # Check if file exists without full path (relative to recordings dir)
-        recordings_dir = "/home/ucadmin/Meeting-Ops/backend/recordings"
+        # Check if file exists without full path (relative to canonical recordings dir)
+        from services.working_audio_service import audio_service as _as
+        recordings_dir = _as.RECORDINGS_DIR
         filename_only = os.path.basename(session.audio_file)
-        alt_path = os.path.join(recordings_dir, filename_only)
-        
+        alt_path = os.path.normpath(os.path.join(recordings_dir, filename_only))
+
         if os.path.exists(alt_path):
             logger.info(f"Found audio file at alternate path: {alt_path}")
             session.audio_file = alt_path
@@ -1248,7 +1271,8 @@ async def get_storage_stats(
 ):
     """Get storage usage statistics"""
     import glob
-    recordings_dir = "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+    from services.working_audio_service import audio_service as _as
+    recordings_dir = _as.RECORDINGS_DIR
 
     # Count files and total size
     wav_files = glob.glob(os.path.join(recordings_dir, "**", "*.wav"), recursive=True)
