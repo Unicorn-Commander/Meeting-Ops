@@ -111,9 +111,15 @@ class WorkingAudioService:
 
         return None
 
-    def start_recording(self, session_id: str, output_dir: Optional[str] = None) -> tuple[bool, str]:
+    def start_recording(self, session_id: str, output_dir: Optional[str] = None,
+                        device_id: Optional[str] = None) -> tuple[bool, str]:
         """
         Start recording audio using ffmpeg through PipeWire/PulseAudio.
+        Args:
+            session_id: Session identifier
+            output_dir: Output directory for WAV files
+            device_id: PulseAudio/PipeWire source name (e.g. 'alsa_input.usb-...')
+                       If None, auto-detects (prefers USB mic)
         Returns: (success, filepath_or_error)
         """
         if self.is_recording:
@@ -129,8 +135,8 @@ class WorkingAudioService:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = os.path.join(output_dir, f"recording_{session_id}_{timestamp}.wav")
 
-        # Find the best audio source
-        source = self._find_pulse_source()
+        # Use specified device or auto-detect
+        source = device_id if device_id else self._find_pulse_source()
 
         # Build ffmpeg command using PulseAudio input (goes through PipeWire)
         cmd = [

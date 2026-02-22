@@ -601,7 +601,11 @@ export default function LiveRecording() {
       // NOW start the actual recording (after WebSocket is connected)
       const startResponse = await fetch(
         `${config.apiUrl}/api/simple/recording-sessions/${session.id}/start`,
-        { method: 'POST' }
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: selectedDevice || undefined })
+        }
       );
       
       if (!startResponse.ok) {
@@ -966,6 +970,23 @@ export default function LiveRecording() {
           {/* Recording Control */}
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-8">
             <div className="flex flex-col items-center">
+              {/* Audio Device Selector */}
+              {!isRecording && audioDevices.length > 1 && (
+                <div className="w-full max-w-xs mb-6">
+                  <label className="block text-xs text-zinc-400 mb-1.5 text-center">Audio Input</label>
+                  <select
+                    value={selectedDevice}
+                    onChange={(e) => setSelectedDevice(e.target.value)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:border-purple-500 focus:outline-none"
+                  >
+                    {audioDevices.map((device) => (
+                      <option key={device.id} value={device.id}>
+                        {device.type === 'USB' ? '\uD83C\uDFA4 ' : '\uD83D\uDCBB '}{device.name || device.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {/* Big Record Button */}
               <button
                 onClick={isRecording ? stopRecording : startRecording}

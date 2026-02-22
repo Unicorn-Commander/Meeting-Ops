@@ -375,23 +375,29 @@ async def get_session(
             detail=f"Internal server error retrieving session: {str(e)}"
         )
 
+class StartRecordingRequest(BaseModel):
+    device_id: Optional[str] = None
+
+
 @router.post("/recording-sessions/{session_id}/start")
 async def start_recording(
     session_id: str,
+    body: Optional[StartRecordingRequest] = None,
     db: Session = Depends(get_db)
 ):
-    """Start recording for a session"""
-    
+    """Start recording for a session. Optionally specify device_id to select audio input."""
+
     # Get session from database - handle both session_id and integer id
     session = db.query(DBRecordingSession).filter(
         DBRecordingSession.session_id == session_id
     ).first()
-    
+
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     # Start recording with audio service (it will generate the file path)
-    success, file_path = audio_service.start_recording(session_id)
+    device_id = body.device_id if body else None
+    success, file_path = audio_service.start_recording(session_id, device_id=device_id)
     
     if not success:
         raise HTTPException(status_code=500, detail=f"Failed to start recording: {file_path}")
