@@ -4,6 +4,7 @@ WebSocket endpoint for live transcription streaming
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import json
 import asyncio
+import os
 from typing import Dict, Set
 import logging
 
@@ -68,7 +69,8 @@ async def websocket_audio_levels(websocket: WebSocket):
         import json
         
         # Connect to Redis for audio level updates
-        redis_client = await redis.from_url("redis://localhost:6379", decode_responses=True)
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6381")
+        redis_client = await redis.from_url(redis_url, decode_responses=True)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe("audio:levels")
         

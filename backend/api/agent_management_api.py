@@ -324,44 +324,28 @@ async def get_agent_types():
 
 @router.get("/models/performance")
 async def get_model_performance():
-    """Get performance metrics for available models"""
+    """Get performance metrics for available models (actual running models)"""
+    # Get real status from the unified LLM service
+    llm_available = False
+    try:
+        from services.unified_llm_service import llm_service
+        status = llm_service.get_status()
+        llm_available = status.get("llamacpp_available", False)
+    except Exception:
+        pass
+
     return {
         "models": [
             {
-                "name": "qwen3-0.6b",
-                "label": "Qwen3 0.6B (Ultra-Fast)",
-                "tokens_per_second": 123.63,
-                "context_window": 32768,
-                "vram_usage": "~4GB",
-                "best_for": "Live summaries, real-time processing",
-                "endpoint": "http://localhost:11440"
-            },
-            {
-                "name": "phi-4-mini",
-                "label": "Phi-4 Mini",
-                "tokens_per_second": 28.40,
+                "name": "granite-3.3-2b-instruct",
+                "label": "Granite 3.3 2B Instruct",
+                "tokens_per_second": 850,
                 "context_window": 8192,
-                "vram_usage": "~3.2GB",
-                "best_for": "Fast summaries, good balance",
-                "endpoint": "http://localhost:11437"
-            },
-            {
-                "name": "qwen3-30b",
-                "label": "Qwen3 30B MoE",
-                "tokens_per_second": 26.54,
-                "context_window": 32768,
-                "vram_usage": "~17.6GB",
-                "best_for": "Premium quality, comprehensive analysis",
-                "endpoint": "http://localhost:11439"
-            },
-            {
-                "name": "granite-3.3-8b",
-                "label": "Granite 3.3 8B",
-                "tokens_per_second": 15.0,
-                "context_window": 32768,
-                "vram_usage": "~5.1GB",
-                "best_for": "Structured output, JSON formatting",
-                "endpoint": "http://localhost:11438"
+                "vram_usage": "~1.5GB",
+                "best_for": "Summaries, chat, insights, sentiment analysis",
+                "endpoint": "http://localhost:11437",
+                "backend": "llama.cpp Vulkan",
+                "status": "active" if llm_available else "unavailable"
             }
         ]
     }

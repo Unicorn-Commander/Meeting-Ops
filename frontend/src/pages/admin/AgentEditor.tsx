@@ -92,10 +92,7 @@ const AGENT_TYPE_OPTIONS = [
 ];
 
 const MODEL_PRESETS = {
-  'qwen3-0.6b': { context: 32768, temp: 0.3, tokens: 512, top_p: 0.9 },
-  'phi-4-mini': { context: 8192, temp: 0.3, tokens: 512, top_p: 0.9 },
-  'qwen3-30b': { context: 32768, temp: 0.7, tokens: 2048, top_p: 0.95 },
-  'granite3.3:8b': { context: 32768, temp: 0.7, tokens: 1024, top_p: 0.9 }
+  'granite-3.3-2b-instruct': { context: 8192, temp: 0.7, tokens: 1024, top_p: 0.9 }
 };
 
 export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCancel }) => {
@@ -366,10 +363,7 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
                     className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-purple-500"
                   >
                     <option value="">Select Model</option>
-                    <option value="qwen3-0.6b">Qwen3-0.6B (123.63 t/s) ⚡</option>
-                    <option value="phi-4-mini">Phi-4-Mini (28.40 t/s)</option>
-                    <option value="qwen3-30b">Qwen3-30B (26.54 t/s)</option>
-                    <option value="granite3.3:8b">Granite 3.3 8B (15.0 t/s)</option>
+                    <option value="granite-3.3-2b-instruct">Granite 3.3 2B Instruct (~850 t/s)</option>
                   </select>
                   {errors.model_name && <p className="text-red-400 text-xs mt-1">{errors.model_name}</p>}
                 </div>
@@ -475,17 +469,8 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
                     Model Performance
                   </h4>
                   <div className="text-sm text-zinc-300">
-                    {editedAgent.model_name === 'qwen3-0.6b' && (
-                      <p>⚡ Ultra-fast: 123.63 tokens/sec with 32K context. Perfect for real-time analysis.</p>
-                    )}
-                    {editedAgent.model_name === 'phi-4-mini' && (
-                      <p>Fast: 28.40 tokens/sec with 8K context. Good for quick analysis.</p>
-                    )}
-                    {editedAgent.model_name === 'qwen3-30b' && (
-                      <p>Premium: 26.54 tokens/sec with 32K context. Best quality output.</p>
-                    )}
-                    {editedAgent.model_name === 'granite3.3:8b' && (
-                      <p>Balanced: 15.0 tokens/sec with 32K context. Great for structured output.</p>
+                    {editedAgent.model_name === 'granite-3.3-2b-instruct' && (
+                      <p>Granite 3.3 2B Instruct: ~850 tokens/sec with 8K context on llama.cpp Vulkan. Used for summaries, chat, insights, and sentiment analysis.</p>
                     )}
                   </div>
                 </div>

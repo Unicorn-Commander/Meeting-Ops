@@ -171,6 +171,7 @@ export default function LiveRecording() {
   // Removed showLiveIntelligence - summaries now integrated into sections
   const [audioDevices, setAudioDevices] = useState<any[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
+  const [llmModelName, setLlmModelName] = useState<string>('Granite 3.3 2B');
   
   const wsRef = useRef<WebSocket | null>(null);
   const audioWsRef = useRef<WebSocket | null>(null);
@@ -251,7 +252,7 @@ export default function LiveRecording() {
               setProgressiveData({
                 intervalUsed: data.summary_data.interval_used,
                 nextInterval: data.summary_data.next_interval,
-                modelSize: data.summary_data.model_size || 'Phi-4 Mini'
+                modelSize: data.summary_data.model_size || 'Granite 3.3 2B'
               });
             } else if (data.data) {
               // OLD format compatibility
@@ -452,6 +453,23 @@ export default function LiveRecording() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [isRecording]);
+
+  // Fetch LLM model name from backend
+  useEffect(() => {
+    const fetchModelInfo = async () => {
+      try {
+        const response = await fetch(`${config.apiUrl}/api/settings/models`);
+        if (response.ok) {
+          const data = await response.json();
+          const label = data.llm?.model_label || data.llm?.model || 'Granite 3.3 2B';
+          setLlmModelName(label);
+        }
+      } catch (error) {
+        console.debug('Failed to fetch model info, using default:', error);
+      }
+    };
+    fetchModelInfo();
+  }, []);
 
   // Fetch auto-summarization settings and active agent
   useEffect(() => {
@@ -1105,8 +1123,8 @@ export default function LiveRecording() {
                       </label>
                     </div>
                     <div className="mt-3 text-xs text-zinc-400">
-                      {summarySettings.enableLiveSummarization 
-                        ? 'Every 500 words • Phi-4 Mini' 
+                      {summarySettings.enableLiveSummarization
+                        ? `Every 500 words • ${llmModelName}`
                         : 'Disabled • Enable for live AI analysis'
                       }
                     </div>
@@ -1143,7 +1161,7 @@ export default function LiveRecording() {
             {isRecording && autoSummary?.executive && (
               <div className="mt-3 pt-3 border-t border-zinc-700">
                 <span className="text-xs text-zinc-400">
-                  Updated automatically • Powered by Phi-4 Mini
+                  Updated automatically • Powered by {llmModelName}
                 </span>
               </div>
             )}
@@ -1409,7 +1427,7 @@ export default function LiveRecording() {
                   <span className="text-xs text-zinc-400">AI Model</span>
                 </div>
                 <div className="text-sm font-medium text-yellow-300">
-                  {summarySettings.enableLiveSummarization ? 'Phi-4 Mini' : 'Standby'}
+                  {summarySettings.enableLiveSummarization ? llmModelName : 'Standby'}
                 </div>
                 <div className="text-xs text-yellow-400">{summarySettings.enableLiveSummarization ? 'Port 11437' : 'Offline'}</div>
               </div>

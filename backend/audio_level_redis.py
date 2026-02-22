@@ -5,6 +5,7 @@ Uses Redis pub/sub for efficient WebSocket distribution
 """
 
 import asyncio
+import os
 import redis.asyncio as redis
 import json
 import logging
@@ -14,10 +15,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6381")
+
 class AudioLevelRedisService:
     """Service to publish audio levels to Redis"""
-    
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
+
+    def __init__(self, redis_url: str = _DEFAULT_REDIS_URL):
         self.redis_url = redis_url
         self.redis_client: Optional[redis.Redis] = None
         self.channel = "audio_levels"
@@ -96,9 +99,9 @@ class AudioLevelRedisService:
 class AudioLevelWebSocketHandler:
     """Handle WebSocket connections with Redis subscription"""
     
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
+    def __init__(self, redis_url: str = _DEFAULT_REDIS_URL):
         self.redis_url = redis_url
-        
+
     async def handle_websocket(self, websocket):
         """Handle a WebSocket connection"""
         # Create Redis connection for this WebSocket

@@ -243,20 +243,15 @@ async def broadcast_transcription_segment(session_id: str, segment: Dict):
     Broadcast transcription segment to all connected clients
     This is called by the transcription service when new segments are available
     """
-    # Store segment in session for auto-summarization
+    # Store segment in live transcription buffer for progressive summaries
     try:
-        from api.simple_recording_fixed import sessions
-        if session_id in sessions:
-            if "transcription_segments" not in sessions[session_id]:
-                sessions[session_id]["transcription_segments"] = []
-            sessions[session_id]["transcription_segments"].append(segment)
-            
-            # Also update the combined transcript
-            if "transcript" not in sessions[session_id]:
-                sessions[session_id]["transcript"] = ""
-            sessions[session_id]["transcript"] += segment.get("text", "") + " "
+        from services.live_recording_transcription import live_recording_transcription
+        if hasattr(live_recording_transcription, 'session_id') and live_recording_transcription.session_id == session_id:
+            if not hasattr(live_recording_transcription, 'transcript_buffer'):
+                live_recording_transcription.transcript_buffer = []
+            # Buffer is already populated by the monitoring loop, skip duplicate
     except Exception as e:
-        logger.debug(f"Could not store segment in session: {e}")
+        logger.debug(f"Could not access live transcription buffer: {e}")
     
     if session_id in active_connections:
         disconnected = set()

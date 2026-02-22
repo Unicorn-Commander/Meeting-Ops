@@ -6,6 +6,7 @@ Works with both Gemma service and our new decoupled model system
 import asyncio
 import json
 import logging
+import os
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
@@ -49,7 +50,8 @@ async def get_unified_service():
     # Initialize Redis once
     if not redis_client:
         try:
-            redis_client = await redis.from_url("redis://localhost:6379", decode_responses=True)
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6381")
+            redis_client = await redis.from_url(redis_url, decode_responses=True)
             await redis_client.ping()
             logger.info("Connected to Redis for caching")
         except Exception as e:

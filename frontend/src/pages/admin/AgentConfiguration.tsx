@@ -40,28 +40,12 @@ interface ModelInfo {
 }
 
 const MODEL_PERFORMANCE: Record<string, ModelInfo> = {
-  'phi-4-mini': {
-    name: 'Phi-4-Mini',
-    speed: '28.40 t/s',
-    best_for: 'Live summaries',
-    memory: '3.2GB',
+  'granite-3.3-2b-instruct': {
+    name: 'Granite 3.3 2B Instruct',
+    speed: '~850 t/s',
+    best_for: 'Summaries, chat, insights',
+    memory: '~1.5GB',
     port: 11437,
-    status: 'ready'
-  },
-  'granite3.3:8b': {
-    name: 'Granite 3.3 8B',
-    speed: '~15 t/s',
-    best_for: 'Final analysis',
-    memory: '5.1GB',
-    port: 11438,
-    status: 'ready'
-  },
-  'qwen3-30b': {
-    name: 'Qwen3-30B',
-    speed: '26.54 t/s',
-    best_for: 'Premium quality',
-    memory: '17.6GB',
-    port: 11439,
     status: 'ready'
   }
 };
@@ -80,7 +64,7 @@ Focus on:
 - Update incrementally
 
 Be immediate and actionable in your responses.`,
-    model_name: 'phi-4-mini',
+    model_name: 'granite-3.3-2b-instruct',
     use_case: 'live' as const,
     model_settings: { temperature: 0.3, max_tokens: 512, context_length: '8K' }
   },
@@ -97,9 +81,9 @@ Provide:
 - Meeting effectiveness assessment
 
 Be thorough and professional in your analysis.`,
-    model_name: 'granite3.3:8b',
+    model_name: 'granite-3.3-2b-instruct',
     use_case: 'final' as const,
-    model_settings: { temperature: 0.7, max_tokens: 2048, context_length: '32K' }
+    model_settings: { temperature: 0.7, max_tokens: 2048, context_length: '8K' }
   },
   action_extractor: {
     name: 'Action Item Extractor',
@@ -114,7 +98,7 @@ For each action item, provide:
 - Dependencies on other tasks
 
 Format as structured lists for easy tracking.`,
-    model_name: 'granite3.3:8b',
+    model_name: 'granite-3.3-2b-instruct',
     use_case: 'custom' as const,
     model_settings: { temperature: 0.4, max_tokens: 1024, context_length: '16K' }
   },
@@ -132,7 +116,7 @@ For each decision, capture:
 - Implementation requirements
 
 Focus on decisions that will affect future work or strategy.`,
-    model_name: 'granite3.3:8b',
+    model_name: 'granite-3.3-2b-instruct',
     use_case: 'custom' as const,
     model_settings: { temperature: 0.5, max_tokens: 1024, context_length: '16K' }
   }
@@ -180,7 +164,7 @@ export const AgentConfiguration: React.FC = () => {
       }
     } catch (error) {
       console.error('Error loading models:', error);
-      setModels(['phi-4-mini', 'granite3.3:8b', 'qwen3-30b']);
+      setModels(['granite-3.3-2b-instruct']);
     }
   };
 
@@ -226,7 +210,7 @@ export const AgentConfiguration: React.FC = () => {
       name: 'New Agent',
       description: 'Custom meeting analysis agent',
       system_prompt: 'You are a helpful meeting assistant.',
-      model_name: 'granite3.3:8b',
+      model_name: 'granite-3.3-2b-instruct',
       use_case: 'general' as const,
       model_settings: { temperature: 0.7, max_tokens: 1024, context_length: '32K' }
     };

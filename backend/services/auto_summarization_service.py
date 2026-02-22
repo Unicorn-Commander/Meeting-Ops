@@ -168,26 +168,23 @@ class AutoSummarizationService:
         Returns summary data or None if transcript hasn't changed significantly
         """
         try:
-            # Get the current transcript from the session
-            # This would normally come from your session storage
-            from api.simple_recording_fixed import sessions
-            
-            if session_id not in sessions:
-                logger.warning(f"Session {session_id} not found")
-                return None
-            
-            session = sessions[session_id]
-            
-            # Build transcript from segments or raw text
+            # Get the current transcript from live transcription buffer
             transcript_text = ""
-            
-            if "transcript" in session and session["transcript"]:
-                transcript_text = session["transcript"]
-            elif "transcription_segments" in session and session["transcription_segments"]:
-                for segment in session["transcription_segments"]:
-                    text = segment.get("text", "").strip()
-                    if text:
-                        transcript_text += text + " "
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                if (hasattr(live_recording_transcription, 'session_id') and
+                    live_recording_transcription.session_id == session_id and
+                    live_recording_transcription.transcript_buffer):
+                    for segment in live_recording_transcription.transcript_buffer:
+                        text = segment.get("text", "").strip()
+                        if text:
+                            transcript_text += text + " "
+            except Exception:
+                pass
+
+            if not transcript_text:
+                logger.warning(f"No transcript available for session {session_id}")
+                return None
             
             # Check if transcript has changed significantly
             current_length = len(transcript_text)
@@ -279,29 +276,22 @@ class AutoSummarizationService:
             except ImportError:
                 pass
             
-            # Fallback to calculating from stored transcript
-            from api.simple_recording_fixed import sessions
-            
-            if session_id not in sessions:
-                return 0
-            
-            session = sessions[session_id]
-            transcript_text = ""
-            
-            if "transcript" in session and session["transcript"]:
-                transcript_text = session["transcript"]
-            elif "transcription_segments" in session and session["transcription_segments"]:
-                for segment in session["transcription_segments"]:
-                    text = segment.get("text", "").strip()
-                    if text:
-                        transcript_text += text + " "
-            
-            word_count = len(transcript_text.split())
-            self.total_word_count[session_id] = word_count
-            return word_count
-            
+            # Fallback to live transcription buffer
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                if (hasattr(live_recording_transcription, 'session_id') and
+                    live_recording_transcription.session_id == session_id and
+                    live_recording_transcription.transcript_buffer):
+                    total = sum(len(seg.get('text', '').split()) for seg in live_recording_transcription.transcript_buffer)
+                    self.total_word_count[session_id] = total
+                    return total
+            except Exception:
+                pass
+
+            return 0
+
         except Exception as e:
-            logger.error(f"Error getting word count for session {session_id}: {e}")
+            logger.debug(f"Could not get word count for session {session_id}: {e}")
             return 0
     
     async def generate_final_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -316,29 +306,24 @@ class AutoSummarizationService:
                 logger.info(f"Final summary disabled for session {session_id}")
                 return None
             
-            # Get the full transcript
-            from api.simple_recording_fixed import sessions
-            
-            if session_id not in sessions:
-                logger.warning(f"Session {session_id} not found for final summary")
-                return None
-            
-            session = sessions[session_id]
-            
-            # Build complete transcript
+            # Get the full transcript from live transcription buffer
             full_transcript = ""
-            if "transcript" in session and session["transcript"]:
-                full_transcript = session["transcript"]
-            elif "transcription_segments" in session and session["transcription_segments"]:
-                for segment in session["transcription_segments"]:
-                    text = segment.get("text", "").strip()
-                    if text:
-                        full_transcript += text + " "
-            
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                if (hasattr(live_recording_transcription, 'session_id') and
+                    live_recording_transcription.session_id == session_id and
+                    live_recording_transcription.transcript_buffer):
+                    for segment in live_recording_transcription.transcript_buffer:
+                        text = segment.get("text", "").strip()
+                        if text:
+                            full_transcript += text + " "
+            except Exception:
+                pass
+
             if len(full_transcript) < 50:
                 logger.info(f"Not enough content for final summary in session {session_id}")
                 return None
-            
+
             # Generate comprehensive final summary
             final_summary = {
                 "type": "final",
@@ -350,9 +335,9 @@ class AutoSummarizationService:
                 "action_items": [],
                 "decisions": [],
                 "topics": [],
-                "participants": session.get("participants", []),
+                "participants": [],
                 "sentiment": "neutral",
-                "duration_seconds": session.get("duration_seconds", 0)
+                "duration_seconds": 0
             }
             
             # Generate comprehensive AI summary for the full transcript

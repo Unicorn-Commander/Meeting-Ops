@@ -3,6 +3,18 @@
 
 echo "Starting Meeting-Ops Backend..."
 
+# Ensure PipeWire audio is running (needed for shared mic access)
+if ! systemctl --user is-active pipewire &>/dev/null; then
+    echo "Starting PipeWire audio services..."
+    systemctl --user start pipewire pipewire-pulse wireplumber 2>/dev/null || true
+    sleep 1
+fi
+if systemctl --user is-active pipewire &>/dev/null; then
+    echo "PipeWire audio: running"
+else
+    echo "PipeWire audio: not available (recording may use direct ALSA)"
+fi
+
 # Load environment variables from .env file
 if [ -f ../.env ]; then
     echo "Loading configuration from parent .env file..."
@@ -13,7 +25,7 @@ elif [ -f .env ]; then
 else
     echo "No .env file found, using defaults..."
     export DATABASE_URL="postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions"
-    export REDIS_URL="redis://localhost:6379"
+    export REDIS_URL="redis://localhost:6381"
     export HOST="0.0.0.0"
     export PORT="9050"
 fi
@@ -63,7 +75,6 @@ done
 cd "$SCRIPT_DIR"
 
 # Kill any existing processes that might conflict
-pkill -f arecord 2>/dev/null || true
 pkill -f "uvicorn main:app" 2>/dev/null || true
 sleep 1
 

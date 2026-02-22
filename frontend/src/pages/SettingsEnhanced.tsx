@@ -81,8 +81,8 @@ export default function SettingsEnhanced() {
     autoGenerateActions: true,
     speakerDiarization: true,
     maxSpeakers: 4,
-    llmModel: 'gemma3n:e4b',
-    llmProvider: 'ollama',
+    llmModel: 'granite-3.3-2b-instruct',
+    llmProvider: 'llamacpp',
     
     // Export Settings
     defaultExportFormat: 'txt',
@@ -993,11 +993,12 @@ export default function SettingsEnhanced() {
               <label className="block text-sm font-medium text-zinc-300 mb-2">
                 LLM Provider
               </label>
-              <select 
+              <select
                 value={settings.llmProvider}
                 onChange={(e) => setSettings({...settings, llmProvider: e.target.value})}
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
               >
+                <option value="llamacpp">llama.cpp Vulkan (Local)</option>
                 <option value="ollama">Ollama (Local)</option>
                 <option value="openai">OpenAI API</option>
                 <option value="anthropic">Anthropic Claude</option>
@@ -1005,24 +1006,20 @@ export default function SettingsEnhanced() {
               </select>
             </div>
 
-            {settings.llmProvider === 'ollama' && (
+            {(settings.llmProvider === 'llamacpp' || settings.llmProvider === 'ollama' || settings.llmProvider === 'custom') && (
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  Ollama Model
+                  LLM Model
                 </label>
-                <select 
+                <select
                   value={settings.llmModel}
                   onChange={(e) => setSettings({...settings, llmModel: e.target.value})}
                   className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
                 >
-                  <option value="gemma3n:e4b">Gemma 3n E4B (Recommended)</option>
-                  <option value="llama3.3:latest">Llama 3.3</option>
-                  <option value="phi4:latest">Phi-4</option>
-                  <option value="granite3.3:latest">Granite 3.3</option>
-                  <option value="mistral:latest">Mistral</option>
+                  <option value="granite-3.3-2b-instruct">Granite 3.3 2B Instruct (Active)</option>
                 </select>
                 <p className="text-xs text-zinc-500 mt-1">
-                  Gemma3n optimized for ROCm with HSA override
+                  Granite 3.3 2B on llama.cpp Vulkan (port 11437, ~850 tok/s)
                 </p>
               </div>
             )}

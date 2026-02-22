@@ -72,36 +72,12 @@ interface ModelPerformance {
 
 const MODEL_PERFORMANCE: ModelPerformance[] = [
   {
-    model: 'qwen3-0.6b',
-    speed: '123.63 t/s',
-    tokens_per_sec: 123.63,
-    context: '32K',
-    memory: '4GB',
-    best_for: 'Ultra-fast live summaries'
-  },
-  {
-    model: 'phi-4-mini',
-    speed: '28.40 t/s',
-    tokens_per_sec: 28.40,
+    model: 'granite-3.3-2b-instruct',
+    speed: '~850 t/s',
+    tokens_per_sec: 850,
     context: '8K',
-    memory: '3.2GB',
-    best_for: 'Quick analysis'
-  },
-  {
-    model: 'qwen3-30b',
-    speed: '26.54 t/s',
-    tokens_per_sec: 26.54,
-    context: '32K',
-    memory: '17.6GB',
-    best_for: 'Premium quality'
-  },
-  {
-    model: 'granite3.3:8b',
-    speed: '15.0 t/s',
-    tokens_per_sec: 15.0,
-    context: '32K',
-    memory: '5.1GB',
-    best_for: 'Structured output'
+    memory: '~1.5GB',
+    best_for: 'Summaries, chat, insights, sentiment'
   }
 ];
 
@@ -162,21 +138,21 @@ export const AgentDashboard: React.FC = () => {
       is_active: true,
       is_default_live: true,
       is_default_final: false,
-      provider_type: 'ollama',
-      model_name: 'qwen3-0.6b',
+      provider_type: 'llamacpp',
+      model_name: 'granite-3.3-2b-instruct',
       model_settings: {
         temperature: 0.3,
         max_tokens: 512,
         top_p: 0.9,
-        context_window: 32768
+        context_window: 8192
       },
       system_prompt: 'You are a live meeting summarizer...',
       output_format: 'text',
       permission_level: 'public',
       performance_metrics: {
-        avg_tokens_per_sec: 123.63,
-        model_size: '4GB',
-        context_window: '32K'
+        avg_tokens_per_sec: 850,
+        model_size: '~1.5GB',
+        context_window: '8K'
       }
     },
     {
@@ -191,21 +167,21 @@ export const AgentDashboard: React.FC = () => {
       is_active: true,
       is_default_live: false,
       is_default_final: true,
-      provider_type: 'ollama',
-      model_name: 'qwen3-30b',
+      provider_type: 'llamacpp',
+      model_name: 'granite-3.3-2b-instruct',
       model_settings: {
         temperature: 0.7,
         max_tokens: 2048,
         top_p: 0.95,
-        context_window: 32768
+        context_window: 8192
       },
       system_prompt: 'You are a comprehensive meeting analyst...',
       output_format: 'json',
       permission_level: 'public',
       performance_metrics: {
-        avg_tokens_per_sec: 26.54,
-        model_size: '17.6GB',
-        context_window: '32K'
+        avg_tokens_per_sec: 850,
+        model_size: '~1.5GB',
+        context_window: '8K'
       }
     }
   ];
@@ -224,7 +200,7 @@ export const AgentDashboard: React.FC = () => {
       is_default_live: false,
       is_default_final: false,
       provider_type: 'ollama',
-      model_name: 'granite3.3:8b',
+      model_name: 'granite-3.3-2b-instruct',
       model_settings: {
         temperature: 0.7,
         max_tokens: 1024,
@@ -389,7 +365,7 @@ export const AgentDashboard: React.FC = () => {
                 Agent Management
               </h1>
               <p className="text-zinc-400">
-                Multi-tier agent system with ultra-fast Qwen3-0.6B (123.63 tokens/sec)
+                Multi-tier agent system powered by Granite 3.3 2B on llama.cpp Vulkan
               </p>
             </div>
             
@@ -437,8 +413,8 @@ export const AgentDashboard: React.FC = () => {
               <div 
                 key={model.model}
                 className={`bg-zinc-900/70 rounded-lg border p-4 ${
-                  model.model === 'qwen3-0.6b' 
-                    ? 'border-yellow-500/50 bg-yellow-900/10' 
+                  model.model === 'granite-3.3-2b-instruct'
+                    ? 'border-green-500/50 bg-green-900/10'
                     : 'border-zinc-800'
                 }`}
               >
@@ -446,9 +422,9 @@ export const AgentDashboard: React.FC = () => {
                   <span className="font-medium text-white capitalize">
                     {model.model.replace('-', ' ').replace('3.3:8b', ' 3.3 8B')}
                   </span>
-                  {model.model === 'qwen3-0.6b' && (
-                    <span className="px-2 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded-full">
-                      NEW
+                  {model.model === 'granite-3.3-2b-instruct' && (
+                    <span className="px-2 py-1 text-xs bg-green-500/20 text-green-400 rounded-full">
+                      ACTIVE
                     </span>
                   )}
                 </div>

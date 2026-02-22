@@ -312,17 +312,20 @@ class UnifiedAgentService:
             except ImportError:
                 pass
 
-            # Fallback to session storage
-            from api.simple_recording_fixed import sessions
-            if session_id in sessions:
-                session = sessions[session_id]
-                transcript = session.get('transcript', '') or ''
-                return len(transcript.split())
+            # Fallback to live transcription buffer
+            try:
+                from services.live_recording_transcription import live_recording_transcription
+                if hasattr(live_recording_transcription, 'transcript_buffer') and live_recording_transcription.transcript_buffer:
+                    if live_recording_transcription.session_id == session_id:
+                        total = sum(len(seg.get('text', '').split()) for seg in live_recording_transcription.transcript_buffer)
+                        return total
+            except Exception:
+                pass
 
             return 0
 
         except Exception as e:
-            logger.error(f"Error getting word count for session {session_id}: {e}")
+            logger.debug(f"Could not get word count for session {session_id}: {e}")
             return 0
 
     async def _generate_progressive_summary(self, session_id: str, interval_info: Dict):
@@ -492,22 +495,7 @@ Brief summary:"""
                         logger.debug(f"Got transcript from live buffer: {len(transcript_text.split())} words")
                         return transcript_text
 
-            # Fallback to session storage
-            try:
-                from api.simple_recording_fixed import sessions
-                if session_id in sessions:
-                    session = sessions[session_id]
-
-                    if 'transcript' in session and session['transcript']:
-                        return session['transcript']
-
-                    if 'transcription_segments' in session and session['transcription_segments']:
-                        segments = session['transcription_segments']
-                        return ' '.join(segment.get('text', '') for segment in segments)
-            except ImportError:
-                pass
-
-            # Try from database as last resort
+            # Try from database
             from database.database import get_db_session
             from database.models import RecordingSession
             db = get_db_session()
