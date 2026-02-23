@@ -846,9 +846,12 @@ export default function LiveRecording() {
 
     setIsProcessing(true);
     try {
+      const stopHeaders: Record<string, string> = {};
+      const stopToken = localStorage.getItem('access_token');
+      if (stopToken) stopHeaders['Authorization'] = `Bearer ${stopToken}`;
       const stopResponse = await fetch(
         `${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}/stop`,
-        { method: 'POST' }
+        { method: 'POST', headers: stopHeaders }
       );
       
       // Continue cleanup even if stop request fails
@@ -870,8 +873,10 @@ export default function LiveRecording() {
         // Poll for final summary (backend generates it asynchronously)
         setTimeout(async () => {
           try {
+            const pollToken = localStorage.getItem('access_token');
             const sessionResponse = await fetch(
-              `${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}`
+              `${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}`,
+              { headers: pollToken ? { 'Authorization': `Bearer ${pollToken}` } : {} }
             );
             if (sessionResponse.ok) {
               const updatedSession = await sessionResponse.json();
@@ -896,7 +901,10 @@ export default function LiveRecording() {
       localStorage.removeItem('activeRecordingSession');
       
       // Fetch final session data with AI summaries
-      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}`);
+      const finalToken = localStorage.getItem('access_token');
+      const response = await fetch(`${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}`, {
+        headers: finalToken ? { 'Authorization': `Bearer ${finalToken}` } : {}
+      });
       if (response.ok) {
         const finalData = await response.json();
         setSessionData(prev => ({

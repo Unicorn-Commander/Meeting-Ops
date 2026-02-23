@@ -18,7 +18,7 @@ interface Session {
   created_at: string;
   updated_at: string;
   duration?: number;
-  status: 'idle' | 'recording' | 'completed' | 'processing';
+  status: 'idle' | 'active' | 'recording' | 'completed' | 'processing' | 'failed';
   participants?: string[];
   tags?: string[];
   audio_file?: string;
@@ -71,7 +71,7 @@ export const Sessions: React.FC = () => {
     setIsSearching(true);
     try {
       const headers: Record<string, string> = {};
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
@@ -165,7 +165,7 @@ export const Sessions: React.FC = () => {
     // Add user message to conversation
     setRagMessages(prev => [...prev, { role: 'user', content: message }]);
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const res = await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/query`, {
         method: 'POST',
         headers: {
@@ -209,7 +209,7 @@ export const Sessions: React.FC = () => {
     setRagMessages([]);
     // Also clear server-side history for a fresh start
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
         method: 'DELETE',
         headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
@@ -228,7 +228,7 @@ export const Sessions: React.FC = () => {
   useEffect(() => {
     const loadRagHistory = async () => {
       try {
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('access_token');
         const res = await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
           headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         });
@@ -267,7 +267,7 @@ export const Sessions: React.FC = () => {
     try {
       // Remove auth header if not present - backend may not require it
       const headers: any = {};
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
@@ -366,7 +366,7 @@ export const Sessions: React.FC = () => {
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${sessionId}`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         }
       });
 
@@ -383,7 +383,7 @@ export const Sessions: React.FC = () => {
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${session.id}/transcript`, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         }
       });
 
@@ -408,7 +408,7 @@ export const Sessions: React.FC = () => {
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${session.id}/audio`, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         }
       });
 
@@ -488,11 +488,19 @@ export const Sessions: React.FC = () => {
 
   const getStatusColor = (status: string) => {
     switch (status) {
+      case 'active':
       case 'recording': return 'text-red-400 bg-red-500/10 border-red-500';
       case 'completed': return 'text-green-400 bg-green-500/10 border-green-500';
       case 'processing': return 'text-yellow-400 bg-yellow-500/10 border-yellow-500';
+      case 'failed': return 'text-red-400 bg-red-500/10 border-red-500/50';
       default: return 'text-gray-400 bg-gray-500/10 border-gray-500';
     }
+  };
+
+  const getStatusLabel = (status: string) => {
+    if (status === 'active') return 'Recording';
+    if (status === 'failed') return 'Failed';
+    return status.charAt(0).toUpperCase() + status.slice(1);
   };
 
   const formatDuration = (seconds?: number) => {
@@ -529,7 +537,7 @@ export const Sessions: React.FC = () => {
 
           <MeetingIntelligenceDashboard
             meetingData={meetingData}
-            isRecording={selectedSession.status === 'recording'}
+            isRecording={selectedSession.status === 'recording' || selectedSession.status === 'active'}
             className="w-full"
           />
         </div>
@@ -637,9 +645,10 @@ export const Sessions: React.FC = () => {
                 >
                   <option value="all">All Status</option>
                   <option value="idle">Idle</option>
-                  <option value="recording">Recording</option>
+                  <option value="active">Recording</option>
                   <option value="processing">Processing</option>
                   <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
                 </select>
 
                 <select
@@ -689,7 +698,7 @@ export const Sessions: React.FC = () => {
                     onClick={async () => {
                       setRagMessages([]);
                       try {
-                        const token = localStorage.getItem('token');
+                        const token = localStorage.getItem('access_token');
                         await fetch(`${config.apiBaseUrl}/api/ai-chat/rag/history`, {
                           method: 'DELETE',
                           headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
@@ -840,7 +849,7 @@ export const Sessions: React.FC = () => {
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
-                          {session.status}
+                          {getStatusLabel(session.status)}
                         </span>
                         {session.summary && (
                           <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
@@ -962,7 +971,7 @@ export const Sessions: React.FC = () => {
                           {session.title || session.name}
                         </h3>
                         <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
-                          {session.status}
+                          {getStatusLabel(session.status)}
                         </span>
                         {session.summary && (
                           <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">

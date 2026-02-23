@@ -16,7 +16,7 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   login: (username: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshToken: () => Promise<boolean>;
   isAuthenticated: boolean;
   isLoading: boolean;
@@ -203,7 +203,27 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    // Try to stop any active recording before clearing auth
+    const activeSession = localStorage.getItem('activeRecordingSession');
+    if (activeSession) {
+      try {
+        const session = JSON.parse(activeSession);
+        if (session.isRecording && session.id) {
+          const apiBase = `http://${window.location.hostname}:9050`;
+          await fetch(`${apiBase}/api/simple/recording-sessions/${session.id}/stop`, {
+            method: 'POST',
+          });
+        }
+      } catch { /* best-effort */ }
+    }
+
+    // Clear recording state
+    localStorage.removeItem('activeRecordingSession');
+    localStorage.removeItem('lastMeetingSummary');
+    localStorage.removeItem('lastMeetingTimestamp');
+
+    // Clear auth
     setUser(null);
     setToken(null);
     setRefreshToken(null);

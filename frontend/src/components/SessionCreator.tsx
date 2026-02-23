@@ -134,7 +134,7 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         },
         body: JSON.stringify(sessionData)
       });
@@ -157,7 +157,7 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
           {
             method: 'POST',
             headers: {
-              'Authorization': `Bearer ${localStorage.getItem('token')}`
+              'Authorization': `Bearer ${localStorage.getItem('access_token')}`
             },
             body: formData
           }
@@ -180,7 +180,7 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
             {
               method: 'POST',
               headers: {
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
+                'Authorization': `Bearer ${localStorage.getItem('access_token')}`
               }
             }
           );

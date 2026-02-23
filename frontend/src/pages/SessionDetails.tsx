@@ -141,7 +141,7 @@ export const SessionDetails: React.FC = () => {
     if (!chatOpen || chatHistoryLoaded || !sessionId || !session) return;
     const loadChatHistory = async () => {
       try {
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('access_token');
         const response = await fetch(
           `${config.apiUrl}/api/ai-chat/sessions/${session.id || sessionId}/messages`,
           {
@@ -175,7 +175,7 @@ export const SessionDetails: React.FC = () => {
     const fetchInsights = async () => {
       setInsightsLoading(true);
       try {
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('access_token');
         const response = await fetch(
           `${config.apiUrl}/api/simple/recording-sessions/${sessionId}/insights`,
           {
@@ -484,7 +484,7 @@ export const SessionDetails: React.FC = () => {
     setChatLoading(true);
     
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const response = await fetch(
         `${config.apiUrl}/api/ai-chat/sessions/${session.id || sessionId}/messages`,
         {
@@ -785,7 +785,7 @@ export const SessionDetails: React.FC = () => {
                     <button
                       onClick={async () => {
                         try {
-                          const token = localStorage.getItem('token');
+                          const token = localStorage.getItem('access_token');
                           const response = await fetch(
                             `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/pdf`,
                             { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
@@ -814,7 +814,7 @@ export const SessionDetails: React.FC = () => {
                     <button
                       onClick={async () => {
                         try {
-                          const token = localStorage.getItem('token');
+                          const token = localStorage.getItem('access_token');
                           const response = await fetch(
                             `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/docx`,
                             { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }

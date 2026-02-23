@@ -149,7 +149,7 @@ export default function SettingsEnhanced() {
   const fetchVocabTerms = async () => {
     setVocabLoading(true);
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const res = await fetch(`${config.apiUrl}/api/vocabulary/terms?limit=100`, {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
@@ -167,7 +167,7 @@ export default function SettingsEnhanced() {
   const addVocabTerm = async () => {
     if (!newTerm.trim() || !newExpansion.trim()) return;
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const res = await fetch(`${config.apiUrl}/api/vocabulary/terms`, {
         method: 'POST',
         headers: {
@@ -194,7 +194,7 @@ export default function SettingsEnhanced() {
 
   const deleteVocabTerm = async (termId: string) => {
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       await fetch(`${config.apiUrl}/api/vocabulary/terms/${termId}`, {
         method: 'DELETE',
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
@@ -207,7 +207,7 @@ export default function SettingsEnhanced() {
 
   const fetchAvailableModels = async () => {
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const res = await fetch(`${config.apiUrl}/api/settings/models/available`, {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
@@ -228,7 +228,7 @@ export default function SettingsEnhanced() {
   const switchModel = async (modelId: string) => {
     setModelSwitching(true);
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('access_token');
       const res = await fetch(`${config.apiUrl}/api/settings/models/active`, {
         method: 'POST',
         headers: {

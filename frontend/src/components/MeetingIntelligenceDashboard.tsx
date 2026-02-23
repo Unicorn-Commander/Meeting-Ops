@@ -395,7 +395,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
       try {
         const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${meetingData.sessionId}`, {
           headers: {
-            'Authorization': `Bearer ${localStorage.getItem('token')}`
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
           }
         });
 
@@ -503,7 +503,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         },
         body: JSON.stringify({
           session_id: meetingData.sessionId,
@@ -540,7 +540,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
         },
         body: JSON.stringify({
           session_id: meetingData.sessionId,
