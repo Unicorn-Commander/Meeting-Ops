@@ -1,108 +1,86 @@
-# Makefile for Unicorn Commander
+# Meeting-Ops Recording Appliance - Makefile
+# Part of the Unicorn Commander Suite
 
-.PHONY: help build up down logs clean dev prod shell test
+COMPOSE := docker compose -f docker-compose-full-stack.yml
+BACKEND_PORT := 9050
+FRONTEND_PORT := 7777
+DATABASE_URL := postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions
+
+.PHONY: help up down backend frontend test test-backend test-frontend logs health status install backup clean
 
 help:
-	@echo "Unicorn Commander - Docker Commands"
+	@echo "Meeting-Ops Recording Appliance"
 	@echo ""
-	@echo "Development:"
-	@echo "  make dev        - Start development environment"
-	@echo "  make build-dev  - Build development images"
+	@echo "Services:"
+	@echo "  make up        - Start Docker services (PostgreSQL, Redis, Qdrant, llama.cpp)"
+	@echo "  make down      - Stop Docker services"
+	@echo "  make backend   - Start backend on port $(BACKEND_PORT)"
+	@echo "  make frontend  - Start frontend on port $(FRONTEND_PORT)"
 	@echo ""
-	@echo "Production:"
-	@echo "  make prod       - Start production environment"
-	@echo "  make build      - Build production images"
+	@echo "Testing:"
+	@echo "  make test          - Run backend + frontend tests"
+	@echo "  make test-backend  - Run backend tests only"
+	@echo "  make test-frontend - Run frontend tests only"
 	@echo ""
-	@echo "Common:"
-	@echo "  make up         - Start services (basic)"
-	@echo "  make down       - Stop all services"
-	@echo "  make logs       - View logs"
-	@echo "  make clean      - Clean up volumes and images"
-	@echo "  make shell-backend  - Shell into backend container"
-	@echo "  make shell-frontend - Shell into frontend container"
+	@echo "Operations:"
+	@echo "  make logs      - Tail Docker service logs"
+	@echo "  make health    - Check backend health endpoint"
+	@echo "  make status    - Show running services and ports"
+	@echo "  make install   - Run install-meeting-ops.sh"
+	@echo "  make backup    - Run backup script"
+	@echo "  make clean     - Stop everything and remove Docker volumes"
 
-# Development commands
-dev:
-	docker-compose -f docker-compose.dev.yml up
-
-build-dev:
-	docker-compose -f docker-compose.dev.yml build
-
-# Production commands
-prod:
-	docker-compose -f docker-compose.prod.yml up -d
-
-build:
-	docker-compose -f docker-compose.yml build
-
-build-prod:
-	docker-compose -f docker-compose.prod.yml build
-
-# Basic commands
 up:
-	docker-compose up -d
+	$(COMPOSE) up -d
+	@echo "Waiting for PostgreSQL..."
+	@for i in $$(seq 1 30); do \
+		docker exec meetingops-postgres pg_isready -U meetingops >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "Services started. llama.cpp may still be loading the model (~60s for GPT-OSS 20B)."
 
 down:
-	docker-compose down
-	docker-compose -f docker-compose.dev.yml down
-	docker-compose -f docker-compose.prod.yml down
+	$(COMPOSE) down
 
-logs:
-	docker-compose logs -f
+backend:
+	cd backend && DATABASE_URL="$(DATABASE_URL)" python3 -m uvicorn main:app --host 0.0.0.0 --port $(BACKEND_PORT)
 
-logs-backend:
-	docker-compose logs -f backend
+frontend:
+	cd frontend && npm run dev -- --host 0.0.0.0
 
-logs-frontend:
-	docker-compose logs -f frontend
+test: test-backend test-frontend
 
-# Shell access
-shell-backend:
-	docker exec -it unicorn-backend /bin/bash
-
-shell-frontend:
-	docker exec -it unicorn-frontend /bin/sh
-
-shell-backend-dev:
-	docker exec -it unicorn-backend-dev /bin/bash
-
-# Database
-db-shell:
-	docker exec -it unicorn-db psql -U unicorn unicorn_commander
-
-db-backup:
-	docker exec unicorn-db pg_dump -U unicorn unicorn_commander > backup_`date +%Y%m%d_%H%M%S`.sql
-
-# Cleanup
-clean:
-	docker-compose down -v
-	docker-compose -f docker-compose.dev.yml down -v
-	docker-compose -f docker-compose.prod.yml down -v
-	docker system prune -f
-
-clean-all:
-	docker-compose down -v --rmi all
-	docker-compose -f docker-compose.dev.yml down -v --rmi all
-	docker-compose -f docker-compose.prod.yml down -v --rmi all
-	docker system prune -af
-
-# Testing
 test-backend:
-	docker exec unicorn-backend pytest
+	cd backend && DATABASE_URL="$(DATABASE_URL)" python3 -m pytest tests/ -v
 
 test-frontend:
-	docker exec unicorn-frontend npm test
+	cd frontend && npm run build && npx vitest run
 
-# Quick restart
-restart:
-	make down
-	make up
+logs:
+	$(COMPOSE) logs -f
 
-restart-dev:
-	docker-compose -f docker-compose.dev.yml restart
+health:
+	@curl -sf http://localhost:$(BACKEND_PORT)/health | python3 -m json.tool 2>/dev/null || echo "Backend not responding on port $(BACKEND_PORT)"
 
-# View running containers
-ps:
-	docker-compose ps
-	docker-compose -f docker-compose.dev.yml ps
-	docker-compose -f docker-compose.prod.yml ps
+status:
+	@echo "=== Docker Services ==="
+	@docker ps --filter "name=meetingops-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "Docker not running"
+	@echo ""
+	@echo "=== Backend ==="
+	@curl -sf http://localhost:$(BACKEND_PORT)/health >/dev/null 2>&1 && echo "Backend: running on port $(BACKEND_PORT)" || echo "Backend: not running"
+	@echo ""
+	@echo "=== Frontend ==="
+	@curl -sf http://localhost:$(FRONTEND_PORT)/ >/dev/null 2>&1 && echo "Frontend: running on port $(FRONTEND_PORT)" || echo "Frontend: not running"
+	@echo ""
+	@echo "=== llama.cpp ==="
+	@curl -sf http://localhost:11437/health >/dev/null 2>&1 && echo "llama.cpp: ready" || echo "llama.cpp: not ready (may still be loading)"
+
+install:
+	bash install-meeting-ops.sh
+
+backup:
+	bash scripts/backup.sh
+
+clean:
+	$(COMPOSE) down -v
+	@echo "Docker volumes removed."

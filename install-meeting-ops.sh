@@ -1,25 +1,25 @@
 #!/bin/bash
 # Meeting-Ops Installation Script
 # Installs all components for the on-premise meeting recording appliance
-# Version: 3.0.0
+# Version: 4.0.0
 #
 # What it does:
 #   1. Checks prerequisites (Python 3.11+, Node.js 18+, Docker)
 #   2. Installs system packages (ffmpeg, portaudio, etc.)
 #   3. Installs Python dependencies (no venv -- system packages)
 #   4. Installs frontend dependencies (npm)
-#   5. Downloads Granite 3.3 2B GGUF model for llama.cpp (if not present)
+#   5. Downloads GPT-OSS 20B GGUF (default) + Granite 3.3 2B (fallback) for llama.cpp
 #   6. Starts Docker services (PostgreSQL:5434, Redis:6381, Qdrant:6335, llama.cpp:11437)
 #   7. Initializes database
 #   8. Creates startup script and systemd service
 #
 # Stack:
-#   LLM:   llama.cpp Vulkan (Granite 3.3 2B) -- NO Ollama
+#   LLM:   llama.cpp Vulkan (GPT-OSS 20B default, Granite 3.3 2B fallback)
 #   STT:   whisper.cpp Vulkan (optional, separate setup)
 #   DB:    PostgreSQL 16 on port 5434
 #   Cache: Redis 7 on port 6381
 #   Vec:   Qdrant on port 6335
-#   API:   FastAPI on port 9050 (21 routers)
+#   API:   FastAPI on port 9050 (22 routers)
 #   UI:    React 19 + Vite on port 7777
 #
 # Safe to run multiple times (idempotent).
@@ -46,9 +46,13 @@ WHISPER_PORT=8178
 
 DATABASE_URL="postgresql://meetingops:REMOVED@localhost:${POSTGRES_PORT}/meeting_sessions"
 
-# Granite 3.3 2B model for llama.cpp
-MODEL_NAME="granite-3.3-2b-instruct-Q4_K_M.gguf"
-MODEL_URL="https://huggingface.co/lmstudio-community/granite-3.3-2b-instruct-GGUF/resolve/main/${MODEL_NAME}"
+# GPT-OSS 20B model for llama.cpp (default)
+PRIMARY_MODEL_NAME="gpt-oss-20b-mxfp4.gguf"
+PRIMARY_MODEL_URL="https://huggingface.co/OptimusCode/gpt-oss-20b-GGUF/resolve/main/${PRIMARY_MODEL_NAME}"
+
+# Granite 3.3 2B model for llama.cpp (fallback)
+FALLBACK_MODEL_NAME="granite-3.3-2b-instruct-Q4_K_M.gguf"
+FALLBACK_MODEL_URL="https://huggingface.co/lmstudio-community/granite-3.3-2b-instruct-GGUF/resolve/main/${FALLBACK_MODEL_NAME}"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,7 +104,7 @@ get_distro() {
 # ============================================================================
 
 echo ""
-echo -e "${BOLD}${BLUE}Meeting-Ops Recording Appliance -- Installation Script v3.0.0${NC}"
+echo -e "${BOLD}${BLUE}Meeting-Ops Recording Appliance -- Installation Script v4.0.0${NC}"
 echo -e "${BLUE}Part of the Unicorn Commander Suite${NC}"
 echo "================================================================"
 echo ""
@@ -363,35 +367,56 @@ cd "$SCRIPT_DIR"
 # Download LLM model
 # ============================================================================
 
-print_header "Step 5: Downloading AI Model"
+print_header "Step 5: Downloading AI Models"
 
 mkdir -p "$MODELS_DIR"
 
-if [ -f "$MODELS_DIR/$MODEL_NAME" ]; then
-    MODEL_SIZE=$(stat -c%s "$MODELS_DIR/$MODEL_NAME" 2>/dev/null || stat -f%z "$MODELS_DIR/$MODEL_NAME" 2>/dev/null)
-    if [ "$MODEL_SIZE" -gt 1000000 ]; then
-        print_success "Model already downloaded: $MODEL_NAME ($(numfmt --to=iec-i --suffix=B "$MODEL_SIZE" 2>/dev/null || echo "${MODEL_SIZE} bytes"))"
-    else
-        print_warning "Model file exists but seems too small. Re-downloading..."
-        rm -f "$MODELS_DIR/$MODEL_NAME"
-    fi
-fi
+# --- GPT-OSS 20B (default model, ~12 GB) ---
+download_model() {
+    local name="$1" url="$2" size_label="$3"
 
-if [ ! -f "$MODELS_DIR/$MODEL_NAME" ]; then
-    print_status "Downloading Granite 3.3 2B Q4_K_M model (~1.6 GB)..."
-    print_status "URL: $MODEL_URL"
-    wget -c -O "$MODELS_DIR/$MODEL_NAME" "$MODEL_URL" || {
+    if [ -f "$MODELS_DIR/$name" ]; then
+        local fsize
+        fsize=$(stat -c%s "$MODELS_DIR/$name" 2>/dev/null || stat -f%z "$MODELS_DIR/$name" 2>/dev/null)
+        if [ "$fsize" -gt 1000000 ]; then
+            print_success "Already present: $name ($(numfmt --to=iec-i --suffix=B "$fsize" 2>/dev/null || echo "${fsize} bytes"))"
+            return 0
+        else
+            print_warning "File $name looks too small. Re-downloading..."
+            rm -f "$MODELS_DIR/$name"
+        fi
+    fi
+
+    print_status "Downloading $name ($size_label)..."
+    print_status "URL: $url"
+    wget -c -O "$MODELS_DIR/$name" "$url" || {
         print_warning "wget failed, trying curl..."
-        curl -L -C - -o "$MODELS_DIR/$MODEL_NAME" "$MODEL_URL" || {
-            print_error "Failed to download model. Download it manually:"
-            print_error "  wget -O $MODELS_DIR/$MODEL_NAME $MODEL_URL"
-            print_warning "Continuing without the model (llama.cpp will fail to start)..."
+        curl -L -C - -o "$MODELS_DIR/$name" "$url" || {
+            print_error "Failed to download $name"
+            return 1
         }
     }
-    if [ -f "$MODELS_DIR/$MODEL_NAME" ]; then
-        print_success "Model downloaded: $MODEL_NAME"
+    if [ -f "$MODELS_DIR/$name" ]; then
+        print_success "Downloaded: $name"
     fi
+}
+
+print_status "GPT-OSS 20B is the default LLM (~12 GB download)."
+print_status "Granite 3.3 2B is a lightweight fallback (~1.6 GB)."
+echo ""
+
+# Download GPT-OSS 20B (primary)
+if ! download_model "$PRIMARY_MODEL_NAME" "$PRIMARY_MODEL_URL" "~12 GB"; then
+    print_warning "GPT-OSS 20B download failed or was skipped."
+    print_warning "You can place the file manually:"
+    print_warning "  wget -O $MODELS_DIR/$PRIMARY_MODEL_NAME $PRIMARY_MODEL_URL"
+    print_warning "Granite 3.3 2B will be used as fallback."
 fi
+
+# Always download Granite 3.3 2B (guaranteed fallback)
+download_model "$FALLBACK_MODEL_NAME" "$FALLBACK_MODEL_URL" "~1.6 GB" || {
+    print_error "Failed to download fallback model. llama.cpp will need a model in ./models/"
+}
 
 # ============================================================================
 # Docker services
@@ -436,7 +461,7 @@ else
 fi
 
 if docker ps | grep -q meetingops-llama-gpu; then
-    print_success "llama.cpp Vulkan is starting on port $LLAMA_PORT (model loads in ~15-30s)"
+    print_success "llama.cpp Vulkan is starting on port $LLAMA_PORT (GPT-OSS 20B loads in ~60s)"
 else
     print_warning "llama.cpp failed to start. Check GPU/Vulkan drivers."
     print_status "Logs: docker logs meetingops-llama-gpu"
@@ -484,7 +509,7 @@ cat > "$SCRIPT_DIR/start-meeting-ops.sh" << 'STARTUP_EOF'
 #!/bin/bash
 # Meeting-Ops Startup Script
 # Starts all services for the meeting recording appliance
-# Generated by install-meeting-ops.sh v3.0.0
+# Generated by install-meeting-ops.sh v4.0.0
 
 set -e
 
@@ -507,9 +532,9 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Wait for llama.cpp to load model
-echo "  Waiting for llama.cpp to load model (~15s)..."
-sleep 15
+# Wait for llama.cpp to load model (GPT-OSS 20B is ~12 GB, needs ~60s)
+echo "  Waiting for llama.cpp to load GPT-OSS 20B model (~60s)..."
+sleep 60
 if curl -sf http://localhost:11437/health >/dev/null 2>&1; then
     echo "  llama.cpp ready"
 else
@@ -576,7 +601,7 @@ WorkingDirectory=$SCRIPT_DIR/backend
 Environment=DATABASE_URL=postgresql://meetingops:REMOVED@localhost:${POSTGRES_PORT}/meeting_sessions
 Environment=REDIS_URL=redis://localhost:${REDIS_PORT}
 ExecStartPre=/usr/bin/docker compose -f $SCRIPT_DIR/docker-compose-full-stack.yml up -d
-ExecStartPre=/bin/sleep 15
+ExecStartPre=/bin/sleep 60
 ExecStart=$PYTHON_CMD -m uvicorn main:app --host 0.0.0.0 --port ${BACKEND_PORT}
 Restart=on-failure
 RestartSec=10
@@ -633,7 +658,7 @@ echo ""
 echo -e "${BOLD}Manual Start:${NC}"
 echo "  # 1. Docker services"
 echo "  docker compose -f docker-compose-full-stack.yml up -d"
-echo "  sleep 15"
+echo "  sleep 60  # GPT-OSS 20B needs ~60s to load"
 echo ""
 echo "  # 2. Backend (port $BACKEND_PORT)"
 echo "  cd backend && DATABASE_URL=\"$DATABASE_URL\" python3 -m uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT"
@@ -655,7 +680,7 @@ echo -e "${BOLD}Services (Docker):${NC}"
 echo "  PostgreSQL:       localhost:$POSTGRES_PORT"
 echo "  Redis:            localhost:$REDIS_PORT"
 echo "  Qdrant:           localhost:$QDRANT_PORT"
-echo "  llama.cpp Vulkan: localhost:$LLAMA_PORT (Granite 3.3 2B)"
+echo "  llama.cpp Vulkan: localhost:$LLAMA_PORT (GPT-OSS 20B default)"
 echo "  whisper.cpp:      localhost:$WHISPER_PORT (optional, see above)"
 echo ""
 echo -e "${BOLD}Tests:${NC}"
