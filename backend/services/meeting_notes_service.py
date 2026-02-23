@@ -41,7 +41,7 @@ class MeetingNotesService:
             max_tokens=2048,  # Enough for detailed notes
             top_p=0.9,
             provider_params={
-                "num_ctx": 8192,  # Large context for full transcripts
+                "num_ctx": 32768,  # Large context for full transcripts
                 "num_gpu": 99,    # Use all GPU layers
                 "repeat_penalty": 1.1
             }

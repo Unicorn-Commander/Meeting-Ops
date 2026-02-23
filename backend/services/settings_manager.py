@@ -37,6 +37,7 @@ class SettingsManager:
             "speaker_diarization": True,
             "real_time_processing": True,
             "whisper_model": "whisperx-npu",
+            "llm_model": "gpt-oss-20b",
             "language": "auto",
             "max_speakers": 10
         },
@@ -109,6 +110,7 @@ class SettingsManager:
             "ai.speaker_diarization": "Enable speaker identification",
             "ai.real_time_processing": "Process audio in real-time",
             "ai.whisper_model": "Whisper model size (tiny, base, small, medium, large)",
+            "ai.llm_model": "Active LLM model for AI tasks (gpt-oss-20b or granite-3.3-2b-instruct)",
             "ai.language": "Language for transcription (auto for automatic detection)",
             "ai.max_speakers": "Maximum number of speakers to detect",
             "storage.auto_cleanup_days": "Delete old recordings after N days (0 = never)",

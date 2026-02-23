@@ -45,6 +45,15 @@ export default function SettingsEnhanced() {
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error' | 'backend-pending'>('idle');
   const [micVolume, setMicVolume] = useState(75); // USB mic volume percentage
+  const [availableModels, setAvailableModels] = useState<Array<{
+    model_id: string;
+    display_name: string;
+    speed_estimate: string;
+    vram_estimate: string;
+    best_for: string;
+    is_active: boolean;
+  }>>([]);
+  const [modelSwitching, setModelSwitching] = useState(false);
   
   // Load settings from localStorage or use defaults
   const loadSettings = () => {
@@ -73,7 +82,7 @@ export default function SettingsEnhanced() {
     autoGenerateActions: true,
     speakerDiarization: true,
     maxSpeakers: 4,
-    llmModel: 'granite-3.3-2b-instruct',
+    llmModel: 'gpt-oss-20b',
     llmProvider: 'llamacpp',
     
     // Export Settings
@@ -196,10 +205,57 @@ export default function SettingsEnhanced() {
     }
   };
 
+  const fetchAvailableModels = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${config.apiUrl}/api/settings/models/available`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableModels(data.models || []);
+        // Set the active model in settings state
+        const activeModel = data.models?.find((m: any) => m.is_active);
+        if (activeModel) {
+          setSettings((prev: any) => ({ ...prev, llmModel: activeModel.model_id }));
+        }
+      }
+    } catch (e) {
+      console.log('Could not fetch available models:', e);
+    }
+  };
+
+  const switchModel = async (modelId: string) => {
+    setModelSwitching(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${config.apiUrl}/api/settings/models/active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ model_id: modelId })
+      });
+      if (res.ok) {
+        setSettings((prev: any) => ({ ...prev, llmModel: modelId }));
+        // Refresh the model list to update active indicators
+        await fetchAvailableModels();
+      }
+    } catch (e) {
+      console.error('Failed to switch model:', e);
+    } finally {
+      setModelSwitching(false);
+    }
+  };
+
   // Fetch vocabulary terms when the vocabulary section is active
   useEffect(() => {
     if (activeSection === 'vocabulary') {
       fetchVocabTerms();
+    }
+    if (activeSection === 'ai') {
+      fetchAvailableModels();
     }
   }, [activeSection]);
 
@@ -1011,14 +1067,39 @@ export default function SettingsEnhanced() {
                 </label>
                 <select
                   value={settings.llmModel}
-                  onChange={(e) => setSettings({...settings, llmModel: e.target.value})}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
+                  onChange={(e) => switchModel(e.target.value)}
+                  disabled={modelSwitching}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 disabled:opacity-50"
                 >
-                  <option value="granite-3.3-2b-instruct">Granite 3.3 2B Instruct (Active)</option>
+                  {availableModels.length > 0 ? (
+                    availableModels.map(model => (
+                      <option key={model.model_id} value={model.model_id}>
+                        {model.display_name} {model.is_active ? '(Active)' : ''}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={settings.llmModel}>{settings.llmModel}</option>
+                  )}
                 </select>
-                <p className="text-xs text-zinc-500 mt-1">
-                  Granite 3.3 2B on llama.cpp Vulkan (port 11437, ~850 tok/s)
-                </p>
+                {(() => {
+                  const activeModel = availableModels.find(m => m.model_id === settings.llmModel);
+                  if (activeModel) {
+                    return (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-xs text-zinc-500">
+                          Speed: {activeModel.speed_estimate} &middot; VRAM: {activeModel.vram_estimate}
+                        </p>
+                        <p className="text-xs text-zinc-400">
+                          {activeModel.best_for}
+                        </p>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+                {modelSwitching && (
+                  <p className="text-xs text-yellow-400 mt-1">Switching model...</p>
+                )}
               </div>
             )}
 

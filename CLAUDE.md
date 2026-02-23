@@ -9,7 +9,7 @@ Hardware appliance for AI-powered meeting recording and transcription. NPU accel
 ## Quick Start
 
 ```bash
-# Start Docker services (PostgreSQL on 5434, llama.cpp Granite 3.3 2B on 11437)
+# Start Docker services (PostgreSQL on 5434, llama.cpp GPT-OSS-20B on 11437)
 docker compose -f docker-compose-full-stack.yml up -d
 
 # Start backend (port 9050)
@@ -32,11 +32,16 @@ cd frontend && npx vitest run                 # 23 pass
 
 ## Architecture
 
-### LLM: Granite 3.3 2B on llama.cpp Vulkan
-- Model: `granite-3.3-2b-instruct-Q4_K_M.gguf` in `./models/`
+### LLM: GPT-OSS 20B on llama.cpp Vulkan (default)
+- Default model: `gpt-oss-20b-mxfp4.gguf` in `./models/` (~28 tok/s, ~12GB VRAM)
+- Fallback model: `granite-3.3-2b-instruct-Q4_K_M.gguf` (~43 tok/s, ~1.5GB VRAM)
+- Model registry: `backend/config/model_registry.py` — centralized model configs
+- Active model setting: `ai.llm_model` in settings_manager (persisted to DB)
+- Token multiplier: GPT-OSS uses Harmony prompt format with hidden reasoning tokens (3x multiplier applied automatically)
 - API: OpenAI-compatible `/v1/chat/completions` at port 11437
-- GPU: AMD 780M iGPU via Vulkan (RADV), ~850 tok/s
+- GPU: AMD 780M iGPU via Vulkan (RADV)
 - Used for: summaries, titles, AI chat, insights, sentiment analysis
+- Switch models: `POST /api/settings/models/active` or Settings UI dropdown
 
 ### Frontend (React 19 + TypeScript + Vite + TailwindCSS)
 Active router: `AppRouterSimplified.tsx` (mobile-responsive with hamburger menu)
@@ -65,7 +70,8 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `simple_recording_db.py` - Recording CRUD + audio capture + full-text search
 - `sessions.py` - Session management
 - `ai_chat.py` - Per-meeting AI chat (real LLM)
-- `ai_insights.py` - AI-powered insights (keywords, sentiment, action items)
+- `ai_insights.py` - AI-powered insights (keywords, sentiment, action items via _call_llm)
+- `ai_settings.py` - Model list/switch endpoints, AI settings
 - `analytics_simple.py` - Speaker analytics + duration trends
 - `batch_export.py` - PDF/DOCX/TXT/JSON/SRT export
 - `vocabulary.py` - Custom vocabulary CRUD
@@ -76,8 +82,8 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `websocket_remote_audio.py` - Companion app remote audio WebSocket
 
 **Key services** (in `backend/services/`):
-- `unified_llm_service.py` - Granite 3.3 2B via llama.cpp OpenAI API
-- `unified_agent_service.py` - Progressive summarization (single model)
+- `unified_llm_service.py` - LLM via llama.cpp OpenAI API (reads model from model_registry, applies token multiplier)
+- `unified_agent_service.py` - Progressive summarization (reads model from model_registry)
 - `working_audio_service.py` - USB mic audio capture
 - `real_whisper_service.py` - NPU-accelerated Whisper
 - `transcription_service.py` - Transcription orchestration
@@ -85,7 +91,7 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 ### Infrastructure
 - PostgreSQL on port 5434 (session/transcript storage)
 - Redis (real-time pub/sub)
-- llama.cpp Vulkan on port 11437 (Granite 3.3 2B)
+- llama.cpp Vulkan on port 11437 (GPT-OSS 20B default, Granite 3.3 2B fallback)
 - Qdrant on port 6335 (hybrid vector search — dense + BM25 sparse)
 
 ### NPU (AMD Phoenix, 16 TOPS)
@@ -116,6 +122,9 @@ GET  /api/analytics/duration-trends               # Duration trends
 GET  /api/simple/recording-sessions/{id}/insights  # AI insights (keywords, sentiment)
 WS   /ws/transcription/{session_id}               # Live transcription
 WS   /ws/audio-levels                             # Audio level monitoring
+GET  /api/settings/models                          # Model info + status
+GET  /api/settings/models/available                # List all models with active indicator
+POST /api/settings/models/active                   # Switch active LLM model
 GET  /health                                       # Health + router status
 # Satellite Devices
 POST /api/satellites/register                      # Register satellite device
@@ -164,7 +173,7 @@ UC-Meeting-Ops/
     auth/                      # JWT authentication
     database/                  # SQLAlchemy models + connection
     models/                    # Unified agent + vocabulary models
-    config/                    # AI backend config
+    config/                    # AI backend config + model registry
     tests/                     # 8 test files (39 tests)
     start-backend.sh           # Start script
   frontend/

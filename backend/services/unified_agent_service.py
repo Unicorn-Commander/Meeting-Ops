@@ -1,10 +1,12 @@
 """
 Unified Agent Service
-Single agent that handles all meeting tasks with Granite 3.3 2B on llama.cpp Vulkan
+Single agent that handles all meeting tasks via llama.cpp Vulkan.
+Reads active model from config/model_registry.py.
 """
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
@@ -26,8 +28,8 @@ except ImportError:
             "url": "http://localhost:11437",
             "endpoint": "/v1/chat/completions",
             "type": "llamacpp",
-            "name": "Granite 3.3 2B (llama.cpp Vulkan)",
-            "model": "granite-3.3-2b-instruct",
+            "name": "llama.cpp Vulkan",
+            "model": "gpt-oss-20b",
             "timeout": 30,
             "health_check": "/health"
         }
@@ -37,10 +39,6 @@ except ImportError:
         return True
 
 logger = logging.getLogger(__name__)
-
-# Constants for the single Granite 3.3 2B model
-LLAMACPP_BASE_URL = "http://localhost:11437"
-LLAMACPP_MODEL = "granite-3.3-2b-instruct"
 
 
 class UnifiedAgentService:
@@ -56,10 +54,21 @@ class UnifiedAgentService:
         # Get AI backend configuration
         backend_name, self.ai_backend = get_available_backend()
         self.base_url = self.ai_backend["url"]
-        self.model_name = self.ai_backend.get("model", LLAMACPP_MODEL)
 
         logger.info(f"Unified Agent Service initialized")
-        logger.info(f"   Using AI backend: {self.ai_backend['name']} at {self.base_url}")
+        logger.info(f"   Using AI backend at {self.base_url}")
+
+    def _get_active_model(self) -> dict:
+        """Get active model config from registry."""
+        try:
+            from config.model_registry import get_active_model
+            return get_active_model()
+        except Exception:
+            return {"model_id": "gpt-oss-20b", "max_tokens_multiplier": 3.0, "display_name": "GPT-OSS 20B"}
+
+    @property
+    def model_name(self) -> str:
+        return self._get_active_model()["model_id"]
 
     def _extract_json_from_ai_response(self, response_text: str) -> Optional[str]:
         """
@@ -136,20 +145,24 @@ class UnifiedAgentService:
     async def _call_llm(self, prompt: str, max_tokens: int = 500, temperature: float = 0.7,
                         system_prompt: str = "You are a meeting assistant.", timeout: int = 30) -> Optional[str]:
         """
-        Call Granite 3.3 2B via OpenAI-compatible chat completions API
-        Single unified method for all LLM calls
+        Call LLM via OpenAI-compatible chat completions API.
+        max_tokens is the base budget; the registry multiplier is applied automatically.
         """
+        model = self._get_active_model()
+        multiplier = model.get("max_tokens_multiplier", 1.0)
+        effective_max_tokens = math.ceil(max_tokens * multiplier)
+
         try:
             url = f"{self.base_url}/v1/chat/completions"
 
             payload = {
-                "model": self.model_name,
+                "model": model["model_id"],
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                "max_tokens": effective_max_tokens,
                 "stream": False
             }
 
@@ -167,7 +180,7 @@ class UnifiedAgentService:
                 inference_time = time.time() - start_time
                 tokens_generated = len(content.split()) if content else 0
                 tokens_per_sec = tokens_generated / inference_time if inference_time > 0 else 0
-                logger.info(f"Granite 3.3 2B inference: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
+                logger.info(f"LLM ({model['model_id']}) inference: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
                 return content.strip()
             else:
                 logger.error(f"llama.cpp API error: {response.status_code}")
@@ -406,8 +419,8 @@ class UnifiedAgentService:
     async def _generate_text_summary(self, transcript: str, interval_info: Dict) -> Optional[str]:
         """Generate a plain text summary for progressive updates"""
         # Truncate transcript if too long for real-time processing
-        if len(transcript) > 2000:
-            transcript = transcript[:2000] + "..."
+        if len(transcript) > 6000:
+            transcript = transcript[:6000] + "..."
 
         prompt = f"""Below is a meeting transcript. Write a 2-3 sentence summary of the key points.
 
@@ -419,9 +432,9 @@ Brief summary:"""
         result = await self._call_llm(
             prompt=prompt,
             max_tokens=150,
-            temperature=0.7,
+            temperature=0.5,
             system_prompt="You are a fast meeting summarizer. Provide brief, clear summaries.",
-            timeout=10
+            timeout=30
         )
 
         if not result:
@@ -551,7 +564,7 @@ Provide JSON analysis:
                 max_tokens=600,
                 temperature=0.3,
                 system_prompt="You are a meeting analyst. Provide comprehensive meeting analysis in valid JSON format.",
-                timeout=90
+                timeout=120
             )
 
             if result:
@@ -591,7 +604,7 @@ Provide JSON analysis:
 
         title_prompt = f"""Based on this meeting transcript, generate a concise, descriptive meeting title (4-8 words):
 
-{transcript[:1000]}...
+{transcript[:4000]}...
 
 Title should capture the main purpose/topic. Examples:
 - "Q4 Budget Planning Review"
@@ -603,10 +616,10 @@ RESPOND WITH ONLY THE TITLE:"""
         try:
             result = await self._call_llm(
                 prompt=title_prompt,
-                max_tokens=20,
+                max_tokens=30,
                 temperature=0.3,
                 system_prompt="You generate concise meeting titles. Respond with ONLY the title.",
-                timeout=15
+                timeout=30
             )
 
             if result:
@@ -625,8 +638,8 @@ RESPOND WITH ONLY THE TITLE:"""
         """
         try:
             # Truncate very long transcripts to avoid timeout
-            if len(transcript) > 5000:
-                transcript = transcript[:5000] + "... [truncated for processing]"
+            if len(transcript) > 20000:
+                transcript = transcript[:20000] + "... [truncated for processing]"
 
             db_session = get_db_session()
 
@@ -661,7 +674,7 @@ RESPOND WITH JSON:
                 result = await self._call_llm(
                     prompt=prompt,
                     max_tokens=500,
-                    temperature=0.7,
+                    temperature=0.5,
                     system_prompt="You are a meeting analyst. Provide meeting analysis in valid JSON format.",
                     timeout=120
                 )

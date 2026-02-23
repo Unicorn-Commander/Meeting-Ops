@@ -240,7 +240,7 @@ async def _generate_summary(transcript: str) -> str:
     svc = _get_llm_service()
     if svc:
         try:
-            result = svc.summarize_meeting(transcript[:4000])
+            result = svc.summarize_meeting(transcript[:16000])
             return result.get("summary", "Meeting discussion covered multiple topics.")
         except Exception as e:
             logger.warning(f"LLM summary failed: {e}")
@@ -253,14 +253,18 @@ async def _extract_keywords(
 ) -> List[Dict[str, Any]]:
     """Extract keywords using LLM, fall back to frequency analysis."""
     svc = _get_llm_service()
-    if svc:
+    if svc and svc.llamacpp_available:
         try:
-            prompt = (
-                "Extract the top 10 important keywords or key phrases from this meeting transcript. "
-                "Return ONLY a JSON array of strings, nothing else.\n\n"
-                f"{transcript[:3000]}"
+            raw = svc._call_llm(
+                system_prompt="You extract keywords from meeting transcripts. Return ONLY a JSON array of strings.",
+                user_prompt=(
+                    "Extract the top 10 important keywords or key phrases from this meeting transcript. "
+                    "Return ONLY a JSON array of strings, nothing else.\n\n"
+                    f"{transcript[:12000]}"
+                ),
+                max_tokens=200,
+                temperature=0.3,
             )
-            raw = svc._generate_with_llamacpp(transcript[:3000], prompt) if svc.llamacpp_available else ""
             if raw.strip():
                 # Try to parse JSON array from response
                 import re
@@ -341,13 +345,17 @@ async def _analyze_speaker_sentiment(segments: List[str]) -> str:
     svc = _get_llm_service()
     if svc and svc.llamacpp_available:
         try:
-            combined = " ".join(segments[:20])[:2000]
-            prompt = (
-                "Classify the overall sentiment of this speaker's dialogue as exactly one word: "
-                "positive, negative, or neutral. Respond with ONLY one word.\n\n"
-                f"{combined}"
+            combined = " ".join(segments[:50])[:6000]
+            raw = svc._call_llm(
+                system_prompt="You classify sentiment. Respond with ONLY one word: positive, negative, or neutral.",
+                user_prompt=(
+                    "Classify the overall sentiment of this speaker's dialogue as exactly one word: "
+                    "positive, negative, or neutral. Respond with ONLY one word.\n\n"
+                    f"{combined}"
+                ),
+                max_tokens=10,
+                temperature=0.1,
             )
-            raw = svc._generate_with_llamacpp(combined, prompt)
             raw_lower = raw.strip().lower()
             for label in ("positive", "negative", "neutral"):
                 if label in raw_lower:
@@ -381,13 +389,17 @@ async def _analyze_overall_sentiment(
     svc = _get_llm_service()
     if svc and svc.llamacpp_available:
         try:
-            prompt = (
-                "Analyze the sentiment of this meeting transcript. "
-                "Return ONLY a JSON object with three keys: positive, neutral, negative "
-                "where values are percentages that sum to 100.\n\n"
-                f"{transcript[:3000]}"
+            raw = svc._call_llm(
+                system_prompt="You analyze meeting sentiment. Return ONLY a JSON object with keys: positive, neutral, negative (percentages summing to 100).",
+                user_prompt=(
+                    "Analyze the sentiment of this meeting transcript. "
+                    "Return ONLY a JSON object with three keys: positive, neutral, negative "
+                    "where values are percentages that sum to 100.\n\n"
+                    f"{transcript[:12000]}"
+                ),
+                max_tokens=50,
+                temperature=0.3,
             )
-            raw = svc._generate_with_llamacpp(transcript[:3000], prompt)
             if raw.strip():
                 import re
                 match = re.search(r'\{.*?\}', raw, re.DOTALL)
@@ -427,12 +439,16 @@ async def _extract_action_items(transcript: str) -> List[ActionItem]:
     svc = _get_llm_service()
     if svc and svc.llamacpp_available:
         try:
-            prompt = (
-                "Extract action items from this meeting transcript. "
-                "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low).\n\n"
-                f"{transcript[:3000]}"
+            raw = svc._call_llm(
+                system_prompt="You extract action items from meeting transcripts. Return ONLY a JSON array.",
+                user_prompt=(
+                    "Extract action items from this meeting transcript. "
+                    "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low).\n\n"
+                    f"{transcript[:12000]}"
+                ),
+                max_tokens=500,
+                temperature=0.3,
             )
-            raw = svc._generate_with_llamacpp(transcript[:3000], prompt)
             if raw.strip():
                 import re
                 match = re.search(r'\[.*?\]', raw, re.DOTALL)
@@ -464,13 +480,17 @@ async def _extract_decisions(transcript: str) -> tuple:
     svc = _get_llm_service()
     if svc and svc.llamacpp_available:
         try:
-            prompt = (
-                "Extract key decisions and follow-up items from this meeting. "
-                "Return ONLY a JSON object with two keys: decisions (array of strings) "
-                "and follow_ups (array of strings).\n\n"
-                f"{transcript[:3000]}"
+            raw = svc._call_llm(
+                system_prompt="You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object.",
+                user_prompt=(
+                    "Extract key decisions and follow-up items from this meeting. "
+                    "Return ONLY a JSON object with two keys: decisions (array of strings) "
+                    "and follow_ups (array of strings).\n\n"
+                    f"{transcript[:12000]}"
+                ),
+                max_tokens=300,
+                temperature=0.3,
             )
-            raw = svc._generate_with_llamacpp(transcript[:3000], prompt)
             if raw.strip():
                 import re
                 match = re.search(r'\{.*\}', raw, re.DOTALL)

@@ -169,7 +169,7 @@ Duration: {duration_str}
 
     # Include transcript, truncated if too long (keep under ~3000 tokens worth)
     if transcript:
-        max_chars = 8000
+        max_chars = 24000
         if len(transcript) > max_chars:
             prompt += f"\nMeeting Transcript (truncated to first {max_chars} characters):\n{transcript[:max_chars]}...\n"
         else:
@@ -249,7 +249,7 @@ async def send_chat_message(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=800,
-            temperature=0.7
+            temperature=0.6
         )
 
         inference_time = time.time() - start_time
@@ -327,7 +327,7 @@ async def delete_chat_history(
 RAG_SESSION_KEY = "__rag__"
 
 # Max context budget in characters (~4000 tokens * 3 chars/token)
-RAG_CONTEXT_MAX_CHARS = 12000
+RAG_CONTEXT_MAX_CHARS = 24000
 
 
 class RAGQueryRequest(BaseModel):
@@ -348,7 +348,7 @@ class RAGResponse(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
-def _format_history_for_prompt(history: List[Dict[str, Any]], max_chars: int = 1500) -> str:
+def _format_history_for_prompt(history: List[Dict[str, Any]], max_chars: int = 3000) -> str:
     """Format chat history for inclusion in LLM prompts.
     Truncates older messages first if total exceeds max_chars."""
     lines = []
@@ -356,7 +356,7 @@ def _format_history_for_prompt(history: List[Dict[str, Any]], max_chars: int = 1
     # Process from newest to oldest, then reverse
     for msg in reversed(history):
         role_label = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"][:300]  # Cap individual messages
+        content = msg["content"][:600]  # Cap individual messages
         line = f"{role_label}: {content}"
         if total + len(line) > max_chars:
             break
@@ -469,7 +469,7 @@ async def rag_query(
 
     # 4. Assemble context within token budget (reduced from 12000 to 9000 to
     #    make room for ~1500 chars of chat history in the prompt)
-    context_budget = 9000 if rag_history else RAG_CONTEXT_MAX_CHARS
+    context_budget = 18000 if rag_history else RAG_CONTEXT_MAX_CHARS
     context_parts = []
     total_chars = 0
     seen_sources = {}  # session_id -> best RAGSource

@@ -207,7 +207,7 @@ async def generate_final_report(request: Dict[str, Any]):
 Include the purpose, main discussions, outcomes, and overall assessment.
 
 Transcript:
-{transcript[:4000]}
+{transcript[:16000]}
 
 Executive Summary:"""
     
@@ -223,7 +223,7 @@ Executive Summary:"""
 Consider: participation, decision-making process, time management, and outcomes.
 
 Transcript:
-{transcript[:4000]}
+{transcript[:16000]}
 
 Analysis:"""
     
@@ -241,7 +241,7 @@ Analysis:"""
 3. Addressing any concerns raised
 
 Transcript:
-{transcript[:4000]}
+{transcript[:16000]}
 
 Recommendations:"""
     
@@ -257,7 +257,7 @@ Recommendations:"""
 Include potential issues, blockers, or areas needing attention.
 
 Transcript:
-{transcript[:4000]}
+{transcript[:16000]}
 
 Risks and Concerns:"""
     

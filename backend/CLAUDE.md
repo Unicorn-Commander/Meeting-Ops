@@ -12,16 +12,20 @@ uvicorn main:app --host 0.0.0.0 --port 9050 --reload
 docker compose -f docker-compose-full-stack.yml up -d
 # Connection: postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions
 
-# LLM (Granite 3.3 2B via llama.cpp Vulkan on port 11437)
+# LLM (GPT-OSS 20B default via llama.cpp Vulkan on port 11437)
 # Started by docker-compose, OpenAI-compatible API
 ```
 
 ## Architecture
 
 ### LLM Integration
-- Model: Granite 3.3 2B (Q4_K_M GGUF) on llama.cpp Vulkan
+- Default model: GPT-OSS 20B (MXFP4 GGUF) on llama.cpp Vulkan (~28 tok/s)
+- Fallback model: Granite 3.3 2B (Q4_K_M GGUF) (~43 tok/s)
+- Model registry: `config/model_registry.py` — centralized configs, token multipliers
+- Active model setting: `ai.llm_model` in settings_manager (DB-persisted)
 - API: OpenAI-compatible `/v1/chat/completions` at `http://localhost:11437`
 - Service: `services/unified_llm_service.py` (singleton, `llm_service` global)
+- Token multiplier: applied inside `_call_llm()` — callers pass base tokens
 - Used by: ai_chat, ai_insights, unified_agent_service, meeting_notes_service
 
 ### main.py
@@ -84,7 +88,8 @@ PostgreSQL (port 5434):
 ```
 
 ### Config (backend/config/)
-- `ai_backends.py` - Single backend: llama.cpp at localhost:11437
+- `model_registry.py` - Model configs (GPT-OSS 20B, Granite 3.3 2B), `get_active_model()`
+- `ai_backends.py` - llama.cpp backend config (reads from model_registry)
 - `dual_ai_backends.py` - Backward-compat wrapper (same single backend)
 
 ## Known Issues

@@ -1,11 +1,12 @@
 """
 LLM Service for Meeting-Ops
-Uses Granite 3.3 2B on llama.cpp Vulkan via OpenAI-compatible API
+Uses active model from config/model_registry.py via llama.cpp Vulkan OpenAI-compatible API
 """
 
 import json
 import asyncio
 import logging
+import math
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
@@ -17,7 +18,15 @@ logger = logging.getLogger(__name__)
 
 # llama.cpp Vulkan endpoint
 LLAMACPP_URL = "http://localhost:11437"
-LLAMACPP_MODEL = "granite-3.3-2b-instruct"
+
+
+def _get_active_model() -> dict:
+    """Get active model config from registry."""
+    try:
+        from config.model_registry import get_active_model
+        return get_active_model()
+    except Exception:
+        return {"model_id": "gpt-oss-20b", "max_tokens_multiplier": 3.0, "display_name": "GPT-OSS 20B"}
 
 
 class GemmaService:
@@ -32,25 +41,33 @@ class GemmaService:
             redis_client: Optional Redis client for caching
         """
         self.base_url = host
-        self.model = LLAMACPP_MODEL
         self.redis = redis_client
         self.cache_ttl = 3600  # 1 hour cache
+
+    @property
+    def model(self) -> str:
+        return _get_active_model()["model_id"]
 
     def _call_llm(self, system_prompt: str, user_prompt: str,
                   max_tokens: int = 2048, temperature: float = 0.7,
                   top_p: float = 0.9, timeout: int = 30) -> Optional[str]:
-        """Call Granite 3.3 2B via OpenAI-compatible chat completions API"""
+        """Call LLM via OpenAI-compatible chat completions API.
+        max_tokens is the base budget; multiplier is applied from registry."""
+        active = _get_active_model()
+        multiplier = active.get("max_tokens_multiplier", 1.0)
+        effective_max_tokens = math.ceil(max_tokens * multiplier)
+
         try:
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
                 json={
-                    "model": self.model,
+                    "model": active["model_id"],
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
                     "temperature": temperature,
-                    "max_tokens": max_tokens,
+                    "max_tokens": effective_max_tokens,
                     "top_p": top_p,
                     "stream": False
                 },
@@ -247,7 +264,7 @@ class GemmaService:
 
         user_prompt = f"""
         MEETING TRANSCRIPT:
-        {transcript[:8000]}
+        {transcript[:24000]}
 
         {history_context}
 
@@ -289,7 +306,7 @@ class GemmaService:
         for i, ctx in enumerate(meeting_contexts[:5], 1):
             context_str += f"Meeting {i} ({ctx.get('date', 'Unknown date')}):\n"
             context_str += f"Summary: {ctx.get('summary', 'No summary')}\n"
-            context_str += f"Relevant excerpt: {ctx.get('excerpt', '')[:500]}\n\n"
+            context_str += f"Relevant excerpt: {ctx.get('excerpt', '')[:1500]}\n\n"
 
         system_prompt = "You are an intelligent assistant with access to multiple meeting records. Synthesize information across meetings and provide actionable insights."
 

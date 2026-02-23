@@ -3,99 +3,28 @@ AI Settings API endpoints for managing LLM and transcription configurations
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import os
 import json
-import urllib.request
-import urllib.error
-from pathlib import Path
+import logging
 
 router = APIRouter(prefix="/api", tags=["ai-settings"])
+logger = logging.getLogger(__name__)
 
-# Settings file path
-SETTINGS_FILE = Path.home() / ".meeting-ops" / "ai_settings.json"
 
-class LLMConfig(BaseModel):
-    provider: str
-    url: str
-    apiKey: Optional[str] = None
-    model: str
-    enabled: bool
+class ModelSwitchRequest(BaseModel):
+    model_id: str
 
-class TranscriptionConfig(BaseModel):
-    provider: str
-    model: str
-    useNPU: bool
-    device: str
-
-class AISettings(BaseModel):
-    ollama: Optional[LLMConfig] = None
-    openai: Optional[LLMConfig] = None
-    anthropic: Optional[LLMConfig] = None
-    transcription: Optional[TranscriptionConfig] = None
-
-def load_settings() -> Dict[str, Any]:
-    """Load settings from file or return defaults"""
-    if SETTINGS_FILE.exists():
-        try:
-            with open(SETTINGS_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            pass
-    
-    # Return defaults
-    return {
-        "ollama": {
-            "provider": "ollama",
-            "url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
-            "model": os.getenv("OLLAMA_MODEL", "gemma3n:latest"),
-            "enabled": True
-        },
-        "openai": {
-            "provider": "openai",
-            "url": "https://api.openai.com/v1",
-            "apiKey": os.getenv("OPENAI_API_KEY", ""),
-            "model": "gpt-3.5-turbo",
-            "enabled": bool(os.getenv("OPENAI_API_KEY"))
-        },
-        "anthropic": {
-            "provider": "anthropic",
-            "url": "https://api.anthropic.com",
-            "apiKey": os.getenv("ANTHROPIC_API_KEY", ""),
-            "model": "claude-3-opus-20240229",
-            "enabled": bool(os.getenv("ANTHROPIC_API_KEY"))
-        },
-        "transcription": {
-            "provider": "whisper",
-            "model": "base",
-            "useNPU": os.path.exists("/dev/accel/accel0"),
-            "device": "/dev/accel/accel0"
-        }
-    }
-
-def save_settings(settings: Dict[str, Any]):
-    """Save settings to file and update environment"""
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(SETTINGS_FILE, 'w') as f:
-        json.dump(settings, f, indent=2)
-    
-    # Update environment variables
-    if settings.get("ollama"):
-        os.environ["OLLAMA_URL"] = settings["ollama"].get("url", "http://localhost:11434")
-        os.environ["OLLAMA_MODEL"] = settings["ollama"].get("model", "gemma3n:latest")
-    
-    if settings.get("openai") and settings["openai"].get("apiKey"):
-        os.environ["OPENAI_API_KEY"] = settings["openai"]["apiKey"]
-    
-    if settings.get("anthropic") and settings["anthropic"].get("apiKey"):
-        os.environ["ANTHROPIC_API_KEY"] = settings["anthropic"]["apiKey"]
 
 @router.get("/settings/models")
 async def get_model_info():
-    """Return actual running model configuration dynamically"""
+    """Return actual running model configuration from the model registry"""
+    from config.model_registry import MODEL_REGISTRY, get_active_model
+
+    active = get_active_model()
+
     # Get LLM status from unified_llm_service
-    llm_info = {"model": "unknown", "base_url": "", "llamacpp_available": False, "active_engine": "none"}
+    llm_info = {"llamacpp_available": False, "base_url": "", "model": active["model_id"]}
     try:
         from services.unified_llm_service import llm_service
         llm_info = llm_service.get_status()
@@ -103,7 +32,7 @@ async def get_model_info():
         llm_info["error"] = str(e)
 
     # Get whisper-server (Vulkan iGPU) status
-    whisper_server_info = {"available": False}
+    whisper_server_info: Dict[str, Any] = {"available": False}
     try:
         from services.whisper_server_client import whisper_server_client
         ws_available = whisper_server_client.is_available()
@@ -119,7 +48,7 @@ async def get_model_info():
         whisper_server_info["error"] = str(e)
 
     # Get fallback STT model info from transcription_service
-    stt_fallback = {}
+    stt_fallback: Dict[str, Any] = {}
     try:
         from services.transcription_service import transcription_service
         stt_fallback = transcription_service.get_current_model_info()
@@ -128,15 +57,16 @@ async def get_model_info():
 
     return {
         "llm": {
-            "model": llm_info.get("model", "granite-3.3-2b-instruct"),
-            "model_label": "Granite 3.3 2B Instruct",
+            "model": active["model_id"],
+            "model_label": active["display_name"],
             "endpoint": llm_info.get("base_url", "http://localhost:11437"),
             "available": llm_info.get("llamacpp_available", False),
             "active_engine": llm_info.get("active_engine", "none"),
             "backend": "llama.cpp Vulkan",
-            "tokens_per_sec": 850,
-            "context_window": 8192,
-            "vram_usage": "~1.5GB"
+            "speed_estimate": active.get("speed_estimate", "unknown"),
+            "context_window": active.get("ctx_size", 8192),
+            "vram_usage": active.get("vram_estimate", "unknown"),
+            "max_tokens_multiplier": active.get("max_tokens_multiplier", 1.0),
         },
         "stt": {
             "primary": whisper_server_info,
@@ -145,164 +75,94 @@ async def get_model_info():
         },
         "available_llm_models": [
             {
-                "name": "granite-3.3-2b-instruct",
-                "label": "Granite 3.3 2B Instruct",
-                "tokens_per_second": 850,
-                "context_window": 8192,
-                "vram_usage": "~1.5GB",
-                "best_for": "Summaries, chat, insights, sentiment",
+                "name": model_id,
+                "label": entry["display_name"],
+                "speed_estimate": entry.get("speed_estimate", "unknown"),
+                "context_window": entry.get("ctx_size", 8192),
+                "vram_usage": entry.get("vram_estimate", "unknown"),
+                "best_for": entry.get("best_for", ""),
+                "max_tokens_multiplier": entry.get("max_tokens_multiplier", 1.0),
                 "endpoint": "http://localhost:11437",
-                "status": "active" if llm_info.get("llamacpp_available") else "unavailable"
+                "status": "active" if model_id == active["model_id"] else "available",
             }
-        ]
+            for model_id, entry in MODEL_REGISTRY.items()
+        ],
     }
+
+
+@router.get("/settings/models/available")
+async def get_available_models():
+    """Return list of models from the registry with active indicator"""
+    from config.model_registry import MODEL_REGISTRY, get_active_model
+
+    active = get_active_model()
+    models = []
+    for model_id, entry in MODEL_REGISTRY.items():
+        models.append({
+            "model_id": model_id,
+            "display_name": entry["display_name"],
+            "gguf_file": entry.get("gguf_file", ""),
+            "speed_estimate": entry.get("speed_estimate", "unknown"),
+            "vram_estimate": entry.get("vram_estimate", "unknown"),
+            "ctx_size": entry.get("ctx_size", 8192),
+            "best_for": entry.get("best_for", ""),
+            "max_tokens_multiplier": entry.get("max_tokens_multiplier", 1.0),
+            "is_active": model_id == active["model_id"],
+        })
+    return {"models": models, "active_model": active["model_id"]}
+
+
+@router.post("/settings/models/active")
+async def set_active_model(request: ModelSwitchRequest):
+    """Set the active LLM model via settings_manager.
+
+    Note: Switching the loaded model requires restarting the llama-gpu
+    container with a different GGUF file. This endpoint updates the
+    persisted setting; the container must be restarted separately.
+    """
+    from config.model_registry import MODEL_REGISTRY
+    from services.settings_manager import settings_manager
+
+    if request.model_id not in MODEL_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_id}. Available: {list(MODEL_REGISTRY.keys())}")
+
+    success = settings_manager.update_setting("ai.llm_model", request.model_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update model setting")
+
+    entry = MODEL_REGISTRY[request.model_id]
+    logger.info(f"Active LLM model switched to: {request.model_id} ({entry['display_name']})")
+
+    return {
+        "status": "success",
+        "active_model": request.model_id,
+        "display_name": entry["display_name"],
+        "message": f"Model set to {entry['display_name']}. If the llama.cpp container is running a different GGUF, restart it to load {entry['gguf_file']}.",
+    }
+
 
 @router.get("/settings/ai")
 async def get_ai_settings():
-    """Get current AI settings"""
-    return load_settings()
+    """Get current AI settings from the centralized settings manager"""
+    try:
+        from services.settings_manager import settings_manager
+        all_settings = settings_manager.get_all_settings()
+        return all_settings.get("ai", {})
+    except Exception as e:
+        logger.warning(f"Could not load AI settings: {e}")
+        return {}
+
 
 @router.put("/settings/ai")
-async def update_ai_settings(settings: AISettings):
+async def update_ai_settings(settings: Dict[str, Any]):
     """Update AI settings"""
-    settings_dict = settings.dict()
-    save_settings(settings_dict)
-    return {"status": "success", "message": "Settings saved"}
-
-@router.post("/test/ollama")
-async def test_ollama(config: Dict[str, str]):
-    """Test Ollama connection"""
     try:
-        # Use urllib instead of httpx
-        url = f"{config['url']}/api/tags"
-        request = urllib.request.Request(url)
-        
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                models = data.get("models", [])
-                model_names = [m["name"] for m in models]
-                
-                if not model_names:
-                    # Try to get models from docker
-                    import subprocess
-                    try:
-                        result = subprocess.run(
-                            ["docker", "exec", "unicorn-ollama", "ollama", "list"],
-                            capture_output=True,
-                            text=True,
-                            timeout=5
-                        )
-                        if result.returncode == 0:
-                            lines = result.stdout.strip().split('\n')[1:]
-                            model_names = [line.split()[0] for line in lines if line.strip()]
-                    except:
-                        pass
-                
-                if config["model"] in model_names:
-                    return {
-                        "success": True,
-                        "message": f"Connected! Model '{config['model']}' is available."
-                    }
-                elif model_names:
-                    return {
-                        "success": True,
-                        "message": f"Connected! Available models: {', '.join(model_names[:3])}"
-                    }
-                else:
-                    return {
-                        "success": True,
-                        "message": "Connected to Ollama but no models found. Install models with: ollama pull gemma3n:latest"
-                    }
-        except urllib.error.URLError as e:
-            return {"success": False, "message": f"Could not connect to Ollama at {config['url']}"}
-            
+        from services.settings_manager import settings_manager
+        success = settings_manager.update_category_settings("ai", settings)
+        if success:
+            return {"status": "success", "message": "AI settings updated"}
+        raise HTTPException(status_code=500, detail="Failed to update settings")
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"success": False, "message": f"Connection failed: {str(e)}"}
-
-@router.post("/test/openai")
-async def test_openai(config: Dict[str, str]):
-    """Test OpenAI connection"""
-    if not config.get("apiKey"):
-        return {"success": False, "message": "API key required"}
-    
-    try:
-        import openai
-        client = openai.OpenAI(api_key=config["apiKey"])
-        
-        # Try a simple completion
-        response = client.chat.completions.create(
-            model=config.get("model", "gpt-3.5-turbo"),
-            messages=[{"role": "user", "content": "test"}],
-            max_tokens=5
-        )
-        
-        return {"success": True, "message": f"Connected! Model '{config['model']}' is working."}
-    except Exception as e:
-        return {"success": False, "message": f"Connection failed: {str(e)}"}
-
-@router.post("/test/anthropic")
-async def test_anthropic(config: Dict[str, str]):
-    """Test Anthropic connection"""
-    if not config.get("apiKey"):
-        return {"success": False, "message": "API key required"}
-    
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=config["apiKey"])
-        
-        # Try a simple completion
-        response = client.messages.create(
-            model=config.get("model", "claude-3-opus-20240229"),
-            messages=[{"role": "user", "content": "test"}],
-            max_tokens=5
-        )
-        
-        return {"success": True, "message": f"Connected! Model '{config['model']}' is working."}
-    except Exception as e:
-        return {"success": False, "message": f"Connection failed: {str(e)}"}
-
-@router.get("/ollama/models")
-async def get_ollama_models():
-    """Get list of available Ollama models"""
-    try:
-        settings = load_settings()
-        ollama_url = settings.get("ollama", {}).get("url", "http://localhost:11434")
-        
-        # Try to get models from Ollama using urllib
-        try:
-            url = f"{ollama_url}/api/tags"
-            request = urllib.request.Request(url)
-            
-            with urllib.request.urlopen(request, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                models = data.get("models", [])
-                model_names = [m["name"] for m in models]
-                if model_names:
-                    return {"models": model_names}
-        except:
-            pass
-            
-        # If that doesn't work, try Docker
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["docker", "exec", "unicorn-ollama", "ollama", "list"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')[1:]  # Skip header
-                models = []
-                for line in lines:
-                    if line.strip():
-                        model_name = line.split()[0]
-                        models.append(model_name)
-                return {"models": models}
-        except:
-            pass
-            
-        return {"models": []}
-    except Exception as e:
-        return {"models": []}
+        raise HTTPException(status_code=500, detail=str(e))

@@ -86,14 +86,17 @@ services:
     ports:
       - "11437:8080"
 
-    # Server startup with full GPU offloading
+    # Server startup with full GPU offloading (GPT-OSS-20B MXFP4 via HMA)
     command: >
-      --model /models/granite-3.3-2b-instruct-Q4_K_M.gguf
+      --model /models/gpt-oss-20b-mxfp4.gguf
       --host 0.0.0.0
       --port 8080
-      --ctx-size 8192
-      --batch-size 512
+      --ctx-size 32768
+      --batch-size 2048
+      --ubatch-size 2048
       --gpu-layers 99
+      --jinja
+      --flash-attn on
       --verbose
       --threads 4
       --parallel 1
@@ -106,7 +109,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
 
 networks:
   meetingops-network:
