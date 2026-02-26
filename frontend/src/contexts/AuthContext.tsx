@@ -1,4 +1,5 @@
 import React, { createContext, useState, useContext, useEffect, type ReactNode } from 'react';
+import { config } from '../config';
 
 interface User {
   id: number;
@@ -210,7 +211,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       try {
         const session = JSON.parse(activeSession);
         if (session.isRecording && session.id) {
-          const apiBase = `http://${window.location.hostname}:9050`;
+          const apiBase = config.apiUrl;
           await fetch(`${apiBase}/api/simple/recording-sessions/${session.id}/stop`, {
             method: 'POST',
           });

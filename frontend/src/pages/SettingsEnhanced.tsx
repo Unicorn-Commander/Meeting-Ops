@@ -97,7 +97,7 @@ export default function SettingsEnhanced() {
     authentikUrl: 'https://authentik.local',
     authentikClientId: 'meeting-ops',
     authentikClientSecret: '',
-    authentikRedirectUri: 'http://localhost:7777/auth/callback',
+    authentikRedirectUri: `${window.location.origin}/auth/callback`,
     
     // Network Settings
     hostname: 'meeting-ops',

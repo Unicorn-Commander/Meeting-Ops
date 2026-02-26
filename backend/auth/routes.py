@@ -90,7 +90,7 @@ async def register(
             role=user_data.role,
             created_by_id=current_user.id if current_user else None
         )
-        return UserResponse.from_orm(user)
+        return UserResponse.model_validate(user)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -235,7 +235,7 @@ async def update_current_user_profile(
         phone=user_update.phone,
         avatar_url=user_update.avatar_url
     )
-    return UserResponse.from_orm(updated_user)
+    return UserResponse.model_validate(updated_user)
 
 @router.post("/me/change-password")
 async def change_password(
@@ -303,7 +303,7 @@ async def list_users(
         )
     
     users = query.offset(skip).limit(limit).all()
-    return [UserResponse.from_orm(user) for user in users]
+    return [UserResponse.model_validate(user) for user in users]
 
 @router.put("/users/{user_id}/activate")
 async def activate_user(

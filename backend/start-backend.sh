@@ -75,6 +75,17 @@ for i in {1..15}; do
     sleep 1
 done
 
+# Fail if PostgreSQL is not reachable
+if ! docker exec meetingops-postgres pg_isready -U meetingops &>/dev/null; then
+    echo ""
+    echo "ERROR: PostgreSQL is not reachable after 15 seconds."
+    echo "Meeting-Ops requires PostgreSQL to run."
+    echo ""
+    echo "To start it:  docker compose -f $PROJECT_DIR/docker-compose-full-stack.yml up -d"
+    echo ""
+    exit 1
+fi
+
 cd "$SCRIPT_DIR"
 
 # Kill any existing processes that might conflict
