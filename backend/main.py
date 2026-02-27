@@ -54,6 +54,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database initialization failed: {e}")
 
+    # Clean up stale sessions (created but never started)
+    try:
+        from database.database import SessionLocal
+        from database.models import RecordingSession
+        from datetime import timedelta
+        cleanup_db = SessionLocal()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        stale = cleanup_db.query(RecordingSession).filter(
+            RecordingSession.status == "active",
+            RecordingSession.started_at.is_(None),
+            RecordingSession.created_at < cutoff
+        ).all()
+        if stale:
+            for s in stale:
+                s.status = "abandoned"
+            cleanup_db.commit()
+            logger.info(f"Cleaned up {len(stale)} stale sessions")
+        cleanup_db.close()
+    except Exception as e:
+        logger.warning(f"Stale session cleanup failed: {e}")
+
     # Check transcription service
     try:
         from services.transcription_service import transcription_service
@@ -80,7 +101,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Meeting-Ops API",
     description="AI-powered meeting recording and transcription system",
-    version="0.0.2",
+    version="0.0.3",
     lifespan=lifespan
 )
 

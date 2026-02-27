@@ -126,7 +126,6 @@ export const SessionDetails: React.FC = () => {
   const [insightsLoading, setInsightsLoading] = useState(false);
 
   useEffect(() => {
-    console.log('🔍 SessionDetails useEffect - sessionId:', sessionId);
     if (sessionId) {
       fetchSession();
     } else {
@@ -204,14 +203,11 @@ export const SessionDetails: React.FC = () => {
   const fetchSession = async () => {
     try {
       setError(null);
-      console.log('📋 Fetching session details for:', sessionId);
       const url = `${config.apiUrl}/api/simple/recording-sessions/${sessionId}`;
-      console.log('🔗 Fetching from URL:', url);
       
       const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
-        console.log('✅ Session data received:', data);
         
         // Normalize transcription data - prefer transcription_segments, then diarized segments
         if (!data.transcription) {
@@ -220,25 +216,15 @@ export const SessionDetails: React.FC = () => {
 
         if (data.transcription_segments && data.transcription_segments.length > 0) {
           data.transcription.segments = data.transcription_segments;
-          console.log('📝 Found', data.transcription_segments.length, 'transcription segments');
         } else if (data.transcript_diarized?.segments?.length) {
           data.transcription.segments = data.transcript_diarized.segments;
-          console.log('📝 Found', data.transcript_diarized.segments.length, 'diarized segments');
         }
 
         if (!data.transcription.text && data.transcript_simple) {
           data.transcription.text = data.transcript_simple;
         }
         
-        // Check if we have transcript text
-        if (data.transcript || data.transcription?.text) {
-          console.log('✅ Transcript text available');
-        } else {
-          console.log('⚠️ No transcript text found');
-        }
-        
         setSession(data);
-        console.log('✅ Session loaded successfully');
       } else {
         const errorText = await response.text();
         console.error('❌ Failed to fetch session:', response.status, errorText);
@@ -1122,7 +1108,6 @@ export const SessionDetails: React.FC = () => {
                     onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                     onError={(e) => {
                       console.error('Audio load error:', e);
-                      console.log('Attempted URL:', `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`);
                     }}
                     className="hidden"
                   />

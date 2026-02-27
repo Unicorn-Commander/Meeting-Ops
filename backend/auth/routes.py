@@ -64,6 +64,9 @@ class LoginRequest(BaseModel):
     username: str  # Can be username or email
     password: str
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
 # Routes
 @router.post("/register", response_model=UserResponse)
 async def register(
@@ -143,14 +146,14 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
-    refresh_token: str,
+    request: RefreshRequest,
     db: Session = Depends(get_db)
 ):
     """Refresh access token using refresh token"""
     from auth.utils import decode_token
-    
+
     # Decode refresh token
-    payload = decode_token(refresh_token)
+    payload = decode_token(request.refresh_token)
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

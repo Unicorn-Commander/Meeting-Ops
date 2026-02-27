@@ -31,9 +31,10 @@ export const RecordingIndicator: React.FC = () => {
   if (!isRecording) return null;
 
   return (
-    <div
+    <button
       onClick={() => navigate('/record')}
       className="fixed top-4 right-4 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg cursor-pointer hover:bg-red-700 transition-colors animate-pulse"
+      aria-label={`Recording in progress: ${activeSession?.name || 'session'} - ${formatTime(localTime)}`}
     >
       <div className="flex items-center gap-3">
         <Circle className="w-4 h-4 fill-white" />
@@ -48,6 +49,6 @@ export const RecordingIndicator: React.FC = () => {
           </span>
         )}
       </div>
-    </div>
+    </button>
   );
 };

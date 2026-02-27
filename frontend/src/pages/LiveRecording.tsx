@@ -313,6 +313,12 @@ export default function LiveRecording() {
           // Silently ignore parse errors in reconnection handler
         }
       };
+      ws.onclose = () => {
+        console.warn('[Meeting-Ops] Transcription WebSocket closed during recording');
+      };
+      ws.onerror = () => {
+        console.error('[Meeting-Ops] Transcription WebSocket error during recording');
+      };
       wsRef.current = ws;
 
       // Audio levels are already connected via the always-on WebSocket
@@ -826,6 +832,15 @@ export default function LiveRecording() {
         } catch (e) {
           // Ignore malformed WebSocket messages
         }
+      };
+      ws.onclose = (event) => {
+        if (isRecording) {
+          console.warn('[Meeting-Ops] Transcription WebSocket lost during recording');
+          alert('Connection to the server was lost. Your recording may still be running on the server. Check the Sessions page.');
+        }
+      };
+      ws.onerror = () => {
+        console.error('[Meeting-Ops] Transcription WebSocket error');
       };
       wsRef.current = ws;
 

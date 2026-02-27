@@ -375,12 +375,8 @@ export const MeetingIntelligenceDashboard: React.FC<{
         }
       }
       
-      // Also trigger API call for live notes generation if we have enough new content,
-      // templates are selected, and live AI is enabled
-      if (activeLiveTemplates.length > 0 && newContent.length > 100 && !notesLoading && liveAiEnabled) {
-        console.log('[MeetingIntelligence] Auto-generating notes for new content...');
-        generateLiveNotes();
-      }
+      // Live notes generation via API is not yet implemented.
+      // Notes come through the WebSocket connection when recording.
     }
   }, [meetingData.transcript, isRecording, activeLiveTemplates, lastTranscriptLength, liveAiEnabled]);
 
@@ -485,80 +481,15 @@ export const MeetingIntelligenceDashboard: React.FC<{
     }
   };
 
+  // NOTE: generateLiveNotes and generateFinalReport are disabled because the
+  // backend endpoints (/api/meeting-intelligence/live-notes and /final-report)
+  // do not exist yet. Live notes come via WebSocket when recording.
   const generateLiveNotes = async () => {
-    if (notesLoading) return;
-
-    // Only proceed if we have actual transcript data
-    if (!meetingData.transcript || meetingData.transcript.trim().length === 0) {
-      console.warn('[MeetingIntelligence] No transcript available for live notes generation');
-      return;
-    }
-
-    // TODO: /api/meeting-intelligence/live-notes endpoint does not exist yet.
-    // This is a placeholder for future live notes generation functionality.
-    console.log('[MeetingIntelligence] Generating live notes with transcript length:', meetingData.transcript.length);
-    setNotesLoading(true);
-    try {
-      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence/live-notes`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify({
-          session_id: meetingData.sessionId,
-          transcript: meetingData.transcript,
-          templates: activeLiveTemplates
-        })
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setRealNotes(data.notes);
-      }
-    } catch (error) {
-      console.error('[MeetingIntelligence] Failed to generate live notes:', error);
-    } finally {
-      setNotesLoading(false);
-    }
+    // No-op: endpoint not implemented
   };
 
   const generateFinalReport = async () => {
-    if (reportLoading) return;
-
-    // Only proceed if we have actual transcript data
-    if (!meetingData.transcript || meetingData.transcript.trim().length === 0) {
-      console.warn('[MeetingIntelligence] No transcript available for final report generation');
-      return;
-    }
-
-    // TODO: /api/meeting-intelligence/final-report endpoint does not exist yet.
-    // This is a placeholder for future final report generation functionality.
-    setReportLoading(true);
-    try {
-      const response = await fetch(`${config.apiBaseUrl}/api/meeting-intelligence/final-report`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-        },
-        body: JSON.stringify({
-          session_id: meetingData.sessionId,
-          transcript: meetingData.transcript,
-          live_notes: realNotes, // Include live notes for context
-          templates: activeFinalTemplates
-        })
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setFinalReport(data.report);
-      }
-    } catch (error) {
-      console.error('[MeetingIntelligence] Failed to generate final report:', error);
-    } finally {
-      setReportLoading(false);
-    }
+    // No-op: endpoint not implemented
   };
 
   // Clear functions
@@ -830,24 +761,15 @@ export const MeetingIntelligenceDashboard: React.FC<{
               </button>
             )}
 
-            {/* Manual Generate for non-recording sessions */}
+            {/* Manual Generate for non-recording sessions (endpoint not yet implemented) */}
             {!isRecording && meetingData.transcript && (
               <button
-                onClick={generateLiveNotes}
-                disabled={notesLoading}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors ${
-                  notesLoading
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
-                }`}
-                title="Generate AI insights from this session's transcript"
+                disabled
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs bg-gray-800 text-gray-500 cursor-not-allowed"
+                title="AI session analysis coming soon"
               >
-                {notesLoading ? (
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                ) : (
-                  <Brain className="w-3 h-3" />
-                )}
-                Analyze Session
+                <Brain className="w-3 h-3" />
+                Analyze (Coming Soon)
               </button>
             )}
 

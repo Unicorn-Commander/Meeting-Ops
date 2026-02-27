@@ -93,8 +93,7 @@ PostgreSQL (port 5434):
 - `dual_ai_backends.py` - Backward-compat wrapper (same single backend)
 
 ## Known Issues
-1. **Audio file path** - Occasional double-nesting of path components
-2. **Qdrant vector search** - Not yet integrated (full-text SQL search available)
+1. **MeetingIntelligenceDashboard** - Live notes and final report generation endpoints not yet implemented (buttons disabled in UI)
 
 ## Testing
 ```bash

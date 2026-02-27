@@ -44,60 +44,62 @@ export const useKeyboardShortcuts = (shortcuts: KeyboardShortcut[]) => {
 };
 
 // Predefined shortcuts for Meeting-Ops
+// NOTE: Uses Alt+ instead of Ctrl+ to avoid hijacking browser defaults
+// (Ctrl+R=reload, Ctrl+T=new tab, Ctrl+P=print, Ctrl+F=find, Ctrl+S=save, Ctrl+D=bookmark)
 export const MEETING_OPS_SHORTCUTS: KeyboardShortcut[] = [
   {
     key: 'r',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:toggle-recording');
       window.dispatchEvent(event);
     },
-    description: 'Toggle recording (Ctrl+R)'
+    description: 'Toggle recording (Alt+R)'
   },
   {
     key: 't',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:toggle-transcription');
       window.dispatchEvent(event);
     },
-    description: 'Toggle transcription (Ctrl+T)'
+    description: 'Toggle transcription (Alt+T)'
   },
   {
     key: 'p',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:pause-recording');
       window.dispatchEvent(event);
     },
-    description: 'Pause/Resume recording (Ctrl+P)'
+    description: 'Pause/Resume recording (Alt+P)'
   },
   {
     key: 'f',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:flag-moment');
       window.dispatchEvent(event);
     },
-    description: 'Flag current moment (Ctrl+F)'
+    description: 'Flag current moment (Alt+F)'
   },
   {
     key: 's',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:save-session');
       window.dispatchEvent(event);
     },
-    description: 'Save session (Ctrl+S)'
+    description: 'Save session (Alt+S)'
   },
   {
     key: 'd',
-    ctrlKey: true,
+    altKey: true,
     action: () => {
       const event = new CustomEvent('meeting-ops:toggle-dark-mode');
       window.dispatchEvent(event);
     },
-    description: 'Toggle dark mode (Ctrl+D)'
+    description: 'Toggle dark mode (Alt+D)'
   },
   {
     key: '/',

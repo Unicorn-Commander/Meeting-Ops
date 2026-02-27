@@ -40,5 +40,5 @@ ENV XILINX_XRT=/opt/xilinx/xrt
 # Expose port
 EXPOSE 9050
 
-# Run the application (simplified for Docker)
-CMD ["python", "-m", "uvicorn", "main_docker:app", "--host", "0.0.0.0", "--port", "9050"]
+# Run the application
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9050"]

@@ -161,7 +161,7 @@ python3 mcp/meeting_ops_mcp.py
 ```
 
 ## Known Issues
-1. Audio file path occasional double-nesting of path components
+1. MeetingIntelligenceDashboard live notes/final report generation endpoints not yet implemented (buttons disabled)
 
 ## File Structure
 ```
