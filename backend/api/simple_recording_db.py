@@ -28,13 +28,14 @@ from services.unified_agent_service import unified_agent_service
 
 
 # Vocabulary replacement helper
-def apply_vocabulary_replacements(text: str, db_session) -> str:
+def apply_vocabulary_replacements(text: str, db_session, organization_id: int) -> str:
     """Apply vocabulary term replacements to transcript text."""
     if not text:
         return text
     try:
         from models.vocabulary import CustomVocabulary
         terms = db_session.query(CustomVocabulary).filter(
+            CustomVocabulary.organization_id == organization_id,
             CustomVocabulary.is_active == True
         ).order_by(CustomVocabulary.priority.desc()).all()
 
@@ -73,7 +74,8 @@ def apply_vocabulary_replacements(text: str, db_session) -> str:
         return text
 
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
 from auth.models import User
 
 import redis.asyncio as aioredis
@@ -101,10 +103,39 @@ class SessionResponse(BaseModel):
     duration: float
     audio_file: Optional[str] = None
     transcription: Optional[dict] = None
+
+
+def _scoped_session_query(db: Session, organization_id: int):
+    return db.query(DBRecordingSession).filter(
+        DBRecordingSession.organization_id == organization_id
+    )
+
+
+def _get_session_for_org(
+    db: Session,
+    organization_id: int,
+    session_id: str,
+) -> Optional[DBRecordingSession]:
+    session = _scoped_session_query(db, organization_id).filter(
+        DBRecordingSession.session_id == session_id
+    ).first()
+    if session:
+        return session
+
+    try:
+        int_id = int(session_id)
+    except (TypeError, ValueError):
+        return None
+
+    return _scoped_session_query(db, organization_id).filter(
+        DBRecordingSession.id == int_id
+    ).first()
     
 @router.post("/recording-sessions")
 async def create_session(
-    request: CreateSessionRequest, 
+    request: CreateSessionRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> SessionResponse:
     """Create a new recording session in database"""
@@ -119,7 +150,9 @@ async def create_session(
         description=request.description or "",
         status="active",
         created_at=datetime.now(timezone.utc),
-        duration=0.0
+        duration=0.0,
+        user_id=current_user.id,
+        organization_id=active_org.organization.id,
     )
     
     db.add(db_session)
@@ -140,11 +173,13 @@ async def create_session(
 @router.get("/recording-sessions")
 async def list_sessions(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     limit: int = 100
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
     
-    sessions = db.query(DBRecordingSession)\
+    sessions = _scoped_session_query(db, active_org.organization.id)\
         .order_by(desc(DBRecordingSession.created_at))\
         .limit(limit)\
         .all()
@@ -188,6 +223,8 @@ class SearchResult(BaseModel):
 async def search_sessions(
     q: str = Query(..., min_length=1, description="Search query string"),
     limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> List[SearchResult]:
     """Search recording sessions across name, transcript, and transcript_simple columns.
@@ -195,7 +232,7 @@ async def search_sessions(
     
     search_term = f"%{q}%"
     
-    sessions = db.query(DBRecordingSession).filter(
+    sessions = _scoped_session_query(db, active_org.organization.id).filter(
         or_(
             DBRecordingSession.name.ilike(search_term),
             DBRecordingSession.title.ilike(search_term),
@@ -259,13 +296,19 @@ async def search_sessions(
 async def semantic_search_sessions(
     q: str = Query(..., min_length=1, description="Natural language search query"),
     limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Semantic search across meetings using vector similarity.
     Understands meaning, not just keywords — e.g. 'meetings about budget planning'
     will match transcripts discussing finances even without the exact words."""
     try:
         from services.semantic_search_service import semantic_search
-        results = semantic_search.search(query=q, limit=limit)
+        results = semantic_search.search(
+            query=q,
+            limit=limit,
+            organization_id=active_org.organization.id,
+        )
         return {"query": q, "results": results, "count": len(results)}
     except Exception as e:
         logger.error(f"Semantic search error: {e}")
@@ -276,12 +319,16 @@ async def semantic_search_sessions(
 async def reindex_all_sessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Reindex all completed sessions into the vector store.
     Run this once to backfill, then new sessions are indexed automatically."""
     try:
         from services.semantic_search_service import semantic_search
-        result = semantic_search.reindex_all(db)
+        result = semantic_search.reindex_all(
+            db,
+            organization_id=active_org.organization.id,
+        )
         return {"status": "ok", **result}
     except Exception as e:
         logger.error(f"Reindex error: {e}")
@@ -289,11 +336,14 @@ async def reindex_all_sessions(
 
 
 @router.get("/semantic-search/stats")
-async def get_semantic_search_stats():
+async def get_semantic_search_stats(
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
     """Get vector search index statistics."""
     try:
         from services.semantic_search_service import semantic_search
-        return semantic_search.get_stats()
+        return semantic_search.get_stats(organization_id=active_org.organization.id)
     except Exception as e:
         return {"initialized": False, "error": str(e)}
 
@@ -320,14 +370,14 @@ def _extract_snippet(text: str, query: str, context_chars: int = 80) -> str:
 @router.get("/recording-sessions/{session_id}")
 async def get_session(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> dict:
     """Get a specific recording session from database with error handling"""
     try:
         # Find by session_id (UUID string)
-        session = db.query(DBRecordingSession).filter(
-            DBRecordingSession.session_id == session_id
-        ).first()
+        session = _get_session_for_org(db, active_org.organization.id, session_id)
         
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -551,14 +601,14 @@ async def _monitor_auto_stop(session_id: str, db_session_id: int):
 async def start_recording(
     session_id: str,
     body: Optional[StartRecordingRequest] = None,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Start recording for a session. Optionally specify device_id to select audio input."""
 
     # Get session from database - handle both session_id and integer id
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -628,14 +678,14 @@ async def start_recording(
 async def stop_recording(
     session_id: str,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Stop recording and trigger transcription"""
     
     # Get session from database - handle both session_id and integer id
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -805,19 +855,31 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
         # Step 1.5: Apply vocabulary replacements to transcript
         try:
             if session.transcript_simple:
-                session.transcript_simple = apply_vocabulary_replacements(session.transcript_simple, db)
+                session.transcript_simple = apply_vocabulary_replacements(
+                    session.transcript_simple,
+                    db,
+                    session.organization_id,
+                )
 
             if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
                 segments = session.transcript_diarized.get("segments", [])
                 for seg in segments:
                     if seg.get("text"):
-                        seg["text"] = apply_vocabulary_replacements(seg["text"], db)
+                        seg["text"] = apply_vocabulary_replacements(
+                            seg["text"],
+                            db,
+                            session.organization_id,
+                        )
                 session.transcript_diarized = session.transcript_diarized
 
             if transcription_result and "segments" in transcription_result:
                 for seg in transcription_result["segments"]:
                     if seg.get("text"):
-                        seg["text"] = apply_vocabulary_replacements(seg["text"], db)
+                        seg["text"] = apply_vocabulary_replacements(
+                            seg["text"],
+                            db,
+                            session.organization_id,
+                        )
                 session.transcript = json.dumps(transcription_result)
 
             db.flush()
@@ -958,6 +1020,7 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                     transcript=session.transcript_simple or "",
                     summary=session.summary or "",
                     created_at=session.created_at.isoformat() if session.created_at else "",
+                    organization_id=session.organization_id,
                 )
                 logger.info(f"   Indexed in vector store for semantic search")
             except Exception as e:
@@ -990,13 +1053,13 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
 @router.delete("/recording-sessions/{session_id}")
 async def delete_session(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Delete a recording session"""
     
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1023,14 +1086,14 @@ async def delete_session(
 @router.get("/recording-sessions/{session_id}/download/audio")
 async def download_audio(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Download audio file for a session"""
     from fastapi.responses import FileResponse, JSONResponse
     
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1075,14 +1138,14 @@ async def download_audio(
 @router.get("/recording-sessions/{session_id}/download/transcript")
 async def download_transcript(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Download transcript with speakers for a session"""
     from fastapi.responses import Response
     
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1145,14 +1208,14 @@ async def download_transcript(
 @router.get("/recording-sessions/{session_id}/download/summary/pdf")
 async def download_summary_pdf(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Download meeting summary as PDF"""
     from fastapi.responses import Response
 
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1176,14 +1239,14 @@ async def download_summary_pdf(
 @router.get("/recording-sessions/{session_id}/download/summary/docx")
 async def download_summary_docx(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Download meeting summary as DOCX"""
     from fastapi.responses import Response
 
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1207,14 +1270,14 @@ async def download_summary_docx(
 @router.get("/recording-sessions/{session_id}/download/transcript/simple")
 async def download_transcript_simple(
     session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Download simple transcript without speakers"""
     from fastapi.responses import Response
     
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1267,6 +1330,7 @@ async def download_transcript_simple(
 @router.get("/storage/stats")
 async def get_storage_stats(
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Get storage usage statistics"""
@@ -1279,8 +1343,8 @@ async def get_storage_stats(
     total_size = sum(os.path.getsize(f) for f in wav_files if os.path.exists(f))
 
     # Get session counts
-    total_sessions = db.query(DBRecordingSession).count()
-    sessions_with_audio = db.query(DBRecordingSession).filter(
+    total_sessions = _scoped_session_query(db, active_org.organization.id).count()
+    sessions_with_audio = _scoped_session_query(db, active_org.organization.id).filter(
         DBRecordingSession.audio_file.isnot(None)
     ).count()
 
@@ -1299,6 +1363,7 @@ async def cleanup_old_recordings(
     days: int = Query(default=90, ge=1, le=365, description="Delete recordings older than N days"),
     dry_run: bool = Query(default=True, description="If true, only report what would be deleted"),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Delete WAV files older than N days. Keeps transcripts and summaries."""
@@ -1306,7 +1371,7 @@ async def cleanup_old_recordings(
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # Find old sessions with audio files
-    old_sessions = db.query(DBRecordingSession).filter(
+    old_sessions = _scoped_session_query(db, active_org.organization.id).filter(
         DBRecordingSession.created_at < cutoff,
         DBRecordingSession.audio_file.isnot(None),
         DBRecordingSession.status.in_(["completed", "failed"])

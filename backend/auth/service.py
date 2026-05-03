@@ -1,10 +1,15 @@
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import logging
 
 from auth.models import User, Organization, UserOrganization, AuditLog
+from auth.organization import (
+    ensure_default_organization,
+    ensure_organization,
+    sync_user_organizations,
+)
 from auth.utils import (
     get_password_hash, verify_password, validate_password,
     create_access_token, create_refresh_token, generate_api_key,
@@ -16,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 class AuthService:
     """Service for authentication and user management"""
+
+    @staticmethod
+    def ensure_default_organization(db: Session) -> Organization:
+        """Get or create the shared migration safety-net organization."""
+        return ensure_default_organization(db)
+
+    @staticmethod
+    def ensure_organization(
+        db: Session,
+        slug: str,
+        *,
+        name: Optional[str] = None,
+    ) -> Organization:
+        """Get or create an organization by slug."""
+        return ensure_organization(db, slug, name=name)
     
     @staticmethod
     def create_user(
@@ -65,6 +85,17 @@ class AuthService:
                 invited_by=created_by_id
             )
             db.add(user_org)
+            db.commit()
+        else:
+            default_org = ensure_default_organization(db)
+            db.add(
+                UserOrganization(
+                    user_id=user.id,
+                    organization_id=default_org.id,
+                    role=role,
+                    invited_by=created_by_id,
+                )
+            )
             db.commit()
         
         # Log user creation
@@ -302,6 +333,7 @@ class AuthService:
         username: Optional[str] = None,
         full_name: Optional[str] = None,
         is_superuser: bool = False,
+        groups: Optional[list[str]] = None,
     ) -> User:
         """Look up a user by SSO email, auto-provisioning if absent.
 
@@ -313,11 +345,12 @@ class AuthService:
         import secrets as _secrets
 
         email = sanitize_email(email)
+        groups = groups or []
         user = db.query(User).filter(User.email == email).first()
         if user:
             updated = False
-            if is_superuser and not user.is_superuser:
-                user.is_superuser = True
+            if user.is_superuser != is_superuser:
+                user.is_superuser = is_superuser
                 updated = True
             if not user.is_active:
                 user.is_active = True
@@ -325,9 +358,13 @@ class AuthService:
             if not user.is_verified:
                 user.is_verified = True
                 updated = True
+            if full_name and user.full_name != full_name:
+                user.full_name = full_name
+                updated = True
             if updated:
                 db.commit()
                 db.refresh(user)
+            sync_user_organizations(db, user, groups)
             return user
 
         # Auto-provision
@@ -347,5 +384,14 @@ class AuthService:
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(f"SSO auto-provisioned user: {candidate} ({email}) admin={is_superuser}")
+
+        sync_user_organizations(db, user, groups)
+
+        logger.info(
+            "SSO auto-provisioned user: %s (%s) admin=%s groups=%s",
+            candidate,
+            email,
+            is_superuser,
+            groups,
+        )
         return user

@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON, ForeignKey
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime, timezone
@@ -50,6 +50,7 @@ class RecordingSession(Base):
     source_device_id = Column(String(100), nullable=True)  # Which satellite recorded this
     source_type = Column(String(50), default="local_mic")  # "local_mic", "satellite_stream", "satellite_upload", "satellite_transcript", "companion_app"
     room_name = Column(String(200), nullable=True)  # Physical room name
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     
     def to_dict(self):
         return {
@@ -143,6 +144,7 @@ class AudioFile(Base):
     sample_rate = Column(Integer)
     channels = Column(Integer)
     uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
 
 
 class ChatHistory(Base):
@@ -156,6 +158,7 @@ class ChatHistory(Base):
     content = Column(Text, nullable=False)
     metadata_json = Column(Text, nullable=True)  # JSON string for extra metadata
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
 
 
 class SatelliteDevice(Base):
@@ -177,3 +180,4 @@ class SatelliteDevice(Base):
     current_session_id = Column(String(100), nullable=True)  # Active recording session
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)

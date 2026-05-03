@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 import logging
 import asyncio
 
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
+from auth.models import User
+from api.simple_recording_db import _get_session_for_org
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["audio-upload"])
@@ -25,14 +30,14 @@ async def upload_audio(
     session_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Upload audio file to an existing session and trigger processing"""
     
     # Validate session exists
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.session_id == session_id
-    ).first()
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")

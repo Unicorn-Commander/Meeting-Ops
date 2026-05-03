@@ -7,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 from database.database import get_db
 from auth.service import AuthService
-from auth.dependencies import get_current_user, require_admin, require_permission
-from auth.models import User
+from auth.dependencies import get_current_organization, get_current_user, require_admin, require_permission
+from auth.models import Organization, User, UserOrganization
 from auth.config import auth_config
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
@@ -41,6 +41,8 @@ class UserResponse(BaseModel):
     is_superuser: bool = False
     created_at: datetime
     role: Optional[str] = None  # Will be populated from organization role or superuser status
+    organizations: list[dict] = []
+    active_organization: Optional[dict] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -66,6 +68,77 @@ class LoginRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str
+
+
+class OrganizationMembershipResponse(BaseModel):
+    id: int
+    name: str
+    slug: str
+    role: str
+    is_active: bool
+
+
+def _serialize_memberships(user: User) -> list[dict]:
+    memberships: list[dict] = []
+    for membership in user.organizations:
+        organization = membership.organization
+        if not organization:
+            continue
+        memberships.append(
+            OrganizationMembershipResponse(
+                id=organization.id,
+                name=organization.name,
+                slug=organization.slug,
+                role=membership.role,
+                is_active=organization.is_active,
+            ).model_dump()
+        )
+
+    memberships.sort(key=lambda item: item["name"].lower())
+    return memberships
+
+
+def _build_user_response(
+    user: User,
+    *,
+    active_org: Optional[Organization] = None,
+    active_role: Optional[str] = None,
+) -> UserResponse:
+    organizations = _serialize_memberships(user)
+    role = "superuser" if user.is_superuser else active_role
+    if not role and organizations:
+        role = organizations[0]["role"]
+    if not role:
+        role = "user"
+
+    active_organization = None
+    if active_org:
+        for org in organizations:
+            if org["id"] == active_org.id:
+                active_organization = org
+                break
+        if active_organization is None:
+            active_organization = {
+                "id": active_org.id,
+                "name": active_org.name,
+                "slug": active_org.slug,
+                "role": active_role or ("superuser" if user.is_superuser else "viewer"),
+                "is_active": active_org.is_active,
+            }
+
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        username=user.username,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        is_verified=user.is_verified,
+        is_superuser=user.is_superuser,
+        created_at=user.created_at,
+        role=role,
+        organizations=organizations,
+        active_organization=active_organization,
+    )
 
 # Routes
 @router.post("/register", response_model=UserResponse)
@@ -93,7 +166,7 @@ async def register(
             role=user_data.role,
             created_by_id=current_user.id if current_user else None
         )
-        return UserResponse.model_validate(user)
+        return _build_user_response(user)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -125,23 +198,20 @@ async def login(
     # Create tokens
     tokens = AuthService.create_tokens(user)
     
-    # Prepare user response with role
-    user_dict = {
-        "id": user.id,
-        "email": user.email,
-        "username": user.username,
-        "full_name": user.full_name,
-        "is_active": user.is_active,
-        "is_verified": user.is_verified,
-        "is_superuser": user.is_superuser,
-        "created_at": user.created_at,
-        "role": "superuser" if user.is_superuser else "admin"  # Default to admin for the initial user
-    }
+    default_org = None
+    default_role = None
+    if user.organizations:
+        default_org = user.organizations[0].organization
+        default_role = user.organizations[0].role
     
     return TokenResponse(
         access_token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
-        user=UserResponse(**user_dict)
+        user=_build_user_response(
+            user,
+            active_org=default_org,
+            active_role=default_role,
+        )
     )
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -178,55 +248,39 @@ async def refresh_token(
     # Create new tokens
     tokens = AuthService.create_tokens(user, payload.get("org_id"))
     
-    # Prepare user response with role
-    user_dict = {
-        "id": user.id,
-        "email": user.email,
-        "username": user.username,
-        "full_name": user.full_name,
-        "is_active": user.is_active,
-        "is_verified": user.is_verified,
-        "is_superuser": user.is_superuser,
-        "created_at": user.created_at,
-        "role": "superuser" if user.is_superuser else "admin"  # Default to admin for the initial user
-    }
+    default_org = None
+    default_role = None
+    if user.organizations:
+        default_org = user.organizations[0].organization
+        default_role = user.organizations[0].role
     
     return TokenResponse(
         access_token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
-        user=UserResponse(**user_dict)
+        user=_build_user_response(
+            user,
+            active_org=default_org,
+            active_role=default_role,
+        )
     )
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    active_org=Depends(get_current_organization),
 ):
     """Get current user profile"""
-    user_dict = {
-        "id": current_user.id,
-        "email": current_user.email,
-        "username": current_user.username,
-        "full_name": current_user.full_name,
-        "is_active": current_user.is_active,
-        "is_verified": current_user.is_verified,
-        "is_superuser": current_user.is_superuser,
-        "created_at": current_user.created_at,
-        "role": "superuser" if current_user.is_superuser else None
-    }
-    
-    # If not superuser, get role from first organization
-    if not current_user.is_superuser and current_user.organizations:
-        user_dict["role"] = current_user.organizations[0].role
-    elif not current_user.is_superuser:
-        user_dict["role"] = "user"  # Default role
-    
-    return UserResponse(**user_dict)
+    return _build_user_response(
+        current_user,
+        active_org=active_org.organization,
+        active_role=active_org.role,
+    )
 
 @router.put("/me", response_model=UserResponse)
 async def update_current_user_profile(
     user_update: UserUpdate,
     current_user: User = Depends(get_current_user),
+    active_org=Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Update current user profile"""
@@ -238,7 +292,11 @@ async def update_current_user_profile(
         phone=user_update.phone,
         avatar_url=user_update.avatar_url
     )
-    return UserResponse.model_validate(updated_user)
+    return _build_user_response(
+        updated_user,
+        active_org=active_org.organization,
+        active_role=active_org.role,
+    )
 
 @router.post("/me/change-password")
 async def change_password(
@@ -274,6 +332,17 @@ async def generate_api_key(
         "message": "API key generated successfully. Store it securely as it won't be shown again."
     }
 
+
+@router.get("/orgs", response_model=list[OrganizationMembershipResponse])
+async def list_current_user_orgs(
+    current_user: User = Depends(get_current_user),
+):
+    """List the authenticated user's organizations."""
+    return [
+        OrganizationMembershipResponse(**membership)
+        for membership in _serialize_memberships(current_user)
+    ]
+
 @router.post("/logout")
 async def logout(
     current_user: User = Depends(get_current_user),
@@ -294,19 +363,32 @@ async def list_users(
     limit: int = 100,
     organization_id: Optional[int] = None,
     current_user: User = Depends(require_permission("user.read")),
+    active_org=Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """List all users (admin only)"""
-    query = db.query(User)
-    
-    # Filter by organization if specified
-    if organization_id:
-        query = query.join(User.organizations).filter(
-            UserOrganization.organization_id == organization_id
+    if organization_id and organization_id != active_org.organization.id and not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to that organization",
         )
-    
+
+    target_org_id = organization_id or active_org.organization.id
+    query = (
+        db.query(User)
+        .join(User.organizations)
+        .filter(UserOrganization.organization_id == target_org_id)
+    )
     users = query.offset(skip).limit(limit).all()
-    return [UserResponse.model_validate(user) for user in users]
+    target_org = db.query(Organization).filter(Organization.id == target_org_id).first()
+    return [
+        _build_user_response(
+            user,
+            active_org=target_org,
+            active_role=AuthService.get_user_role(db, user.id, target_org_id),
+        )
+        for user in users
+    ]
 
 @router.put("/users/{user_id}/activate")
 async def activate_user(

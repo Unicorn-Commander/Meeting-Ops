@@ -11,7 +11,8 @@ import uuid
 from pathlib import Path
 
 from database.database import get_db
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
 from auth.models import User
 from database.models import RecordingSession
 
@@ -52,8 +53,32 @@ class ExportTemplate(BaseModel):
     options: Dict[str, Any]
     description: str
 
+
+def _get_session_for_export(
+    db: Session,
+    organization_id: int,
+    session_identifier: str,
+) -> Optional[RecordingSession]:
+    session = db.query(RecordingSession).filter(
+        RecordingSession.organization_id == organization_id,
+        RecordingSession.session_id == session_identifier,
+    ).first()
+    if session:
+        return session
+
+    try:
+        int_id = int(session_identifier)
+    except (TypeError, ValueError):
+        return None
+
+    return db.query(RecordingSession).filter(
+        RecordingSession.organization_id == organization_id,
+        RecordingSession.id == int_id,
+    ).first()
+
 # In-memory storage for export jobs (should use database in production)
 export_jobs: Dict[str, ExportJob] = {}
+export_job_scope: Dict[str, Dict[str, int]] = {}
 export_templates: List[ExportTemplate] = [
     ExportTemplate(
         id="1",
@@ -77,16 +102,26 @@ export_templates: List[ExportTemplate] = [
         description="SRT subtitle format for video editing"
     )
 ]
+export_template_scope: Dict[str, Dict[str, int]] = {}
+BUILTIN_TEMPLATE_IDS = {template.id for template in export_templates}
 
 @router.post("/batch", response_model=ExportJob)
 async def create_batch_export(
     request: BatchExportRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
     """Create a batch export job for multiple sessions"""
     try:
+        for session_id in request.sessionIds:
+            if not _get_session_for_export(db, active_org.organization.id, session_id):
+                raise HTTPException(
+                    status_code=404,
+                    detail="One or more sessions were not found in the active organization",
+                )
+
         # Create export job
         job_id = str(uuid.uuid4())
         job = ExportJob(
@@ -101,6 +136,10 @@ async def create_batch_export(
         
         # Store job
         export_jobs[job_id] = job
+        export_job_scope[job_id] = {
+            "user_id": current_user.id,
+            "organization_id": active_org.organization.id,
+        }
         
         # Start background export task
         background_tasks.add_task(
@@ -109,6 +148,7 @@ async def create_batch_export(
             request.sessionIds,
             request.format,
             request.options,
+            active_org.organization.id,
             db
         )
         
@@ -121,30 +161,40 @@ async def create_batch_export(
 
 @router.get("/jobs", response_model=List[ExportJob])
 async def get_export_jobs(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get all export jobs for the current user"""
-    return list(export_jobs.values())
+    return [
+        job
+        for job_id, job in export_jobs.items()
+        if export_job_scope.get(job_id, {}).get("user_id") == current_user.id
+        and export_job_scope.get(job_id, {}).get("organization_id") == active_org.organization.id
+    ]
 
 @router.get("/jobs/{job_id}", response_model=ExportJob)
 async def get_export_job(
     job_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get status of a specific export job"""
     job = export_jobs.get(job_id)
-    if not job:
+    scope = export_job_scope.get(job_id, {})
+    if not job or scope.get("user_id") != current_user.id or scope.get("organization_id") != active_org.organization.id:
         raise HTTPException(status_code=404, detail="Export job not found")
     return job
 
 @router.delete("/jobs/{job_id}")
 async def cancel_export_job(
     job_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Cancel an export job"""
     job = export_jobs.get(job_id)
-    if not job:
+    scope = export_job_scope.get(job_id, {})
+    if not job or scope.get("user_id") != current_user.id or scope.get("organization_id") != active_org.organization.id:
         raise HTTPException(status_code=404, detail="Export job not found")
     
     if job.status in ["completed", "failed"]:
@@ -157,29 +207,48 @@ async def cancel_export_job(
 
 @router.get("/templates", response_model=List[ExportTemplate])
 async def get_export_templates(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get available export templates"""
-    return export_templates
+    return [
+        template
+        for template in export_templates
+        if template.id in BUILTIN_TEMPLATE_IDS
+        or export_template_scope.get(template.id, {}).get("organization_id") == active_org.organization.id
+    ]
 
 @router.post("/templates", response_model=ExportTemplate)
 async def create_export_template(
     template: ExportTemplate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Create a new export template"""
     template.id = str(uuid.uuid4())
     export_templates.append(template)
+    export_template_scope[template.id] = {
+        "user_id": current_user.id,
+        "organization_id": active_org.organization.id,
+    }
     return template
 
 @router.delete("/templates/{template_id}")
 async def delete_export_template(
     template_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Delete an export template"""
     global export_templates
+    scope = export_template_scope.get(template_id, {})
+    if template_id not in BUILTIN_TEMPLATE_IDS and (
+        scope.get("organization_id") != active_org.organization.id
+        or scope.get("user_id") != current_user.id
+    ):
+        raise HTTPException(status_code=404, detail="Template not found")
     export_templates = [t for t in export_templates if t.id != template_id]
+    export_template_scope.pop(template_id, None)
     return {"message": "Template deleted"}
 
 async def process_export_job(
@@ -187,6 +256,7 @@ async def process_export_job(
     session_ids: List[str],
     format: str,
     options: ExportOptions,
+    organization_id: int,
     db: Session
 ):
     """Background task to process export job"""
@@ -209,9 +279,7 @@ async def process_export_job(
             job.progress = int((i / total_sessions) * 100)
             
             # Get session from database
-            session = db.query(RecordingSession).filter(
-                RecordingSession.id == session_id
-            ).first()
+            session = _get_session_for_export(db, organization_id, session_id)
             
             if not session:
                 logger.warning(f"Session {session_id} not found")
@@ -889,11 +957,16 @@ def format_srt_timestamp(seconds: float) -> str:
 async def download_export(
     job_id: str,
     filename: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Download exported file"""
     from fastapi.responses import FileResponse
     
+    scope = export_job_scope.get(job_id, {})
+    if scope.get("user_id") != current_user.id or scope.get("organization_id") != active_org.organization.id:
+        raise HTTPException(status_code=404, detail="Export job not found")
+
     file_path = Path("/tmp/exports") / job_id / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")

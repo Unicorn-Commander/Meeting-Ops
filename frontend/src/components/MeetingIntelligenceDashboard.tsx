@@ -6,6 +6,7 @@ import {
   FileBarChart, GitBranch, CheckSquare
 } from 'lucide-react';
 import { config } from '../config';
+import { useOrg } from '../contexts/OrgContext';
 
 interface MeetingData {
   transcript: string;
@@ -49,6 +50,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
   isRecording: boolean;
   className?: string;
 }> = ({ meetingData, isRecording, className = '' }) => {
+  const { getOrgQueryUrl } = useOrg();
   
   // State management with localStorage persistence
   const [activeLiveTemplates, setActiveLiveTemplates] = useState<string[]>(() => {
@@ -303,7 +305,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
     }
 
     const connectWebSocket = () => {
-      const wsUrl = `${config.wsEndpoints.base.replace('http', 'ws')}/api/meeting-intelligence/ws/live-notes/${meetingData.sessionId}`;
+      const wsUrl = getOrgQueryUrl(`${config.wsEndpoints.base.replace('http', 'ws')}/api/meeting-intelligence/ws/live-notes/${meetingData.sessionId}`);
       console.log('[MeetingIntelligence] Connecting to notes WebSocket:', wsUrl);
       
       const ws = new WebSocket(wsUrl);

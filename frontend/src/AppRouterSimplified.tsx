@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
+import { useOrg } from './contexts/OrgContext';
 import { useRecording } from './contexts/RecordingContext';
 import { Login } from './components/Login';
 import LiveRecording from './pages/LiveRecording';
@@ -13,6 +14,8 @@ import { Menu, X, Circle, Clock } from 'lucide-react';
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const { organizations, activeOrganization, switchOrganization } = useOrg();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
@@ -36,6 +39,30 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
       <SimplifiedNavigation isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <main className="flex-1 overflow-y-auto">
+        <header className="sticky top-0 z-30 flex items-center justify-end gap-3 border-b border-zinc-800 bg-black/80 px-4 py-3 backdrop-blur">
+          <div className="mr-auto pl-12 text-sm text-zinc-500 md:pl-0">
+            {activeOrganization ? `Workspace: ${activeOrganization.name}` : 'Workspace'}
+          </div>
+          <div className="min-w-0">
+            <label className="sr-only" htmlFor="org-switcher">Organization</label>
+            <select
+              id="org-switcher"
+              value={activeOrganization?.slug ?? ''}
+              onChange={(event) => switchOrganization(event.target.value)}
+              className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-zinc-500"
+            >
+              {organizations.map((organization) => (
+                <option key={organization.slug} value={organization.slug}>
+                  {organization.name} ({organization.role})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="hidden text-right md:block">
+            <div className="text-sm text-zinc-100">{user?.full_name || user?.email || user?.username}</div>
+            <div className="text-xs text-zinc-500">{activeOrganization?.role || user?.role || 'user'}</div>
+          </div>
+        </header>
         {children}
       </main>
     </div>
@@ -147,9 +174,10 @@ function SsoLoginRedirect({ isAuthenticated }: { isAuthenticated: boolean }) {
 // Protected Route Component
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
+  const { hasAccess, isLoading: isOrgLoading } = useOrg();
 
   // Wait for SSO probe before deciding
-  if (isLoading) {
+  if (isLoading || isOrgLoading) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Authenticating…</div></div>;
   }
 
@@ -160,14 +188,19 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
   }
 
+  if (!hasAccess) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">No organization access.</div></div>;
+  }
+
   return <AppLayout>{children}</AppLayout>;
 }
 
 // Main Router
 export function AppRouterSimplified() {
   const { isAuthenticated, isLoading } = useAuth();
+  const { isLoading: isOrgLoading } = useOrg();
 
-  if (isLoading) {
+  if (isLoading || isOrgLoading) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Authenticating…</div></div>;
   }
 

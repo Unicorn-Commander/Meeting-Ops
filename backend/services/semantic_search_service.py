@@ -92,6 +92,21 @@ class SemanticSearchService:
     def _get_embedder(self):
         return self._get_dense_embedder()
 
+    def _org_filter(self, organization_id: Optional[int]):
+        if organization_id is None:
+            return None
+
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        return Filter(
+            must=[
+                FieldCondition(
+                    key="organization_id",
+                    match=MatchValue(value=organization_id),
+                )
+            ]
+        )
+
     def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate dense embeddings for a list of texts."""
         embedder = self._get_dense_embedder()
@@ -327,9 +342,15 @@ class SemanticSearchService:
 
         return chunks if chunks else [{"text": text, "speakers": []}]
 
-    def index_session(self, session_id: str, title: str,
-                      transcript: Optional[str], summary: Optional[str],
-                      created_at: Optional[str] = None):
+    def index_session(
+        self,
+        session_id: str,
+        title: str,
+        transcript: Optional[str],
+        summary: Optional[str],
+        created_at: Optional[str] = None,
+        organization_id: Optional[int] = None,
+    ):
         """
         Index a meeting session into Qdrant with hybrid (dense + sparse) vectors.
         Chunks long transcripts and indexes each chunk as a separate point.
@@ -369,6 +390,7 @@ class SemanticSearchService:
                     "text": chunk_text,  # Store full chunk text for RAG retrieval
                     "speakers": chunk_speakers,
                     "created_at": created_at or "",
+                    "organization_id": organization_id,
                 })
 
         # Index summary as a single point
@@ -383,6 +405,7 @@ class SemanticSearchService:
                 "text": summary,  # Store full summary text for RAG retrieval
                 "speakers": [],
                 "created_at": created_at or "",
+                "organization_id": organization_id,
             })
 
         # Index title
@@ -397,6 +420,7 @@ class SemanticSearchService:
                 "text": title,
                 "speakers": [],
                 "created_at": created_at or "",
+                "organization_id": organization_id,
             })
 
         if not texts_to_embed:
@@ -445,7 +469,12 @@ class SemanticSearchService:
         )
         return len(points)
 
-    def _hybrid_query(self, query: str, limit: int):
+    def _hybrid_query(
+        self,
+        query: str,
+        limit: int,
+        organization_id: Optional[int] = None,
+    ):
         """Execute a hybrid (dense + sparse) query using Qdrant prefetch + RRF fusion.
 
         Falls back to dense-only if sparse embedder is unavailable or the
@@ -457,6 +486,7 @@ class SemanticSearchService:
 
         # Dense embedding (always available)
         query_dense = self._embed([query])[0]
+        org_filter = self._org_filter(organization_id)
 
         # Try sparse embedding
         sparse_result = self._sparse_embed([query])
@@ -485,11 +515,13 @@ class SemanticSearchService:
                             query=query_dense,
                             using="dense",
                             limit=limit * 3,
+                            filter=org_filter,
                         ),
                         Prefetch(
                             query=query_sparse,
                             using="sparse",
                             limit=limit * 3,
+                            filter=org_filter,
                         ),
                     ],
                     query=FusionQuery(fusion=Fusion.RRF),
@@ -508,10 +540,16 @@ class SemanticSearchService:
             query=query_dense,
             using="dense",
             limit=limit,
+            query_filter=org_filter,
         )
         return query_result.points, "dense"
 
-    def search(self, query: str, limit: int = 10) -> List[Dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        organization_id: Optional[int] = None,
+    ) -> List[Dict]:
         """
         Hybrid semantic search across all indexed meetings.
         Uses dense + sparse BM25 with RRF fusion for best recall.
@@ -526,7 +564,11 @@ class SemanticSearchService:
             return []
 
         # Hybrid query: dense + sparse with RRF fusion
-        results, search_mode = self._hybrid_query(query, limit=limit * 3)
+        results, search_mode = self._hybrid_query(
+            query,
+            limit=limit * 3,
+            organization_id=organization_id,
+        )
 
         # Deduplicate by session_id, keeping the best score
         seen_sessions = {}
@@ -551,7 +593,12 @@ class SemanticSearchService:
 
         return results_list
 
-    def search_chunks(self, query: str, limit: int = 10) -> List[Dict]:
+    def search_chunks(
+        self,
+        query: str,
+        limit: int = 10,
+        organization_id: Optional[int] = None,
+    ) -> List[Dict]:
         """
         Hybrid semantic search returning individual chunks (not deduplicated by session).
         Used by RAG pipeline to retrieve relevant context across all meetings.
@@ -565,7 +612,11 @@ class SemanticSearchService:
             return []
 
         # Hybrid query: dense + sparse with RRF fusion
-        results, search_mode = self._hybrid_query(query, limit=limit)
+        results, search_mode = self._hybrid_query(
+            query,
+            limit=limit,
+            organization_id=organization_id,
+        )
 
         chunks = []
         for hit in results:
@@ -598,7 +649,7 @@ class SemanticSearchService:
         )
         logger.info(f"Deleted vectors for session {session_id}")
 
-    def get_stats(self) -> Dict:
+    def get_stats(self, organization_id: Optional[int] = None) -> Dict:
         """Get collection statistics including hybrid search status."""
         try:
             client = self._get_client()
@@ -631,6 +682,7 @@ class SemanticSearchService:
                 "search_mode": search_mode,
                 "dense_model": DENSE_MODEL,
                 "sparse_model": SPARSE_MODEL if has_sparse else None,
+                "organization_id": organization_id,
             }
         except Exception as e:
             return {
@@ -638,7 +690,7 @@ class SemanticSearchService:
                 "error": str(e),
             }
 
-    def reindex_all(self, db_session) -> Dict:
+    def reindex_all(self, db_session, organization_id: Optional[int] = None) -> Dict:
         """Reindex all completed sessions from the database.
 
         Recreates the collection with hybrid vectors if needed, then
@@ -648,6 +700,8 @@ class SemanticSearchService:
         sessions = db_session.query(RecordingSession).filter(
             RecordingSession.status.in_(["completed", "failed"])
         ).all()
+        if organization_id is not None:
+            sessions = [s for s in sessions if s.organization_id == organization_id]
 
         total_points = 0
         indexed = 0
@@ -682,6 +736,7 @@ class SemanticSearchService:
                 transcript=transcript,
                 summary=summary,
                 created_at=created,
+                organization_id=session.organization_id,
             )
             total_points += points
             indexed += 1
@@ -691,6 +746,7 @@ class SemanticSearchService:
             "sessions_skipped": skipped,
             "total_points": total_points,
             "search_mode": "hybrid" if self._hybrid_enabled else "dense-only",
+            "organization_id": organization_id,
         }
 
 

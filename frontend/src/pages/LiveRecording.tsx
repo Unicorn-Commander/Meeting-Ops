@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
+import { useOrg } from '../contexts/OrgContext';
 
 interface SummaryFormats {
   executive: boolean;
@@ -89,6 +90,7 @@ interface SessionData {
 }
 
 export default function LiveRecording() {
+  const { getOrgQueryUrl } = useOrg();
   // Check for existing recording session on mount
   const getStoredSession = () => {
     const stored = localStorage.getItem('activeRecordingSession');
@@ -216,7 +218,7 @@ export default function LiveRecording() {
   useEffect(() => {
     if (storedSession && storedSession.isRecording && storedSession.id) {
       // Reconnect to enhanced WebSocket that provides both transcription and auto-summaries
-      const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${storedSession.id}`;
+      const wsUrl = getOrgQueryUrl(`${config.wsEndpoints.base}/ws/transcription-auto/${storedSession.id}`);
       const ws = new WebSocket(wsUrl);
       ws.onmessage = (event) => {
         try {
@@ -336,7 +338,7 @@ export default function LiveRecording() {
     
     const connectAudioLevels = () => {
       try {
-        const audioWs = new WebSocket(`${config.wsEndpoints.base}/ws/audio-levels`);
+        const audioWs = new WebSocket(getOrgQueryUrl(`${config.wsEndpoints.base}/ws/audio-levels`));
         
         audioWs.onopen = () => {
           // Connected
@@ -552,7 +554,7 @@ export default function LiveRecording() {
 
             // If always-on started recording, connect to its WebSocket for live transcription
             if (status.state === 'RECORDING' && status.current_session_id && !wsRef.current) {
-              const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${status.current_session_id}`;
+              const wsUrl = getOrgQueryUrl(`${config.wsEndpoints.base}/ws/transcription-auto/${status.current_session_id}`);
               const ws = new WebSocket(wsUrl);
               ws.onmessage = (event) => {
                 try {
@@ -656,7 +658,7 @@ export default function LiveRecording() {
       const session = await response.json();
 
       // Connect to enhanced WebSocket BEFORE starting recording
-      const wsUrl = `${config.wsEndpoints.base}/ws/transcription-auto/${session.id}`;
+      const wsUrl = getOrgQueryUrl(`${config.wsEndpoints.base}/ws/transcription-auto/${session.id}`);
       const ws = new WebSocket(wsUrl);
       
       // Wait for WebSocket to connect before proceeding

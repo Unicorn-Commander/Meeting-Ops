@@ -14,7 +14,8 @@ import logging
 
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession, ChatHistory
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
 from auth.models import User
 from services.unified_llm_service import llm_service
 
@@ -24,11 +25,19 @@ logger = logging.getLogger(__name__)
 
 # ---- Chat history persistence helpers ----
 
-def _load_history(db: Session, session_key: str, limit: int = 20) -> List[Dict[str, Any]]:
+def _load_history(
+    db: Session,
+    session_key: str,
+    organization_id: int,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
     """Load chat history from PostgreSQL, most recent `limit` messages."""
     rows = (
         db.query(ChatHistory)
-        .filter(ChatHistory.session_key == session_key)
+        .filter(
+            ChatHistory.session_key == session_key,
+            ChatHistory.organization_id == organization_id,
+        )
         .order_by(ChatHistory.id.desc())
         .limit(limit)
         .all()
@@ -50,22 +59,32 @@ def _load_history(db: Session, session_key: str, limit: int = 20) -> List[Dict[s
     return result
 
 
-def _save_message(db: Session, session_key: str, role: str, content: str,
-                  metadata: Optional[Dict] = None):
+def _save_message(
+    db: Session,
+    session_key: str,
+    organization_id: int,
+    role: str,
+    content: str,
+    metadata: Optional[Dict] = None,
+):
     """Save a single chat message to PostgreSQL."""
     msg = ChatHistory(
         session_key=session_key,
         role=role,
         content=content,
         metadata_json=json.dumps(metadata) if metadata else None,
+        organization_id=organization_id,
     )
     db.add(msg)
     db.commit()
 
 
-def _clear_history(db: Session, session_key: str):
+def _clear_history(db: Session, session_key: str, organization_id: int):
     """Delete all chat history for a session key."""
-    db.query(ChatHistory).filter(ChatHistory.session_key == session_key).delete()
+    db.query(ChatHistory).filter(
+        ChatHistory.session_key == session_key,
+        ChatHistory.organization_id == organization_id,
+    ).delete()
     db.commit()
 
 
@@ -188,12 +207,14 @@ async def send_chat_message(
     session_id: str,
     request: SendMessageRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Send a message about a meeting and get an AI response using the real LLM."""
 
     # Look up the recording session
     session = db.query(DBRecordingSession).filter(
+        DBRecordingSession.organization_id == active_org.organization.id,
         DBRecordingSession.session_id == session_id
     ).first()
 
@@ -201,6 +222,7 @@ async def send_chat_message(
         # Try by integer id
         try:
             session = db.query(DBRecordingSession).filter(
+                DBRecordingSession.organization_id == active_org.organization.id,
                 DBRecordingSession.id == int(session_id)
             ).first()
         except (ValueError, TypeError):
@@ -224,10 +246,21 @@ async def send_chat_message(
     system_prompt = _build_system_prompt(session, transcript, summary)
 
     # Save user message to DB
-    _save_message(db, session_key=session_id, role="user", content=request.message)
+    _save_message(
+        db,
+        session_key=session_id,
+        organization_id=active_org.organization.id,
+        role="user",
+        content=request.message,
+    )
 
     # Load recent chat history from DB for conversational context
-    history = _load_history(db, session_key=session_id, limit=20)
+    history = _load_history(
+        db,
+        session_key=session_id,
+        organization_id=active_org.organization.id,
+        limit=20,
+    )
 
     # Build user prompt including recent chat history
     if len(history) > 1:
@@ -258,10 +291,21 @@ async def send_chat_message(
             response_text = "I'm sorry, the AI model is currently unavailable. Please ensure the LLM service is running and try again."
 
         # Save assistant response to DB
-        _save_message(db, session_key=session_id, role="assistant", content=response_text)
+        _save_message(
+            db,
+            session_key=session_id,
+            organization_id=active_org.organization.id,
+            role="assistant",
+            content=response_text,
+        )
 
         # Reload history length for metadata
-        history = _load_history(db, session_key=session_id, limit=20)
+        history = _load_history(
+            db,
+            session_key=session_id,
+            organization_id=active_org.organization.id,
+            limit=20,
+        )
 
         logger.info(f"AI chat response generated for session {session_id} in {inference_time:.2f}s")
 
@@ -290,10 +334,16 @@ async def send_chat_message(
 async def get_chat_messages(
     session_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get chat history for a specific recording session (from PostgreSQL)."""
-    history = _load_history(db, session_key=session_id, limit=50)
+    history = _load_history(
+        db,
+        session_key=session_id,
+        organization_id=active_org.organization.id,
+        limit=50,
+    )
 
     messages = []
     for i, msg in enumerate(history):
@@ -312,10 +362,11 @@ async def get_chat_messages(
 async def delete_chat_history(
     session_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Clear chat history for a specific recording session."""
-    _clear_history(db, session_key=session_id)
+    _clear_history(db, session_key=session_id, organization_id=active_org.organization.id)
     return {"message": "Chat history cleared"}
 
 
@@ -407,7 +458,8 @@ def _rewrite_query_with_history(
 async def rag_query(
     request: RAGQueryRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """
     Cross-meeting RAG query with multi-turn conversation support.
@@ -426,7 +478,12 @@ async def rag_query(
         )
 
     # 1. Load recent chat history for conversational context
-    rag_history = _load_history(db, session_key=RAG_SESSION_KEY, limit=6)
+    rag_history = _load_history(
+        db,
+        session_key=RAG_SESSION_KEY,
+        organization_id=active_org.organization.id,
+        limit=6,
+    )
 
     # 2. Rewrite query using history context (if there IS history)
     search_query = request.message
@@ -445,6 +502,7 @@ async def rag_query(
         chunks = semantic_search.search_chunks(
             query=search_query,
             limit=request.limit * 3,  # Over-fetch, then trim to context budget
+            organization_id=active_org.organization.id,
         )
     except Exception as e:
         logger.error(f"RAG search failed: {e}")
@@ -452,12 +510,24 @@ async def rag_query(
 
     if not chunks:
         # Still save to history even if no results
-        _save_message(db, session_key=RAG_SESSION_KEY, role="user", content=request.message)
+        _save_message(
+            db,
+            session_key=RAG_SESSION_KEY,
+            organization_id=active_org.organization.id,
+            role="user",
+            content=request.message,
+        )
         no_results_answer = (
             "No indexed meetings found matching your query. "
             "Please ensure meetings have been recorded and indexed in the semantic search system."
         )
-        _save_message(db, session_key=RAG_SESSION_KEY, role="assistant", content=no_results_answer)
+        _save_message(
+            db,
+            session_key=RAG_SESSION_KEY,
+            organization_id=active_org.organization.id,
+            role="assistant",
+            content=no_results_answer,
+        )
         return RAGResponse(
             answer=no_results_answer,
             sources=[],
@@ -553,8 +623,20 @@ async def rag_query(
         answer = "The AI model is currently unavailable. Please ensure the LLM service is running."
 
     # 7. Persist to DB
-    _save_message(db, session_key=RAG_SESSION_KEY, role="user", content=request.message)
-    _save_message(db, session_key=RAG_SESSION_KEY, role="assistant", content=answer)
+    _save_message(
+        db,
+        session_key=RAG_SESSION_KEY,
+        organization_id=active_org.organization.id,
+        role="user",
+        content=request.message,
+    )
+    _save_message(
+        db,
+        session_key=RAG_SESSION_KEY,
+        organization_id=active_org.organization.id,
+        role="assistant",
+        content=answer,
+    )
 
     # 8. Build response
     sources = sorted(seen_sources.values(), key=lambda s: s.score, reverse=True)
@@ -582,10 +664,16 @@ async def rag_query(
 @router.get("/rag/history")
 async def get_rag_history(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get the cross-meeting RAG chat history (from PostgreSQL)."""
-    history = _load_history(db, session_key=RAG_SESSION_KEY, limit=50)
+    history = _load_history(
+        db,
+        session_key=RAG_SESSION_KEY,
+        organization_id=active_org.organization.id,
+        limit=50,
+    )
     messages = []
     for i, msg in enumerate(history):
         messages.append({
@@ -599,8 +687,9 @@ async def get_rag_history(
 @router.delete("/rag/history")
 async def clear_rag_history(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Clear cross-meeting RAG chat history."""
-    _clear_history(db, session_key=RAG_SESSION_KEY)
+    _clear_history(db, session_key=RAG_SESSION_KEY, organization_id=active_org.organization.id)
     return {"message": "RAG chat history cleared"}

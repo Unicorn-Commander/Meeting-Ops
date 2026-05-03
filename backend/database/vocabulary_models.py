@@ -1,5 +1,5 @@
 """Vocabulary system database models"""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey, Table, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -26,6 +26,7 @@ class VocabularyTerm(Base):
     created_by = Column(Integer)  # User ID who created this
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    organization_id = Column(Integer, ForeignKey('organizations.id'), nullable=True, index=True)
     
     # Relationship to sets
     sets = relationship("VocabularySet", secondary=vocabulary_set_terms, back_populates="terms")
@@ -45,15 +46,19 @@ class VocabularyTerm(Base):
 class VocabularySet(Base):
     """Collection of vocabulary terms that can be activated/deactivated"""
     __tablename__ = "vocabulary_sets"
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'name', name='uq_vocabulary_sets_org_name'),
+    )
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String(100), nullable=False, unique=True)  # "Defense Acronyms", "Medical Terms"
+    name = Column(String(100), nullable=False)  # "Defense Acronyms", "Medical Terms"
     description = Column(Text)
     is_active = Column(Boolean, default=True)
     industry = Column(String(50))  # defense, medical, finance, tech
     created_by = Column(Integer)  # User ID
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    organization_id = Column(Integer, ForeignKey('organizations.id'), nullable=True, index=True)
     
     # Relationship to terms
     terms = relationship("VocabularyTerm", secondary=vocabulary_set_terms, back_populates="sets")

@@ -46,8 +46,9 @@ def app():
 
     db = SessionLocal()
     try:
-        if not db.query(User).filter(User.username == "admin").first():
-            user = User(
+        admin_user = db.query(User).filter(User.username == "admin").first()
+        if not admin_user:
+            admin_user = User(
                 email="admin@meeting-ops.local",
                 username="admin",
                 hashed_password=get_password_hash("admin123"),
@@ -55,7 +56,28 @@ def app():
                 is_verified=True,
                 is_superuser=True,
             )
-            db.add(user)
+            db.add(admin_user)
+            db.commit()
+
+        default_org = db.query(Organization).filter(Organization.slug == "magic-unicorn").first()
+        if not default_org:
+            default_org = Organization(
+                name="Magic Unicorn",
+                slug="magic-unicorn",
+                is_active=True,
+            )
+            db.add(default_org)
+            db.commit()
+
+        if not db.query(UserOrganization).filter(
+            UserOrganization.user_id == admin_user.id,
+            UserOrganization.organization_id == default_org.id,
+        ).first():
+            db.add(UserOrganization(
+                user_id=admin_user.id,
+                organization_id=default_org.id,
+                role="admin",
+            ))
             db.commit()
     finally:
         db.close()

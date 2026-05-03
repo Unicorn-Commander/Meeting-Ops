@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON, Float
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    JSON,
+    Float,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from database.database import Base
@@ -73,6 +83,9 @@ class User(Base):
 
 class UserOrganization(Base):
     __tablename__ = "user_organizations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "organization_id", name="uq_user_organizations_user_org"),
+    )
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)

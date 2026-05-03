@@ -15,6 +15,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_database():
     """Initialize database tables"""
+    # Import models so their tables are registered on the shared metadata
+    from auth import models as _auth_models  # noqa: F401
+    from models import vocabulary as _vocabulary_models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
 
 def get_db():

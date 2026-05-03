@@ -31,10 +31,11 @@ class CustomVocabulary(Base):
     created_by = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
 
     # Constraints
     __table_args__ = (
-        UniqueConstraint('term', 'category', name='uq_vocabulary_term_category'),
+        UniqueConstraint('organization_id', 'term', 'category', name='uq_vocabulary_term_category'),
     )
     
     def to_dict(self):
@@ -59,9 +60,12 @@ class CustomVocabulary(Base):
 class VocabularySet(Base):
     """Model for vocabulary sets/collections"""
     __tablename__ = "vocabulary_sets"
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'name', name='uq_vocabulary_sets_org_name'),
+    )
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name = Column(String(100), nullable=False, unique=True)
+    name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
     is_default = Column(Boolean, default=False)  # Auto-apply to all sessions
@@ -74,6 +78,7 @@ class VocabularySet(Base):
     created_by = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
 
     # Relationships
     session_vocabularies = relationship("SessionVocabulary", back_populates="vocabulary_set")
@@ -105,6 +110,7 @@ class SessionVocabulary(Base):
     applied_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     applied_to_live = Column(Boolean, default=False)
     applied_to_final = Column(Boolean, default=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     
     # Relationships
     vocabulary_set = relationship("VocabularySet", back_populates="session_vocabularies")

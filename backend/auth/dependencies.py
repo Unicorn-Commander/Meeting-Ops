@@ -1,4 +1,4 @@
-from typing import Optional, Annotated
+from typing import Optional
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from sqlalchemy.orm import Session
@@ -6,15 +6,31 @@ from jose import JWTError
 
 from database.database import get_db
 from auth.models import User
+from auth.organization import ActiveOrganization, is_global_admin, parse_group_list, resolve_active_organization
 from auth.service import AuthService
 from auth.utils import decode_token, check_permission
-from auth.config import auth_config
 
 # OAuth2 scheme for JWT tokens
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 # API Key header scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _first_email(*candidates: Optional[str]) -> Optional[str]:
+    for value in candidates:
+        if value and "@" in value:
+            return value.strip()
+    return None
+
+
+def _get_sso_groups(request: Request) -> list[str]:
+    raw_groups = (
+        request.headers.get("X-Auth-Request-Groups")
+        or request.headers.get("X-Forwarded-Groups")
+        or ""
+    )
+    return parse_group_list(g.strip() for g in raw_groups.split(",") if g.strip())
 
 async def get_current_user_optional(
     request: Request,
@@ -36,11 +52,6 @@ async def get_current_user_optional(
     # Keycloak doesn't always emit a discrete email claim; preferred_username
     # often holds it, so we fall through several headers and accept the first
     # value that looks like an email.
-    def _first_email(*candidates):
-        for v in candidates:
-            if v and "@" in v:
-                return v.strip()
-        return None
     sso_email = _first_email(
         request.headers.get("X-Auth-Request-Email"),
         request.headers.get("X-Forwarded-Email"),
@@ -55,26 +66,9 @@ async def get_current_user_optional(
             or request.headers.get("X-Auth-Request-User")
             or request.headers.get("X-Forwarded-User")
         )
-        sso_groups_h = (
-            request.headers.get("X-Auth-Request-Groups")
-            or request.headers.get("X-Forwarded-Groups")
-            or ""
-        )
-        sso_groups = [g.strip() for g in sso_groups_h.split(",") if g.strip()]
-        # Keycloak emits roles with a 'role:' prefix when included in groups claim.
-        # Strip it for matching, and keep the long names for app-specific admin roles.
-        normalized = {g.removeprefix("role:").lower() for g in sso_groups}
-        admin_aliases = {
-            "admin",
-            "meeting-ops-admins",
-            "meetingops-admin",
-            "uc-admins",
-            "app:meeting-ops-admin",
-            "app:meetingops-admin",
-            "app:meetingops:admin",
-            "app:meeting-ops:admin",
-        }
-        is_admin = bool(normalized & admin_aliases)
+        sso_groups = _get_sso_groups(request)
+        request.state.sso_groups = sso_groups
+        is_admin = is_global_admin(sso_groups)
         try:
             user = AuthService.get_or_create_sso_user(
                 db,
@@ -82,6 +76,7 @@ async def get_current_user_optional(
                 username=sso_username,
                 full_name=sso_username,
                 is_superuser=is_admin,
+                groups=sso_groups,
             )
         except Exception:
             user = None
@@ -130,32 +125,22 @@ async def get_current_active_user(
         )
     return current_user
 
+
+async def get_current_organization(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> ActiveOrganization:
+    """Resolve the caller's active organization for the current request."""
+    return resolve_active_organization(db, request, current_user)
+
 def require_permission(permission: str):
     """Dependency to require a specific permission"""
     async def permission_checker(
         current_user: User = Depends(get_current_active_user),
-        db: Session = Depends(get_db),
-        request: Request = None
+        active_org: ActiveOrganization = Depends(get_current_organization),
     ):
-        # Get organization ID from request or token
-        org_id = None
-        if request:
-            # Try to get org_id from query params or path
-            org_id = request.query_params.get("org_id") or request.path_params.get("organization_id")
-        
-        # Get user's role in the organization
-        role = "viewer"  # Default role
-        if current_user.is_superuser:
-            role = "superuser"
-        elif org_id:
-            user_role = AuthService.get_user_role(db, current_user.id, int(org_id))
-            if user_role:
-                role = user_role
-        elif current_user.organizations:
-            # Use first organization's role as fallback
-            role = current_user.organizations[0].role
-        
-        # Check permission
+        role = "superuser" if current_user.is_superuser else active_org.role
         if not check_permission(role, permission):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -170,24 +155,10 @@ def require_role(required_role: str):
     """Dependency to require a specific role or higher"""
     async def role_checker(
         current_user: User = Depends(get_current_active_user),
-        db: Session = Depends(get_db)
+        active_org: ActiveOrganization = Depends(get_current_organization),
     ):
-        # Get user's highest role
-        role = "viewer"
-        if current_user.is_superuser:
-            role = "superuser"
-        elif current_user.organizations:
-            # Get highest role across all organizations
-            roles = [uo.role for uo in current_user.organizations]
-            role_priority = {"superuser": 0, "admin": 1, "manager": 2, "user": 3, "viewer": 4}
-            roles.sort(key=lambda r: role_priority.get(r, 5))
-            if roles:
-                role = roles[0]
-        
-        # Check role hierarchy
+        role = "superuser" if current_user.is_superuser else active_org.role
         from auth.config import ROLE_HIERARCHY
-        allowed_roles = ROLE_HIERARCHY.get(required_role, [required_role])
-        
         if role not in ROLE_HIERARCHY or required_role not in ROLE_HIERARCHY[role]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

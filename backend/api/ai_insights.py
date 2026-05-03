@@ -12,7 +12,8 @@ import json
 
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession, Transcription
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
 from auth.models import User
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ async def get_meeting_insights(
     session_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get AI-generated insights for a recording session.
 
@@ -81,6 +83,7 @@ async def get_meeting_insights(
     try:
         # Find by session_id (UUID) first
         session = db.query(DBRecordingSession).filter(
+            DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.session_id == session_id
         ).first()
 
@@ -89,6 +92,7 @@ async def get_meeting_insights(
             try:
                 int_id = int(session_id)
                 session = db.query(DBRecordingSession).filter(
+                    DBRecordingSession.organization_id == active_org.organization.id,
                     DBRecordingSession.id == int_id
                 ).first()
             except (ValueError, TypeError):
@@ -148,9 +152,10 @@ async def regenerate_insights(
     session_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Force regeneration of AI insights for a session. Requires authentication."""
-    return await get_meeting_insights(session_id, db, current_user)
+    return await get_meeting_insights(session_id, db, current_user, active_org)
 
 
 # ---------------------------------------------------------------------------

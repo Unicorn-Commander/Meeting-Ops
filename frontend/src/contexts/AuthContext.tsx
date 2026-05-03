@@ -1,5 +1,12 @@
 import React, { createContext, useState, useContext, useEffect, type ReactNode } from 'react';
 import { config } from '../config';
+import {
+  buildOrgHeaders,
+  clearStoredOrgSlug,
+  getStoredOrgSlug,
+  isMeetingOpsApiRequest,
+  type OrganizationMembership,
+} from '../utils/organization';
 
 interface User {
   id: number;
@@ -11,6 +18,8 @@ interface User {
   is_verified: boolean;
   is_superuser?: boolean;
   created_at: string;
+  organizations?: OrganizationMembership[];
+  active_organization?: OrganizationMembership | null;
 }
 
 interface AuthContextType {
@@ -246,6 +255,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setRefreshToken(null);
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
+    clearStoredOrgSlug();
     setError(null);
 
     // SSO sign-out: clear oauth2-proxy session, then Keycloak session,
@@ -263,26 +273,34 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const originalFetch = window.fetch;
     
     window.fetch = async (url: RequestInfo | URL, init?: RequestInit) => {
-      // Add auth header to API requests
-      if (token && typeof url === 'string' && url.startsWith('/api/')) {
-        init = init || {};
-        init.headers = {
-          ...init.headers,
-          'Authorization': `Bearer ${token}`,
+      const orgSlug = getStoredOrgSlug();
+      const shouldDecorate = isMeetingOpsApiRequest(url, config.apiBaseUrl);
+
+      if (shouldDecorate) {
+        const headers = buildOrgHeaders(init?.headers, orgSlug);
+        if (token && !headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${token}`);
+        }
+        init = {
+          ...init,
+          headers,
         };
       }
 
       const response = await originalFetch(url, init);
 
       // Handle 401 responses
-      if (response.status === 401 && refreshToken && typeof url === 'string' && !url.includes('/auth/')) {
+      const rawUrl = typeof url === 'string' ? url : url.toString();
+      if (response.status === 401 && refreshToken && !rawUrl.includes('/auth/')) {
         const refreshSuccess = await refreshAccessToken();
         // Retry the original request if refresh was successful
-        if (refreshSuccess && token) {
-          init = init || {};
-          init.headers = {
-            ...init.headers,
-            'Authorization': `Bearer ${token}`,
+        const refreshedToken = localStorage.getItem('access_token');
+        if (refreshSuccess && refreshedToken && shouldDecorate) {
+          const retryHeaders = buildOrgHeaders(init?.headers, orgSlug);
+          retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
+          init = {
+            ...init,
+            headers: retryHeaders,
           };
           return originalFetch(url, init);
         }

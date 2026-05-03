@@ -14,6 +14,9 @@ import json
 # Database imports
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession, Transcription
+from auth.dependencies import get_current_organization, get_current_user
+from auth.organization import ActiveOrganization
+from auth.models import User
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 logger = logging.getLogger(__name__)
@@ -21,6 +24,8 @@ logger = logging.getLogger(__name__)
 @router.get("/summary")
 async def get_analytics_summary(
     time_range: str = "month",  # week, month, quarter, year
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Get analytics summary with real session and speaker data"""
@@ -40,6 +45,7 @@ async def get_analytics_summary(
         
         # Get sessions in date range
         sessions = db.query(DBRecordingSession).filter(
+            DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.created_at >= start_date,
             DBRecordingSession.status.in_(["completed", "processing"])
         ).all()
@@ -145,11 +151,14 @@ async def get_analytics_summary(
 @router.get("/sessions")
 async def get_session_analytics(
     limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     """Get recent session analytics with real data including speaker counts"""
     try:
         sessions = db.query(DBRecordingSession).filter(
+            DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.status.in_(["completed", "processing"])
         ).order_by(desc(DBRecordingSession.created_at)).limit(limit).all()
         
@@ -183,6 +192,8 @@ async def get_session_analytics(
 async def get_speaker_analytics(
     time_range: str = "month",
     limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Get detailed speaker analytics across sessions"""
@@ -202,6 +213,7 @@ async def get_speaker_analytics(
         # Get session IDs in range
         session_ids = [
             s.id for s in db.query(DBRecordingSession.id).filter(
+                DBRecordingSession.organization_id == active_org.organization.id,
                 DBRecordingSession.created_at >= start_date,
                 DBRecordingSession.status.in_(["completed", "processing"]),
             ).all()
@@ -250,6 +262,8 @@ async def get_speaker_analytics(
 async def get_duration_trends(
     time_range: str = "month",
     group_by: str = "day",  # day or week
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Get average meeting duration trends grouped by day or week"""
@@ -267,6 +281,7 @@ async def get_duration_trends(
             start_date = now - timedelta(days=30)
 
         sessions = db.query(DBRecordingSession).filter(
+            DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.created_at >= start_date,
             DBRecordingSession.status.in_(["completed", "processing"]),
         ).order_by(DBRecordingSession.created_at).all()
@@ -316,11 +331,16 @@ async def get_duration_trends(
         raise HTTPException(status_code=500, detail="Failed to get duration trends")
 
 @router.get("/performance")
-async def get_performance_metrics(db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def get_performance_metrics(
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """Get real NPU and system performance metrics"""
     try:
         # Get recent completed sessions for performance analysis
         recent_sessions = db.query(DBRecordingSession).filter(
+            DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.created_at >= datetime.now(timezone.utc) - timedelta(days=7),
             DBRecordingSession.status == "completed"
         ).all()

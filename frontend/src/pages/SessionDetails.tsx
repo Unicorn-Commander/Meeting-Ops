@@ -10,6 +10,7 @@ import {
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { config } from '../config';
+import { useOrg } from '../contexts/OrgContext';
 
 interface TranscriptionSegment {
   start: number;
@@ -93,6 +94,7 @@ interface Session {
 export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { getOrgQueryUrl } = useOrg();
   
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1103,7 +1105,7 @@ export const SessionDetails: React.FC = () => {
                 <>
                   <audio
                     ref={audioRef}
-                    src={`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`}
+                    src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                     onError={(e) => {
