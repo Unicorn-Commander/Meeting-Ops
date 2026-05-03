@@ -35,14 +35,12 @@ def app():
         importlib.reload(sys.modules["database.database"])
     if "auth.models" in sys.modules:
         importlib.reload(sys.modules["auth.models"])
-    if "models.vocabulary" in sys.modules:
-        importlib.reload(sys.modules["models.vocabulary"])
     from database.database import engine, SessionLocal
     from database.models import Base
 
-    # Import ALL models BEFORE create_all so they register with Base.metadata
+    # Import the auth models needed by these API tests before create_all so
+    # their tables register on the same metadata object as the core DB models.
     from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
-    from models import vocabulary as _vocabulary_models  # noqa: F401
 
     # Create all tables in the test SQLite DB
     Base.metadata.create_all(bind=engine)
