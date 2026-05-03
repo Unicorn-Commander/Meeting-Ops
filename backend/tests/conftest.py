@@ -26,17 +26,27 @@ def app():
     # Force reload database module to pick up SQLite URL
     import importlib
 
-    # Reload database.models first (owns Base), then database.database (imports Base)
+    # Reload database.models first (owns Base), then database.database (imports Base).
+    # Any model modules that previously imported Base must be reloaded afterwards so
+    # their tables are attached to the same metadata for this isolated SQLite DB.
     if "database.models" in sys.modules:
         importlib.reload(sys.modules["database.models"])
     if "database.database" in sys.modules:
         importlib.reload(sys.modules["database.database"])
+    if "auth.models" in sys.modules:
+        importlib.reload(sys.modules["auth.models"])
+    if "models.vocabulary" in sys.modules:
+        importlib.reload(sys.modules["models.vocabulary"])
+    if "database.vocabulary_models" in sys.modules:
+        importlib.reload(sys.modules["database.vocabulary_models"])
 
     from database.database import engine, SessionLocal
     from database.models import Base
 
     # Import ALL models BEFORE create_all so they register with Base.metadata
     from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
+    from models import vocabulary as _vocabulary_models  # noqa: F401
+    from database import vocabulary_models as _db_vocabulary_models  # noqa: F401
 
     # Create all tables in the test SQLite DB
     Base.metadata.create_all(bind=engine)
