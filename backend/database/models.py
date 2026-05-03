@@ -1,7 +1,7 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from datetime import datetime, timezone
 import uuid
 
@@ -51,7 +51,10 @@ class RecordingSession(Base):
     source_type = Column(String(50), default="local_mic")  # "local_mic", "satellite_stream", "satellite_upload", "satellite_transcript", "companion_app"
     room_name = Column(String(200), nullable=True)  # Physical room name
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
-    
+    project_app = Column(String(50), nullable=True)  # 'project-ops', 'crisis-ops', or NULL
+    project_id = Column(Integer, nullable=True)
+    project_slug = Column(String(200), nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -181,3 +184,51 @@ class SatelliteDevice(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
+
+class OrgProviderSettings(Base):
+    """Per-organization provider configuration for pluggable AI services."""
+    __tablename__ = "org_provider_settings"
+    __table_args__ = (
+        Index("ix_org_provider_settings_org_kind", "organization_id", "service_kind", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    service_kind = Column(String(50), nullable=False)  # llm, stt, tts, embeddings, reranking, diarization
+    provider_name = Column(String(50), nullable=False)  # litellm, openai, infinity, kokoro, etc.
+    endpoint_url = Column(String(500), nullable=True)
+    api_key_encrypted = Column(Text, nullable=True)  # Fernet-encrypted
+    model_name = Column(String(200), nullable=True)
+    overrides = Column(JSON, nullable=True)  # {"fast": {"model": "x"}, "quality": {"model": "y"}}
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class MeetingChunkEmbedding(Base):
+    """Tracks chunk embeddings for meeting transcripts in Qdrant."""
+    __tablename__ = "meeting_chunk_embedding"
+
+    id = Column(Integer, primary_key=True)
+    meeting_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, index=True)
+    chunk_idx = Column(Integer, nullable=False)
+    qdrant_point_id = Column(String(100), nullable=False)
+    text_snippet = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MeetingDigest(Base):
+    """Cached time-window meeting digests."""
+    __tablename__ = "meeting_digest"
+    __table_args__ = (
+        Index("ix_meeting_digest_org_period", "organization_id", "period", "date"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    period = Column(String(20), nullable=False)  # day, week, month, quarter, year
+    date = Column(String(10), nullable=False)  # YYYY-MM-DD
+    project_id = Column(Integer, nullable=True)
+    content = Column(Text, nullable=False)
+    meeting_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

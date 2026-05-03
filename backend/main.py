@@ -147,6 +147,12 @@ _load_router(app, "websocket_satellite", "api.websocket_satellite")
 # === COMPANION APP ROUTERS (optional) ===
 _load_router(app, "websocket_remote_audio", "api.websocket_remote_audio")
 
+# === PHASE 2 ROUTERS ===
+_load_router(app, "provider_settings", "api.provider_settings")
+_load_router(app, "integrations", "api.integrations")
+_load_router(app, "digests", "api.digests")
+_load_router(app, "rag_chat", "api.rag_chat")
+
 
 # === CORE API ENDPOINTS ===
 

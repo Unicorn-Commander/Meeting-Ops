@@ -5,6 +5,8 @@ import { useOrg } from './contexts/OrgContext';
 import { useRecording } from './contexts/RecordingContext';
 import { Login } from './components/Login';
 import LiveRecording from './pages/LiveRecording';
+import RAGChat from './pages/RAGChat';
+import DigestsPage from './pages/Digests';
 import { Sessions } from './pages/Sessions';
 import { SessionDetails } from './pages/SessionDetails';
 import SettingsEnhanced from './pages/SettingsEnhanced';
@@ -243,6 +245,18 @@ export function AppRouterSimplified() {
       <Route path="/admin/agents-old" element={
         <ProtectedRoute>
           <AgentConfiguration />
+        </ProtectedRoute>
+      } />
+
+            <Route path="/rag" element={
+        <ProtectedRoute>
+          <RAGChat />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/digests" element={
+        <ProtectedRoute>
+          <DigestsPage />
         </ProtectedRoute>
       } />
 

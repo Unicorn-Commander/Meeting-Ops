@@ -45,18 +45,23 @@ class UnifiedLLMService:
         # Check availability on startup
         self._check_available()
 
-    def _get_active_model(self) -> dict:
-        """Get active model config from registry (called per-request for hot-swap)."""
+    def _get_active_model(self, task: str = "quality") -> dict:
+        """Get active model config. task: 'fast' for live/short, 'quality' for summary/chat."""
+        env_keys = {
+            "fast": ("LLM_MODEL_FAST", "LLM_MODEL_QUALITY"),
+            "quality": ("LLM_MODEL_QUALITY", "LLM_MODEL_FAST"),
+            "chat": ("LLM_MODEL_CHAT", "LLM_MODEL_QUALITY"),
+        }.get(task, ("LLM_MODEL_QUALITY",))
+        for key in env_keys:
+            v = os.getenv(key)
+            if v:
+                return {"model_id": v, "display_name": v, "max_tokens_multiplier": 1.0}
+        # Last-resort fallback to registry, then a hardcoded default
         try:
             from config.model_registry import get_active_model
             return get_active_model()
-        except Exception as e:
-            logger.debug(f"model_registry unavailable, using fallback: {e}")
-            return {
-                "model_id": "granite-3.3-2b-instruct",
-                "display_name": "Granite 3.3 2B Instruct (Q4_K_M)",
-                "max_tokens_multiplier": 1.0,
-            }
+        except Exception:
+            return {"model_id": "qwen3.6-35b-moe", "display_name": "qwen3.6-35b-moe", "max_tokens_multiplier": 1.0}
 
     @property
     def model_name(self) -> str:
@@ -66,7 +71,14 @@ class UnifiedLLMService:
     def _check_available(self):
         """Check if llama.cpp Vulkan server is available"""
         try:
-            response = requests.get(f"{self.base_url}/health", timeout=3)
+            api_key = os.getenv("OPENAI_API_KEY", "")
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            try:
+                response = requests.get(f"{self.base_url}/v1/models", headers=headers, timeout=3)
+            except Exception:
+                response = requests.get(f"{self.base_url}/health", timeout=3)
             if response.status_code == 200:
                 self.llamacpp_available = True
                 model = self._get_active_model()
@@ -90,8 +102,13 @@ class UnifiedLLMService:
         effective_max_tokens = math.ceil(max_tokens * multiplier)
 
         try:
+            api_key = os.getenv("OPENAI_API_KEY", "")
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
+                headers=headers,
                 json={
                     "model": model["model_id"],
                     "messages": [
@@ -100,15 +117,22 @@ class UnifiedLLMService:
                     ],
                     "temperature": temperature,
                     "max_tokens": effective_max_tokens,
-                    "stream": False
+                    "stream": False,
+                    # Disable reasoning preamble (Qwen 3.6 / Gemma 4) so we get
+                    # direct answer in `content`, not `reasoning_content`.
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "reasoning_effort": "none",
                 },
                 timeout=120
             )
 
             if response.status_code == 200:
                 result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                return content.strip()
+                msg = result["choices"][0].get("message", {})
+                content = (msg.get("content") or "").strip()
+                if not content:
+                    content = (msg.get("reasoning_content") or "").strip()
+                return content
             else:
                 logger.error(f"llama.cpp API error: {response.status_code} - {response.text[:200]}")
                 return ""

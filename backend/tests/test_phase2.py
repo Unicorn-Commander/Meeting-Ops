@@ -1,0 +1,355 @@
+"""Tests for Phase 2: Provider Registry, RAG, Embeddings, Digests, Integrations."""
+
+from __future__ import annotations
+
+import uuid
+import json
+
+from auth.utils import get_password_hash
+
+
+def _current_models():
+    from auth.models import Organization, User, UserOrganization
+    from database.database import SessionLocal
+    from database.models import RecordingSession, OrgProviderSettings, MeetingDigest
+    from database.database import Base, engine
+    return Organization, User, UserOrganization, SessionLocal, RecordingSession, OrgProviderSettings, MeetingDigest
+
+
+def _login_headers(client, username: str, password: str, org_slug: str | None = None) -> dict[str, str]:
+    response = client.post(
+        "/api/auth/login",
+        data={"username": username, "password": password},
+    )
+    assert response.status_code == 200, f"Login failed: {response.text}"
+    token = response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    if org_slug:
+        headers["X-MeetingOps-Org"] = org_slug
+    return headers
+
+
+def _seed_user(db, username: str, password: str, email: str, is_superuser: bool = False):
+    _, User, _, _, _, _, _ = _current_models()
+    user = User(
+        email=email,
+        username=username,
+        hashed_password=get_password_hash(password),
+        is_active=True,
+        is_verified=True,
+        is_superuser=is_superuser,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _seed_org(db, name: str, slug: str):
+    Organization, _, _, _, _, _, _ = _current_models()
+    org = Organization(name=name, slug=slug, is_active=True)
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+    return org
+
+
+def _seed_membership(db, user_id: int, org_id: int, role: str = "user"):
+    _, _, UserOrganization, _, _, _, _ = _current_models()
+    mem = UserOrganization(user_id=user_id, organization_id=org_id, role=role)
+    db.add(mem)
+    db.commit()
+    return mem
+
+
+def _seed_session(db, org_id: int, name: str, status: str = "completed"):
+    _, _, _, _, RecordingSession, _, _ = _current_models()
+    session = RecordingSession(
+        session_id=str(uuid.uuid4()),
+        name=name,
+        status=status,
+        organization_id=org_id,
+        duration=60.0,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+class TestProviderRegistry:
+    """Provider settings CRUD with org scoping."""
+
+    def test_list_providers_returns_defaults(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            _, _, _, _, _, OrgProviderSettings, _ = _current_models()
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+
+            user = _seed_user(db, "prov_test", "test123", "prov@test.com", is_superuser=True)
+            org = _seed_org(db, "Provider Org", "provider-org")
+            _seed_membership(db, user.id, org.id, "admin")
+            headers = _login_headers(client, "prov_test", "test123", "provider-org")
+
+            resp = client.get("/api/providers", headers=headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data) == 6
+            kinds = [d["service_kind"] for d in data]
+            assert "llm" in kinds
+            assert "embeddings" in kinds
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_admin_can_update_provider_settings(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            _, _, _, _, _, OrgProviderSettings, _ = _current_models()
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+
+            user = _seed_user(db, "prov_admin", "test123", "prov_admin@test.com")
+            org = _seed_org(db, "Admin Org", "admin-org")
+            _seed_membership(db, user.id, org.id, "admin")
+            headers = _login_headers(client, "prov_admin", "test123", "admin-org")
+
+            resp = client.put(
+                "/api/providers/llm",
+                json={
+                    "provider_name": "litellm",
+                    "model_name": "gemma-4-26b-moe",
+                },
+                headers=headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["provider_name"] == "litellm"
+            assert data["model_name"] == "gemma-4-26b-moe"
+
+            # Verify via GET
+            resp2 = client.get("/api/providers/llm", headers=headers)
+            assert resp2.status_code == 200
+            assert resp2.json()["model_name"] == "gemma-4-26b-moe"
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_non_admin_cannot_edit_providers(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            _, _, _, _, _, OrgProviderSettings, _ = _current_models()
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+
+            user = _seed_user(db, "prov_user", "test123", "prov_user@test.com")
+            org = _seed_org(db, "User Org", "user-org")
+            _seed_membership(db, user.id, org.id, "user")
+            headers = _login_headers(client, "prov_user", "test123", "user-org")
+
+            resp = client.put(
+                "/api/providers/llm",
+                json={"provider_name": "openai"},
+                headers=headers,
+            )
+            assert resp.status_code == 403
+        finally:
+            db.rollback()
+            db.close()
+
+
+class TestProviderSettingsOrgIsolation:
+    """Provider settings are scoped per-org."""
+
+    def test_org_a_cannot_see_org_b_settings(self, client):
+        _, _, _, SessionLocal, _, OrgProviderSettings, _ = _current_models()
+        db = SessionLocal()
+        try:
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+
+            user = _seed_user(db, "iso_prov", "test123", "iso_prov@test.com", is_superuser=True)
+            org_a = _seed_org(db, "Org A", "org-a")
+            org_b = _seed_org(db, "Org B", "org-b")
+            _seed_membership(db, user.id, org_a.id, "admin")
+            _seed_membership(db, user.id, org_b.id, "admin")
+
+            # Set in org_a
+            h_a = _login_headers(client, "iso_prov", "test123", "org-a")
+            client.put("/api/providers/llm", json={"provider_name": "anthropic"}, headers=h_a)
+
+            # Set in org_b
+            h_b = _login_headers(client, "iso_prov", "test123", "org-b")
+            client.put("/api/providers/llm", json={"provider_name": "openai"}, headers=h_b)
+
+            # Verify org_a sees its own
+            resp_a = client.get("/api/providers/llm", headers=h_a)
+            assert resp_a.json()["provider_name"] == "anthropic"
+
+            # Verify org_b sees its own
+            resp_b = client.get("/api/providers/llm", headers=h_b)
+            assert resp_b.json()["provider_name"] == "openai"
+        finally:
+            db.rollback()
+            db.close()
+
+
+class TestRAGChatEndpoint:
+    """RAG chat endpoint basic availability."""
+
+    def test_rag_chat_returns_stream(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            user = _seed_user(db, "rag_user", "test123", "rag@test.com", is_superuser=True)
+            org = _seed_org(db, "RAG Org", "rag-org")
+            _seed_membership(db, user.id, org.id, "user")
+            headers = _login_headers(client, "rag_user", "test123", "rag-org")
+
+            resp = client.post(
+                "/api/rag/chat",
+                json={"question": "test", "scope": {}},
+                headers=headers,
+            )
+            # 503 is acceptable when embedding service is down; 200 when available
+            assert resp.status_code in (200, 503)
+            if resp.status_code == 200:
+                assert "text/event-stream" in resp.headers.get("content-type", "")
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_rag_history_org_isolation(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            from database.models import ChatHistory
+            db.query(ChatHistory).delete()
+            db.commit()
+
+            user = _seed_user(db, "rag_iso", "test123", "rag_iso@test.com", is_superuser=True)
+            org_a = _seed_org(db, "RAG Org A", "rag-org-a")
+            org_b = _seed_org(db, "RAG Org B", "rag-org-b")
+            _seed_membership(db, user.id, org_a.id, "user")
+            _seed_membership(db, user.id, org_b.id, "user")
+
+            db.add(ChatHistory(session_key="__rag_v2__", role="user", content="org A msg", organization_id=org_a.id))
+            db.add(ChatHistory(session_key="__rag_v2__", role="user", content="org B msg", organization_id=org_b.id))
+            db.commit()
+
+            h_a = _login_headers(client, "rag_iso", "test123", "rag-org-a")
+            h_b = _login_headers(client, "rag_iso", "test123", "rag-org-b")
+
+            resp_a = client.get("/api/rag/chat/history", headers=h_a)
+            assert resp_a.status_code == 200
+            content_a = [h["content"] for h in resp_a.json()]
+            assert "org A msg" in content_a
+            assert "org B msg" not in content_a
+
+            resp_b = client.get("/api/rag/chat/history", headers=h_b)
+            assert resp_b.status_code == 200
+            content_b = [h["content"] for h in resp_b.json()]
+            assert "org B msg" in content_b
+            assert "org A msg" not in content_b
+        finally:
+            db.rollback()
+            db.close()
+
+
+class TestDigestsEndpoint:
+    """Time-window digests endpoint."""
+
+    def test_digests_requires_auth(self, client):
+        resp = client.get("/api/digests?period=day&date=2026-05-03")
+        assert resp.status_code in (401, 403)
+
+    def test_digests_accepts_valid_params(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            user = _seed_user(db, "dig_user", "test123", "dig@test.com", is_superuser=True)
+            org = _seed_org(db, "Digest Org", "digest-org")
+            _seed_membership(db, user.id, org.id, "user")
+            headers = _login_headers(client, "dig_user", "test123", "digest-org")
+
+            resp = client.get("/api/digests?period=day&date=2026-05-03", headers=headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["period"] == "day"
+        finally:
+            db.close()
+
+
+class TestIntegrations:
+    """Project integrations endpoint."""
+
+    def test_integrations_returns_mock_data(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            user = _seed_user(db, "int_user", "test123", "int@test.com", is_superuser=True)
+            org = _seed_org(db, "Integration Org", "int-org")
+            _seed_membership(db, user.id, org.id, "user")
+            headers = _login_headers(client, "int_user", "test123", "int-org")
+
+            resp = client.get(f"/api/integrations/project-ops/projects?organization_id={org.id}", headers=headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data) >= 1
+            assert data[0]["app"] == "project-ops"
+        finally:
+            db.close()
+
+    def test_integrations_respects_org(self, client):
+        _, _, _, SessionLocal, _, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            user = _seed_user(db, "int_iso", "test123", "int_iso@test.com", is_superuser=False)
+            org_a = _seed_org(db, "Int A", "int-a")
+            org_b = _seed_org(db, "Int B", "int-b")
+            _seed_membership(db, user.id, org_a.id, "user")
+            _seed_membership(db, user.id, org_b.id, "user")
+            headers = _login_headers(client, "int_iso", "test123", "int-a")
+
+            # Try to fetch projects for org_b while authed as org_a (non-superuser)
+            resp = client.get(f"/api/integrations/project-ops/projects?organization_id={org_b.id}", headers=headers)
+            assert resp.status_code == 403
+        finally:
+            db.close()
+
+
+class TestProjectLinkingSchema:
+    """Meeting session project linking fields."""
+
+    def test_session_has_project_fields(self, client):
+        _, _, _, SessionLocal, RecordingSession, _, _ = _current_models()
+        db = SessionLocal()
+        try:
+            user = _seed_user(db, "proj_user", "test123", "proj@test.com", is_superuser=True)
+            org = _seed_org(db, "Project Org", "proj-org")
+            _seed_membership(db, user.id, org.id, "user")
+
+            session = RecordingSession(
+                session_id=str(uuid.uuid4()),
+                name="Project Meeting",
+                status="active",
+                organization_id=org.id,
+                project_app="project-ops",
+                project_id=42,
+                project_slug="q2-roadmap",
+                duration=30.0,
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+            assert session.project_app == "project-ops"
+            assert session.project_id == 42
+            assert session.project_slug == "q2-roadmap"
+        finally:
+            db.rollback()
+            db.close()

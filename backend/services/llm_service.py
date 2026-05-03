@@ -59,8 +59,13 @@ class GemmaService:
         effective_max_tokens = math.ceil(max_tokens * multiplier)
 
         try:
+            api_key = os.getenv("OPENAI_API_KEY", "")
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
+                headers=headers,
                 json={
                     "model": active["model_id"],
                     "messages": [

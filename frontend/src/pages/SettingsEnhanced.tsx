@@ -17,6 +17,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { config } from '../config';
+import ProviderSettingsPanel from '../components/ProviderSettingsPanel';
 
 interface SettingsSection {
   id: string;
@@ -264,6 +265,7 @@ export default function SettingsEnhanced() {
     { id: 'audio', title: 'Audio & Recording', icon: Mic, description: 'Audio devices and recording configuration', category: 'app' },
     { id: 'ai', title: 'AI & Transcription', icon: Cpu, description: 'AI models and processing options', category: 'app' },
     { id: 'vocabulary', title: 'Custom Vocabulary', icon: BookOpen, description: 'Industry terms and acronyms for transcription', category: 'app' },
+    { id: 'providers', title: 'AI Providers', icon: Network, description: 'Per-service AI provider configuration', category: 'app' },
 
     // Admin Settings
     { id: 'authentik', title: 'Authentication (Authentik)', icon: Lock, description: 'Authentik SSO configuration', category: 'admin' },
@@ -1274,6 +1276,8 @@ export default function SettingsEnhanced() {
           </div>
         );
 
+      case 'providers':
+        return <ProviderSettingsPanel />;
       default:
         return (
           <div className="flex items-center justify-center h-64 text-zinc-500">
