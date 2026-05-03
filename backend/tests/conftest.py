@@ -37,16 +37,12 @@ def app():
         importlib.reload(sys.modules["auth.models"])
     if "models.vocabulary" in sys.modules:
         importlib.reload(sys.modules["models.vocabulary"])
-    if "database.vocabulary_models" in sys.modules:
-        importlib.reload(sys.modules["database.vocabulary_models"])
-
     from database.database import engine, SessionLocal
     from database.models import Base
 
     # Import ALL models BEFORE create_all so they register with Base.metadata
     from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
     from models import vocabulary as _vocabulary_models  # noqa: F401
-    from database import vocabulary_models as _db_vocabulary_models  # noqa: F401
 
     # Create all tables in the test SQLite DB
     Base.metadata.create_all(bind=engine)
