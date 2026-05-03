@@ -137,12 +137,27 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   );
 }
 
+function SsoLoginRedirect({ isAuthenticated }: { isAuthenticated: boolean }) {
+  if (isAuthenticated) return <Navigate to="/record" replace />;
+  // Kick to Keycloak via oauth2-proxy
+  window.location.href = `/oauth2/start?rd=${encodeURIComponent('/')}`;
+  return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
+}
+
 // Protected Route Component
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
 
+  // Wait for SSO probe before deciding
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Authenticating…</div></div>;
+  }
+
+  // Not authed → kick to oauth2-proxy SSO sign-in (Keycloak)
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
+    const target = encodeURIComponent(window.location.pathname + window.location.hash);
+    window.location.href = `/oauth2/start?rd=${target}`;
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
   }
 
   return <AppLayout>{children}</AppLayout>;
@@ -150,13 +165,15 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 // Main Router
 export function AppRouterSimplified() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Authenticating…</div></div>;
+  }
 
   return (
     <Routes>
-      <Route path="/login" element={
-        isAuthenticated ? <Navigate to="/record" replace /> : <Login />
-      } />
+      <Route path="/login" element={<SsoLoginRedirect isAuthenticated={isAuthenticated} />} />
 
       <Route path="/" element={<Navigate to="/record" replace />} />
 

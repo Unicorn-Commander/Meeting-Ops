@@ -48,7 +48,6 @@ ffmpeg-python==0.2.0
 # LLM Providers
 openai==1.54.4
 anthropic==0.40.0
-ollama==0.4.4
 requests==2.32.3
 
 # Document Generation
@@ -89,3 +88,4 @@ onnxruntime==1.20.1
 
 # Note: Some packages may require specific versions based on Python version
 # For Python 3.13, use requirements-py313.txt
+email-validator==2.2.0

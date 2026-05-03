@@ -283,3 +283,12 @@ async def get_system_info():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9050)
+
+from fastapi import Request as _DebugRequest
+@app.get("/api/_debug/headers")
+async def _debug_headers_endpoint(request: _DebugRequest):
+    h = {}
+    for k, v in request.headers.items():
+        if k.lower().startswith(("x-", "authorization")) and not k.lower() == "x-forwarded-for":
+            h[k] = v[:200]
+    return {"headers": h}

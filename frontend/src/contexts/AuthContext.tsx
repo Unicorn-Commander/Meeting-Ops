@@ -106,12 +106,28 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       setIsLoading(false);
     };
 
-    // Only run auth check after initial load is complete
+    // Always probe /api/auth/me on mount so SSO sessions (oauth2-proxy
+    // injects X-Auth-Request-Email server-side) are picked up even without
+    // a JWT in localStorage.
+    const probeSso = async () => {
+      try {
+        const r = await fetch('/api/auth/me', {
+          credentials: 'same-origin',
+          headers: { 'Accept': 'application/json' },
+        });
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.includes('application/json')) {
+          try { setUser(await r.json()); } catch {}
+        }
+      } catch {}
+      setIsLoading(false);
+    };
+
     if (initialLoadComplete) {
       if (token || refreshToken) {
         checkAuth();
       } else {
-        setIsLoading(false);
+        probeSso();
       }
     }
   }, [initialLoadComplete, token, refreshToken]); // Depend on initial load and token changes
@@ -231,6 +247,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     setError(null);
+
+    // SSO sign-out: clear oauth2-proxy session, then Keycloak session,
+    // then bounce back to root (which will redirect to fresh SSO login).
+    const rd = encodeURIComponent(
+      'https://auth.magicunicorn.dev/realms/uchub/protocol/openid-connect/logout' +
+      '?post_logout_redirect_uri=' + encodeURIComponent('https://meetingops.magicunicorn.dev/') +
+      '&client_id=meeting-ops'
+    );
+    window.location.href = `/oauth2/sign_out?rd=${rd}`;
   };
 
   // Set up axios-like interceptor for fetch

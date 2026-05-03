@@ -3,6 +3,7 @@ LLM Service for Meeting-Ops
 Uses active model from config/model_registry.py via llama.cpp Vulkan OpenAI-compatible API
 """
 
+import os
 import json
 import asyncio
 import logging
@@ -17,7 +18,7 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 # llama.cpp Vulkan endpoint
-LLAMACPP_URL = "http://localhost:11437"
+LLAMACPP_URL = os.getenv("LLAMACPP_URL", "http://localhost:11437")
 
 
 def _get_active_model() -> dict:

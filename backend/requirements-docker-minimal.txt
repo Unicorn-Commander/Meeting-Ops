@@ -19,7 +19,7 @@ webrtcvad==2.0.10
 numpy==1.26.4
 
 # AI/ML (minimal for now)
-onnx==1.15.0
+onnx==1.17.0
 onnxruntime==1.22.0
 huggingface-hub==0.25.0
 
@@ -37,3 +37,5 @@ boto3==1.35.21
 
 # PDF Export
 reportlab==4.0.4
+psycopg2-binary==2.9.10
+

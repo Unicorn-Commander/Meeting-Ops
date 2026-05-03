@@ -17,15 +17,77 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def get_current_user_optional(
+    request: Request,
     token: Optional[str] = Depends(oauth2_scheme),
     api_key: Optional[str] = Depends(api_key_header),
     db: Session = Depends(get_db)
 ) -> Optional[User]:
-    """Get current user from JWT token or API key (optional)"""
+    """Get current user from SSO header, JWT token, or API key (optional).
+
+    Order of trust:
+      1. oauth2-proxy forward-auth headers (X-Auth-Request-Email)
+      2. JWT bearer token
+      3. X-API-Key header
+    SSO is checked first so Keycloak-authed users are auto-provisioned.
+    """
     user = None
-    
-    # Try JWT token first
-    if token:
+
+    # Try SSO forward-auth headers first (oauth2-proxy / Keycloak).
+    # Keycloak doesn't always emit a discrete email claim; preferred_username
+    # often holds it, so we fall through several headers and accept the first
+    # value that looks like an email.
+    def _first_email(*candidates):
+        for v in candidates:
+            if v and "@" in v:
+                return v.strip()
+        return None
+    sso_email = _first_email(
+        request.headers.get("X-Auth-Request-Email"),
+        request.headers.get("X-Forwarded-Email"),
+        request.headers.get("X-Auth-Request-Preferred-Username"),
+        request.headers.get("X-Forwarded-Preferred-Username"),
+        request.headers.get("X-Auth-Request-User"),
+        request.headers.get("X-Forwarded-User"),
+    )
+    if sso_email:
+        sso_username = (
+            request.headers.get("X-Auth-Request-Preferred-Username")
+            or request.headers.get("X-Auth-Request-User")
+            or request.headers.get("X-Forwarded-User")
+        )
+        sso_groups_h = (
+            request.headers.get("X-Auth-Request-Groups")
+            or request.headers.get("X-Forwarded-Groups")
+            or ""
+        )
+        sso_groups = [g.strip() for g in sso_groups_h.split(",") if g.strip()]
+        # Keycloak emits roles with a 'role:' prefix when included in groups claim.
+        # Strip it for matching, and keep the long names for app-specific admin roles.
+        normalized = {g.removeprefix("role:").lower() for g in sso_groups}
+        admin_aliases = {
+            "admin",
+            "meeting-ops-admins",
+            "meetingops-admin",
+            "uc-admins",
+            "app:meeting-ops-admin",
+            "app:meetingops-admin",
+            "app:meetingops:admin",
+            "app:meeting-ops:admin",
+        }
+        is_admin = bool(normalized & admin_aliases)
+        try:
+            user = AuthService.get_or_create_sso_user(
+                db,
+                email=sso_email,
+                username=sso_username,
+                full_name=sso_username,
+                is_superuser=is_admin,
+            )
+        except Exception:
+            user = None
+
+    # Try JWT token
+    if not user and token:
         try:
             payload = decode_token(token)
             if payload and payload.get("type") == "access":
@@ -34,15 +96,15 @@ async def get_current_user_optional(
                     user = AuthService.get_user_by_id(db, int(user_id))
         except (JWTError, ValueError):
             pass
-    
+
     # Try API key if no valid JWT
     if not user and api_key:
         user = AuthService.get_user_by_api_key(db, api_key)
-    
+
     # Check if user is active
     if user and not user.is_active:
         return None
-    
+
     return user
 
 async def get_current_user(

@@ -294,3 +294,58 @@ class AuthService:
         )
         db.add(audit_log)
         db.commit()
+
+    @staticmethod
+    def get_or_create_sso_user(
+        db: Session,
+        email: str,
+        username: Optional[str] = None,
+        full_name: Optional[str] = None,
+        is_superuser: bool = False,
+    ) -> User:
+        """Look up a user by SSO email, auto-provisioning if absent.
+
+        Used by Keycloak/oauth2-proxy forward-auth — the upstream proxy
+        has already validated the OIDC session, so we trust the headers
+        and just maintain a local User row for FK relationships.
+        """
+        from auth.utils import get_password_hash
+        import secrets as _secrets
+
+        email = sanitize_email(email)
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            updated = False
+            if is_superuser and not user.is_superuser:
+                user.is_superuser = True
+                updated = True
+            if not user.is_active:
+                user.is_active = True
+                updated = True
+            if not user.is_verified:
+                user.is_verified = True
+                updated = True
+            if updated:
+                db.commit()
+                db.refresh(user)
+            return user
+
+        # Auto-provision
+        candidate = sanitize_username((username or email.split('@')[0])[:30])
+        if db.query(User).filter(User.username == candidate).first():
+            candidate = f"{candidate}_{_secrets.token_hex(2)}"
+
+        user = User(
+            email=email,
+            username=candidate,
+            hashed_password=get_password_hash(_secrets.token_urlsafe(48)),
+            full_name=full_name or candidate,
+            is_active=True,
+            is_verified=True,
+            is_superuser=is_superuser,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info(f"SSO auto-provisioned user: {candidate} ({email}) admin={is_superuser}")
+        return user

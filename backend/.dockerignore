@@ -24,7 +24,6 @@ meeting_sessions.db
 *.whl
 *.npubin
 *.xclbin
-models/
 npu_stt_models/
 storage/
 benchmark_samples/
