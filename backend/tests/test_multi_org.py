@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import uuid
 
-from auth.models import Organization, User, UserOrganization
 from auth.utils import get_password_hash
-from database.database import SessionLocal
-from database.models import RecordingSession
+
+
+def _current_models():
+    from auth.models import Organization, User, UserOrganization
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    return Organization, User, UserOrganization, SessionLocal, RecordingSession
 
 
 def _login_headers(client, username: str, password: str, org_slug: str | None = None) -> dict[str, str]:
@@ -22,7 +27,8 @@ def _login_headers(client, username: str, password: str, org_slug: str | None = 
     return headers
 
 
-def _seed_user(db, username: str, password: str, email: str) -> User:
+def _seed_user(db, username: str, password: str, email: str):
+    _, User, _, _, _ = _current_models()
     user = User(
         email=email,
         username=username,
@@ -37,6 +43,7 @@ def _seed_user(db, username: str, password: str, email: str) -> User:
 
 
 def test_org_isolation_blocks_cross_org_session_access(client):
+    Organization, _, UserOrganization, SessionLocal, RecordingSession = _current_models()
     db = SessionLocal()
     try:
         org_x = Organization(name=f"Org X {uuid.uuid4().hex[:6]}", slug=f"org-x-{uuid.uuid4().hex[:6]}", is_active=True)
@@ -92,6 +99,7 @@ def test_org_isolation_blocks_cross_org_session_access(client):
 
 
 def test_active_org_header_switches_visible_sessions(client):
+    Organization, _, UserOrganization, SessionLocal, RecordingSession = _current_models()
     db = SessionLocal()
     try:
         org_a = Organization(name=f"Alpha {uuid.uuid4().hex[:6]}", slug=f"alpha-{uuid.uuid4().hex[:6]}", is_active=True)
