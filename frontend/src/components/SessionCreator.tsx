@@ -5,6 +5,7 @@ import {
   Mic
 } from 'lucide-react';
 import { config } from '../config';
+import { ProjectLinkPicker, type ProjectLink } from './ProjectLinkPicker';
 
 interface SessionCreatorProps {
   onClose: () => void;
@@ -25,6 +26,11 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
   const [sessionType, setSessionType] = useState<'live' | 'upload'>('live');
   const [creating, setCreating] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [projectLink, setProjectLink] = useState<ProjectLink>({
+    project_app: null,
+    project_id: null,
+    project_slug: null,
+  });
 
   const audioInputRef = useRef<HTMLInputElement>(null);
 
@@ -122,13 +128,20 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
 
     try {
       // Create session
-      const sessionData = {
+      const sessionData: Record<string, unknown> = {
         name: sessionName,
         description: description.trim() || undefined,
         participants: participants.filter(p => p.trim()),
         tags: tags.filter(t => t.trim()),
         session_type: sessionType
       };
+
+      // Optional project link
+      if (projectLink.project_app) {
+        sessionData.project_app = projectLink.project_app;
+        sessionData.project_id = projectLink.project_id;
+        sessionData.project_slug = projectLink.project_slug;
+      }
 
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions`, {
         method: 'POST',
@@ -363,6 +376,12 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
             ))}
           </div>
         </div>
+
+        {/* Project Link (optional) */}
+        <ProjectLinkPicker
+          value={projectLink}
+          onChange={setProjectLink}
+        />
 
         {/* Audio Upload (for upload type) */}
         {sessionType === 'upload' && (

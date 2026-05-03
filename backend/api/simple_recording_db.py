@@ -92,6 +92,15 @@ _auto_stop_tasks: Dict[str, asyncio.Task] = {}
 class CreateSessionRequest(BaseModel):
     name: str
     description: Optional[str] = ""
+    project_app: Optional[str] = None      # 'project-ops' | 'crisis-ops' | None
+    project_id: Optional[int] = None
+    project_slug: Optional[str] = None
+
+
+class UpdateSessionProjectRequest(BaseModel):
+    project_app: Optional[str] = None      # 'project-ops' | 'crisis-ops' | None ('' clears)
+    project_id: Optional[int] = None
+    project_slug: Optional[str] = None
 
 class SessionResponse(BaseModel):
     id: str
@@ -143,6 +152,11 @@ async def create_session(
     session_id = str(uuid.uuid4())
     
     # Create database session
+    # Validate project_app if provided
+    project_app = request.project_app or None
+    if project_app and project_app not in ("project-ops", "crisis-ops"):
+        raise HTTPException(status_code=400, detail="project_app must be 'project-ops' or 'crisis-ops'")
+
     db_session = DBRecordingSession(
         session_id=session_id,
         name=request.name,
@@ -153,14 +167,20 @@ async def create_session(
         duration=0.0,
         user_id=current_user.id,
         organization_id=active_org.organization.id,
+        project_app=project_app,
+        project_id=request.project_id if project_app else None,
+        project_slug=request.project_slug if project_app else None,
     )
-    
+
     db.add(db_session)
     db.commit()
     db.refresh(db_session)
-    
-    logger.info(f"Created DB session: {session_id}")
-    
+
+    logger.info(
+        f"Created DB session: {session_id} "
+        f"(project_app={db_session.project_app}, project_id={db_session.project_id})"
+    )
+
     return SessionResponse(
         id=session_id,
         name=db_session.name,
@@ -468,7 +488,11 @@ async def get_session(
             # Legacy fields
             "user_id": session.user_id,
             "meeting_type": session.meeting_type,
-            "updated_at": session.updated_at.isoformat() if session.updated_at else None
+            "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+            # Project linking (Phase 2)
+            "project_app": session.project_app,
+            "project_id": session.project_id,
+            "project_slug": session.project_slug,
         }
         
     except HTTPException:
@@ -1057,6 +1081,54 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             
     finally:
         db.close()
+
+@router.patch("/recording-sessions/{session_id}/project-link")
+async def update_session_project_link(
+    session_id: str,
+    request: UpdateSessionProjectRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Set or clear the project link on an existing recording session.
+
+    Pass project_app=None (or empty string) to clear the link.
+    """
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Normalize: empty string means clear
+    project_app = request.project_app or None
+    if project_app and project_app not in ("project-ops", "crisis-ops"):
+        raise HTTPException(status_code=400, detail="project_app must be 'project-ops' or 'crisis-ops'")
+
+    if project_app:
+        session.project_app = project_app
+        session.project_id = request.project_id
+        session.project_slug = request.project_slug
+    else:
+        # Clear the link
+        session.project_app = None
+        session.project_id = None
+        session.project_slug = None
+
+    session.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(session)
+
+    logger.info(
+        f"Updated project link for session {session_id}: "
+        f"project_app={session.project_app}, project_id={session.project_id}"
+    )
+
+    return {
+        "id": session.session_id or str(session.id),
+        "project_app": session.project_app,
+        "project_id": session.project_id,
+        "project_slug": session.project_slug,
+    }
+
 
 @router.delete("/recording-sessions/{session_id}")
 async def delete_session(

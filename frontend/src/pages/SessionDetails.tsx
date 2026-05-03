@@ -5,10 +5,12 @@ import {
   Users, Clock, Calendar, FileText, Volume2,
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
-  Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send
+  Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
+  Briefcase, Edit2, Check
 } from 'lucide-react';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
+import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 
@@ -89,7 +91,16 @@ interface Session {
     speakers?: string[];
   };
   transcription_segments?: TranscriptionSegment[];
+  // Project linking (Phase 2)
+  project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
+  project_id?: number | null;
+  project_slug?: string | null;
 }
+
+const PROJECT_APP_LABELS: Record<string, string> = {
+  'project-ops': 'Project-Ops',
+  'crisis-ops': 'Crisis-Ops',
+};
 
 export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
@@ -126,6 +137,15 @@ export const SessionDetails: React.FC = () => {
   // AI Insights state
   const [insights, setInsights] = useState<any>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
+
+  // Project link editor state
+  const [editingProjectLink, setEditingProjectLink] = useState(false);
+  const [projectLinkDraft, setProjectLinkDraft] = useState<ProjectLink>({
+    project_app: null,
+    project_id: null,
+    project_slug: null,
+  });
+  const [savingProjectLink, setSavingProjectLink] = useState(false);
 
   useEffect(() => {
     if (sessionId) {
@@ -499,6 +519,57 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const openProjectLinkEditor = () => {
+    if (!session) return;
+    setProjectLinkDraft({
+      project_app: session.project_app ?? null,
+      project_id: session.project_id ?? null,
+      project_slug: session.project_slug ?? null,
+    });
+    setEditingProjectLink(true);
+  };
+
+  const saveProjectLink = async () => {
+    if (!session) return;
+    setSavingProjectLink(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/project-link`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            project_app: projectLinkDraft.project_app,
+            project_id: projectLinkDraft.project_id,
+            project_slug: projectLinkDraft.project_slug,
+          }),
+        },
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setSession({
+          ...session,
+          project_app: data.project_app ?? null,
+          project_id: data.project_id ?? null,
+          project_slug: data.project_slug ?? null,
+        });
+        setEditingProjectLink(false);
+      } else {
+        const errText = await response.text();
+        alert(`Failed to update project link: ${errText}`);
+      }
+    } catch (err) {
+      console.error('Project link save failed:', err);
+      alert('Failed to update project link');
+    } finally {
+      setSavingProjectLink(false);
+    }
+  };
+
   const generateEmails = async () => {
     if (!session) return;
     
@@ -643,6 +714,77 @@ export const SessionDetails: React.FC = () => {
                       <Zap className="w-4 h-4" />
                       NPU Accelerated
                     </span>
+                  )}
+                </div>
+                {/* Project link badge / editor */}
+                <div className="mt-2">
+                  {editingProjectLink ? (
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 max-w-xl">
+                      <div className="flex items-center gap-2 mb-2 text-sm font-medium text-gray-700">
+                        <Briefcase className="w-4 h-4 text-purple-600" />
+                        Edit project link
+                      </div>
+                      {/* Reuse the picker (dark-themed; wrap to lighten contrast on the white card) */}
+                      <div className="bg-gray-900 rounded p-3">
+                        <ProjectLinkPicker
+                          value={projectLinkDraft}
+                          onChange={setProjectLinkDraft}
+                          hideLabel
+                        />
+                      </div>
+                      <div className="flex items-center gap-2 mt-3">
+                        <button
+                          onClick={saveProjectLink}
+                          disabled={savingProjectLink}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white text-sm rounded hover:bg-purple-700 disabled:opacity-50"
+                        >
+                          {savingProjectLink ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingProjectLink(false)}
+                          disabled={savingProjectLink}
+                          className="px-3 py-1.5 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : session.project_app && session.project_slug ? (
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={`/projects/${session.project_slug}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 hover:bg-purple-200 rounded-full text-sm font-medium transition-colors"
+                        title={`Open in ${PROJECT_APP_LABELS[session.project_app] || session.project_app}`}
+                      >
+                        <Briefcase className="w-3.5 h-3.5" />
+                        <span>{PROJECT_APP_LABELS[session.project_app] || session.project_app}</span>
+                        <span className="text-purple-500">/</span>
+                        <span>{session.project_slug}</span>
+                      </a>
+                      <button
+                        onClick={openProjectLinkEditor}
+                        className="p-1 text-gray-400 hover:text-gray-700 rounded"
+                        title="Edit project link"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={openProjectLinkEditor}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 rounded-full text-xs font-medium transition-colors"
+                      title="Link this meeting to a project"
+                    >
+                      <Briefcase className="w-3.5 h-3.5" />
+                      Link to project
+                    </button>
                   )}
                 </div>
               </div>
