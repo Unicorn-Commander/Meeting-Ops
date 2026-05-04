@@ -32,3 +32,11 @@ class RerankingProvider(Protocol):
 @runtime_checkable
 class DiarizationProvider(Protocol):
     async def diarize(self, audio_path: str) -> list[dict]: ...
+
+    async def embed(self, audio_path: str) -> dict: ...
+    """Return {"embedding": list[float], "embedding_dim": int, "duration_seconds": float, "model": str}."""
+
+    async def identify(self, embedding: list[float], candidates: list[dict], threshold: float = 0.55) -> dict: ...
+    """candidates: [{"speaker_id": int, "embedding": list[float]}, ...]
+    Returns {"matches": [{"speaker_id": int, "similarity": float, "matched": bool}, ...],
+             "best_match": {...} | None}."""

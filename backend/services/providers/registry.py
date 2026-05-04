@@ -149,8 +149,18 @@ class ProviderRegistry:
             return KokoroProvider(endpoint=settings.get("endpoint_url", "http://localhost:8880"))
 
     def get_diarization(self, org_id: int) -> Any:
-        from .impl_diarization import LocalDiarizationProvider
-        return LocalDiarizationProvider()
+        """Returns a DiarizationProvider that also exposes embed() and identify().
+        Configurable per-org via OrgProviderSettings; defaults to the internal
+        speaker-svc container on bigboy GPU 1."""
+        settings = self._get_settings(org_id, "diarization")
+        endpoint = settings.get("endpoint_url") or os.getenv("SPEAKER_SVC_URL", "http://meet-speaker-svc:8889")
+        from .impl_diarization import LocalSpeakerSvcProvider
+        return LocalSpeakerSvcProvider(endpoint=endpoint)
+
+    def get_speaker_svc(self, org_id: int) -> Any:
+        """Convenience alias — same provider as get_diarization but reads as
+        intent in code that only needs embed/identify (e.g. enrollment)."""
+        return self.get_diarization(org_id)
 
     def clear_cache(self):
         self._settings_cache.clear()
