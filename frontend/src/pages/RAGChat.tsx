@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Trash2, ExternalLink } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { Send, Bot, User, Trash2, ExternalLink, ChevronDown, AlertTriangle } from 'lucide-react';
 import { useOrg } from '../contexts/OrgContext';
 import { config } from '../config';
 
@@ -14,6 +14,30 @@ interface Message {
   content: string;
   citations?: Citation[];
   metadata?: any;
+  agent_id?: string;
+}
+
+interface AgentDescriptor {
+  id: string;
+  name: string;
+  description: string;
+  source: 'local' | 'brigade' | string;
+  domain?: string | null;
+  capabilities?: string[] | null;
+  requires_role?: string | null;
+  icon?: string | null;
+  streaming?: boolean;
+}
+
+const DEFAULT_AGENT_ID = 'meeting-rag';
+
+const SOURCE_LABEL: Record<string, string> = {
+  local: 'Meeting Ops',
+  brigade: 'Brigade Agents',
+};
+
+function sourceGroupLabel(source: string): string {
+  return SOURCE_LABEL[source] || source.charAt(0).toUpperCase() + source.slice(1);
 }
 
 export default function RAGChatPanel() {
@@ -22,6 +46,10 @@ export default function RAGChatPanel() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState('');
+  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(DEFAULT_AGENT_ID);
+  const [agentWarnings, setAgentWarnings] = useState<string[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -31,6 +59,7 @@ export default function RAGChatPanel() {
   useEffect(() => {
     if (activeOrganization) {
       loadHistory();
+      loadAgents();
     }
   }, [activeOrganization?.slug]);
 
@@ -40,6 +69,37 @@ export default function RAGChatPanel() {
       headers['X-MeetingOps-Org'] = activeOrganization.slug;
     }
     return headers;
+  };
+
+  const loadAgents = async () => {
+    const localFallback: AgentDescriptor = {
+      id: 'meeting-rag',
+      name: 'Meeting RAG',
+      description: "Searches and synthesizes across this org's meetings",
+      source: 'local',
+      icon: '🎙️',
+    };
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/agents/available`, {
+        headers: getHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const list: AgentDescriptor[] = Array.isArray(data?.agents) ? data.agents : [];
+        if (list.length === 0) {
+          setAgents([localFallback]);
+        } else {
+          setAgents(list);
+        }
+        setAgentWarnings(Array.isArray(data?.warnings) ? data.warnings : []);
+      } else {
+        setAgents([localFallback]);
+        setAgentWarnings([`Agent registry returned HTTP ${res.status}; showing local agents only.`]);
+      }
+    } catch (e) {
+      setAgents([localFallback]);
+      setAgentWarnings(['Agent registry unreachable; showing local agents only.']);
+    }
   };
 
   const loadHistory = async () => {
@@ -59,27 +119,53 @@ export default function RAGChatPanel() {
     } catch { /* skip */ }
   };
 
+  const groupedAgents = useMemo(() => {
+    const groups: Record<string, AgentDescriptor[]> = {};
+    for (const a of agents) {
+      const key = a.source || 'other';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(a);
+    }
+    return groups;
+  }, [agents]);
+
+  const selectedAgent = useMemo(
+    () => agents.find((a) => a.id === selectedAgentId) || null,
+    [agents, selectedAgentId]
+  );
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     const question = input.trim();
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: question }]);
+    const newUserMsg: Message = { role: 'user', content: question };
+    setMessages((prev) => [...prev, newUserMsg]);
     setLoading(true);
     setStreaming('');
 
+    const isLocalRag = selectedAgentId === 'meeting-rag';
+    const messagesForRequest = [...messages, newUserMsg].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     try {
-      const res = await fetch(`${config.apiBaseUrl}/api/rag/chat`, {
+      const res = await fetch(`${config.apiBaseUrl}/api/agents/chat`, {
         method: 'POST',
         headers: getHeaders(),
         body: JSON.stringify({
-          question,
-          scope: {},
-          history: messages.map(m => ({ role: m.role, content: m.content })),
+          agent_id: selectedAgentId,
+          messages: messagesForRequest,
+          stream: true,
+          scope: isLocalRag ? {} : undefined,
         }),
       });
 
       if (!res.ok) {
-        setMessages(prev => [...prev, { role: 'assistant', content: 'Error: Unable to reach RAG service.' }]);
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: `Error: agent dispatch returned HTTP ${res.status}.` },
+        ]);
         setLoading(false);
         return;
       }
@@ -119,14 +205,18 @@ export default function RAGChatPanel() {
       }
 
       setStreaming('');
-      setMessages(prev => [...prev, {
+      setMessages((prev) => [...prev, {
         role: 'assistant',
         content: fullContent,
         citations: finalCitations,
         metadata: finalMetadata,
+        agent_id: selectedAgentId,
       }]);
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Error: Failed to connect to RAG service.' }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Error: Failed to connect to agent dispatcher.' },
+      ]);
     }
     setLoading(false);
   };
@@ -142,20 +232,102 @@ export default function RAGChatPanel() {
     setStreaming('');
   };
 
+  const isBrigade = (source: string) => source === 'brigade';
+
   return (
     <div className="flex flex-col h-full bg-zinc-950">
-      <div className="flex items-center justify-between p-3 border-b border-zinc-800">
-        <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-fuchsia-400" />
-          <span className="text-sm font-medium text-zinc-100">Meeting RAG Chat</span>
+      <div className="flex flex-col gap-2 p-3 border-b border-zinc-800">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Bot className="w-5 h-5 text-fuchsia-400" />
+            <span className="text-sm font-medium text-zinc-100">AI Chat</span>
+          </div>
+          <button
+            onClick={clearHistory}
+            className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors"
+            title="Clear history"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
-        <button
-          onClick={clearHistory}
-          className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors"
-          title="Clear history"
-        >
-          <Trash2 className="w-4 h-4" />
-        </button>
+
+        {/* Agent picker */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setPickerOpen((v) => !v)}
+            data-testid="agent-picker-button"
+            aria-haspopup="listbox"
+            aria-expanded={pickerOpen}
+            className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-left text-sm text-zinc-100 hover:border-fuchsia-500 transition-colors"
+          >
+            <span className="flex items-center gap-2 truncate">
+              <span className="text-base leading-none">{selectedAgent?.icon || '🤖'}</span>
+              <span className="truncate">{selectedAgent?.name || 'Select an agent'}</span>
+              {selectedAgent && isBrigade(selectedAgent.source) && (
+                <span className="ml-2 px-2 py-0.5 text-[10px] rounded bg-purple-700/50 text-purple-200">
+                  Powered by Brigade
+                </span>
+              )}
+            </span>
+            <ChevronDown className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+          </button>
+          {pickerOpen && (
+            <div
+              role="listbox"
+              data-testid="agent-picker-list"
+              className="absolute z-10 mt-1 w-full max-h-72 overflow-y-auto rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl"
+            >
+              {Object.entries(groupedAgents).map(([source, list]) => (
+                <div key={source}>
+                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-zinc-500 bg-zinc-950">
+                    {sourceGroupLabel(source)}
+                  </div>
+                  {list.map((agent) => (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      role="option"
+                      aria-selected={agent.id === selectedAgentId}
+                      data-testid={`agent-option-${agent.id}`}
+                      onClick={() => {
+                        setSelectedAgentId(agent.id);
+                        setPickerOpen(false);
+                      }}
+                      title={agent.description}
+                      className={`w-full text-left px-3 py-2 hover:bg-zinc-800 transition-colors flex items-start gap-2 ${
+                        agent.id === selectedAgentId ? 'bg-zinc-800' : ''
+                      }`}
+                    >
+                      <span className="text-base leading-none mt-0.5">{agent.icon || '🤖'}</span>
+                      <span className="flex-1 min-w-0">
+                        <span className="flex items-center gap-2">
+                          <span className="text-sm text-zinc-100 truncate">{agent.name}</span>
+                          {isBrigade(agent.source) && (
+                            <span className="px-1.5 py-0.5 text-[9px] rounded bg-purple-700/50 text-purple-200 flex-shrink-0">
+                              Brigade
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-xs text-zinc-500 line-clamp-2">{agent.description}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {agentWarnings.length > 0 && (
+          <div
+            data-testid="agent-warnings"
+            className="flex items-start gap-2 px-2 py-1.5 rounded bg-yellow-900/30 border border-yellow-800/50 text-xs text-yellow-200"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <span>{agentWarnings[0]}</span>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">

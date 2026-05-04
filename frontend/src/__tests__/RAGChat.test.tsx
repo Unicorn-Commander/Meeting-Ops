@@ -77,11 +77,31 @@ function installFetch(streamEvents: string[] | null = null, historyPayload: unkn
     if (url.endsWith('/api/auth/me')) {
       return jsonResponse(ME_PAYLOAD);
     }
+    if (url.includes('/api/agents/available')) {
+      return jsonResponse({
+        agents: [
+          {
+            id: 'meeting-rag',
+            name: 'Meeting RAG',
+            description: "Searches and synthesizes across this org's meetings",
+            source: 'local',
+            icon: '🎙️',
+          },
+        ],
+        warnings: [],
+      });
+    }
     if (url.includes('/api/rag/chat/history')) {
       if (init?.method === 'DELETE') {
         return jsonResponse({ ok: true });
       }
       return jsonResponse(historyPayload);
+    }
+    if (url.includes('/api/agents/chat')) {
+      if (streamEvents === null) {
+        return jsonResponse({ detail: 'no embeddings yet' }, 503);
+      }
+      return streamingResponse(streamEvents);
     }
     if (url.includes('/api/rag/chat')) {
       if (streamEvents === null) {
@@ -158,7 +178,7 @@ describe('RAGChat', () => {
     ).toBeInTheDocument();
   });
 
-  it('posts the question to /api/rag/chat with the X-MeetingOps-Org header', async () => {
+  it('posts the question to /api/agents/chat with the X-MeetingOps-Org header', async () => {
     installFetch(['data: {"done": true}\n\n']);
     await renderRAGChat();
 
@@ -167,14 +187,16 @@ describe('RAGChat', () => {
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
     await waitFor(() => {
-      const ragPost = fetchCalls.find(
-        (call) => call.url.includes('/api/rag/chat') && !call.url.includes('history')
+      const agentPost = fetchCalls.find(
+        (call) => call.url.includes('/api/agents/chat') && call.init?.method === 'POST'
       );
-      expect(ragPost).toBeTruthy();
-      expect(ragPost?.init?.method).toBe('POST');
-      const headers = new Headers(ragPost?.init?.headers as HeadersInit);
+      expect(agentPost).toBeTruthy();
+      const headers = new Headers(agentPost?.init?.headers as HeadersInit);
       expect(headers.get('X-MeetingOps-Org')).toBe('magic-unicorn');
       expect(headers.get('Content-Type')).toBe('application/json');
+      const body = JSON.parse(agentPost?.init?.body as string);
+      expect(body.agent_id).toBe('meeting-rag');
+      expect(Array.isArray(body.messages)).toBe(true);
     });
   });
 
@@ -209,7 +231,7 @@ describe('RAGChat', () => {
     expect(link).toHaveAttribute('href', '#/sessions/abc-123');
   });
 
-  it('shows an error message when the RAG endpoint is unreachable', async () => {
+  it('shows an error message when the agent dispatcher is unreachable', async () => {
     installFetch(null);
     await renderRAGChat();
 
@@ -218,7 +240,7 @@ describe('RAGChat', () => {
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
     expect(
-      await screen.findByText(/Error: Unable to reach RAG service\./i)
+      await screen.findByText(/Error: agent dispatch returned HTTP 503/i)
     ).toBeInTheDocument();
   });
 });

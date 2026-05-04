@@ -126,6 +126,9 @@ _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
 _load_router(app, "meeting_management", "api.meeting_management")
 _load_router(app, "meeting_intelligence", "api.meeting_intelligence_real")
 _load_router(app, "ai_settings", "api.ai_settings")
+# === PHASE 3 ROUTERS ===
+_load_router(app, "agents", "api.agents")
+
 _load_router(app, "agent_management", "api.agent_management_api")
 _load_router(app, "meeting_notes", "api.meeting_notes_unified")
 _load_router(app, "websocket_transcription", "api.websocket_transcription")
@@ -152,6 +155,7 @@ _load_router(app, "provider_settings", "api.provider_settings")
 _load_router(app, "integrations", "api.integrations")
 _load_router(app, "digests", "api.digests")
 _load_router(app, "rag_chat", "api.rag_chat")
+
 
 
 # === CORE API ENDPOINTS ===

@@ -1,15 +1,19 @@
 """
 RAG Chat API — cross-meeting RAG with SSE streaming, reranking, and citations.
 Replaces the simpler /api/ai-chat/rag/query with a full pipeline.
+
+The core pipeline lives in `rag_chat_pipeline()` so the multi-agent
+dispatcher (api/agents.py) can reuse it without code duplication.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, AsyncIterator
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import logging
+import os
 import time
 
 from database.database import get_db
@@ -57,17 +61,21 @@ def _save_message(db: Session, org_id: int, role: str, content: str):
     db.commit()
 
 
-@router.post("/chat")
-async def rag_chat(
-    request: RAGChatRequest,
-    req: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
-):
-    org_id = active_org.organization.id
-    scope = request.scope or {}
-    history = request.history or _load_history(db, org_id)
+async def rag_chat_pipeline(
+    *,
+    question: str,
+    scope: Optional[dict],
+    history: Optional[list[dict]],
+    db: Session,
+    org_id: int,
+) -> StreamingResponse:
+    """Run the full RAG pipeline and return an SSE StreamingResponse.
+
+    Exposed as a function so api/agents.py can dispatch to the same logic
+    when an agent_id of 'meeting-rag' is selected.
+    """
+    scope = scope or {}
+    history = history or _load_history(db, org_id)
 
     registry = get_provider_registry(db)
     embeddings = registry.get_embeddings(org_id)
@@ -75,7 +83,7 @@ async def rag_chat(
     reranker = registry.get_reranking(org_id)
 
     # 1. Embed question
-    question_embedding = embeddings.embed_sync([request.question])
+    question_embedding = embeddings.embed_sync([question])
     if not question_embedding:
         raise HTTPException(status_code=503, detail="Embedding service unavailable")
     query_vector = question_embedding[0]
@@ -85,8 +93,8 @@ async def rag_chat(
     from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     qdrant = QdrantClient(
-        host=__import__("os").getenv("QDRANT_HOST", "localhost"),
-        port=int(__import__("os").getenv("QDRANT_PORT", "6335")),
+        host=os.getenv("QDRANT_HOST", "localhost"),
+        port=int(os.getenv("QDRANT_PORT", "6335")),
         check_compatibility=False,
     )
 
@@ -116,14 +124,17 @@ async def rag_chat(
     qdrant_filter = Filter(must=must_filters)
 
     search_result = qdrant.query_points(
-        collection_name=f"{__import__('os').getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}chunks",
+        collection_name=f"{os.getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}chunks",
         query=query_vector,
         limit=50,
         query_filter=qdrant_filter,
     )
 
     if not search_result.points:
-        return {"answer": "No relevant meeting content found for your question.", "sources": [], "citations": []}
+        async def empty_stream():
+            yield f"data: {json.dumps({'token': 'No relevant meeting content found for your question.'})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'sources': [], 'metadata': {'chunks_searched': 0}})}\n\n"
+        return StreamingResponse(empty_stream(), media_type="text/event-stream")
 
     # 3. Rerank top-50 to top-5
     documents = []
@@ -135,7 +146,7 @@ async def rag_chat(
             documents.append(text)
             point_map[len(documents) - 1] = point
 
-    reranked = await reranker.rerank(request.question, documents, top_n=5)
+    reranked = await reranker.rerank(question, documents, top_n=5)
     if reranked:
         top_points = [point_map[r.get("index", i)] for i, r in enumerate(reranked[:5])]
     else:
@@ -167,7 +178,6 @@ async def rag_chat(
         f"Meeting Excerpts:\n{context_text}"
     )
 
-    # Format history for context
     history_text = ""
     if history:
         recent = history[-6:]
@@ -176,11 +186,12 @@ async def rag_chat(
             for h in recent
         ])
 
-    user_prompt = request.question
+    user_prompt = question
     if history_text:
-        user_prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.question}"
+        user_prompt = f"Previous conversation:\n{history_text}\n\nUser: {question}"
 
-    # 5. Stream answer via SSE
+    chunks_searched = len(search_result.points)
+
     async def event_stream():
         full_answer = ""
         chunk_count = 0
@@ -201,12 +212,32 @@ async def rag_chat(
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
         inference_ms = int((time.time() - t0) * 1000)
-        yield f"data: {json.dumps({'done': True, 'sources': citations, 'metadata': {'response_time_ms': inference_ms, 'chunks_searched': len(search_result.points), 'chunks_streamed': chunk_count}})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'sources': citations, 'metadata': {'response_time_ms': inference_ms, 'chunks_searched': chunks_searched, 'chunks_streamed': chunk_count}})}\n\n"
 
-        _save_message(db, org_id, "user", request.question)
-        _save_message(db, org_id, "assistant", full_answer)
+        try:
+            _save_message(db, org_id, "user", question)
+            _save_message(db, org_id, "assistant", full_answer)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to persist RAG history: {e}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/chat")
+async def rag_chat(
+    request: RAGChatRequest,
+    req: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    return await rag_chat_pipeline(
+        question=request.question,
+        scope=request.scope,
+        history=request.history,
+        db=db,
+        org_id=active_org.organization.id,
+    )
 
 
 @router.get("/chat/history")
