@@ -85,11 +85,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Transcription service check failed: {e}")
 
+    try:
+        from api.uploads import cleanup_stale_uploads, start_upload_pipeline_queue
+        await start_upload_pipeline_queue()
+        await cleanup_stale_uploads()
+        logger.info("Upload pipeline initialized")
+    except Exception as e:
+        logger.warning(f"Upload pipeline initialization failed: {e}")
+
     logger.info(f"Routers loaded: {len(loaded_routers)}, failed: {len(failed_routers)}")
 
     yield
 
     logger.info("Shutting down...")
+    try:
+        from api.uploads import stop_upload_pipeline_queue
+        await stop_upload_pipeline_queue()
+    except Exception as e:
+        logger.warning(f"Upload pipeline shutdown failed: {e}")
     if audio_monitor_task and not audio_monitor_task.done():
         audio_monitor_task.cancel()
         try:
@@ -158,6 +171,10 @@ _load_router(app, "rag_chat", "api.rag_chat")
 
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")
+
+# === PHASE 4A ROUTERS ===
+_load_router(app, "uploads", "api.uploads")
+_load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
 
 
 

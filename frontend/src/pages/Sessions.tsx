@@ -9,6 +9,7 @@ import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
 import { config } from '../config';
 import { useNavigate } from 'react-router-dom';
+import { useUploads } from '../contexts/UploadsContext';
 
 interface Session {
   id: string;
@@ -38,6 +39,7 @@ interface RagMessage {
 
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
+  const { startUploads } = useUploads();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,6 +62,7 @@ export const Sessions: React.FC = () => {
   const [showRagPanel, setShowRagPanel] = useState(false);
   const [ragFollowUp, setRagFollowUp] = useState('');
   const ragEndRef = useRef<HTMLDivElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   // Debounced server-side search (keyword + semantic)
   const performSearch = useCallback(async (query: string) => {
@@ -359,6 +362,14 @@ export const Sessions: React.FC = () => {
     navigate(`/sessions/${sessionId}`);
   };
 
+  const handleUploadPicked = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length > 0) {
+      void startUploads(files, 'transcribe');
+    }
+    event.target.value = '';
+  };
+
   const deleteSession = async (sessionId: string) => {
     if (!confirm('Are you sure you want to delete this session?')) return;
 
@@ -566,13 +577,30 @@ export const Sessions: React.FC = () => {
             <p className="text-gray-400 mt-1">Manage your meeting recordings and transcriptions</p>
           </div>
 
-          <button
-            onClick={() => setShowCreator(true)}
-            className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            New Session
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => uploadInputRef.current?.click()}
+              className="flex items-center gap-2 rounded-lg bg-cyan-600 px-5 py-3 text-white transition-colors hover:bg-cyan-500"
+            >
+              <Upload className="w-5 h-5" />
+              Upload Audio/Video
+            </button>
+            <button
+              onClick={() => setShowCreator(true)}
+              className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
+            >
+              <Plus className="w-5 h-5" />
+              New Session
+            </button>
+          </div>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.flac,.opus,.aac,.mp4,.mov,.mkv,.webm,.avi"
+            onChange={handleUploadPicked}
+            className="hidden"
+          />
         </div>
 
         {/* Controls */}
@@ -825,6 +853,16 @@ export const Sessions: React.FC = () => {
           </div>
         ) : (
           <div className={viewMode === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6' : 'space-y-4'}>
+            {viewMode === 'grid' && (
+              <button
+                onClick={() => uploadInputRef.current?.click()}
+                className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-cyan-500/70 bg-gray-900 p-6 text-center transition-colors hover:border-cyan-300 hover:bg-gray-900/80"
+              >
+                <Upload className="mb-3 h-10 w-10 text-cyan-300" />
+                <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
+                <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
+              </button>
+            )}
             {filteredSessions.map(session => (
               <div
                 key={session.id}

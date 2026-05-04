@@ -17,6 +17,18 @@ QDRANT_COLLECTION_CHUNKS = f"{os.getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}chu
 QDRANT_COLLECTION_SUMMARIES = f"{os.getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}summaries"
 
 
+def _qdrant_client():
+    from qdrant_client import QdrantClient
+
+    qdrant_url = os.getenv("QDRANT_URL")
+    if qdrant_url:
+        return QdrantClient(url=qdrant_url)
+    return QdrantClient(
+        host=os.getenv("QDRANT_HOST", "unicorn-qdrant"),
+        port=int(os.getenv("QDRANT_PORT", "6333")),
+    )
+
+
 def _chunk_transcript(text: str, chunk_size: int = 500) -> list[dict]:
     words = text.split()
     chunks = []
@@ -36,12 +48,8 @@ def _chunk_transcript(text: str, chunk_size: int = 500) -> list[dict]:
 
 
 def ensure_collections():
-    from qdrant_client import QdrantClient
     from qdrant_client.models import VectorParams, Distance
-
-    host = os.getenv("QDRANT_HOST", "localhost")
-    port = int(os.getenv("QDRANT_PORT", "6335"))
-    client = QdrantClient(host=host, port=port, check_compatibility=False)
+    client = _qdrant_client()
 
     collections = {c.name for c in client.get_collections().collections}
 
@@ -95,7 +103,6 @@ def _extract_transcript_text(session: RecordingSession) -> str:
 def embed_meeting(session: RecordingSession, db: Session):
     ensure_collections()
 
-    from qdrant_client import QdrantClient
     import uuid as _uuid
 
     org_id = session.organization_id
@@ -112,9 +119,7 @@ def embed_meeting(session: RecordingSession, db: Session):
     registry = get_provider_registry(db)
     embedder = registry.get_embeddings(org_id)
 
-    host = os.getenv("QDRANT_HOST", "localhost")
-    port = int(os.getenv("QDRANT_PORT", "6335"))
-    client = QdrantClient(host=host, port=port, check_compatibility=False)
+    client = _qdrant_client()
 
     # Delete existing points for this meeting
     from qdrant_client.models import Filter, FieldCondition, MatchValue

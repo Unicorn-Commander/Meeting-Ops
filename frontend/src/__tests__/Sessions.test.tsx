@@ -11,6 +11,15 @@ vi.mock('../components/MeetingIntelligenceDashboard', () => ({
   MeetingIntelligenceDashboard: () => <div>Meeting Intelligence</div>,
 }));
 
+vi.mock('../contexts/UploadsContext', () => ({
+  useUploads: () => ({
+    uploads: [],
+    startUploads: vi.fn(),
+    cancelUpload: vi.fn(),
+    openSession: vi.fn(),
+  }),
+}));
+
 vi.mock('../components/Toast', () => ({
   showToast: {
     success: vi.fn(),

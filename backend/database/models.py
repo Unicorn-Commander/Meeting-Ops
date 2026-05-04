@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from datetime import datetime, timezone
@@ -232,6 +232,37 @@ class MeetingDigest(Base):
     content = Column(Text, nullable=False)
     meeting_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class UploadJob(Base):
+    """Chunked media upload state and processing pipeline progress."""
+    __tablename__ = "upload_jobs"
+    __table_args__ = (
+        Index("ix_upload_jobs_org_upload_id", "organization_id", "upload_id", unique=True),
+        Index("ix_upload_jobs_stage", "stage"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    upload_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4, index=True)
+    filename = Column(Text, nullable=False)
+    content_type = Column(Text, nullable=True)
+    action = Column(String(20), nullable=False, default="transcribe")
+    total_size = Column(BigInteger, nullable=False)
+    bytes_received = Column(BigInteger, nullable=False, default=0)
+    chunks_received = Column(Integer, nullable=False, default=0)
+    total_chunks = Column(Integer, nullable=False, default=0)
+    stage = Column(String(30), nullable=False, default="queued")
+    last_completed_stage = Column(String(30), nullable=True)
+    progress_pct = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=True)
+    job_started_at = Column(DateTime, nullable=True)
+    job_completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 # ---------- Phase 3: Speaker Library ----------
