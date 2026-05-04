@@ -1050,7 +1050,17 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             except Exception as e:
                 logger.warning(f"Vector indexing failed (non-fatal): {e}")
 
-            # Step 6: Phase 2 meeting embeddings pipeline (chunks -> Qdrant)
+            # Step 6a: Phase 3 — identify speakers against the org speaker
+            # library and rewrite transcript_diarized labels with display
+            # names BEFORE embedding, so cross-meeting RAG sees real names.
+            try:
+                from services.speaker_service import identify_speakers
+                ident_summary = identify_speakers(session, db)
+                logger.info(f"   Speaker identification: {ident_summary}")
+            except Exception as e:
+                logger.warning(f"Speaker identification failed (non-fatal): {e}")
+
+            # Step 6b: Phase 2 meeting embeddings pipeline (chunks -> Qdrant)
             try:
                 from services.meeting_embeddings import embed_meeting
                 embed_meeting(session, db)
