@@ -92,11 +92,15 @@ async def rag_chat_pipeline(
     from qdrant_client import QdrantClient
     from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-    qdrant = QdrantClient(
-        host=os.getenv("QDRANT_HOST", "localhost"),
-        port=int(os.getenv("QDRANT_PORT", "6335")),
-        check_compatibility=False,
-    )
+    # Honor QDRANT_URL when set, else fall back to host/port pair.
+    qdrant_url = os.getenv("QDRANT_URL")
+    if qdrant_url:
+        qdrant = QdrantClient(url=qdrant_url)
+    else:
+        qdrant = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "unicorn-qdrant"),
+            port=int(os.getenv("QDRANT_PORT", "6333")),
+        )
 
     must_filters = [
         FieldCondition(key="organization_id", match=MatchValue(value=org_id)),
@@ -123,14 +127,25 @@ async def rag_chat_pipeline(
 
     qdrant_filter = Filter(must=must_filters)
 
-    search_result = qdrant.query_points(
-        collection_name=f"{os.getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}chunks",
-        query=query_vector,
-        limit=50,
-        query_filter=qdrant_filter,
-    )
+    collection_name = f"{os.getenv('QDRANT_COLLECTION_PREFIX', 'meet_')}chunks"
+    try:
+        search_result = qdrant.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            limit=50,
+            query_filter=qdrant_filter,
+        )
+        no_points = not search_result.points
+    except Exception as exc:
+        # Collection doesn't exist yet (no meetings indexed) — graceful empty.
+        msg = str(exc).lower()
+        if "not found" in msg or "doesn't exist" in msg or "404" in msg:
+            search_result = None
+            no_points = True
+        else:
+            raise
 
-    if not search_result.points:
+    if no_points:
         async def empty_stream():
             yield f"data: {json.dumps({'token': 'No relevant meeting content found for your question.'})}\n\n"
             yield f"data: {json.dumps({'done': True, 'sources': [], 'metadata': {'chunks_searched': 0}})}\n\n"
