@@ -11,6 +11,7 @@ import {
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
+import { SpeakerTagger } from '../components/SpeakerTagger';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 
@@ -990,6 +991,9 @@ export const SessionDetails: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
+            {/* Phase 3: speaker tagger — confirm/change diarized labels */}
+            <SpeakerTagger sessionId={String(session.id || sessionId)} />
+
             {/* AI Summary Section */}
             {(session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
               <div className="bg-white rounded-lg shadow-sm p-6">

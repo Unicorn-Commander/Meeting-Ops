@@ -1,0 +1,443 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X } from 'lucide-react';
+import { config } from '../config';
+import { useOrg } from '../contexts/OrgContext';
+import { useAuth } from '../contexts/AuthContext';
+
+interface SpeakerSummary {
+  id: number;
+  organization_id: number;
+  display_name: string;
+  email?: string | null;
+  notes?: string | null;
+  embedding_dim?: number | null;
+  embedding_model?: string | null;
+  sample_count: number;
+  has_centroid: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+interface VoiceSample {
+  id: number;
+  speaker_id: number;
+  source: string;
+  source_session_id?: number | null;
+  embedding_dim: number;
+  embedding_model: string;
+  duration_seconds?: number | null;
+  similarity_to_centroid?: number | null;
+  has_audio: boolean;
+  created_at?: string | null;
+}
+
+interface SpeakerDetail extends SpeakerSummary {
+  voice_samples: VoiceSample[];
+  session_count: number;
+}
+
+const isAdminRole = (role?: string, isSuperuser?: boolean): boolean => {
+  if (isSuperuser) return true;
+  return role === 'admin' || role === 'superuser';
+};
+
+export const SpeakerLibrary: React.FC = () => {
+  const { user } = useAuth();
+  const { activeOrganization } = useOrg();
+
+  const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
+
+  const [speakers, setSpeakers] = useState<SpeakerSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<SpeakerDetail | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [newNotes, setNewNotes] = useState('');
+  const [enrolling, setEnrolling] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const orgHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    if (activeOrganization?.slug) {
+      headers['X-MeetingOps-Org'] = activeOrganization.slug;
+    }
+    return headers;
+  };
+
+  const loadSpeakers = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers`, { headers: orgHeaders() });
+      if (res.ok) {
+        const data: SpeakerSummary[] = await res.json();
+        setSpeakers(data);
+        if (selectedId && !data.some(s => s.id === selectedId)) {
+          setSelectedId(null);
+          setDetail(null);
+        }
+      } else {
+        setError(`Failed to load speakers (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error loading speakers.');
+    }
+    setLoading(false);
+  };
+
+  const loadDetail = async (id: number) => {
+    setSelectedId(id);
+    setDetail(null);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${id}`, { headers: orgHeaders() });
+      if (res.ok) {
+        setDetail(await res.json());
+      }
+    } catch {
+      // non-fatal — leave detail null and surface in list reload
+    }
+  };
+
+  useEffect(() => {
+    loadSpeakers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrganization?.slug]);
+
+  const createSpeaker = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers`, {
+        method: 'POST',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_name: newName.trim(),
+          email: newEmail.trim() || null,
+          notes: newNotes.trim() || null,
+        }),
+      });
+      if (res.ok) {
+        const created: SpeakerSummary = await res.json();
+        setShowCreate(false);
+        setNewName('');
+        setNewEmail('');
+        setNewNotes('');
+        await loadSpeakers();
+        loadDetail(created.id);
+      } else if (res.status === 409) {
+        setError('A speaker with that name already exists.');
+      } else {
+        setError(`Create failed (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error creating speaker.');
+    }
+    setCreating(false);
+  };
+
+  const enrollSample = async (file: File) => {
+    if (!selectedId) return;
+    setEnrolling(true);
+    try {
+      const form = new FormData();
+      form.append('audio', file);
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${selectedId}/voice-samples`, {
+        method: 'POST',
+        headers: orgHeaders(),
+        body: form,
+      });
+      if (res.ok) {
+        await loadSpeakers();
+        await loadDetail(selectedId);
+      } else if (res.status === 502) {
+        setError('Speaker service unreachable. Ask an operator to check meet-speaker-svc.');
+      } else {
+        setError(`Enrollment failed (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error during enrollment upload.');
+    }
+    setEnrolling(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const deleteSample = async (sampleId: number) => {
+    if (!selectedId) return;
+    if (!confirm('Delete this voice sample? Centroid will be recomputed from the remaining samples.')) return;
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/speakers/${selectedId}/voice-samples/${sampleId}`,
+        { method: 'DELETE', headers: orgHeaders() },
+      );
+      if (res.ok) {
+        await loadSpeakers();
+        await loadDetail(selectedId);
+      }
+    } catch {
+      setError('Network error deleting voice sample.');
+    }
+  };
+
+  const deleteSpeaker = async (id: number) => {
+    if (!confirm('Delete this speaker? Existing meeting links will be cleared.')) return;
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${id}`, {
+        method: 'DELETE',
+        headers: orgHeaders(),
+      });
+      if (res.ok) {
+        if (selectedId === id) {
+          setSelectedId(null);
+          setDetail(null);
+        }
+        await loadSpeakers();
+      }
+    } catch {
+      setError('Network error deleting speaker.');
+    }
+  };
+
+  if (!isAdmin) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-300">
+        <Users className="w-10 h-10 text-zinc-600 mb-3" />
+        <h1 className="text-lg font-semibold text-zinc-100 mb-2">Speaker Library</h1>
+        <p className="text-sm text-zinc-400 max-w-md">
+          Speaker enrollment is restricted to organisation admins. Ask your workspace admin
+          to enroll voices, then identification will run automatically on every recording.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-zinc-950 p-4">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <Users className="w-5 h-5 text-fuchsia-400" />
+          <h1 className="text-lg font-semibold text-zinc-100">Speaker Library</h1>
+          <span className="text-xs text-zinc-500">({speakers.length} enrolled)</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadSpeakers}
+            className="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-900 flex items-center gap-1"
+          >
+            <RefreshCw className="w-3 h-3" />
+            Refresh
+          </button>
+          <button
+            onClick={() => setShowCreate(true)}
+            className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white flex items-center gap-1"
+          >
+            <Plus className="w-3 h-3" />
+            New speaker
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-3 text-xs text-red-300 bg-red-950/50 border border-red-900 rounded px-3 py-2 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" />
+          {error}
+          <button onClick={() => setError(null)} className="ml-auto text-red-300 hover:text-white">
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 overflow-hidden">
+        {/* Left column: speaker list */}
+        <aside className="md:col-span-1 overflow-y-auto bg-zinc-900 border border-zinc-800 rounded-lg p-2">
+          {loading ? (
+            <div className="text-sm text-zinc-500 flex items-center gap-2 p-3">
+              <RefreshCw className="w-4 h-4 animate-spin" /> Loading…
+            </div>
+          ) : speakers.length === 0 ? (
+            <div className="text-sm text-zinc-500 p-3">
+              No speakers yet. Click <span className="text-fuchsia-400">New speaker</span> to enroll one.
+            </div>
+          ) : (
+            <ul className="space-y-1">
+              {speakers.map(s => (
+                <li key={s.id}>
+                  <button
+                    onClick={() => loadDetail(s.id)}
+                    className={`w-full text-left px-3 py-2 rounded transition-colors ${
+                      selectedId === s.id
+                        ? 'bg-zinc-800 text-zinc-100'
+                        : 'text-zinc-300 hover:bg-zinc-800/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium truncate">{s.display_name}</span>
+                      {s.has_centroid && (
+                        <Mic className="w-3 h-3 text-emerald-400" />
+                      )}
+                    </div>
+                    <div className="text-xs text-zinc-500 mt-0.5">
+                      {s.sample_count} sample{s.sample_count === 1 ? '' : 's'}
+                      {s.email ? ` · ${s.email}` : ''}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+
+        {/* Right column: detail */}
+        <section className="md:col-span-2 overflow-y-auto bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          {!detail ? (
+            <div className="text-sm text-zinc-500">Pick a speaker to view enrollment samples.</div>
+          ) : (
+            <>
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h2 className="text-base font-semibold text-zinc-100">{detail.display_name}</h2>
+                  <div className="text-xs text-zinc-500 mt-0.5">
+                    {detail.email || 'No email on file'} · {detail.session_count} meeting
+                    {detail.session_count === 1 ? '' : 's'} linked
+                  </div>
+                  {detail.notes && (
+                    <p className="text-xs text-zinc-400 mt-2 max-w-xl whitespace-pre-wrap">{detail.notes}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => deleteSpeaker(detail.id)}
+                  className="text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/40 flex items-center gap-1"
+                  aria-label="Delete speaker"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Delete
+                </button>
+              </div>
+
+              <div className="border border-zinc-800 rounded p-3 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs uppercase tracking-wide text-zinc-500">Enrollment samples</div>
+                  <div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="audio/*"
+                      className="hidden"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (file) enrollSample(file);
+                      }}
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={enrolling}
+                      className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50 flex items-center gap-1"
+                    >
+                      {enrolling ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin" /> Embedding…
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-3 h-3" /> Upload sample
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {detail.voice_samples.length === 0 ? (
+                  <div className="text-xs text-zinc-500">
+                    Upload at least one 3–30s clean speech clip so this speaker can be identified.
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-zinc-800">
+                    {detail.voice_samples.map(sample => (
+                      <li key={sample.id} className="py-2 flex items-center gap-3 text-sm">
+                        <Mic className="w-3 h-3 text-emerald-400" />
+                        <span className="flex-1 text-zinc-300">
+                          {sample.source === 'enrollment' ? 'Enrollment' : 'From meeting'}
+                          {sample.source_session_id ? ` (session #${sample.source_session_id})` : ''}
+                        </span>
+                        <span className="text-xs text-zinc-500">
+                          {sample.duration_seconds ? `${sample.duration_seconds.toFixed(1)}s` : '—'}
+                          {sample.similarity_to_centroid !== null && sample.similarity_to_centroid !== undefined
+                            ? ` · ${(sample.similarity_to_centroid * 100).toFixed(0)}%`
+                            : ''}
+                        </span>
+                        <button
+                          onClick={() => deleteSample(sample.id)}
+                          className="text-zinc-400 hover:text-red-300"
+                          aria-label="Delete sample"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="text-xs text-zinc-500">
+                Embedding model: <code className="text-zinc-300">{detail.embedding_model || 'not yet set'}</code>
+                {detail.embedding_dim ? ` · ${detail.embedding_dim}-d` : ''}
+              </div>
+            </>
+          )}
+        </section>
+      </div>
+
+      {showCreate && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-full max-w-md">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-zinc-100">New speaker</h2>
+              <button onClick={() => setShowCreate(false)} className="text-zinc-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <label className="block text-xs text-zinc-400 mb-1">Display name *</label>
+            <input
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="e.g. Aaron Stransky"
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-3"
+            />
+            <label className="block text-xs text-zinc-400 mb-1">Email (optional)</label>
+            <input
+              value={newEmail}
+              onChange={e => setNewEmail(e.target.value)}
+              placeholder="aaron@magicunicorn.tech"
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-3"
+            />
+            <label className="block text-xs text-zinc-400 mb-1">Notes (optional)</label>
+            <textarea
+              value={newNotes}
+              onChange={e => setNewNotes(e.target.value)}
+              rows={3}
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-3"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowCreate(false)}
+                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createSpeaker}
+                disabled={creating || !newName.trim()}
+                className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
+              >
+                {creating ? 'Creating…' : 'Create speaker'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

@@ -9,6 +9,7 @@ import RAGChat from './pages/RAGChat';
 import DigestsPage from './pages/Digests';
 import { Sessions } from './pages/Sessions';
 import { SessionDetails } from './pages/SessionDetails';
+import { SpeakerLibrary } from './pages/SpeakerLibrary';
 import SettingsEnhanced from './pages/SettingsEnhanced';
 import { AgentConfiguration } from './pages/admin/AgentConfiguration';
 import { AgentDashboard } from './pages/admin/AgentDashboard';
@@ -80,6 +81,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   const navItems = [
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
+    { path: '/speakers', label: 'Speakers', icon: '🗣️' },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
@@ -229,6 +231,12 @@ export function AppRouterSimplified() {
       <Route path="/sessions/:id" element={
         <ProtectedRoute>
           <SessionDetails />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/speakers" element={
+        <ProtectedRoute>
+          <SpeakerLibrary />
         </ProtectedRoute>
       } />
 
