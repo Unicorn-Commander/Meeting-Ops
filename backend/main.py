@@ -156,6 +156,9 @@ _load_router(app, "integrations", "api.integrations")
 _load_router(app, "digests", "api.digests")
 _load_router(app, "rag_chat", "api.rag_chat")
 
+# === PHASE 3 ROUTERS ===
+_load_router(app, "speakers", "api.speakers")
+
 
 
 # === CORE API ENDPOINTS ===
