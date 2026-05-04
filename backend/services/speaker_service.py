@@ -173,17 +173,27 @@ def add_voice_sample(
 
 
 def _run_async(coro):
-    """Bridge a coroutine into a sync caller. We always start a fresh loop
-    since this is invoked from a BackgroundTasks worker thread."""
+    """Bridge a coroutine into a sync caller.
+
+    Three call sites:
+      1. BackgroundTasks worker / Alembic / scripts — no running loop, asyncio.run works
+      2. FastAPI request handler — a loop is already running on this thread
+         (`asyncio.run` raises RuntimeError). Run the coroutine on a fresh
+         loop in a worker thread so we don't try to nest loops.
+    """
     try:
         return asyncio.run(coro)
     except RuntimeError:
-        # Already in an event loop — fall back to a new one in a thread
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        # We're inside a running event loop — offload to a worker thread.
+        import concurrent.futures
+        def _runner():
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_runner).result()
 
 
 def _segments_from_session(session: RecordingSession) -> list[dict]:
