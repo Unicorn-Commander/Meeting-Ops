@@ -17,7 +17,7 @@ DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
 # legacy unified_llm_service reads). This keeps the registry compatible with
 # existing deploys that only set OPENAI_API_KEY.
 DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-DEFAULT_INFINITY_ENDPOINT = "http://unicorn-infinity-proxy:8086/v1"
+DEFAULT_INFINITY_ENDPOINT = os.getenv("INFINITY_ENDPOINT") or "http://unicorn-infinity-proxy:8086/v1"
 
 
 class ProviderRegistry:
