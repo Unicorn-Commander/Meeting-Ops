@@ -231,8 +231,12 @@ def identify_speakers(
         summary["skipped_reason"] = "no_diarized_segments"
         return summary
 
+    # Audio file is only required if we need to re-extract embeddings
+    # ourselves; if the diarizer already wrote embeddings into each
+    # segment we can identify without ever touching the wav file.
+    has_inline_embeddings = any(seg.get("embedding") for seg in segments)
     audio_path = session.audio_file
-    if not audio_path or not os.path.exists(audio_path):
+    if not has_inline_embeddings and (not audio_path or not os.path.exists(audio_path)):
         summary["skipped_reason"] = f"audio_missing:{audio_path}"
         logger.info("identify_speakers skipped: %s", summary["skipped_reason"])
         return summary
