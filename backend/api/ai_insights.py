@@ -15,15 +15,17 @@ from database.models import RecordingSession as DBRecordingSession, Transcriptio
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
+from services.providers import get_provider_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
 
-# Lazy-load LLM service to avoid import errors at startup
+# Lazy-load legacy LLM service. Used as a fallback when no org context is
+# available or when org-aware registry resolution fails.
 _llm_service = None
 
 def _get_llm_service():
-    """Lazily import and return the LLM service singleton."""
+    """Lazily import and return the legacy LLM service singleton."""
     global _llm_service
     if _llm_service is None:
         try:
@@ -32,6 +34,51 @@ def _get_llm_service():
         except Exception as e:
             logger.warning(f"Could not import LLM service: {e}")
     return _llm_service
+
+
+class _LegacyLLMAdapter:
+    """Wrap the legacy unified_llm_service singleton with the registry's
+    chat_sync(...) interface so call sites stay uniform whether they hit the
+    registry or the fallback."""
+
+    def __init__(self, legacy):
+        self._legacy = legacy
+
+    @property
+    def llamacpp_available(self) -> bool:
+        return getattr(self._legacy, "llamacpp_available", True)
+
+    def chat_sync(self, system_prompt, user_prompt, *, max_tokens=500, temperature=0.7):
+        return self._legacy._call_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    def summarize_meeting(self, transcript, template="standard"):
+        return self._legacy.summarize_meeting(transcript, template)
+
+
+def _resolve_llm(db: Session, org_id: Optional[int], task: str = "quality"):
+    """Return an LLM provider for this org+task, or None if neither registry
+    nor legacy fallback is available. The returned object exposes ``chat_sync``."""
+    if org_id is not None:
+        try:
+            registry = get_provider_registry(db)
+            provider = registry.get_llm(org_id=org_id, task=task)
+            # Provider implementations that don't have llamacpp_available always
+            # behave as available; stamp the attr so callers can gate uniformly.
+            if not hasattr(provider, "llamacpp_available"):
+                provider.llamacpp_available = True  # type: ignore[attr-defined]
+            return provider
+        except Exception as exc:
+            logger.warning(f"ProviderRegistry LLM resolution failed, falling back to unified_llm_service: {exc}")
+
+    legacy = _get_llm_service()
+    if legacy is None:
+        return None
+    return _LegacyLLMAdapter(legacy)
 
 
 class ActionItem(BaseModel):
@@ -125,9 +172,15 @@ async def get_meeting_insights(
             f"[{t.speaker or 'Unknown'}]: {t.text}"
             for t in transcriptions if t.text
         ])
-        
-        # Generate insights
-        insights = await _generate_ai_insights(full_transcript, transcriptions, session)
+
+        # Generate insights using the org's configured LLM
+        insights = await _generate_ai_insights(
+            full_transcript,
+            transcriptions,
+            session,
+            db,
+            active_org.organization.id,
+        )
         return insights
         
     except HTTPException:
@@ -166,8 +219,11 @@ async def _generate_ai_insights(
     transcript: str,
     transcriptions: List[Transcription],
     session: DBRecordingSession,
+    db: Session,
+    org_id: Optional[int],
 ) -> MeetingInsightsResponse:
-    """Generate AI insights from transcript using real speaker data and the LLM."""
+    """Generate AI insights from transcript using real speaker data and the
+    org-aware LLM provider (with legacy fallback)."""
 
     duration = int(session.duration or 0)
 
@@ -186,12 +242,12 @@ async def _generate_ai_insights(
             speaker_stats[speaker]["segments"].append(t.text)
 
     # ---- Keyword extraction (LLM if available, else frequency-based) ----
-    keywords = await _extract_keywords(transcript, transcriptions)
+    keywords = await _extract_keywords(transcript, transcriptions, db, org_id)
 
     # ---- Build speaker insights with per-speaker sentiment ----
     speaker_insights = []
     for speaker, stats in speaker_stats.items():
-        sentiment = await _analyze_speaker_sentiment(stats["segments"])
+        sentiment = await _analyze_speaker_sentiment(stats["segments"], db, org_id)
 
         speaker_topics = []
         speaker_text = " ".join(stats["segments"]).lower()
@@ -209,16 +265,16 @@ async def _generate_ai_insights(
         ))
 
     # ---- Overall sentiment via LLM ----
-    sentiment_dist = await _analyze_overall_sentiment(transcript, transcriptions)
+    sentiment_dist = await _analyze_overall_sentiment(transcript, transcriptions, db, org_id)
 
     # ---- Summary via LLM ----
-    summary = await _generate_summary(transcript)
+    summary = await _generate_summary(transcript, db, org_id)
 
     # ---- Action items via LLM ----
-    action_items = await _extract_action_items(transcript)
+    action_items = await _extract_action_items(transcript, db, org_id)
 
     # ---- Key decisions and follow-ups via LLM ----
-    key_decisions, follow_ups = await _extract_decisions(transcript)
+    key_decisions, follow_ups = await _extract_decisions(transcript, db, org_id)
 
     # Topics from keyword categories
     topics = list(set(k["word"] for k in keywords[:10]))
@@ -240,13 +296,34 @@ async def _generate_ai_insights(
 # LLM-powered helpers (gracefully degrade to heuristics)
 # ---------------------------------------------------------------------------
 
-async def _generate_summary(transcript: str) -> str:
-    """Generate a meeting summary using the LLM."""
-    svc = _get_llm_service()
+async def _generate_summary(transcript: str, db: Session, org_id: Optional[int]) -> str:
+    """Generate a meeting summary using the org's configured LLM (quality task)."""
+    svc = _resolve_llm(db, org_id, task="quality")
     if svc:
+        # Legacy adapter exposes summarize_meeting() with extra structuring;
+        # use it when available, otherwise fall back to a direct chat call.
+        if isinstance(svc, _LegacyLLMAdapter):
+            try:
+                result = svc.summarize_meeting(transcript[:16000])
+                return result.get("summary", "Meeting discussion covered multiple topics.")
+            except Exception as e:
+                logger.warning(f"Legacy summarize_meeting failed: {e}")
+
         try:
-            result = svc.summarize_meeting(transcript[:16000])
-            return result.get("summary", "Meeting discussion covered multiple topics.")
+            text = svc.chat_sync(
+                system_prompt=(
+                    "You are a meeting assistant. Provide a concise, structured "
+                    "meeting summary covering main topics, key decisions, and "
+                    "action items. Keep the language clear and direct."
+                ),
+                user_prompt=(
+                    "Summarize this meeting transcript:\n\n" + transcript[:16000]
+                ),
+                max_tokens=500,
+                temperature=0.5,
+            )
+            if text:
+                return text
         except Exception as e:
             logger.warning(f"LLM summary failed: {e}")
     return "Meeting discussion covered multiple topics. AI summary generation unavailable."
@@ -255,12 +332,14 @@ async def _generate_summary(transcript: str) -> str:
 async def _extract_keywords(
     transcript: str,
     transcriptions: List[Transcription],
+    db: Session,
+    org_id: Optional[int],
 ) -> List[Dict[str, Any]]:
     """Extract keywords using LLM, fall back to frequency analysis."""
-    svc = _get_llm_service()
-    if svc and svc.llamacpp_available:
+    svc = _resolve_llm(db, org_id, task="quality")
+    if svc and getattr(svc, "llamacpp_available", True):
         try:
-            raw = svc._call_llm(
+            raw = svc.chat_sync(
                 system_prompt="You extract keywords from meeting transcripts. Return ONLY a JSON array of strings.",
                 user_prompt=(
                     "Extract the top 10 important keywords or key phrases from this meeting transcript. "
@@ -342,16 +421,16 @@ def _frequency_keywords(transcriptions: List[Transcription]) -> List[Dict[str, A
     return keywords
 
 
-async def _analyze_speaker_sentiment(segments: List[str]) -> str:
+async def _analyze_speaker_sentiment(segments: List[str], db: Session, org_id: Optional[int]) -> str:
     """Analyze sentiment for a speaker's segments using the LLM."""
     if not segments:
         return "neutral"
 
-    svc = _get_llm_service()
-    if svc and svc.llamacpp_available:
+    svc = _resolve_llm(db, org_id, task="fast")
+    if svc and getattr(svc, "llamacpp_available", True):
         try:
             combined = " ".join(segments[:50])[:6000]
-            raw = svc._call_llm(
+            raw = svc.chat_sync(
                 system_prompt="You classify sentiment. Respond with ONLY one word: positive, negative, or neutral.",
                 user_prompt=(
                     "Classify the overall sentiment of this speaker's dialogue as exactly one word: "
@@ -389,12 +468,14 @@ async def _analyze_speaker_sentiment(segments: List[str]) -> str:
 async def _analyze_overall_sentiment(
     transcript: str,
     transcriptions: List[Transcription],
+    db: Session,
+    org_id: Optional[int],
 ) -> Dict[str, float]:
     """Analyze overall meeting sentiment using LLM."""
-    svc = _get_llm_service()
-    if svc and svc.llamacpp_available:
+    svc = _resolve_llm(db, org_id, task="quality")
+    if svc and getattr(svc, "llamacpp_available", True):
         try:
-            raw = svc._call_llm(
+            raw = svc.chat_sync(
                 system_prompt="You analyze meeting sentiment. Return ONLY a JSON object with keys: positive, neutral, negative (percentages summing to 100).",
                 user_prompt=(
                     "Analyze the sentiment of this meeting transcript. "
@@ -439,12 +520,12 @@ async def _analyze_overall_sentiment(
     }
 
 
-async def _extract_action_items(transcript: str) -> List[ActionItem]:
+async def _extract_action_items(transcript: str, db: Session, org_id: Optional[int]) -> List[ActionItem]:
     """Extract action items using the LLM."""
-    svc = _get_llm_service()
-    if svc and svc.llamacpp_available:
+    svc = _resolve_llm(db, org_id, task="quality")
+    if svc and getattr(svc, "llamacpp_available", True):
         try:
-            raw = svc._call_llm(
+            raw = svc.chat_sync(
                 system_prompt="You extract action items from meeting transcripts. Return ONLY a JSON array.",
                 user_prompt=(
                     "Extract action items from this meeting transcript. "
@@ -477,15 +558,15 @@ async def _extract_action_items(transcript: str) -> List[ActionItem]:
     return []
 
 
-async def _extract_decisions(transcript: str) -> tuple:
+async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]) -> tuple:
     """Extract key decisions and follow-ups using the LLM."""
     key_decisions: List[str] = []
     follow_ups: List[str] = []
 
-    svc = _get_llm_service()
-    if svc and svc.llamacpp_available:
+    svc = _resolve_llm(db, org_id, task="quality")
+    if svc and getattr(svc, "llamacpp_available", True):
         try:
-            raw = svc._call_llm(
+            raw = svc.chat_sync(
                 system_prompt="You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object.",
                 user_prompt=(
                     "Extract key decisions and follow-up items from this meeting. "

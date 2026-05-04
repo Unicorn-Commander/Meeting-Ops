@@ -13,7 +13,10 @@ _SERVICE_KINDS = ("llm", "stt", "tts", "embeddings", "reranking", "diarization")
 _TASKS = {"llm": ("fast", "quality", "chat")}
 
 DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
-DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
+# Honor either LITELLM_API_KEY (preferred) or OPENAI_API_KEY (the env var the
+# legacy unified_llm_service reads). This keeps the registry compatible with
+# existing deploys that only set OPENAI_API_KEY.
+DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 DEFAULT_INFINITY_ENDPOINT = "http://unicorn-infinity-proxy:8086/v1"
 
 

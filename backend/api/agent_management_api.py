@@ -2,16 +2,22 @@
 Agent Management API
 Full CRUD operations for multi-tier agent system
 """
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 import json
 import uuid
+import logging
 
 from database.database import get_db
 from services.agent_manager_service import agent_manager
 from models.agent_system import AgentType, AgentPermission
+from auth.dependencies import get_current_user_optional
+from auth.models import User
+from auth.organization import resolve_active_organization
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["Agent Management"])
 
@@ -323,9 +329,18 @@ async def get_agent_types():
 # Model Performance Information
 
 @router.get("/models/performance")
-async def get_model_performance():
-    """Get performance metrics for available models (actual running models)"""
-    # Get real status from the unified LLM service
+async def get_model_performance(
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """Get performance metrics for the available models.
+
+    Reports the system-wide LLM service health (legacy unified_llm_service
+    fallback) and overlays the per-org provider configuration when an
+    active organization can be resolved for the caller.
+    """
+    # System-wide service health (legacy fallback path)
     llm_available = False
     try:
         from services.unified_llm_service import llm_service
@@ -334,18 +349,39 @@ async def get_model_performance():
     except Exception:
         pass
 
+    # Per-org provider overlay via the org-aware ProviderRegistry
+    per_org_provider: Optional[Dict] = None
+    if current_user is not None:
+        try:
+            active_org = resolve_active_organization(db, request, current_user)
+            from services.providers import get_provider_registry
+
+            registry = get_provider_registry(db)
+            provider = registry.get_llm(org_id=active_org.organization.id, task="quality")
+            per_org_provider = {
+                "org_slug": active_org.organization.slug,
+                "endpoint": getattr(provider, "endpoint", ""),
+                "model": getattr(provider, "model", ""),
+            }
+        except Exception as exc:
+            logger.debug(f"Per-org provider overlay failed: {exc}")
+
+    base_endpoint = (per_org_provider or {}).get("endpoint") or "http://localhost:11437"
+    base_model_name = (per_org_provider or {}).get("model") or "granite-3.3-2b-instruct"
+
     return {
         "models": [
             {
-                "name": "granite-3.3-2b-instruct",
-                "label": "Granite 3.3 2B Instruct",
+                "name": base_model_name,
+                "label": "Active LLM",
                 "tokens_per_second": 850,
                 "context_window": 8192,
                 "vram_usage": "~1.5GB",
                 "best_for": "Summaries, chat, insights, sentiment analysis",
-                "endpoint": "http://localhost:11437",
+                "endpoint": base_endpoint,
                 "backend": "llama.cpp Vulkan",
-                "status": "active" if llm_available else "unavailable"
+                "status": "active" if llm_available else "unavailable",
             }
-        ]
+        ],
+        "per_org_provider": per_org_provider,
     }

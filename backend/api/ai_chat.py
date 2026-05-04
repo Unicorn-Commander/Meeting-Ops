@@ -1,6 +1,6 @@
 """
 AI Chat API - Per-meeting AI chat + cross-meeting RAG chat using real LLM inference.
-Loads session transcript as context and sends to Granite 3.3 2B via unified_llm_service.
+Loads session transcript as context and routes through the per-org ProviderRegistry.
 Chat history persisted to PostgreSQL (chat_history table).
 """
 
@@ -17,10 +17,47 @@ from database.models import RecordingSession as DBRecordingSession, ChatHistory
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
-from services.unified_llm_service import llm_service
+from services.providers import get_provider_registry
+from services.unified_llm_service import llm_service  # legacy fallback when no org context
 
 router = APIRouter(prefix="/api/ai-chat", tags=["AI Chat"])
 logger = logging.getLogger(__name__)
+
+
+def _llm_call(
+    db: Session,
+    org_id: Optional[int],
+    *,
+    task: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 500,
+    temperature: float = 0.7,
+) -> str:
+    """Resolve the org-aware LLM provider and run a synchronous chat call.
+
+    Falls back to the legacy unified_llm_service when no org context is available
+    or when the registry resolution fails.
+    """
+    if org_id is not None:
+        try:
+            registry = get_provider_registry(db)
+            llm = registry.get_llm(org_id=org_id, task=task)
+            return llm.chat_sync(
+                system_prompt,
+                user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            logger.warning(f"ProviderRegistry LLM call failed, falling back to unified_llm_service: {exc}")
+
+    return llm_service._call_llm(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
 
 
 # ---- Chat history persistence helpers ----
@@ -278,11 +315,14 @@ async def send_chat_message(
         import time
         start_time = time.time()
 
-        response_text = llm_service._call_llm(
+        response_text = _llm_call(
+            db,
+            active_org.organization.id,
+            task="chat",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=800,
-            temperature=0.6
+            temperature=0.6,
         )
 
         inference_time = time.time() - start_time
@@ -419,6 +459,8 @@ def _format_history_for_prompt(history: List[Dict[str, Any]], max_chars: int = 3
 def _rewrite_query_with_history(
     current_query: str,
     history: List[Dict[str, Any]],
+    db: Session,
+    org_id: Optional[int],
 ) -> Optional[str]:
     """Use LLM to rewrite a follow-up question as a standalone search query.
     Returns the rewritten query, or None if rewriting fails or is unnecessary."""
@@ -435,7 +477,10 @@ def _rewrite_query_with_history(
     )
 
     try:
-        rewritten = llm_service._call_llm(
+        rewritten = _llm_call(
+            db,
+            org_id,
+            task="fast",
             system_prompt=(
                 "You rewrite follow-up questions into standalone search queries. "
                 "Output only the rewritten query with no explanation or preamble."
@@ -489,7 +534,12 @@ async def rag_query(
     search_query = request.message
     rewritten_query = None
     if rag_history:
-        rewritten = _rewrite_query_with_history(request.message, rag_history)
+        rewritten = _rewrite_query_with_history(
+            request.message,
+            rag_history,
+            db,
+            active_org.organization.id,
+        )
         if rewritten and rewritten.lower() != request.message.lower():
             rewritten_query = rewritten
             search_query = rewritten
@@ -607,11 +657,14 @@ async def rag_query(
     start_time = time.time()
 
     try:
-        answer = llm_service._call_llm(
+        answer = _llm_call(
+            db,
+            active_org.organization.id,
+            task="chat",
             system_prompt=system_prompt,
             user_prompt=request.message,
             max_tokens=800,
-            temperature=0.3  # Lower temperature for factual RAG answers
+            temperature=0.3,  # Lower temperature for factual RAG answers
         )
     except Exception as e:
         logger.error(f"RAG LLM call failed: {e}")

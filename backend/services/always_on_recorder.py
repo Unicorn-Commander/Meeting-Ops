@@ -305,6 +305,71 @@ class AlwaysOnRecorder:
             logger.error(f"Error extracting transcript text: {e}")
             return ""
 
+    def _resolve_org_id_for_current_session(self) -> Optional[int]:
+        """Resolve the active org id for the current always-on session, falling
+        back to the default org slug ('magic-unicorn') when the session row has
+        no organization scoping."""
+        try:
+            from database.database import SessionLocal
+            from database.models import RecordingSession
+            from auth.models import Organization
+            from auth.organization import DEFAULT_ORG_SLUG
+
+            db = SessionLocal()
+            try:
+                if self.current_session_id:
+                    row = (
+                        db.query(RecordingSession.organization_id)
+                        .filter(RecordingSession.session_id == self.current_session_id)
+                        .first()
+                    )
+                    if row and row[0] is not None:
+                        return int(row[0])
+
+                default = (
+                    db.query(Organization.id)
+                    .filter(Organization.slug == DEFAULT_ORG_SLUG)
+                    .first()
+                )
+                if default and default[0] is not None:
+                    return int(default[0])
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.debug(f"Always-on org resolution failed: {exc}")
+        return None
+
+    def _registry_chat_sync(
+        self,
+        org_id: int,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        """Run a synchronous chat_sync via the org-aware ProviderRegistry."""
+        try:
+            from database.database import SessionLocal
+            from services.providers import get_provider_registry
+
+            db = SessionLocal()
+            try:
+                registry = get_provider_registry(db)
+                # 'fast' tier — context-continuity is a low-latency yes/no.
+                provider = registry.get_llm(org_id=org_id, task="fast")
+            finally:
+                db.close()
+
+            return provider.chat_sync(
+                system_prompt,
+                user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            logger.warning(f"Always-on registry LLM call failed: {exc}")
+            return None
+
     async def _check_context_continuity(
         self,
         before_text: str,
@@ -326,18 +391,6 @@ class AlwaysOnRecorder:
             return False
 
         try:
-            from services.unified_llm_service import llm_service
-
-            # Re-check availability in case server came back up
-            if not llm_service.llamacpp_available:
-                llm_service._check_available()
-
-            if not llm_service.llamacpp_available:
-                logger.warning(
-                    "Context check: LLM unavailable, falling back to finalize"
-                )
-                return False
-
             system_prompt = (
                 "You analyze meeting transcripts. Given text spoken before and "
                 "after a silence gap, determine if this is the SAME meeting "
@@ -352,17 +405,44 @@ class AlwaysOnRecorder:
                 f"AFTER SILENCE GAP:\n{after_text}"
             )
 
-            # Run the synchronous _call_llm in a thread to avoid blocking
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: llm_service._call_llm(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    max_tokens=10,
-                    temperature=0.1,
-                ),
+
+            # 1. Try the org-aware ProviderRegistry first.
+            response: Optional[str] = None
+            org_id = await loop.run_in_executor(
+                None, self._resolve_org_id_for_current_session
             )
+
+            if org_id is not None:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._registry_chat_sync(
+                        org_id, system_prompt, user_prompt, max_tokens=10, temperature=0.1
+                    ),
+                )
+
+            # 2. Fall back to legacy unified_llm_service when registry path returns nothing.
+            if not response:
+                from services.unified_llm_service import llm_service
+
+                if not llm_service.llamacpp_available:
+                    llm_service._check_available()
+
+                if not llm_service.llamacpp_available:
+                    logger.warning(
+                        "Context check: LLM unavailable (registry + legacy), falling back to finalize"
+                    )
+                    return False
+
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: llm_service._call_llm(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        max_tokens=10,
+                        temperature=0.1,
+                    ),
+                )
 
             if not response:
                 logger.warning(

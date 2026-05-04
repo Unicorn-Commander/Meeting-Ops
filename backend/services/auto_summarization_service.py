@@ -1,6 +1,9 @@
 """
 Automatic Summarization Service
-Handles backend-controlled periodic summarization during live recording
+Handles backend-controlled periodic summarization during live recording.
+
+Routes LLM calls through the org-aware ProviderRegistry, falling back to the
+legacy unified_llm_service singleton when no org context can be resolved.
 """
 
 import asyncio
@@ -11,14 +14,94 @@ from datetime import datetime, timezone
 import json
 
 from services.system_service import SystemService
-from services.unified_llm_service import llm_service
+from services.unified_llm_service import llm_service  # legacy fallback when no org context
+from services.providers import get_provider_registry
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_org_id(session_id: str) -> Optional[int]:
+    """Look up organization_id for a session_id (uuid string) from the DB."""
+    try:
+        from database.database import SessionLocal
+        from database.models import RecordingSession
+
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(RecordingSession.organization_id)
+                .filter(RecordingSession.session_id == session_id)
+                .first()
+            )
+            if row and row[0] is not None:
+                return int(row[0])
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug(f"Could not resolve org_id for session {session_id}: {exc}")
+    return None
+
+
+def _summarize_with_org(transcript: str, org_id: Optional[int], task: str = "fast") -> Optional[Dict[str, Any]]:
+    """Run a meeting summary via the org-aware provider, falling back to the
+    legacy singleton when no org context is available.
+
+    Returns a dict shaped like the legacy summarize_meeting() output:
+        {
+            "summary": str,
+            "key_points": list[str],
+            ...
+        }
+    or None on hard failure.
+    """
+    if org_id is not None:
+        try:
+            from database.database import SessionLocal
+            db = SessionLocal()
+            try:
+                registry = get_provider_registry(db)
+                provider = registry.get_llm(org_id=org_id, task=task)
+            finally:
+                db.close()
+
+            text = provider.chat_sync(
+                system_prompt=(
+                    "You are a meeting assistant. Provide a concise meeting "
+                    "summary covering main topics, key decisions, and action "
+                    "items. Keep the language clear and direct."
+                ),
+                user_prompt=(
+                    "Summarize this meeting transcript:\n\n" + transcript[:16000]
+                ),
+                max_tokens=500,
+                temperature=0.5,
+            )
+            if text:
+                # Match the legacy parsed shape minimally.
+                return {
+                    "summary": text,
+                    "sections": {},
+                    "action_items": [],
+                    "key_decisions": [],
+                }
+        except Exception as exc:
+            logger.warning(
+                f"ProviderRegistry summarize failed for org {org_id}, "
+                f"falling back to unified_llm_service: {exc}"
+            )
+
+    # Fallback path
+    if hasattr(llm_service, "summarize_meeting"):
+        try:
+            return llm_service.summarize_meeting(transcript)
+        except Exception as exc:
+            logger.error(f"Legacy summarize_meeting failed: {exc}")
+    return None
+
+
 class AutoSummarizationService:
     """Service for automatic summarization during recording"""
-    
+
     def __init__(self):
         self.active_tasks: Dict[str, asyncio.Task] = {}
         self.last_summary_time: Dict[str, float] = {}
@@ -27,30 +110,45 @@ class AutoSummarizationService:
         self.total_word_count: Dict[str, int] = {}  # Track total words processed
         self.summaries_cache: Dict[str, Dict[str, Any]] = {}
         self.summary_history: Dict[str, list] = {}  # Store all summaries for final compilation
+        self.session_org_id: Dict[str, Optional[int]] = {}  # Per-session resolved org id
         
     async def start_auto_summarization(
-        self, 
+        self,
         session_id: str,
-        websocket_callback=None
+        websocket_callback=None,
+        organization_id: Optional[int] = None,
     ) -> None:
         """
-        Start automatic summarization for a session
-        
+        Start automatic summarization for a session.
+
         Args:
             session_id: Recording session ID
             websocket_callback: Async function to send updates via WebSocket
+            organization_id: Optional active org id used to route LLM calls
+                through the per-org ProviderRegistry. When None, the service
+                resolves org_id from the RecordingSession row, falling back to
+                the legacy unified LLM service if neither is available.
         """
         # Check if already running for this session
         if session_id in self.active_tasks:
             logger.warning(f"Auto-summarization already running for session {session_id}")
             return
-        
+
+        # Cache the org id (or resolve it lazily later)
+        if organization_id is not None:
+            self.session_org_id[session_id] = organization_id
+        else:
+            self.session_org_id[session_id] = await asyncio.to_thread(_resolve_org_id, session_id)
+
         # Create and store the task
         task = asyncio.create_task(
             self._summarization_loop(session_id, websocket_callback)
         )
         self.active_tasks[session_id] = task
-        logger.info(f"Started auto-summarization for session {session_id}")
+        logger.info(
+            f"Started auto-summarization for session {session_id} "
+            f"(org_id={self.session_org_id.get(session_id)})"
+        )
         
     async def stop_auto_summarization(self, session_id: str) -> None:
         """Stop automatic summarization for a session"""
@@ -62,11 +160,12 @@ class AutoSummarizationService:
             except asyncio.CancelledError:
                 pass
             del self.active_tasks[session_id]
-            
+
             # Clean up tracking data
             self.last_summary_time.pop(session_id, None)
             self.last_transcript_length.pop(session_id, None)
-            
+            self.session_org_id.pop(session_id, None)
+
             logger.info(f"Stopped auto-summarization for session {session_id}")
     
     async def _summarization_loop(
@@ -212,19 +311,24 @@ class AutoSummarizationService:
             # Only generate AI summary if we have enough content
             if current_length > 200:
                 try:
-                    if hasattr(llm_service, 'summarize_meeting'):
-                        ai_summary = await asyncio.to_thread(
-                            llm_service.summarize_meeting,
-                            transcript_text
-                        )
-                        if ai_summary:
-                            summary_data.update(ai_summary)
+                    org_id = self.session_org_id.get(session_id)
+                    if org_id is None:
+                        # Resolve lazily in case it wasn't cached at start.
+                        org_id = await asyncio.to_thread(_resolve_org_id, session_id)
+                        self.session_org_id[session_id] = org_id
+
+                    # Use 'fast' tier for live progressive updates.
+                    ai_summary = await asyncio.to_thread(
+                        _summarize_with_org, transcript_text, org_id, "fast"
+                    )
+                    if ai_summary:
+                        summary_data.update(ai_summary)
                     else:
                         # Basic extraction without AI
                         sentences = [s.strip() for s in transcript_text.split('.') if len(s.strip()) > 20]
                         summary_data["key_points"] = sentences[:5] if sentences else []
                         summary_data["summary"] = f"Meeting ongoing with {len(sentences)} key points discussed."
-                        
+
                 except Exception as e:
                     logger.error(f"Error generating AI summary: {e}")
                     # Continue with basic summary
@@ -340,24 +444,34 @@ class AutoSummarizationService:
                 "duration_seconds": 0
             }
             
-            # Generate comprehensive AI summary for the full transcript
+            # Generate comprehensive AI summary for the full transcript using
+            # the org-aware 'quality' tier provider.
             try:
+                org_id = self.session_org_id.get(session_id)
+                if org_id is None:
+                    org_id = await asyncio.to_thread(_resolve_org_id, session_id)
+                    self.session_org_id[session_id] = org_id
+
+                ai_summary = None
+
+                # If the legacy service exposes a specialized final summary
+                # method, prefer it (richer structuring) — otherwise fall back
+                # to the registry-routed generic summarize path.
                 if hasattr(llm_service, 'generate_final_summary'):
-                    # Use specialized final summary method if available
+                    try:
+                        ai_summary = await asyncio.to_thread(
+                            llm_service.generate_final_summary,
+                            full_transcript,
+                            self.summary_history.get(session_id, [])
+                        )
+                    except Exception as e:
+                        logger.warning(f"Legacy generate_final_summary failed: {e}")
+
+                if not ai_summary:
                     ai_summary = await asyncio.to_thread(
-                        llm_service.generate_final_summary,
-                        full_transcript,
-                        self.summary_history.get(session_id, [])
+                        _summarize_with_org, full_transcript, org_id, "quality"
                     )
-                elif hasattr(llm_service, 'summarize_meeting'):
-                    # Fallback to regular summarize
-                    ai_summary = await asyncio.to_thread(
-                        llm_service.summarize_meeting,
-                        full_transcript
-                    )
-                else:
-                    ai_summary = None
-                
+
                 if ai_summary:
                     final_summary.update(ai_summary)
                     final_summary["summary"] = f"[FINAL SUMMARY] {ai_summary.get('summary', 'Complete meeting transcript processed.')}"
@@ -366,7 +480,7 @@ class AutoSummarizationService:
                     sentences = [s.strip() for s in full_transcript.split('.') if len(s.strip()) > 20]
                     final_summary["key_points"] = sentences[:10] if sentences else []
                     final_summary["summary"] = f"[FINAL SUMMARY] Meeting completed with {len(sentences)} discussion points."
-                    
+
             except Exception as e:
                 logger.error(f"Error generating AI final summary: {e}")
                 final_summary["summary"] = "[FINAL SUMMARY] Meeting completed. Full transcript available."

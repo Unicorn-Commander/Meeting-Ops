@@ -1,15 +1,56 @@
 """
-AI Settings API endpoints for managing LLM and transcription configurations
+AI Settings API endpoints for managing LLM and transcription configurations.
+
+Reports the currently configured LLM tier in two layers:
+  1. Per-org configuration resolved via the ProviderRegistry (when an active
+     organization can be determined for the request).
+  2. System-wide LLM service health from the legacy unified_llm_service
+     singleton, used as a fallback when no org context is available.
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+from sqlalchemy.orm import Session
 import os
 import json
 import logging
 
+from database.database import get_db
+from auth.dependencies import get_current_user_optional
+from auth.models import User
+from auth.organization import resolve_active_organization
+
 router = APIRouter(prefix="/api", tags=["ai-settings"])
 logger = logging.getLogger(__name__)
+
+
+def _per_org_llm_overlay(
+    request: Request,
+    current_user: Optional[User],
+    db: Session,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the per-org LLM provider configuration for this caller via the
+    ProviderRegistry. Returns None when no org context is available."""
+    if current_user is None:
+        return None
+    try:
+        active_org = resolve_active_organization(db, request, current_user)
+    except Exception:
+        return None
+    try:
+        from services.providers import get_provider_registry
+
+        registry = get_provider_registry(db)
+        provider = registry.get_llm(org_id=active_org.organization.id, task="quality")
+        return {
+            "org_slug": active_org.organization.slug,
+            "endpoint": getattr(provider, "endpoint", ""),
+            "model": getattr(provider, "model", ""),
+            "task": "quality",
+        }
+    except Exception as exc:
+        logger.debug(f"Per-org LLM overlay failed: {exc}")
+        return None
 
 
 class ModelSwitchRequest(BaseModel):
@@ -17,19 +58,28 @@ class ModelSwitchRequest(BaseModel):
 
 
 @router.get("/settings/models")
-async def get_model_info():
-    """Return actual running model configuration from the model registry"""
+async def get_model_info(
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """Return actual running model configuration from the model registry,
+    overlayed with the active org's per-org LLM provider configuration when
+    one can be resolved."""
     from config.model_registry import MODEL_REGISTRY, get_active_model
 
     active = get_active_model()
 
-    # Get LLM status from unified_llm_service
+    # Get system-wide LLM service health from the legacy unified_llm_service
+    # (kept as a fallback per the ProviderRegistry migration plan).
     llm_info = {"llamacpp_available": False, "base_url": "", "model": active["model_id"]}
     try:
         from services.unified_llm_service import llm_service
         llm_info = llm_service.get_status()
     except Exception as e:
         llm_info["error"] = str(e)
+
+    org_llm = _per_org_llm_overlay(request, current_user, db)
 
     # Get whisper-server (Vulkan iGPU) status
     whisper_server_info: Dict[str, Any] = {"available": False}
@@ -57,9 +107,9 @@ async def get_model_info():
 
     return {
         "llm": {
-            "model": active["model_id"],
+            "model": (org_llm and org_llm.get("model")) or active["model_id"],
             "model_label": active["display_name"],
-            "endpoint": llm_info.get("base_url", "http://localhost:11437"),
+            "endpoint": (org_llm and org_llm.get("endpoint")) or llm_info.get("base_url", "http://localhost:11437"),
             "available": llm_info.get("llamacpp_available", False),
             "active_engine": llm_info.get("active_engine", "none"),
             "backend": "llama.cpp Vulkan",
@@ -67,6 +117,7 @@ async def get_model_info():
             "context_window": active.get("ctx_size", 8192),
             "vram_usage": active.get("vram_estimate", "unknown"),
             "max_tokens_multiplier": active.get("max_tokens_multiplier", 1.0),
+            "per_org_provider": org_llm,
         },
         "stt": {
             "primary": whisper_server_info,
