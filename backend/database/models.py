@@ -232,3 +232,87 @@ class MeetingDigest(Base):
     content = Column(Text, nullable=False)
     meeting_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ---------- Phase 3: Speaker Library ----------
+# These are *org-level* speakers (a person across many meetings), distinct
+# from the existing per-session `Speaker` model above which holds raw
+# diarized labels for a single recording.
+#
+# Embeddings are stored as raw bytes + a dim column so we can swap models
+# (ECAPA 192-d -> ECAPA-XL 256-d -> WavLM 768-d) without a schema change.
+# Encode/decode helpers live in services/speaker_service.py.
+
+from sqlalchemy import LargeBinary  # noqa: E402
+
+
+class SpeakerProfile(Base):
+    """Org-level speaker identity. One row per real person you want to
+    recognise across meetings."""
+    __tablename__ = "speaker"
+    __table_args__ = (
+        Index("ix_speaker_org", "organization_id"),
+        Index("ix_speaker_org_name", "organization_id", "display_name", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    display_name = Column(String(200), nullable=False)
+    email = Column(String(320), nullable=True)
+    notes = Column(Text, nullable=True)
+    centroid_embedding = Column(LargeBinary, nullable=True)
+    embedding_dim = Column(Integer, nullable=True)
+    embedding_model = Column(String(100), nullable=True)
+    sample_count = Column(Integer, nullable=False, default=0)
+    created_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class SpeakerVoiceSample(Base):
+    """A single embedding + (optionally) the audio bytes that produced it.
+    Created by enrollment uploads and by post-meeting auto-identification."""
+    __tablename__ = "speaker_voice_sample"
+    __table_args__ = (
+        Index("ix_speaker_voice_sample_speaker", "speaker_id"),
+        Index("ix_speaker_voice_sample_org", "organization_id"),
+        Index("ix_speaker_voice_sample_session", "source_session_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    speaker_id = Column(Integer, ForeignKey("speaker.id", ondelete="CASCADE"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)  # "enrollment" | "session"
+    source_session_id = Column(Integer, ForeignKey("recording_sessions.id", ondelete="SET NULL"), nullable=True)
+    source_segment_idx = Column(Integer, nullable=True)
+    embedding = Column(LargeBinary, nullable=False)
+    embedding_dim = Column(Integer, nullable=False)
+    embedding_model = Column(String(100), nullable=False)
+    audio_path = Column(String(500), nullable=True)  # only set when STORE_SPEAKER_AUDIO=true
+    duration_seconds = Column(Float, nullable=True)
+    similarity_to_centroid = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SpeakerSessionLink(Base):
+    """Maps a recording_session's raw diarized label (e.g. "SPEAKER_00")
+    to an org-level SpeakerProfile. One row per unique (session, raw_label)."""
+    __tablename__ = "speaker_session_link"
+    __table_args__ = (
+        Index("ix_speaker_session_link_session", "session_id"),
+        Index("ix_speaker_session_link_org", "organization_id"),
+        Index("ix_speaker_session_link_speaker", "speaker_id"),
+        Index("uq_speaker_session_link_label", "session_id", "raw_label", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("recording_sessions.id", ondelete="CASCADE"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    raw_label = Column(String(100), nullable=False)
+    speaker_id = Column(Integer, ForeignKey("speaker.id", ondelete="SET NULL"), nullable=True)
+    similarity = Column(Float, nullable=True)
+    source = Column(String(20), nullable=False, default="auto")  # "auto" | "manual"
+    confirmed = Column(Boolean, nullable=False, default=False)
+    confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
