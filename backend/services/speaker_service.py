@@ -365,6 +365,10 @@ def identify_speakers(
                         ordered.append(s)
                 diarized["speakers"] = ordered
             session.transcript_diarized = diarized
+            # SQLAlchemy can't detect in-place mutations on JSON columns;
+            # explicitly flag the column as dirty so the change persists.
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(session, "transcript_diarized")
 
     db.commit()
     backend_hint = (segments[0] or {}).get("backend") if segments else None

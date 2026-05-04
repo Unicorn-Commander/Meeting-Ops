@@ -519,6 +519,8 @@ async def update_speaker_link(
                     ordered.append(s)
             diarized["speakers"] = ordered
         session.transcript_diarized = diarized
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "transcript_diarized")
 
     db.commit()
     db.refresh(link)
