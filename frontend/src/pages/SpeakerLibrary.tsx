@@ -103,9 +103,14 @@ export const SpeakerLibrary: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!isAdmin) {
+      // Non-admins never see speakers — skip the network call entirely.
+      setLoading(false);
+      return;
+    }
     loadSpeakers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrganization?.slug]);
+  }, [activeOrganization?.slug, isAdmin]);
 
   const createSpeaker = async () => {
     if (!newName.trim()) return;
