@@ -80,6 +80,8 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   const navItems = [
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
+    { path: '/rag', label: 'AI Chat', icon: '💬' },
+    { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
     { path: '/admin/agents', label: 'AI Agents', icon: '🤖' },
   ];
