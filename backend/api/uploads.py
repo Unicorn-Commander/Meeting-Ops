@@ -654,13 +654,20 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
 
 
 async def _transcribe_audio(audio_path: Path) -> dict[str, Any]:
-    from services.real_whisper_service import real_whisper_service
+    """Transcribe via whisper.cpp HTTP server (the live service in this deploy).
+
+    Diarization happens separately via speaker_service after this step.
+    """
+    from services.whisper_server_client import whisper_server_client
     result = await asyncio.wait_for(
-        asyncio.to_thread(real_whisper_service.transcribe_file, str(audio_path), diarize=True),
+        asyncio.to_thread(whisper_server_client.transcribe_file, str(audio_path), "en"),
         timeout=1800,
     )
     if not result or not result.get("segments"):
         raise RuntimeError("Transcription produced no segments.")
+    # Add fields _persist_transcription expects
+    result.setdefault("model", "whisper.cpp-large-v3-turbo")
+    result.setdefault("audio_duration", result.get("duration", 0.0))
     return result
 
 
