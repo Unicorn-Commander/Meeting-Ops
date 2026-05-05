@@ -150,3 +150,10 @@ migrations/
 backend/src/
 FIX_FRONTEND_ERRORS.md
 GROK_FRONTEND_IMPLEMENTATION.md
+
+# === Deploy artifacts (Phase 4c — moved deploy into repo) ===
+deploy/bigboy/.env*
+deploy/bigboy/*.bak
+!deploy/bigboy/.env.bigboy.example
+
+!deploy/bigboy/STATUS.md
