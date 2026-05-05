@@ -16,7 +16,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VIBEVOICE_VOICES_DIR=/app/voices \
     VIBEVOICE_EAGER_LOAD=true
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Swap Ubuntu mirrors to ones reachable from midboy1's network path.
+# canonical's archive.ubuntu.com IPv4 stalls on this host's uplink during
+# build, so we point apt at mirrors.edge.kernel.org for both main + security
+# (it carries jammy + jammy-security/updates).
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.edge.kernel.org/ubuntu/|g; s|http://security.ubuntu.com/ubuntu/|http://mirrors.edge.kernel.org/ubuntu/|g' \
+        /etc/apt/sources.list \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=120 update \
+    && apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3-pip \
         ffmpeg lame libsndfile1 \
         ca-certificates curl git \
