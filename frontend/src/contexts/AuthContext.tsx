@@ -1,5 +1,6 @@
 import React, { createContext, useState, useContext, useEffect, type ReactNode } from 'react';
 import { config } from '../config';
+import { setReconnectingState } from '../components/ReconnectingOverlay';
 import {
   buildOrgHeaders,
   clearStoredOrgSlug,
@@ -273,6 +274,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const originalFetch = window.fetch;
     
     window.fetch = async (url: RequestInfo | URL, init?: RequestInit) => {
+      const rawUrl = typeof url === 'string' ? url : url.toString();
       const orgSlug = getStoredOrgSlug();
       const shouldDecorate = isMeetingOpsApiRequest(url, config.apiBaseUrl);
 
@@ -289,8 +291,29 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       const response = await originalFetch(url, init);
 
+      // Detect stale oauth2-proxy session: 302 redirect or HTML response
+      // when we expected JSON. This happens when the oauth2-proxy cookie
+      // expires but the SPA tab is still open.
+      const isApiCall = rawUrl.startsWith('/api/') || rawUrl.includes('/api/');
+      const headersInit = init?.headers;
+      const headersObj = headersInit instanceof Headers ? headersInit : new Headers(headersInit);
+      const wantsJson = headersObj.get('accept')?.includes('application/json') ||
+        (isApiCall && !headersObj.has('Accept'));
+      if (isApiCall && wantsJson && response.status === 302) {
+        const loc = response.headers.get('location') || '';
+        if (/\/oauth2\/(start|sign_out)|\/realms\/uchub/i.test(loc)) {
+          setReconnectingState(true);
+          window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+          return new Response(null, { status: 302 });
+        }
+      }
+      if (isApiCall && wantsJson && response.headers.get('content-type')?.startsWith('text/html')) {
+        setReconnectingState(true);
+        window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+        return new Response(null, { status: 401 });
+      }
+
       // Handle 401 responses
-      const rawUrl = typeof url === 'string' ? url : url.toString();
       if (response.status === 401 && refreshToken && !rawUrl.includes('/auth/')) {
         const refreshSuccess = await refreshAccessToken();
         // Retry the original request if refresh was successful
