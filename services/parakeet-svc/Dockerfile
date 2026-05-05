@@ -16,14 +16,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/models/torch \
     HYDRA_FULL_ERROR=1
 
+# Use the Ubuntu 22.04 default Python 3.10 — Jammy's python3.11 package is
+# 3.11.0rc1 and segfaults loading some NeMo ASR modules.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv python3-pip \
+        python3 python3-venv python3-pip python3-dev \
         ffmpeg libsndfile1 libsox-fmt-all sox \
         ca-certificates curl git \
         build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 
 WORKDIR /app
 
