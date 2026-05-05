@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Settings as SettingsIcon,
+  ExternalLink,
   Mic,
   Cpu,
   Save,
@@ -1394,6 +1395,17 @@ export default function SettingsEnhanced() {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Agent Settings link */}
+        <div className="mt-4 text-sm text-zinc-500">
+          Local agent templates and model configuration:
+          <a
+            href="#/admin/agents"
+            className="text-fuchsia-400 hover:text-fuchsia-300 ml-1 inline-flex items-center gap-1"
+          >
+            Agent Settings <ExternalLink className="w-3 h-3" />
+          </a>
         </div>
       </div>
     </div>

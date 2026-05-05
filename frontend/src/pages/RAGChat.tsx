@@ -328,6 +328,15 @@ export default function RAGChatPanel() {
             <span>{agentWarnings[0]}</span>
           </div>
         )}
+
+        <div className="text-right">
+          <a
+            href="#/admin/agents"
+            className="text-xs text-fuchsia-400 hover:text-fuchsia-300 transition-colors inline-flex items-center gap-1"
+          >
+            Manage local agents <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
