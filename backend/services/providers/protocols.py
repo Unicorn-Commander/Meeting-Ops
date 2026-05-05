@@ -1,4 +1,4 @@
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -16,24 +16,27 @@ class EmbeddingsProvider(Protocol):
 
 @runtime_checkable
 class STTProvider(Protocol):
-    async def transcribe(self, audio_path: str, *, language: str | None = None) -> dict[str, Any]:
-        """Transcribe an audio file. Returns a normalized dict with at least:
-
-            text:       str
-            segments:   list[dict]   # each {start, end, text, confidence, speaker?}
-            words:      list[dict]   # optional word-level (parakeet only)
-            duration:   float
-            language:   str
-            model:      str          # used to populate processing_metadata.transcription_model
-            confidence: float
-            rtf:        float | None # realtime factor when the engine reports it
-        """
-        ...
+    async def transcribe(self, audio_path: str, *, language: str | None = None) -> str: ...
 
 
 @runtime_checkable
 class TTSProvider(Protocol):
-    async def synthesize(self, text: str, *, voice: str | None = None) -> bytes: ...
+    async def synthesize(self, text: str, *, voice: str | None = None, format: str = "mp3") -> bytes: ...
+
+    async def synthesize_podcast(
+        self,
+        script: list[dict],
+        voices: dict[str, str],
+        *,
+        format: str = "mp3",
+    ) -> bytes: ...
+    """Multi-speaker synthesis. Providers without native multi-voice support
+    should raise NotImplementedError so the API can return 501."""
+
+    async def list_voices(self) -> list[dict]: ...
+    """Return [{"voice_id": str, "label": str}, ...] for the active provider."""
+
+    async def health(self) -> dict: ...
 
 
 @runtime_checkable
