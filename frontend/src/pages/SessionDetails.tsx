@@ -12,6 +12,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
 import { SpeakerTagger } from '../components/SpeakerTagger';
+import AudioPlayer from '../components/AudioPlayer';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 
@@ -74,11 +75,6 @@ interface Session {
     model_used?: string;
     last_progressive_summary?: string;
     total_progressive_summaries?: number;
-    transcription_model?: string;        // STT engine used (e.g. parakeet-tdt-1.1b, whisper.cpp-large-v3-turbo)
-    transcription_language?: string;
-    transcription_rtf?: number;          // realtime factor (Parakeet only)
-    has_word_timestamps?: boolean;
-    word_timestamps?: Array<{ start: number; end: number; word: string; confidence?: number }>;
   };
   generated_emails?: Array<{    // Generated follow-up emails
     subject: string;
@@ -111,7 +107,7 @@ const PROJECT_APP_LABELS: Record<string, string> = {
 export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { getOrgQueryUrl } = useOrg();
+  const { getOrgQueryUrl, activeOrganization } = useOrg();
   
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -152,6 +148,96 @@ export const SessionDetails: React.FC = () => {
     project_slug: null,
   });
   const [savingProjectLink, setSavingProjectLink] = useState(false);
+
+  // TTS state — single-voice "listen to summary" + multi-voice podcast
+  const [ttsProvider, setTtsProvider] = useState<{ name: string; supports_podcast: boolean } | null>(null);
+  const [summaryAudioUrl, setSummaryAudioUrl] = useState<string | null>(null);
+  const [summaryAudioLoading, setSummaryAudioLoading] = useState(false);
+  const [summaryAudioError, setSummaryAudioError] = useState<string | null>(null);
+  const [podcastAudioUrl, setPodcastAudioUrl] = useState<string | null>(null);
+  const [podcastAudioLoading, setPodcastAudioLoading] = useState(false);
+  const [podcastAudioError, setPodcastAudioError] = useState<string | null>(null);
+  const [podcastScript, setPodcastScript] = useState<Array<{ speaker_id: string; text: string }>>([]);
+
+  const ttsHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+    return headers;
+  };
+
+  // Probe the active org's TTS provider so we know whether to show the
+  // podcast button.
+  useEffect(() => {
+    if (!sessionId) return;
+    (async () => {
+      try {
+        const res = await fetch(`${config.apiUrl}/api/tts/voices`, { headers: ttsHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          setTtsProvider({ name: data.provider, supports_podcast: !!data.supports_podcast });
+        }
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, activeOrganization?.slug]);
+
+  const synthesizeSummary = async (regenerate = false) => {
+    if (!session) return;
+    setSummaryAudioLoading(true);
+    setSummaryAudioError(null);
+    try {
+      const id = session.id || sessionId;
+      const res = await fetch(
+        `${config.apiUrl}/api/sessions/${id}/tts/summary?format=mp3${regenerate ? '&regenerate=true' : ''}`,
+        { method: 'POST', headers: ttsHeaders() },
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      // Cache-bust on regenerate so the <audio> element re-fetches.
+      const stamp = regenerate ? `?ts=${Date.now()}` : '';
+      setSummaryAudioUrl(`${config.apiUrl}${data.audio_url}${stamp}`);
+    } catch (err: any) {
+      setSummaryAudioError(err?.message || 'Failed to synthesize audio.');
+    } finally {
+      setSummaryAudioLoading(false);
+    }
+  };
+
+  const synthesizePodcast = async (regenerate = false) => {
+    if (!session) return;
+    setPodcastAudioLoading(true);
+    setPodcastAudioError(null);
+    try {
+      const id = session.id || sessionId;
+      const res = await fetch(
+        `${config.apiUrl}/api/sessions/${id}/tts/podcast?format=mp3${regenerate ? '&regenerate=true' : ''}`,
+        { method: 'POST', headers: ttsHeaders() },
+      );
+      if (res.status === 501) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Active TTS provider does not support podcast mode.');
+      }
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const stamp = regenerate ? `?ts=${Date.now()}` : '';
+      setPodcastAudioUrl(`${config.apiUrl}${data.audio_url}${stamp}`);
+      setPodcastScript(data.script || []);
+    } catch (err: any) {
+      setPodcastAudioError(err?.message || 'Failed to generate podcast.');
+    } finally {
+      setPodcastAudioLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (sessionId) {
@@ -1132,6 +1218,109 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
+            {/* Listen-to-summary + podcast recap (Phase 4c-2 — VibeVoice TTS) */}
+            {(session.final_summary || session.summary || session.transcript_simple || session.transcript) && (
+              <div className="bg-white rounded-lg shadow-sm p-6 space-y-4">
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <Volume2 className="w-5 h-5 text-purple-600" />
+                  Listen
+                  {ttsProvider && (
+                    <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full font-normal">
+                      {ttsProvider.name}
+                    </span>
+                  )}
+                </h2>
+
+                <div className="space-y-3">
+                  <div>
+                    {!summaryAudioUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => synthesizeSummary(false)}
+                        disabled={summaryAudioLoading}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-500 disabled:opacity-50"
+                      >
+                        {summaryAudioLoading ? (
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Play className="w-4 h-4" />
+                        )}
+                        {summaryAudioLoading ? 'Synthesizing...' : 'Listen to summary'}
+                      </button>
+                    ) : (
+                      <AudioPlayer
+                        src={summaryAudioUrl}
+                        downloadAs={`summary-${session.id || sessionId}.mp3`}
+                        caption="AI-narrated meeting summary."
+                        onRegenerate={() => synthesizeSummary(true)}
+                        regenerating={summaryAudioLoading}
+                      />
+                    )}
+                    {summaryAudioError && (
+                      <div className="mt-2 text-sm text-red-600">{summaryAudioError}</div>
+                    )}
+                  </div>
+
+                  {ttsProvider?.supports_podcast && (
+                    <div className="pt-3 border-t border-gray-100">
+                      {!podcastAudioUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => synthesizePodcast(false)}
+                          disabled={podcastAudioLoading}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-fuchsia-600 text-white text-sm font-medium hover:bg-fuchsia-500 disabled:opacity-50"
+                        >
+                          {podcastAudioLoading ? (
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4" />
+                          )}
+                          {podcastAudioLoading ? 'Generating podcast...' : 'Generate podcast version'}
+                        </button>
+                      ) : (
+                        <div className="space-y-3">
+                          <AudioPlayer
+                            src={podcastAudioUrl}
+                            downloadAs={`podcast-${session.id || sessionId}.mp3`}
+                            caption="Two-host podcast recap (host + analyst)."
+                            onRegenerate={() => synthesizePodcast(true)}
+                            regenerating={podcastAudioLoading}
+                          />
+                          {podcastScript.length > 0 && (
+                            <details className="text-xs text-gray-600">
+                              <summary className="cursor-pointer hover:text-gray-800">
+                                Podcast script ({podcastScript.length} turns)
+                              </summary>
+                              <div className="mt-2 space-y-2 bg-gray-50 p-3 rounded max-h-64 overflow-y-auto">
+                                {podcastScript.map((turn, i) => (
+                                  <div key={i}>
+                                    <span className="font-semibold text-purple-700">
+                                      {turn.speaker_id === 'host' ? 'Host' : 'Analyst'}:
+                                    </span>{' '}
+                                    {turn.text}
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      )}
+                      {podcastAudioError && (
+                        <div className="mt-2 text-sm text-red-600">{podcastAudioError}</div>
+                      )}
+                    </div>
+                  )}
+                  {ttsProvider && !ttsProvider.supports_podcast && (
+                    <div className="text-xs text-gray-500">
+                      Switch your TTS provider to VibeVoice in{' '}
+                      <a href="/settings" className="text-purple-600 hover:underline">Settings</a>{' '}
+                      to enable podcast recaps.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Progressive Summaries Timeline */}
             {session.progressive_summaries && session.progressive_summaries.length > 0 && (
               <div className="bg-white rounded-lg shadow-sm p-6">
@@ -1309,27 +1498,8 @@ export const SessionDetails: React.FC = () => {
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <FileText className="w-5 h-5 text-purple-600" />
                   Transcript
-                  {session.metadata?.transcription_model && (
-                    <span
-                      className={`ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                        session.metadata.transcription_model.toLowerCase().includes('parakeet')
-                          ? 'bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200'
-                          : 'bg-blue-100 text-blue-700 border border-blue-200'
-                      }`}
-                      title={`STT engine: ${session.metadata.transcription_model}${
-                        session.metadata.transcription_rtf
-                          ? ` · RTF ${session.metadata.transcription_rtf.toFixed(3)}`
-                          : ''
-                      }`}
-                    >
-                      <Zap className="w-3 h-3" />
-                      {session.metadata.transcription_model.toLowerCase().includes('parakeet')
-                        ? 'Parakeet'
-                        : 'Whisper'}
-                    </span>
-                  )}
                 </h2>
-
+                
                 {/* Filters */}
                 <div className="flex items-center gap-3">
                   <div className="relative">
@@ -1462,18 +1632,6 @@ export const SessionDetails: React.FC = () => {
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-600">AI Model</span>
                       <span className="text-sm font-medium">{session.metadata.model_used}</span>
-                    </div>
-                  )}
-
-                  {session.metadata.transcription_model && (
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">STT Engine</span>
-                      <span className="text-sm font-medium">
-                        {session.metadata.transcription_model}
-                        {session.metadata.transcription_rtf
-                          ? ` · RTF ${session.metadata.transcription_rtf.toFixed(3)}`
-                          : ''}
-                      </span>
                     </div>
                   )}
                   
