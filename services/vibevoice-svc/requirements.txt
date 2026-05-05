@@ -9,9 +9,9 @@ librosa==0.10.2.post1
 # transformers + tokenizers needed by VibeVoice
 transformers==4.51.3
 tokenizers>=0.21
-accelerate==1.0.1
+accelerate==1.6.0
 sentencepiece==0.2.0
-huggingface_hub==0.26.5
+huggingface_hub>=0.30.0,<1.0
 diffusers==0.31.0
 einops==0.8.0
 scipy==1.13.1
