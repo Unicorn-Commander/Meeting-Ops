@@ -179,7 +179,7 @@ async def _generate_digest(
 @router.get("", response_model=DigestResponse)
 async def get_digest(
     period: str = Query(..., description="day, week, month, quarter, year"),
-    date: str = Query(..., description="YYYY-MM-DD"),
+    date: str = Query(None, description="YYYY-MM-DD (defaults to today)"),
     project_id: Optional[int] = Query(None),
     force: bool = Query(False, description="Force regeneration"),
     db: Session = Depends(get_db),
@@ -192,6 +192,10 @@ async def get_digest(
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+
+    # Default date to today if not provided
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if not force:
         existing = (
