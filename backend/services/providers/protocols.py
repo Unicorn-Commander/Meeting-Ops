@@ -1,4 +1,4 @@
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -16,7 +16,19 @@ class EmbeddingsProvider(Protocol):
 
 @runtime_checkable
 class STTProvider(Protocol):
-    async def transcribe(self, audio_path: str, *, language: str | None = None) -> str: ...
+    async def transcribe(self, audio_path: str, *, language: str | None = None) -> dict[str, Any]:
+        """Transcribe an audio file. Returns a normalized dict with at least:
+
+            text:       str
+            segments:   list[dict]   # each {start, end, text, confidence, speaker?}
+            words:      list[dict]   # optional word-level (parakeet only)
+            duration:   float
+            language:   str
+            model:      str          # used to populate processing_metadata.transcription_model
+            confidence: float
+            rtf:        float | None # realtime factor when the engine reports it
+        """
+        ...
 
 
 @runtime_checkable

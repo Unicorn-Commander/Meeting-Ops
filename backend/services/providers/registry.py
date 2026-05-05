@@ -18,6 +18,8 @@ DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
 # existing deploys that only set OPENAI_API_KEY.
 DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 DEFAULT_INFINITY_ENDPOINT = os.getenv("INFINITY_ENDPOINT") or "http://unicorn-infinity-proxy:8086/v1"
+DEFAULT_WHISPER_ENDPOINT = os.getenv("WHISPER_SERVER_URL", "http://meet-whisper:8178")
+DEFAULT_PARAKEET_ENDPOINT = os.getenv("PARAKEET_SERVER_URL", "http://meet-parakeet-svc:8881")
 
 
 class ProviderRegistry:
@@ -134,8 +136,44 @@ class ProviderRegistry:
         return InfinityRerankingProvider(api_key=api_key, endpoint=endpoint, model=model)
 
     def get_stt(self, org_id: int) -> Any:
+        """Resolve the STT provider for the given org.
+
+        Recognized provider_name values:
+            - "local_whisper" (default) -> in-cluster whisper.cpp on :8178
+            - "parakeet"                -> in-cluster Parakeet-TDT on :8881
+            - "local_parakeet"          -> alias of "parakeet"
+        Cloud STT (deepgram / assemblyai / openai) is reserved for future
+        provider impls; for now we fall back to whisper for unknown values
+        so an org can't accidentally lose transcription by picking a
+        provider that hasn't shipped yet.
+        """
+        settings = self._get_settings(org_id, "stt")
+        provider_name = (settings.get("provider_name") or "local_whisper").lower()
+        endpoint = settings.get("endpoint_url") or ""
+        model = settings.get("model_name") or ""
+
+        if provider_name in ("parakeet", "local_parakeet"):
+            from .impl_stt import LocalParakeetProvider
+            return LocalParakeetProvider(
+                endpoint=endpoint or DEFAULT_PARAKEET_ENDPOINT,
+                model=model or "parakeet-tdt-1.1b",
+            )
+        if provider_name in ("local_whisper", "whisper", ""):
+            from .impl_stt import LocalWhisperProvider
+            return LocalWhisperProvider(
+                endpoint=endpoint or DEFAULT_WHISPER_ENDPOINT,
+                model=model or "whisper.cpp-large-v3-turbo",
+            )
+
+        # Unknown provider — log and fall back to whisper so the pipeline still
+        # works.
+        logger.warning("Unknown STT provider '%s' for org %s; falling back to local_whisper",
+                       provider_name, org_id)
         from .impl_stt import LocalWhisperProvider
-        return LocalWhisperProvider(endpoint="http://meet-whisper:8080")
+        return LocalWhisperProvider(
+            endpoint=endpoint or DEFAULT_WHISPER_ENDPOINT,
+            model=model or "whisper.cpp-large-v3-turbo",
+        )
 
     def get_tts(self, org_id: int) -> Any:
         settings = self._get_settings(org_id, "tts")
