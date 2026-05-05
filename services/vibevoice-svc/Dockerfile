@@ -1,0 +1,59 @@
+# vibevoice-svc — Microsoft VibeVoice long-form, multi-speaker TTS for Meeting-Ops
+# Targets: midboy1 GPU 1 (Tesla P40, 24 GB), CUDA 12.x, joined to host network or LAN.
+#
+# Build:  docker build -t meet-vibevoice:local .
+# Run:    docker run -d --gpus '"device=1"' -p 8882:8882 \
+#           -v /opt/vibevoice-models:/models meet-vibevoice:local
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/models/hf \
+    TORCH_HOME=/models/torch \
+    VIBEVOICE_CACHE=/models/vibevoice \
+    VIBEVOICE_VOICES_DIR=/app/voices \
+    VIBEVOICE_EAGER_LOAD=true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3-pip \
+        ffmpeg lame libsndfile1 libsox-fmt-all sox \
+        ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+# CUDA wheels for the P40 (Pascal, sm_61). 2.4.x has cu121 wheels that work fine
+# on the host driver; the cudnn runtime base image supplies the rest.
+RUN python -m pip install --upgrade pip wheel \
+    && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.4.1 torchaudio==2.4.1 \
+    && python -m pip install -r requirements.txt
+
+# Pull the VibeVoice TTS code and install it in-place.
+# Microsoft pulled the original TTS code from microsoft/VibeVoice in 2025-09;
+# the community fork at vibevoice-community/VibeVoice preserves it. We pin to
+# a specific commit at build time for reproducibility — bump VIBEVOICE_REF
+# (build-arg) when upgrading.
+ARG VIBEVOICE_REF=main
+RUN git clone --depth 1 --branch ${VIBEVOICE_REF} \
+        https://github.com/vibevoice-community/VibeVoice.git /opt/vibevoice \
+    && python -m pip install /opt/vibevoice \
+    # Copy the bundled voice presets out so the service's VOICES_DIR has them.
+    && mkdir -p /app/voices \
+    && cp -a /opt/vibevoice/demo/voices/*.wav /app/voices/ 2>/dev/null \
+    && ls -la /app/voices
+
+COPY main.py /app/main.py
+
+EXPOSE 8882
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=180s \
+    CMD curl -fsS http://localhost:8882/health || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8882", "--workers", "1"]
