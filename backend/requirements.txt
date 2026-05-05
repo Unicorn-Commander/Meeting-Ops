@@ -89,3 +89,7 @@ onnxruntime==1.20.1
 # Note: Some packages may require specific versions based on Python version
 # For Python 3.13, use requirements-py313.txt
 email-validator==2.2.0
+
+# Optional router deps (previously skipped at startup)
+aiohttp==3.10.11
+netifaces==0.11.0
