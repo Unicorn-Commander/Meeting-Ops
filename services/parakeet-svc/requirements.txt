@@ -12,3 +12,5 @@ scipy==1.13.1
 nemo_toolkit[asr]==2.0.0
 # Cython is needed by NeMo's text normalizers
 Cython==3.0.11
+# pyarrow<14 — NeMo 2.0 uses pa.PyExtensionType (removed in 14+)
+pyarrow==13.0.0

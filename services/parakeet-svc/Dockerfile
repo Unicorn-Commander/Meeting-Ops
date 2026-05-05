@@ -18,7 +18,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Use the Ubuntu 22.04 default Python 3.10 — Jammy's python3.11 package is
 # 3.11.0rc1 and segfaults loading some NeMo ASR modules.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# canonical's archive.ubuntu.com is flaky from this host during build —
+# swap to mirrors.edge.kernel.org which is reliably reachable.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.edge.kernel.org/ubuntu/|g; s|http://security.ubuntu.com/ubuntu/|http://mirrors.edge.kernel.org/ubuntu/|g' \
+        /etc/apt/sources.list \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=120 update \
+    && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip python3-dev \
         ffmpeg libsndfile1 libsox-fmt-all sox \
         ca-certificates curl git \
