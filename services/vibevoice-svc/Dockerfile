@@ -44,13 +44,13 @@ RUN python -m pip install --upgrade pip wheel \
 
 # Pull the VibeVoice TTS code and install it in-place.
 # Microsoft pulled the original TTS code from microsoft/VibeVoice in 2025-09;
-# the community fork at vibevoice-community/VibeVoice preserves it. We pin to
-# a specific commit at build time for reproducibility — bump VIBEVOICE_REF
-# (build-arg) when upgrading.
-ARG VIBEVOICE_REF=main
-RUN git clone --depth 1 --branch ${VIBEVOICE_REF} \
-        https://github.com/vibevoice-community/VibeVoice.git /opt/vibevoice \
-    && python -m pip install /opt/vibevoice \
+# the community fork at vibevoice-community/VibeVoice preserves it. We bring
+# the source tree in via the build context (extracted from the tarball below)
+# rather than `git clone` because the docker buildkit network on this host
+# stalls on github.com clones. Refresh by re-running the snippet in
+# README.md or `services/vibevoice-svc/refresh-source.sh`.
+COPY VibeVoice-src/ /opt/vibevoice/
+RUN python -m pip install /opt/vibevoice \
     # Copy the bundled voice presets out so the service's VOICES_DIR has them.
     && mkdir -p /app/voices \
     && cp -a /opt/vibevoice/demo/voices/*.wav /app/voices/ 2>/dev/null \
