@@ -188,14 +188,13 @@ async def get_digest(
 ):
     if period not in ("day", "week", "month", "quarter", "year"):
         raise HTTPException(status_code=400, detail="Invalid period")
+    # Default date to today if not provided
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
-
-    # Default date to today if not provided
-    if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if not force:
         existing = (
