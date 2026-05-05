@@ -48,7 +48,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 
-MODEL_NAME = os.getenv("VIBEVOICE_MODEL", "microsoft/VibeVoice-1.5B")
+MODEL_NAME = os.getenv("VIBEVOICE_MODEL", "vibevoice/VibeVoice-1.5B")
 MODEL_CACHE_DIR = os.getenv("VIBEVOICE_CACHE", "/models/vibevoice")
 VOICES_DIR = os.getenv("VIBEVOICE_VOICES_DIR", "/app/voices")
 SAMPLE_RATE = 24000
