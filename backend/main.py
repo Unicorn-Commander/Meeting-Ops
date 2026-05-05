@@ -176,6 +176,9 @@ _load_router(app, "speakers", "api.speakers")
 _load_router(app, "uploads", "api.uploads")
 _load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
 
+# === PHASE 4C-2 ROUTERS ===
+_load_router(app, "tts", "api.tts")
+
 
 
 # === CORE API ENDPOINTS ===
