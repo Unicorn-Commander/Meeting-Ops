@@ -19,7 +19,9 @@ router = APIRouter(prefix="/api/providers", tags=["Provider Settings"])
 SERVICE_KINDS = ("llm", "stt", "tts", "embeddings", "reranking", "diarization")
 VALID_PROVIDERS = {
     "llm": ("litellm", "openai", "anthropic", "openrouter", "lambda", "bedrock"),
-    "stt": ("local_whisper", "deepgram", "assemblyai", "openai"),
+    # local_whisper = whisper.cpp HTTP server on :8178
+    # parakeet      = NVIDIA NeMo Parakeet-TDT on :8881 (word-level timestamps)
+    "stt": ("local_whisper", "parakeet", "deepgram", "assemblyai", "openai"),
     "tts": ("kokoro", "vibevoice", "openai"),
     "embeddings": ("infinity", "openai", "voyage", "cohere"),
     "reranking": ("infinity", "cohere", "voyage"),

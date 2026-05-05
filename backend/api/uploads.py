@@ -552,7 +552,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
 
         session = await _create_upload_session(db, job, audio_path)
         await _set_job_state(db, job, stage="transcribing", progress_pct=5, session_id=session.id)
-        transcription_result = await _transcribe_audio(audio_path)
+        transcription_result = await _transcribe_audio(audio_path, session.organization_id, db)
         await _persist_transcription(db, session, transcription_result)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="transcribing")
 
@@ -653,21 +653,23 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
     return session
 
 
-async def _transcribe_audio(audio_path: Path) -> dict[str, Any]:
-    """Transcribe via whisper.cpp HTTP server (the live service in this deploy).
+async def _transcribe_audio(audio_path: Path, org_id: int, db: Session) -> dict[str, Any]:
+    """Transcribe via the org's configured STT provider (Whisper or Parakeet).
 
     Diarization happens separately via speaker_service after this step.
+    The provider is resolved through ProviderRegistry so org admins can
+    switch engines via Settings -> AI Providers.
     """
-    from services.whisper_server_client import whisper_server_client
-    result = await asyncio.wait_for(
-        asyncio.to_thread(whisper_server_client.transcribe_file, str(audio_path), "en"),
-        timeout=1800,
-    )
+    from services.providers.registry import get_provider_registry
+    registry = get_provider_registry(db)
+    stt = registry.get_stt(org_id)
+    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language="en"), timeout=1800)
     if not result or not result.get("segments"):
         raise RuntimeError("Transcription produced no segments.")
-    # Add fields _persist_transcription expects
-    result.setdefault("model", "whisper.cpp-large-v3-turbo")
+    # _persist_transcription expects audio_duration; the providers return
+    # `duration` directly, so mirror it for back-compat.
     result.setdefault("audio_duration", result.get("duration", 0.0))
+    result.setdefault("model", "whisper.cpp-large-v3-turbo")
     return result
 
 
@@ -695,9 +697,20 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     metadata.update({
         "word_count": len((session.transcript_simple or "").split()),
         "transcription_model": result.get("model", "whisper"),
+        "transcription_language": result.get("language", "en"),
         "npu_accelerated": result.get("npu_accelerated", False),
         "processing_started_from_upload": True,
     })
+    # Word-level timestamps: only Parakeet provides these natively. Store
+    # them separately so the frontend can render word-by-word highlighting
+    # without the segment-level renderer having to know about them.
+    word_timestamps = result.get("words") or []
+    if word_timestamps:
+        metadata["word_timestamps"] = word_timestamps
+        metadata["has_word_timestamps"] = True
+    rtf = result.get("rtf")
+    if rtf is not None:
+        metadata["transcription_rtf"] = rtf
     session.processing_metadata = metadata
     db.commit()
     db.refresh(session)
