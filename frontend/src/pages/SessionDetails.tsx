@@ -74,6 +74,11 @@ interface Session {
     model_used?: string;
     last_progressive_summary?: string;
     total_progressive_summaries?: number;
+    transcription_model?: string;        // STT engine used (e.g. parakeet-tdt-1.1b, whisper.cpp-large-v3-turbo)
+    transcription_language?: string;
+    transcription_rtf?: number;          // realtime factor (Parakeet only)
+    has_word_timestamps?: boolean;
+    word_timestamps?: Array<{ start: number; end: number; word: string; confidence?: number }>;
   };
   generated_emails?: Array<{    // Generated follow-up emails
     subject: string;
@@ -1304,8 +1309,27 @@ export const SessionDetails: React.FC = () => {
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <FileText className="w-5 h-5 text-purple-600" />
                   Transcript
+                  {session.metadata?.transcription_model && (
+                    <span
+                      className={`ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                        session.metadata.transcription_model.toLowerCase().includes('parakeet')
+                          ? 'bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200'
+                          : 'bg-blue-100 text-blue-700 border border-blue-200'
+                      }`}
+                      title={`STT engine: ${session.metadata.transcription_model}${
+                        session.metadata.transcription_rtf
+                          ? ` · RTF ${session.metadata.transcription_rtf.toFixed(3)}`
+                          : ''
+                      }`}
+                    >
+                      <Zap className="w-3 h-3" />
+                      {session.metadata.transcription_model.toLowerCase().includes('parakeet')
+                        ? 'Parakeet'
+                        : 'Whisper'}
+                    </span>
+                  )}
                 </h2>
-                
+
                 {/* Filters */}
                 <div className="flex items-center gap-3">
                   <div className="relative">
@@ -1438,6 +1462,18 @@ export const SessionDetails: React.FC = () => {
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-600">AI Model</span>
                       <span className="text-sm font-medium">{session.metadata.model_used}</span>
+                    </div>
+                  )}
+
+                  {session.metadata.transcription_model && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">STT Engine</span>
+                      <span className="text-sm font-medium">
+                        {session.metadata.transcription_model}
+                        {session.metadata.transcription_rtf
+                          ? ` · RTF ${session.metadata.transcription_rtf.toFixed(3)}`
+                          : ''}
+                      </span>
                     </div>
                   )}
                   

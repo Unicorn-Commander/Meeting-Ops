@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useOrg } from '../contexts/OrgContext';
 import { config } from '../config';
 
@@ -20,9 +20,13 @@ const SERVICE_LABELS: Record<string, string> = {
   diarization: 'Diarization',
 };
 
+// Static fallback list — matches the canonical list in backend
+// api/provider_settings.py. The component also fetches
+// /api/providers/available/{kind} on mount so newly added backend
+// providers surface in the dropdown without a frontend redeploy.
 const VALID_PROVIDERS: Record<string, string[]> = {
   llm: ['litellm', 'openai', 'anthropic', 'openrouter', 'lambda', 'bedrock'],
-  stt: ['local_whisper', 'deepgram', 'assemblyai', 'openai'],
+  stt: ['local_whisper', 'parakeet', 'deepgram', 'assemblyai', 'openai'],
   tts: ['kokoro', 'vibevoice', 'openai'],
   embeddings: ['infinity', 'openai', 'voyage', 'cohere'],
   reranking: ['infinity', 'cohere', 'voyage'],
@@ -42,6 +46,7 @@ export default function ProviderSettingsPanel() {
   });
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [providers, setProviders] = useState<Record<string, string[]>>(VALID_PROVIDERS);
 
   const getHeaders = () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -51,6 +56,45 @@ export default function ProviderSettingsPanel() {
     return headers;
   };
 
+  // Sync the dropdown list from the backend so newly registered providers
+  // (like parakeet for STT) appear without a frontend redeploy.
+  useEffect(() => {
+    let cancelled = false;
+    const kinds = Object.keys(VALID_PROVIDERS);
+    const refresh = async () => {
+      try {
+        const updates = await Promise.all(
+          kinds.map(async (kind) => {
+            try {
+              const res = await fetch(
+                `${config.apiBaseUrl}/api/providers/available/${kind}`,
+                { headers: getHeaders() }
+              );
+              if (res.ok) {
+                const body = await res.json();
+                if (Array.isArray(body?.providers) && body.providers.length > 0) {
+                  return [kind, body.providers as string[]] as const;
+                }
+              }
+            } catch {
+              /* fall through to static */
+            }
+            return [kind, VALID_PROVIDERS[kind]] as const;
+          })
+        );
+        if (cancelled) return;
+        setProviders(Object.fromEntries(updates));
+      } catch {
+        /* keep static fallback */
+      }
+    };
+    refresh();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrganization?.slug]);
+
   const loadProvider = async (kind: string) => {
     try {
       const res = await fetch(`${config.apiBaseUrl}/api/providers/${kind}`, { headers: getHeaders() });
@@ -58,7 +102,7 @@ export default function ProviderSettingsPanel() {
         const data = await res.json();
         setForm({
           service_kind: kind,
-          provider_name: data.provider_name || VALID_PROVIDERS[kind]?.[0] || '',
+          provider_name: data.provider_name || (providers[kind] || VALID_PROVIDERS[kind])?.[0] || '',
           endpoint_url: data.endpoint_url || '',
           api_key: '',
           model_name: data.model_name || '',
@@ -129,7 +173,7 @@ export default function ProviderSettingsPanel() {
               onChange={e => setForm({ ...form, provider_name: e.target.value })}
               className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none"
             >
-              {(VALID_PROVIDERS[editingKind] || []).map(p => (
+              {(providers[editingKind] || VALID_PROVIDERS[editingKind] || []).map(p => (
                 <option key={p} value={p}>{p}</option>
               ))}
             </select>
@@ -192,7 +236,7 @@ export default function ProviderSettingsPanel() {
             <div>
               <span className="text-sm font-medium text-zinc-100">{label}</span>
               <span className="block text-xs text-zinc-500 mt-0.5">
-                {(VALID_PROVIDERS[kind] || [])[0] || 'default'}
+                {(providers[kind] || VALID_PROVIDERS[kind] || [])[0] || 'default'}
               </span>
             </div>
             <span className="text-zinc-600">Configure</span>
