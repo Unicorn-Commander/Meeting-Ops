@@ -199,6 +199,31 @@ export const SessionDetails: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, activeOrganization?.slug]);
 
+  // Lazily restore an existing podcast script on page load so the artifact is
+  // visible without forcing a re-render. The audio URL is restored opportunistically;
+  // 404 just means no podcast yet for this session.
+  useEffect(() => {
+    if (!sessionId) return;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${config.apiUrl}/api/sessions/${sessionId}/tts/podcast/script`,
+          { headers: ttsHeaders() },
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.script) && data.script.length) {
+            setPodcastScript(data.script);
+            setPodcastAudioUrl(`${config.apiUrl}/api/sessions/${sessionId}/tts/podcast.mp3`);
+          }
+        }
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, activeOrganization?.slug]);
+
   const synthesizeSummary = async (regenerate = false) => {
     if (!session) return;
     setSummaryAudioLoading(true);
