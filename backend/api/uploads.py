@@ -493,6 +493,67 @@ async def cancel_upload(
     return {"status": "cancelled"}
 
 
+MAX_UPLOAD_RETRIES = int(os.getenv("UPLOAD_MAX_RETRIES", "3"))
+
+
+@router.post("/{upload_id}/retry", response_model=UploadStatusResponse)
+async def retry_upload(
+    upload_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Re-queue a failed or cancelled upload through the processing pipeline.
+
+    The chunked file bytes still live on disk under uploads/<org>/<upload_id>/
+    until cancellation tears them down. Retry skips the upload phase entirely
+    and re-runs extraction → transcription → diarization → summary → embed.
+    Capped at UPLOAD_MAX_RETRIES (default 3); the cap can be raised by a
+    superuser via the ?force=true query param.
+    """
+    job = _get_job(db, upload_id, active_org.organization.id)
+    if job.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Upload belongs to another user.")
+
+    if job.stage not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Upload is in stage '{job.stage}'; only failed or cancelled uploads can be retried.",
+        )
+
+    if (job.retry_count or 0) >= MAX_UPLOAD_RETRIES and not current_user.is_superuser:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Upload has been retried {job.retry_count} times (cap {MAX_UPLOAD_RETRIES}). "
+            "Contact an administrator to retry further.",
+        )
+
+    job_dir = _job_dir(active_org.organization.slug, upload_id)
+    if not job_dir.exists():
+        raise HTTPException(
+            status_code=410,
+            detail="Upload bytes are no longer on disk; please re-upload.",
+        )
+
+    job.stage = "queued"
+    job.progress_pct = 0
+    job.error_message = None
+    job.last_completed_stage = None
+    job.retry_count = (job.retry_count or 0) + 1
+    job.job_started_at = None
+    job.job_completed_at = None
+    job.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    await ws_manager.broadcast(upload_id, _status_payload(job))
+    await upload_pipeline_queue.enqueue(upload_id)
+
+    logger.info(
+        f"Upload {upload_id} retry #{job.retry_count} enqueued by user {current_user.id} (org {active_org.organization.slug})"
+    )
+    return UploadStatusResponse(**_status_payload(job))
+
+
 async def mark_upload_cancelled(upload_id: str) -> None:
     db = SessionLocal()
     try:
