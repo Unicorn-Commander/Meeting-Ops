@@ -15,6 +15,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+def _local_audio_disabled() -> bool:
+    """The cloud build sets DISABLE_LOCAL_AUDIO=1; the UC-1 NPU appliance does not."""
+    val = os.getenv("DISABLE_LOCAL_AUDIO", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
 class WhisperXNPUService:
     def __init__(self):
         """Initialize WhisperX with NPU acceleration"""
@@ -22,11 +28,14 @@ class WhisperXNPUService:
         self.model_name = "large-v3"  # Best Whisper model
         self.sample_rate = 16000
         self.language = "en"
-        
-        # Check NPU availability
+
+        # Check NPU availability. On the cloud build, NPU absence is expected
+        # and not a warning; on UC-1, NPU absence is a real degradation.
         self.npu_available = os.path.exists(self.npu_device)
         if self.npu_available:
             logger.info(f"✅ NPU detected at {self.npu_device}")
+        elif _local_audio_disabled():
+            logger.info("WhisperX NPU service inert (cloud build, no local NPU)")
         else:
             logger.warning(f"⚠️ NPU not found at {self.npu_device}, will use CPU fallback")
         

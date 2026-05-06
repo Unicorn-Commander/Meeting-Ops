@@ -75,13 +75,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Stale session cleanup failed: {e}")
 
-    # Check transcription service
+    # Check transcription service. The legacy local NPU path stays inert when
+    # DISABLE_LOCAL_AUDIO is set (cloud build); STT then routes through
+    # ProviderRegistry.get_stt() instead, which is verified at upload time.
     try:
+        import os as _os
         from services.transcription_service import transcription_service
         if transcription_service.is_ready:
-            logger.info(f"Transcription service ready: {transcription_service.current_model_id}")
+            logger.info(f"Local transcription service ready: {transcription_service.current_model_id}")
+        elif _os.getenv("DISABLE_LOCAL_AUDIO", "").strip().lower() in ("1", "true", "yes", "on"):
+            logger.info("Local transcription service inert (DISABLE_LOCAL_AUDIO); STT via ProviderRegistry")
         else:
-            logger.warning("Transcription service not ready")
+            logger.warning("Local transcription service not ready")
     except Exception as e:
         logger.warning(f"Transcription service check failed: {e}")
 

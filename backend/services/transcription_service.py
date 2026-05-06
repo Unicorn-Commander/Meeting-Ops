@@ -1,9 +1,18 @@
 """
 Unified Transcription Service
-Manages dynamic model switching and unified transcription interface
+Manages dynamic model switching and unified transcription interface.
+
+This is the legacy NPU-first STT path used on the UC-1 appliance build. On
+hosts without an NPU (the cloud build on bigboy) it stays inert: upload
+transcription routes through ProviderRegistry.get_stt() to whisper-server, and
+the live-recording path that consumed this service needs a local mic that the
+cloud build does not have. The DISABLE_LOCAL_AUDIO env gate (set by
+deploy/bigboy/.env.bigboy) skips initialization entirely so the NPU runtime
+is not loaded and no startup errors fire.
 """
 import logging
 import asyncio
+import os
 import time
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
@@ -16,6 +25,12 @@ from npu_runtime import NPURuntime
 from services.performance_metrics_service import performance_metrics_service
 
 logger = logging.getLogger(__name__)
+
+
+def _local_audio_disabled() -> bool:
+    """Return True when the host opted out of local audio + NPU initialization."""
+    val = os.getenv("DISABLE_LOCAL_AUDIO", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 # Working transcriber not needed - NPU transcription is available
 WORKING_TRANSCRIBER_AVAILABLE = False
@@ -58,7 +73,17 @@ class TranscriptionService:
         self.current_model_id = None
         self.is_ready = False
         self._models = {}
-        
+
+        if _local_audio_disabled():
+            # Cloud / non-NPU build. Upload transcription is handled by
+            # ProviderRegistry.get_stt(); leave this service inert so we don't
+            # try to load NPU kernels on hardware that doesn't have them.
+            logger.info(
+                "Local transcription service skipped (DISABLE_LOCAL_AUDIO set); "
+                "STT routes through ProviderRegistry.get_stt() instead."
+            )
+            return
+
         # Initialize with default model
         logger.info("Attempting to initialize default model...")
         self._initialize_default_model()
