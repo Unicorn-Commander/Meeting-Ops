@@ -116,15 +116,6 @@ export const config = {
       diarizationSettings: '/api/ai/diarization-settings',
     },
     
-    // Multi-model meeting notes (new unified system)
-    meetingNotes: {
-      generate: '/api/meeting-notes-unified/generate',
-      status: '/api/meeting-notes-unified/status',
-      switchProvider: '/api/meeting-notes-unified/switch-provider',
-      test: '/api/meeting-notes-unified/test',
-      websocket: (sessionId: string) => `/api/meeting-notes-unified/ws/meeting-notes/${sessionId}`,
-    },
-    
     // Agent System (new decoupled system)
     agents: {
       configurations: '/api/agents/configurations',

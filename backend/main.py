@@ -143,7 +143,6 @@ _load_router(app, "ai_settings", "api.ai_settings")
 _load_router(app, "agents", "api.agents")
 
 _load_router(app, "agent_management", "api.agent_management_api")
-_load_router(app, "meeting_notes", "api.meeting_notes_unified")
 _load_router(app, "websocket_transcription", "api.websocket_transcription")
 _load_router(app, "websocket_auto_summary", "api.websocket_auto_summary")
 _load_router(app, "unified_agent", "api.unified_agent_api")
