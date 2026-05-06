@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -482,3 +483,31 @@ async def get_podcast_audio(
         media_type=_media_type_for(ext),
         filename=f"podcast-{session_id}.{ext}",
     )
+
+
+@router.get("/api/sessions/{session_id}/tts/podcast/script")
+async def get_podcast_script(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Return the cached host/analyst script for this session's podcast recap.
+
+    Lets the UI show the script as a stable artifact (with copy/download
+    affordance) without re-running TTS or LLM. Returns 404 when no podcast has
+    been generated yet for this session in this org.
+    """
+    _resolve_session(session_id, db, active_org.organization.id)
+    script_path = _output_dir(active_org.organization.slug, session_id) / "podcast_script.json"
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="No podcast script for this session yet.")
+    try:
+        payload = json.loads(script_path.read_text() or "[]")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Stored podcast script is corrupt.")
+    return {
+        "session_id": session_id,
+        "script": [PodcastTurn(**t).model_dump() for t in payload],
+        "generated_at": datetime.fromtimestamp(script_path.stat().st_mtime, tz=timezone.utc).isoformat(),
+    }
