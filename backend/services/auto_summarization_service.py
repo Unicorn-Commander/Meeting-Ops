@@ -2,8 +2,10 @@
 Automatic Summarization Service
 Handles backend-controlled periodic summarization during live recording.
 
-Routes LLM calls through the org-aware ProviderRegistry, falling back to the
-legacy unified_llm_service singleton when no org context can be resolved.
+LLM calls route exclusively through the org-aware ProviderRegistry. When no
+org context can be resolved or the provider call fails the service degrades
+gracefully (no summary) rather than silently substituting a default provider —
+silent fallback would bypass per-org provider configuration and billing.
 """
 
 import asyncio
@@ -14,7 +16,6 @@ from datetime import datetime, timezone
 import json
 
 from services.system_service import SystemService
-from services.unified_llm_service import llm_service  # legacy fallback when no org context
 from services.providers import get_provider_registry
 
 logger = logging.getLogger(__name__)
@@ -42,61 +43,127 @@ def _resolve_org_id(session_id: str) -> Optional[int]:
     return None
 
 
-def _summarize_with_org(transcript: str, org_id: Optional[int], task: str = "fast") -> Optional[Dict[str, Any]]:
-    """Run a meeting summary via the org-aware provider, falling back to the
-    legacy singleton when no org context is available.
+_SUMMARY_PROMPTS = {
+    "executive": (
+        "Create an executive summary with:\n"
+        "1. Key Decisions (bullet points)\n"
+        "2. Action Items with owners\n"
+        "3. Strategic Implications\n"
+        "4. Next Steps\n"
+        "Keep it concise and actionable."
+    ),
+    "technical": (
+        "Create a technical summary with:\n"
+        "1. Technical Topics Discussed\n"
+        "2. Architecture Decisions\n"
+        "3. Implementation Details\n"
+        "4. Technical Debt Items\n"
+        "5. Dependencies and Blockers"
+    ),
+    "standard": (
+        "Create a meeting summary with:\n"
+        "1. Main Topics (3-5 bullet points)\n"
+        "2. Key Decisions Made\n"
+        "3. Action Items (who, what, when)\n"
+        "4. Follow-up Required\n"
+        "Keep it clear and organized."
+    ),
+}
 
-    Returns a dict shaped like the legacy summarize_meeting() output:
-        {
-            "summary": str,
-            "key_points": list[str],
-            ...
-        }
-    or None on hard failure.
+
+def _parse_summary(response: str) -> Dict[str, Any]:
+    """Heuristic parse of an LLM summary into structured sections + lists."""
+    summary: Dict[str, Any] = {
+        "summary": response,
+        "sections": {},
+        "action_items": [],
+        "key_decisions": [],
+    }
+    current_section: Optional[str] = None
+    current_content: list = []
+
+    for raw_line in response.split("\n"):
+        line = raw_line.strip()
+        lower = line.lower()
+        if any(h in lower for h in ("action items", "action points")):
+            if current_section:
+                summary["sections"][current_section] = "\n".join(current_content)
+            current_section, current_content = "action_items", []
+        elif any(h in lower for h in ("decisions", "key decisions")):
+            if current_section:
+                summary["sections"][current_section] = "\n".join(current_content)
+            current_section, current_content = "decisions", []
+        elif any(h in lower for h in ("topics", "main topics")):
+            if current_section:
+                summary["sections"][current_section] = "\n".join(current_content)
+            current_section, current_content = "topics", []
+        elif line and not line.endswith(":"):
+            current_content.append(line)
+
+    if current_section and current_content:
+        summary["sections"][current_section] = "\n".join(current_content)
+
+    action_block = summary["sections"].get("action_items", "")
+    if action_block:
+        summary["action_items"] = [
+            line.strip("- *").strip()
+            for line in action_block.split("\n")
+            if line.strip() and line.strip()[0] in "-*"
+        ]
+    decisions_block = summary["sections"].get("decisions", "")
+    if decisions_block:
+        summary["key_decisions"] = [
+            line.strip("- *").strip()
+            for line in decisions_block.split("\n")
+            if line.strip() and line.strip()[0] in "-*"
+        ]
+    return summary
+
+
+def _summarize_with_org(
+    transcript: str,
+    org_id: Optional[int],
+    task: str = "fast",
+    template: str = "standard",
+) -> Optional[Dict[str, Any]]:
+    """Summarize a transcript via the org's configured LLM provider.
+
+    Returns a parsed dict ({summary, sections, action_items, key_decisions})
+    on success, or None on any failure. No silent provider substitution: if
+    the registry can't resolve a provider (or the call fails) the caller
+    degrades gracefully without LLM-derived structure.
     """
-    if org_id is not None:
-        try:
-            from database.database import SessionLocal
-            db = SessionLocal()
-            try:
-                registry = get_provider_registry(db)
-                provider = registry.get_llm(org_id=org_id, task=task)
-            finally:
-                db.close()
+    if org_id is None:
+        logger.debug("No org context for summary, skipping LLM call")
+        return None
 
-            text = provider.chat_sync(
-                system_prompt=(
-                    "You are a meeting assistant. Provide a concise meeting "
-                    "summary covering main topics, key decisions, and action "
-                    "items. Keep the language clear and direct."
-                ),
-                user_prompt=(
-                    "Summarize this meeting transcript:\n\n" + transcript[:16000]
-                ),
-                max_tokens=500,
-                temperature=0.5,
-            )
-            if text:
-                # Match the legacy parsed shape minimally.
-                return {
-                    "summary": text,
-                    "sections": {},
-                    "action_items": [],
-                    "key_decisions": [],
-                }
-        except Exception as exc:
-            logger.warning(
-                f"ProviderRegistry summarize failed for org {org_id}, "
-                f"falling back to unified_llm_service: {exc}"
-            )
+    prompt_body = _SUMMARY_PROMPTS.get(template, _SUMMARY_PROMPTS["standard"])
 
-    # Fallback path
-    if hasattr(llm_service, "summarize_meeting"):
+    try:
+        from database.database import SessionLocal
+        db = SessionLocal()
         try:
-            return llm_service.summarize_meeting(transcript)
-        except Exception as exc:
-            logger.error(f"Legacy summarize_meeting failed: {exc}")
-    return None
+            registry = get_provider_registry(db)
+            provider = registry.get_llm(org_id=org_id, task=task)
+        finally:
+            db.close()
+
+        text = provider.chat_sync(
+            system_prompt="You are a meeting assistant. Provide clear, structured meeting summaries.",
+            user_prompt=f"{prompt_body}\n\nTranscript:\n{transcript[:16000]}",
+            max_tokens=500,
+            temperature=0.5,
+        )
+    except Exception as exc:
+        logger.error(
+            f"ProviderRegistry summarize failed for org {org_id} task={task}: {exc}",
+            exc_info=True,
+        )
+        return None
+
+    if not text:
+        return None
+    return _parse_summary(text)
 
 
 class AutoSummarizationService:
@@ -452,25 +519,9 @@ class AutoSummarizationService:
                     org_id = await asyncio.to_thread(_resolve_org_id, session_id)
                     self.session_org_id[session_id] = org_id
 
-                ai_summary = None
-
-                # If the legacy service exposes a specialized final summary
-                # method, prefer it (richer structuring) — otherwise fall back
-                # to the registry-routed generic summarize path.
-                if hasattr(llm_service, 'generate_final_summary'):
-                    try:
-                        ai_summary = await asyncio.to_thread(
-                            llm_service.generate_final_summary,
-                            full_transcript,
-                            self.summary_history.get(session_id, [])
-                        )
-                    except Exception as e:
-                        logger.warning(f"Legacy generate_final_summary failed: {e}")
-
-                if not ai_summary:
-                    ai_summary = await asyncio.to_thread(
-                        _summarize_with_org, full_transcript, org_id, "quality"
-                    )
+                ai_summary = await asyncio.to_thread(
+                    _summarize_with_org, full_transcript, org_id, "quality"
+                )
 
                 if ai_summary:
                     final_summary.update(ai_summary)

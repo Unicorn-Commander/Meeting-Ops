@@ -20,65 +20,24 @@ from services.providers import get_provider_registry
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
 
-# Lazy-load legacy LLM service. Used as a fallback when no org context is
-# available or when org-aware registry resolution fails.
-_llm_service = None
-
-def _get_llm_service():
-    """Lazily import and return the legacy LLM service singleton."""
-    global _llm_service
-    if _llm_service is None:
-        try:
-            from services.unified_llm_service import llm_service
-            _llm_service = llm_service
-        except Exception as e:
-            logger.warning(f"Could not import LLM service: {e}")
-    return _llm_service
-
-
-class _LegacyLLMAdapter:
-    """Wrap the legacy unified_llm_service singleton with the registry's
-    chat_sync(...) interface so call sites stay uniform whether they hit the
-    registry or the fallback."""
-
-    def __init__(self, legacy):
-        self._legacy = legacy
-
-    @property
-    def llamacpp_available(self) -> bool:
-        return getattr(self._legacy, "llamacpp_available", True)
-
-    def chat_sync(self, system_prompt, user_prompt, *, max_tokens=500, temperature=0.7):
-        return self._legacy._call_llm(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-
-    def summarize_meeting(self, transcript, template="standard"):
-        return self._legacy.summarize_meeting(transcript, template)
-
-
 def _resolve_llm(db: Session, org_id: Optional[int], task: str = "quality"):
-    """Return an LLM provider for this org+task, or None if neither registry
-    nor legacy fallback is available. The returned object exposes ``chat_sync``."""
-    if org_id is not None:
-        try:
-            registry = get_provider_registry(db)
-            provider = registry.get_llm(org_id=org_id, task=task)
-            # Provider implementations that don't have llamacpp_available always
-            # behave as available; stamp the attr so callers can gate uniformly.
-            if not hasattr(provider, "llamacpp_available"):
-                provider.llamacpp_available = True  # type: ignore[attr-defined]
-            return provider
-        except Exception as exc:
-            logger.warning(f"ProviderRegistry LLM resolution failed, falling back to unified_llm_service: {exc}")
+    """Resolve the org-aware LLM provider. Returns None if no org context or if
+    registry resolution fails — callers gracefully degrade to non-LLM output.
 
-    legacy = _get_llm_service()
-    if legacy is None:
+    Silent fallback to a default provider is intentionally NOT done: it would
+    bypass per-org provider config and billing, which is unacceptable in the
+    multi-tenant model."""
+    if org_id is None:
         return None
-    return _LegacyLLMAdapter(legacy)
+    try:
+        registry = get_provider_registry(db)
+        return registry.get_llm(org_id=org_id, task=task)
+    except Exception as exc:
+        logger.error(
+            f"ProviderRegistry LLM resolution failed for org_id={org_id} task={task}: {exc}",
+            exc_info=True,
+        )
+        return None
 
 
 class ActionItem(BaseModel):
@@ -300,15 +259,6 @@ async def _generate_summary(transcript: str, db: Session, org_id: Optional[int])
     """Generate a meeting summary using the org's configured LLM (quality task)."""
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
-        # Legacy adapter exposes summarize_meeting() with extra structuring;
-        # use it when available, otherwise fall back to a direct chat call.
-        if isinstance(svc, _LegacyLLMAdapter):
-            try:
-                result = svc.summarize_meeting(transcript[:16000])
-                return result.get("summary", "Meeting discussion covered multiple topics.")
-            except Exception as e:
-                logger.warning(f"Legacy summarize_meeting failed: {e}")
-
         try:
             text = svc.chat_sync(
                 system_prompt=(
@@ -337,7 +287,7 @@ async def _extract_keywords(
 ) -> List[Dict[str, Any]]:
     """Extract keywords using LLM, fall back to frequency analysis."""
     svc = _resolve_llm(db, org_id, task="quality")
-    if svc and getattr(svc, "llamacpp_available", True):
+    if svc:
         try:
             raw = svc.chat_sync(
                 system_prompt="You extract keywords from meeting transcripts. Return ONLY a JSON array of strings.",
@@ -427,7 +377,7 @@ async def _analyze_speaker_sentiment(segments: List[str], db: Session, org_id: O
         return "neutral"
 
     svc = _resolve_llm(db, org_id, task="fast")
-    if svc and getattr(svc, "llamacpp_available", True):
+    if svc:
         try:
             combined = " ".join(segments[:50])[:6000]
             raw = svc.chat_sync(
@@ -473,7 +423,7 @@ async def _analyze_overall_sentiment(
 ) -> Dict[str, float]:
     """Analyze overall meeting sentiment using LLM."""
     svc = _resolve_llm(db, org_id, task="quality")
-    if svc and getattr(svc, "llamacpp_available", True):
+    if svc:
         try:
             raw = svc.chat_sync(
                 system_prompt="You analyze meeting sentiment. Return ONLY a JSON object with keys: positive, neutral, negative (percentages summing to 100).",
@@ -523,7 +473,7 @@ async def _analyze_overall_sentiment(
 async def _extract_action_items(transcript: str, db: Session, org_id: Optional[int]) -> List[ActionItem]:
     """Extract action items using the LLM."""
     svc = _resolve_llm(db, org_id, task="quality")
-    if svc and getattr(svc, "llamacpp_available", True):
+    if svc:
         try:
             raw = svc.chat_sync(
                 system_prompt="You extract action items from meeting transcripts. Return ONLY a JSON array.",
@@ -564,7 +514,7 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
     follow_ups: List[str] = []
 
     svc = _resolve_llm(db, org_id, task="quality")
-    if svc and getattr(svc, "llamacpp_available", True):
+    if svc:
         try:
             raw = svc.chat_sync(
                 system_prompt="You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object.",

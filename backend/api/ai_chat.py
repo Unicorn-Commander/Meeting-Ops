@@ -18,7 +18,6 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
 from services.providers import get_provider_registry
-from services.unified_llm_service import llm_service  # legacy fallback when no org context
 
 router = APIRouter(prefix="/api/ai-chat", tags=["AI Chat"])
 logger = logging.getLogger(__name__)
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def _llm_call(
     db: Session,
-    org_id: Optional[int],
+    org_id: int,
     *,
     task: str,
     system_prompt: str,
@@ -36,25 +35,15 @@ def _llm_call(
 ) -> str:
     """Resolve the org-aware LLM provider and run a synchronous chat call.
 
-    Falls back to the legacy unified_llm_service when no org context is available
-    or when the registry resolution fails.
+    Raises if registry resolution fails. The caller decides whether to surface
+    that to the user as 503 or to handle it; silent fallbacks are not allowed
+    because they bypass per-org provider configuration and billing.
     """
-    if org_id is not None:
-        try:
-            registry = get_provider_registry(db)
-            llm = registry.get_llm(org_id=org_id, task=task)
-            return llm.chat_sync(
-                system_prompt,
-                user_prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        except Exception as exc:
-            logger.warning(f"ProviderRegistry LLM call failed, falling back to unified_llm_service: {exc}")
-
-    return llm_service._call_llm(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
+    registry = get_provider_registry(db)
+    llm = registry.get_llm(org_id=org_id, task=task)
+    return llm.chat_sync(
+        system_prompt,
+        user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
     )
