@@ -421,32 +421,9 @@ class AlwaysOnRecorder:
                     ),
                 )
 
-            # 2. Fall back to legacy unified_llm_service when registry path returns nothing.
-            if not response:
-                from services.unified_llm_service import llm_service
-
-                if not llm_service.llamacpp_available:
-                    llm_service._check_available()
-
-                if not llm_service.llamacpp_available:
-                    logger.warning(
-                        "Context check: LLM unavailable (registry + legacy), falling back to finalize"
-                    )
-                    return False
-
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: llm_service._call_llm(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        max_tokens=10,
-                        temperature=0.1,
-                    ),
-                )
-
             if not response:
                 logger.warning(
-                    "Context check: LLM returned empty response, falling back to finalize"
+                    "Context check: registry-routed LLM call returned empty, falling back to finalize"
                 )
                 return False
 

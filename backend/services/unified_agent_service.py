@@ -1,74 +1,72 @@
 """
 Unified Agent Service
-Single agent that handles all meeting tasks via llama.cpp Vulkan.
-Reads active model from config/model_registry.py.
+
+Routes all LLM calls through the org-aware ProviderRegistry. The service tracks
+the resolved organization_id per session so each call honors the org's
+configured LLM provider — no silent fallback to a default provider.
 """
 import asyncio
 import json
 import logging
-import math
 import time
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
 
-import requests
-
 from sqlalchemy.orm import Session
-from database.database import get_db_session
+from database.database import get_db_session, SessionLocal
+from database.models import RecordingSession
 from models.unified_agent import UnifiedMeetingAgent
 from services.progressive_interval_manager import progressive_interval_manager, ProgressiveConfig
-
-# Import AI backend configuration
-try:
-    from config.ai_backends import get_ai_backend, get_available_backend, check_backend_health
-except ImportError:
-    # Fallback if config doesn't exist yet
-    def get_ai_backend(name=None):
-        return {
-            "url": "http://localhost:11437",
-            "endpoint": "/v1/chat/completions",
-            "type": "llamacpp",
-            "name": "llama.cpp Vulkan",
-            "model": "gpt-oss-20b",
-            "timeout": 30,
-            "health_check": "/health"
-        }
-    def get_available_backend():
-        return "llamacpp", get_ai_backend()
-    def check_backend_health(config):
-        return True
+from services.providers import get_provider_registry
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_org_id_for_session(session_id: str) -> Optional[int]:
+    """Look up organization_id for a session_id (uuid or int) from the DB."""
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(RecordingSession.organization_id)
+            .filter(RecordingSession.session_id == session_id)
+            .first()
+        )
+        if row and row[0] is not None:
+            return int(row[0])
+        # Fallback to integer id
+        try:
+            row = (
+                db.query(RecordingSession.organization_id)
+                .filter(RecordingSession.id == int(session_id))
+                .first()
+            )
+            if row and row[0] is not None:
+                return int(row[0])
+        except (ValueError, TypeError):
+            pass
+    except Exception as exc:
+        logger.debug(f"Could not resolve org_id for session {session_id}: {exc}")
+    finally:
+        db.close()
+    return None
+
+
 class UnifiedAgentService:
-    """
-    Simplified service for single meeting agent
-    Uses Granite 3.3 2B for all tasks via llama.cpp Vulkan
-    """
+    """Progressive meeting agent that delegates LLM calls to ProviderRegistry."""
 
     def __init__(self):
         self.active_sessions: Dict[str, Dict] = {}
         self.monitoring_tasks: Dict[str, asyncio.Task] = {}
-
-        # Get AI backend configuration
-        backend_name, self.ai_backend = get_available_backend()
-        self.base_url = self.ai_backend["url"]
-
-        logger.info(f"Unified Agent Service initialized")
-        logger.info(f"   Using AI backend at {self.base_url}")
-
-    def _get_active_model(self) -> dict:
-        """Get active model config from registry."""
-        try:
-            from config.model_registry import get_active_model
-            return get_active_model()
-        except Exception:
-            return {"model_id": "gpt-oss-20b", "max_tokens_multiplier": 3.0, "display_name": "GPT-OSS 20B"}
+        logger.info("Unified Agent Service initialized (ProviderRegistry-routed)")
 
     @property
     def model_name(self) -> str:
-        return self._get_active_model()["model_id"]
+        """Return the configured task=quality model name from environment.
+
+        Used only for log/display purposes; actual model selection happens
+        per-org inside ProviderRegistry.get_llm()."""
+        import os
+        return os.getenv("LLM_MODEL_QUALITY", "configured-by-registry")
 
     def _extract_json_from_ai_response(self, response_text: str) -> Optional[str]:
         """
@@ -142,55 +140,73 @@ class UnifiedAgentService:
 
         return None
 
-    async def _call_llm(self, prompt: str, max_tokens: int = 500, temperature: float = 0.7,
-                        system_prompt: str = "You are a meeting assistant.", timeout: int = 30) -> Optional[str]:
+    async def _call_llm(
+        self,
+        session_id: str,
+        prompt: str,
+        max_tokens: int = 500,
+        temperature: float = 0.7,
+        system_prompt: str = "You are a meeting assistant.",
+        timeout: int = 30,
+        task: str = "quality",
+    ) -> Optional[str]:
+        """Resolve the session's org-aware LLM provider and run a chat call.
+
+        Returns the response text, or None on any failure. Silent fallback to
+        a default provider is intentionally not done — it would bypass per-org
+        provider configuration and billing.
         """
-        Call LLM via OpenAI-compatible chat completions API.
-        max_tokens is the base budget; the registry multiplier is applied automatically.
-        """
-        model = self._get_active_model()
-        multiplier = model.get("max_tokens_multiplier", 1.0)
-        effective_max_tokens = math.ceil(max_tokens * multiplier)
+        org_id = self.active_sessions.get(session_id, {}).get("organization_id")
+        if org_id is None:
+            org_id = await asyncio.to_thread(_resolve_org_id_for_session, session_id)
+            if session_id in self.active_sessions:
+                self.active_sessions[session_id]["organization_id"] = org_id
 
-        try:
-            url = f"{self.base_url}/v1/chat/completions"
-
-            payload = {
-                "model": model["model_id"],
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": temperature,
-                "max_tokens": effective_max_tokens,
-                "stream": False
-            }
-
-            start_time = time.time()
-            response = await asyncio.to_thread(
-                requests.post,
-                url,
-                json=payload,
-                timeout=timeout
+        if org_id is None:
+            logger.error(
+                f"unified_agent: no org_id resolvable for session {session_id}; cannot route LLM call"
             )
+            return None
 
-            if response.status_code == 200:
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                inference_time = time.time() - start_time
-                tokens_generated = len(content.split()) if content else 0
-                tokens_per_sec = tokens_generated / inference_time if inference_time > 0 else 0
-                logger.info(f"LLM ({model['model_id']}) inference: {inference_time:.1f}s ({tokens_per_sec:.1f} tokens/sec)")
-                return content.strip()
-            else:
-                logger.error(f"llama.cpp API error: {response.status_code}")
+        def _do_call() -> Optional[str]:
+            db = SessionLocal()
+            try:
+                registry = get_provider_registry(db)
+                provider = registry.get_llm(org_id=org_id, task=task)
+            except Exception as exc:
+                logger.error(
+                    f"unified_agent: registry resolution failed for org {org_id} task={task}: {exc}",
+                    exc_info=True,
+                )
+                return None
+            finally:
+                db.close()
+
+            try:
+                start = time.time()
+                text = provider.chat_sync(
+                    system_prompt,
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                elapsed = time.time() - start
+                if text:
+                    tokens = len(text.split())
+                    rate = tokens / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"unified_agent LLM call ({getattr(provider, 'model', '?')}) "
+                        f"{elapsed:.1f}s ({rate:.1f} tok/s)"
+                    )
+                return text.strip() if text else None
+            except Exception as exc:
+                logger.error(f"unified_agent: provider chat_sync failed: {exc}", exc_info=True)
                 return None
 
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_do_call), timeout=timeout)
         except asyncio.TimeoutError:
-            logger.error("llama.cpp request timed out")
-            return None
-        except Exception as e:
-            logger.error(f"llama.cpp call failed: {e}")
+            logger.error(f"unified_agent: LLM call timed out after {timeout}s (session {session_id})")
             return None
 
     async def start_meeting_analysis(self, session_id: str, websocket_callback=None) -> bool:
@@ -213,6 +229,10 @@ class UnifiedAgentService:
             # Initialize progressive intervals
             progressive_interval_manager.initialize_session(session_id, str(agent.id), config)
 
+            # Resolve org_id once so subsequent _call_llm hits don't have to
+            # re-query the DB on every interval tick.
+            org_id = await asyncio.to_thread(_resolve_org_id_for_session, session_id)
+
             # Store session info
             session_info = {
                 'session_id': session_id,
@@ -220,7 +240,8 @@ class UnifiedAgentService:
                 'config': config,
                 'websocket_callback': websocket_callback,
                 'started_at': datetime.now(timezone.utc),
-                'summary_count': 0
+                'summary_count': 0,
+                'organization_id': org_id,
             }
 
             self.active_sessions[session_id] = session_info
@@ -357,7 +378,7 @@ class UnifiedAgentService:
                 return
 
             # Generate plain text summary
-            summary_text = await self._generate_text_summary(transcript, interval_info)
+            summary_text = await self._generate_text_summary(session_id, transcript, interval_info)
 
             if not summary_text:
                 logger.warning(f"Failed to generate progressive summary for session {session_id}")
@@ -416,7 +437,7 @@ class UnifiedAgentService:
         except Exception as e:
             logger.error(f"Error generating progressive summary: {e}")
 
-    async def _generate_text_summary(self, transcript: str, interval_info: Dict) -> Optional[str]:
+    async def _generate_text_summary(self, session_id: str, transcript: str, interval_info: Dict) -> Optional[str]:
         """Generate a plain text summary for progressive updates"""
         # Truncate transcript if too long for real-time processing
         if len(transcript) > 6000:
@@ -430,11 +451,13 @@ Meeting transcript:
 Brief summary:"""
 
         result = await self._call_llm(
+            session_id=session_id,
             prompt=prompt,
             max_tokens=150,
             temperature=0.5,
             system_prompt="You are a fast meeting summarizer. Provide brief, clear summaries.",
-            timeout=30
+            timeout=30,
+            task="fast",
         )
 
         if not result:
@@ -560,11 +583,13 @@ Provide JSON analysis:
 
         try:
             result = await self._call_llm(
+                session_id=session_id,
                 prompt=final_prompt,
                 max_tokens=600,
                 temperature=0.3,
                 system_prompt="You are a meeting analyst. Provide comprehensive meeting analysis in valid JSON format.",
-                timeout=120
+                timeout=120,
+                task="quality",
             )
 
             if result:
@@ -615,11 +640,13 @@ RESPOND WITH ONLY THE TITLE:"""
 
         try:
             result = await self._call_llm(
+                session_id=session_id,
                 prompt=title_prompt,
                 max_tokens=30,
                 temperature=0.3,
                 system_prompt="You generate concise meeting titles. Respond with ONLY the title.",
-                timeout=30
+                timeout=30,
+                task="fast",
             )
 
             if result:
@@ -672,11 +699,13 @@ RESPOND WITH JSON:
 
             try:
                 result = await self._call_llm(
+                    session_id=session_id,
                     prompt=prompt,
                     max_tokens=500,
                     temperature=0.5,
                     system_prompt="You are a meeting analyst. Provide meeting analysis in valid JSON format.",
-                    timeout=120
+                    timeout=120,
+                    task="quality",
                 )
 
                 if result:
