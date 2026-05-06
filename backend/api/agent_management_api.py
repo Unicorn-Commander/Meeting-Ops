@@ -336,38 +336,39 @@ async def get_model_performance(
 ):
     """Get performance metrics for the available models.
 
-    Reports the system-wide LLM service health (legacy unified_llm_service
-    fallback) and overlays the per-org provider configuration when an
-    active organization can be resolved for the caller.
+    Reports availability of the active org's configured LLM provider via the
+    ProviderRegistry. When no caller org context can be resolved, falls back
+    to the system default LiteLLM provider.
     """
-    # System-wide service health (legacy fallback path)
-    llm_available = False
-    try:
-        from services.unified_llm_service import llm_service
-        status = llm_service.get_status()
-        llm_available = status.get("llamacpp_available", False)
-    except Exception:
-        pass
+    from services.providers import get_provider_registry
+    registry = get_provider_registry(db)
 
-    # Per-org provider overlay via the org-aware ProviderRegistry
-    per_org_provider: Optional[Dict] = None
+    org_id = None
+    org_slug = None
     if current_user is not None:
         try:
             active_org = resolve_active_organization(db, request, current_user)
-            from services.providers import get_provider_registry
-
-            registry = get_provider_registry(db)
-            provider = registry.get_llm(org_id=active_org.organization.id, task="quality")
-            per_org_provider = {
-                "org_slug": active_org.organization.slug,
-                "endpoint": getattr(provider, "endpoint", ""),
-                "model": getattr(provider, "model", ""),
-            }
+            org_id = active_org.organization.id
+            org_slug = active_org.organization.slug
         except Exception as exc:
-            logger.debug(f"Per-org provider overlay failed: {exc}")
+            logger.debug(f"Per-org context resolution failed: {exc}")
 
-    base_endpoint = (per_org_provider or {}).get("endpoint") or "http://localhost:11437"
-    base_model_name = (per_org_provider or {}).get("model") or "granite-3.3-2b-instruct"
+    try:
+        provider = registry.get_llm(org_id=org_id, task="quality") if org_id else registry.default_llm()
+        health = await provider.health()
+        llm_available = bool(health.get("available"))
+        per_org_provider = {
+            "org_slug": org_slug,
+            "endpoint": health.get("endpoint", ""),
+            "model": health.get("model", ""),
+        }
+    except Exception as exc:
+        logger.debug(f"Provider health probe failed: {exc}")
+        llm_available = False
+        per_org_provider = None
+
+    base_endpoint = (per_org_provider or {}).get("endpoint") or "http://unicorn-litellm:4000/v1"
+    base_model_name = (per_org_provider or {}).get("model") or "gemma-4-26b-moe"
 
     return {
         "models": [

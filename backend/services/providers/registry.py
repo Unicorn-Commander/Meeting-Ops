@@ -13,9 +13,8 @@ _SERVICE_KINDS = ("llm", "stt", "tts", "embeddings", "reranking", "diarization")
 _TASKS = {"llm": ("fast", "quality", "chat")}
 
 DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
-# Honor either LITELLM_API_KEY (preferred) or OPENAI_API_KEY (the env var the
-# legacy unified_llm_service reads). This keeps the registry compatible with
-# existing deploys that only set OPENAI_API_KEY.
+# Honor either LITELLM_API_KEY (preferred) or OPENAI_API_KEY for compat with
+# deploys that historically only set OPENAI_API_KEY.
 DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 DEFAULT_INFINITY_ENDPOINT = os.getenv("INFINITY_ENDPOINT") or "http://unicorn-infinity-proxy:8086/v1"
 
@@ -66,6 +65,26 @@ class ProviderRegistry:
         if service_kind == "llm":
             return DEFAULT_LITELLM_API_KEY
         return ""
+
+    def default_llm(self, task: str = "quality") -> Any:
+        """Return the system default LiteLLM provider with no org overlay.
+
+        For status endpoints / unauthenticated callers / background jobs that
+        cannot resolve an org context but still need to probe upstream
+        availability. Honors LLM_MODEL_{FAST,QUALITY,CHAT} env vars.
+        """
+        env_key = {
+            "fast": "LLM_MODEL_FAST",
+            "quality": "LLM_MODEL_QUALITY",
+            "chat": "LLM_MODEL_CHAT",
+        }.get(task, "LLM_MODEL_QUALITY")
+        model = os.getenv(env_key, "gemma-4-26b-moe")
+        from .impl_llm import LiteLLMProvider
+        return LiteLLMProvider(
+            api_key=DEFAULT_LITELLM_API_KEY,
+            endpoint=DEFAULT_LITELLM_ENDPOINT,
+            model=model,
+        )
 
     def get_llm(self, org_id: int, task: str = "quality") -> Any:
         settings = self._get_settings(org_id, "llm")

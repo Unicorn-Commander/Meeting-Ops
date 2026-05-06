@@ -4,7 +4,7 @@ AI Settings API endpoints for managing LLM and transcription configurations.
 Reports the currently configured LLM tier in two layers:
   1. Per-org configuration resolved via the ProviderRegistry (when an active
      organization can be determined for the request).
-  2. System-wide LLM service health from the legacy unified_llm_service
+  2. System-wide LLM provider health via ProviderRegistry
      singleton, used as a fallback when no org context is available.
 """
 from fastapi import APIRouter, HTTPException, Depends, Request
@@ -70,12 +70,30 @@ async def get_model_info(
 
     active = get_active_model()
 
-    # Get system-wide LLM service health from the legacy unified_llm_service
-    # (kept as a fallback per the ProviderRegistry migration plan).
-    llm_info = {"llamacpp_available": False, "base_url": "", "model": active["model_id"]}
+    # LLM health resolved from the active org's configured provider via
+    # ProviderRegistry. Falls through to the registry default when no caller
+    # org context is available.
+    llm_info: Dict[str, Any] = {"llamacpp_available": False, "base_url": "", "model": active["model_id"]}
     try:
-        from services.unified_llm_service import llm_service
-        llm_info = llm_service.get_status()
+        from services.providers import get_provider_registry
+        registry = get_provider_registry(db)
+        org_id = None
+        if current_user is not None:
+            from auth.organization import resolve_active_organization
+            try:
+                ao = resolve_active_organization(db, request, current_user)
+                org_id = ao.organization.id
+            except Exception:
+                pass
+        provider = registry.get_llm(org_id=org_id, task="quality") if org_id else registry.default_llm()
+        health = await provider.health()
+        llm_info = {
+            "llamacpp_available": bool(health.get("available")),
+            "base_url": health.get("endpoint", ""),
+            "model": health.get("model", active["model_id"]),
+        }
+        if health.get("error"):
+            llm_info["error"] = health["error"]
     except Exception as e:
         llm_info["error"] = str(e)
 

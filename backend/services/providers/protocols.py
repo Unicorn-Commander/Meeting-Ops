@@ -7,6 +7,10 @@ class LLMProvider(Protocol):
     def chat_sync(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7) -> str: ...
     async def chat_stream(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7): ...
 
+    async def health(self) -> dict: ...
+    """Return {"available": bool, "endpoint": str, "model": str, "error": str | None}.
+    Implementations should hit the upstream's /v1/models or /health and not raise."""
+
 
 @runtime_checkable
 class EmbeddingsProvider(Protocol):

@@ -104,3 +104,26 @@ class LiteLLMProvider:
                                 yield content
                         except (json.JSONDecodeError, KeyError, IndexError):
                             continue
+
+    async def health(self) -> dict:
+        """Probe upstream availability via /v1/models, falling back to /health.
+        Never raises — returns {available, endpoint, model, error}."""
+        headers = self._build_headers()
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{self.endpoint}/models", headers=headers)
+                if resp.status_code == 200:
+                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                # Fall back to /health (some llama.cpp builds expose it without auth)
+                base = self.endpoint.rsplit("/v1", 1)[0]
+                resp2 = await client.get(f"{base}/health")
+                if resp2.status_code == 200:
+                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                return {
+                    "available": False,
+                    "endpoint": self.endpoint,
+                    "model": self.model,
+                    "error": f"HTTP {resp.status_code}",
+                }
+        except Exception as exc:
+            return {"available": False, "endpoint": self.endpoint, "model": self.model, "error": str(exc)}
