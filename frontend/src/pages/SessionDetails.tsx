@@ -151,6 +151,10 @@ export const SessionDetails: React.FC = () => {
 
   // TTS state — single-voice "listen to summary" + multi-voice podcast
   const [ttsProvider, setTtsProvider] = useState<{ name: string; supports_podcast: boolean } | null>(null);
+  const [ttsVoices, setTtsVoices] = useState<Array<{ voice_id: string; label: string }>>([]);
+  const [summaryVoice, setSummaryVoice] = useState<string>('');
+  const [hostVoice, setHostVoice] = useState<string>('');
+  const [analystVoice, setAnalystVoice] = useState<string>('');
   const [summaryAudioUrl, setSummaryAudioUrl] = useState<string | null>(null);
   const [summaryAudioLoading, setSummaryAudioLoading] = useState(false);
   const [summaryAudioError, setSummaryAudioError] = useState<string | null>(null);
@@ -177,6 +181,16 @@ export const SessionDetails: React.FC = () => {
         if (res.ok) {
           const data = await res.json();
           setTtsProvider({ name: data.provider, supports_podcast: !!data.supports_podcast });
+          const voices: Array<{ voice_id: string; label: string }> = Array.isArray(data.voices) ? data.voices : [];
+          setTtsVoices(voices);
+          // Pick sensible defaults: alice/frank are VibeVoice's stock host/analyst pair.
+          // For other providers fall back to the first / second voice in the list.
+          const ids = voices.map((v) => v.voice_id);
+          const pickHost = ids.includes('alice') ? 'alice' : ids[0] || '';
+          const pickAnalyst = ids.includes('frank') ? 'frank' : ids[1] || ids[0] || '';
+          setSummaryVoice((prev) => prev || pickHost);
+          setHostVoice((prev) => prev || pickHost);
+          setAnalystVoice((prev) => prev || pickAnalyst);
         }
       } catch {
         /* non-fatal */
@@ -191,8 +205,9 @@ export const SessionDetails: React.FC = () => {
     setSummaryAudioError(null);
     try {
       const id = session.id || sessionId;
+      const voiceParam = summaryVoice ? `&voice=${encodeURIComponent(summaryVoice)}` : '';
       const res = await fetch(
-        `${config.apiUrl}/api/sessions/${id}/tts/summary?format=mp3${regenerate ? '&regenerate=true' : ''}`,
+        `${config.apiUrl}/api/sessions/${id}/tts/summary?format=mp3${voiceParam}${regenerate ? '&regenerate=true' : ''}`,
         { method: 'POST', headers: ttsHeaders() },
       );
       if (!res.ok) {
@@ -216,8 +231,11 @@ export const SessionDetails: React.FC = () => {
     setPodcastAudioError(null);
     try {
       const id = session.id || sessionId;
+      const voiceParams =
+        (hostVoice ? `&host_voice=${encodeURIComponent(hostVoice)}` : '') +
+        (analystVoice ? `&analyst_voice=${encodeURIComponent(analystVoice)}` : '');
       const res = await fetch(
-        `${config.apiUrl}/api/sessions/${id}/tts/podcast?format=mp3${regenerate ? '&regenerate=true' : ''}`,
+        `${config.apiUrl}/api/sessions/${id}/tts/podcast?format=mp3${voiceParams}${regenerate ? '&regenerate=true' : ''}`,
         { method: 'POST', headers: ttsHeaders() },
       );
       if (res.status === 501) {
@@ -1233,6 +1251,21 @@ export const SessionDetails: React.FC = () => {
 
                 <div className="space-y-3">
                   <div>
+                    {ttsVoices.length > 1 && (
+                      <label className="block text-xs text-gray-600 mb-1">
+                        Narrator voice
+                        <select
+                          value={summaryVoice}
+                          onChange={(e) => setSummaryVoice(e.target.value)}
+                          className="ml-2 text-xs border border-gray-200 rounded px-2 py-1 bg-white"
+                          disabled={summaryAudioLoading}
+                        >
+                          {ttsVoices.map((v) => (
+                            <option key={v.voice_id} value={v.voice_id}>{v.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
                     {!summaryAudioUrl ? (
                       <button
                         type="button"
@@ -1263,6 +1296,36 @@ export const SessionDetails: React.FC = () => {
 
                   {ttsProvider?.supports_podcast && (
                     <div className="pt-3 border-t border-gray-100">
+                      {ttsVoices.length > 1 && (
+                        <div className="mb-2 grid grid-cols-2 gap-2">
+                          <label className="block text-xs text-gray-600">
+                            Host voice
+                            <select
+                              value={hostVoice}
+                              onChange={(e) => setHostVoice(e.target.value)}
+                              className="mt-1 w-full text-xs border border-gray-200 rounded px-2 py-1 bg-white"
+                              disabled={podcastAudioLoading}
+                            >
+                              {ttsVoices.map((v) => (
+                                <option key={v.voice_id} value={v.voice_id}>{v.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="block text-xs text-gray-600">
+                            Analyst voice
+                            <select
+                              value={analystVoice}
+                              onChange={(e) => setAnalystVoice(e.target.value)}
+                              className="mt-1 w-full text-xs border border-gray-200 rounded px-2 py-1 bg-white"
+                              disabled={podcastAudioLoading}
+                            >
+                              {ttsVoices.map((v) => (
+                                <option key={v.voice_id} value={v.voice_id}>{v.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                      )}
                       {!podcastAudioUrl ? (
                         <button
                           type="button"
