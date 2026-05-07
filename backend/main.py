@@ -98,6 +98,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Upload pipeline initialization failed: {e}")
 
+    try:
+        from services.tts_jobs import tts_queue
+        await tts_queue.start()
+        logger.info("TTS render queue initialized")
+    except Exception as e:
+        logger.warning(f"TTS render queue initialization failed: {e}")
+
     logger.info(f"Routers loaded: {len(loaded_routers)}, failed: {len(failed_routers)}")
 
     yield
@@ -108,6 +115,11 @@ async def lifespan(app: FastAPI):
         await stop_upload_pipeline_queue()
     except Exception as e:
         logger.warning(f"Upload pipeline shutdown failed: {e}")
+    try:
+        from services.tts_jobs import tts_queue
+        await tts_queue.stop()
+    except Exception as e:
+        logger.warning(f"TTS render queue shutdown failed: {e}")
     if audio_monitor_task and not audio_monitor_task.done():
         audio_monitor_task.cancel()
         try:
@@ -181,6 +193,7 @@ _load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
 
 # === PHASE 4C-2 ROUTERS ===
 _load_router(app, "tts", "api.tts")
+_load_router(app, "tts_websocket", "api.tts", router_attr="ws_router")
 
 
 

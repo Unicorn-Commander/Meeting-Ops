@@ -347,3 +347,38 @@ class SpeakerSessionLink(Base):
     confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class TtsJob(Base):
+    """Asynchronous TTS rendering jobs (summary single-voice and podcast multi-voice).
+
+    Mirrors the UploadJob shape so the frontend can reuse the same status +
+    progress + retry affordances. The recording session referenced by
+    session_id provides the source text; output_path holds the rendered
+    audio location once stage='done'.
+    """
+    __tablename__ = "tts_jobs"
+    __table_args__ = (
+        Index("ix_tts_jobs_org_job_id", "organization_id", "job_id", unique=True),
+        Index("ix_tts_jobs_stage", "stage"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    job_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4, index=True)
+    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, index=True)
+    kind = Column(String(20), nullable=False)  # 'summary' | 'podcast'
+    voice = Column(String(80), nullable=True)         # used for summary
+    host_voice = Column(String(80), nullable=True)    # used for podcast
+    analyst_voice = Column(String(80), nullable=True) # used for podcast
+    format = Column(String(8), nullable=False, default="mp3")
+    stage = Column(String(30), nullable=False, default="queued")
+    progress_pct = Column(Integer, nullable=False, default=0)
+    output_path = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    job_started_at = Column(DateTime, nullable=True)
+    job_completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

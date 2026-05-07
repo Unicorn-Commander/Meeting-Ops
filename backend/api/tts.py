@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -39,6 +39,7 @@ from services.providers.registry import ProviderRegistry, get_provider_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["TTS"])
+ws_router = APIRouter(tags=["TTS"])
 
 RECORDINGS_DIR = Path(os.getenv("RECORDINGS_DIR", "/app/recordings"))
 TTS_SUBDIR = "tts"
@@ -379,6 +380,26 @@ async def _build_podcast_script(
     return parsed
 
 
+def _normalize_speaker_ids(
+    script: list[dict],
+    *,
+    host_voice: str = "alice",
+    analyst_voice: str = "frank",
+) -> dict[str, str]:
+    """Constrain script speakers to host/analyst (the only two voices the
+    podcast format renders). Returns the speaker -> voice mapping."""
+    speakers = {"host": host_voice, "analyst": analyst_voice}
+    for t in script:
+        sid = t.get("speaker_id", "host").strip().lower()
+        if sid not in speakers:
+            t["speaker_id"] = (
+                "analyst"
+                if sid in ("analyst", "guest", "expert", "speaker_2", "speaker2")
+                else "host"
+            )
+    return speakers
+
+
 @router.post("/api/sessions/{session_id}/tts/podcast", response_model=PodcastTTSResponse)
 async def synthesize_podcast(
     session_id: int,
@@ -429,16 +450,11 @@ async def synthesize_podcast(
     if not script:
         raise HTTPException(status_code=502, detail="Could not generate a podcast script.")
 
-    speakers = {
-        "host": host_voice or "alice",
-        "analyst": analyst_voice or "frank",
-    }
-    # Map any unexpected speaker_ids back onto host/analyst so the model only
-    # ever sees two voices for the recap.
-    for t in script:
-        sid = t.get("speaker_id", "host").strip().lower()
-        if sid not in speakers:
-            t["speaker_id"] = "analyst" if sid in ("analyst", "guest", "expert", "speaker_2", "speaker2") else "host"
+    speakers = _normalize_speaker_ids(
+        script,
+        host_voice=host_voice or "alice",
+        analyst_voice=analyst_voice or "frank",
+    )
 
     try:
         audio_bytes = await provider.synthesize_podcast(script, speakers, format=format)
@@ -511,3 +527,192 @@ async def get_podcast_script(
         "script": [PodcastTurn(**t).model_dump() for t in payload],
         "generated_at": datetime.fromtimestamp(script_path.stat().st_mtime, tz=timezone.utc).isoformat(),
     }
+
+
+# ---------- async TTS jobs ----------
+
+
+class TtsJobResponse(BaseModel):
+    job_id: str
+    session_id: int
+    kind: str
+    stage: str
+    progress_pct: int
+    audio_url: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+def _tts_job_response(job) -> TtsJobResponse:
+    return TtsJobResponse(
+        job_id=str(job.job_id),
+        session_id=job.session_id,
+        kind=job.kind,
+        stage=job.stage,
+        progress_pct=job.progress_pct,
+        audio_url=(
+            f"/api/sessions/{job.session_id}/tts/{job.kind}.{job.format}"
+            if job.stage == "done"
+            else None
+        ),
+        error_message=job.error_message,
+    )
+
+
+@router.post("/api/sessions/{session_id}/tts/summary/start", response_model=TtsJobResponse)
+async def start_summary_job(
+    session_id: int,
+    voice: Optional[str] = Query(None),
+    format: str = Query("mp3", pattern="^(mp3|wav)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Enqueue an async summary TTS job. Returns immediately with job_id; the
+    caller subscribes to /ws/tts/{job_id} for progress events. Pre-renders to
+    the same path as the sync endpoint so cached audio remains compatible."""
+    from database.models import TtsJob
+    from services.tts_jobs import tts_queue, ws_manager
+    import uuid as _uuid
+
+    session = _resolve_session(session_id, db, active_org.organization.id)
+    if not _summary_text(session):
+        raise HTTPException(status_code=400, detail="Session has no summary or transcript to read aloud.")
+
+    job = TtsJob(
+        organization_id=active_org.organization.id,
+        user_id=current_user.id,
+        job_id=_uuid.uuid4(),
+        session_id=session_id,
+        kind="summary",
+        voice=voice,
+        format=format,
+        stage="queued",
+        progress_pct=0,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    await tts_queue.enqueue(str(job.job_id))
+    return _tts_job_response(job)
+
+
+@router.post("/api/sessions/{session_id}/tts/podcast/start", response_model=TtsJobResponse)
+async def start_podcast_job(
+    session_id: int,
+    host_voice: Optional[str] = Query(None),
+    analyst_voice: Optional[str] = Query(None),
+    format: str = Query("mp3", pattern="^(mp3|wav)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Enqueue an async podcast TTS job. Returns immediately with job_id; the
+    caller subscribes to /ws/tts/{job_id} for progress events. Returns 501
+    when the active provider does not support multi-voice synthesis."""
+    from database.models import TtsJob
+    from services.tts_jobs import tts_queue
+    import uuid as _uuid
+
+    session = _resolve_session(session_id, db, active_org.organization.id)
+    if not _summary_text(session):
+        raise HTTPException(status_code=400, detail="Session has no summary or transcript to convert.")
+
+    registry = ProviderRegistry(db)
+    provider = registry.get_tts(active_org.organization.id)
+    if not getattr(provider, "supports_podcast", False):
+        return JSONResponse(
+            status_code=501,
+            content={
+                "detail": (
+                    f"TTS provider '{getattr(provider, 'name', 'unknown')}' does not "
+                    "support multi-voice podcast generation. Switch to VibeVoice in Provider Settings."
+                )
+            },
+        )
+
+    job = TtsJob(
+        organization_id=active_org.organization.id,
+        user_id=current_user.id,
+        job_id=_uuid.uuid4(),
+        session_id=session_id,
+        kind="podcast",
+        host_voice=host_voice,
+        analyst_voice=analyst_voice,
+        format=format,
+        stage="queued",
+        progress_pct=0,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    await tts_queue.enqueue(str(job.job_id))
+    return _tts_job_response(job)
+
+
+@router.get("/api/tts/jobs/{job_id}", response_model=TtsJobResponse)
+async def get_tts_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Status snapshot for an async TTS job."""
+    from database.models import TtsJob
+    import uuid as _uuid
+
+    try:
+        job = (
+            db.query(TtsJob)
+            .filter(
+                TtsJob.job_id == _uuid.UUID(job_id),
+                TtsJob.organization_id == active_org.organization.id,
+            )
+            .first()
+        )
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id.")
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Job belongs to another user.")
+    return _tts_job_response(job)
+
+
+@ws_router.websocket("/ws/tts/{job_id}")
+async def tts_progress_websocket(websocket: WebSocket, job_id: str):
+    """Live stage / progress events for an async TTS job. The client connects
+    after POST /tts/{kind}/start and receives a JSON payload on each state
+    transition until stage in {done, failed}. Auth here is the same connection
+    upgrade flow as upload progress: oauth2-proxy already validated the
+    cookie at the reverse proxy."""
+    from services.tts_jobs import ws_manager
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(job_id)
+    except (ValueError, TypeError):
+        await websocket.close(code=1008, reason="invalid job_id")
+        return
+
+    await ws_manager.connect(job_id, websocket)
+    try:
+        # Send the current state immediately so the client doesn't wait for
+        # the next event to render initial progress.
+        from database.database import SessionLocal
+        from database.models import TtsJob
+        db = SessionLocal()
+        try:
+            job = db.query(TtsJob).filter(TtsJob.job_id == _uuid.UUID(job_id)).first()
+            if job:
+                from services.tts_jobs import _job_payload
+                await websocket.send_json(_job_payload(job))
+        finally:
+            db.close()
+
+        # Keep the socket open; the worker pool broadcasts via ws_manager.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_manager.disconnect(job_id, websocket)

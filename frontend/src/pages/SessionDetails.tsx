@@ -226,6 +226,39 @@ export const SessionDetails: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, activeOrganization?.slug]);
 
+  // Bridge a TTS job lifecycle: kicks off /tts/{kind}/start, opens
+  // /ws/tts/{job_id}, returns when stage is 'done' (resolves with audio_url)
+  // or 'failed' (rejects with the error).
+  const trackTtsJob = (jobId: string, onProgress?: (pct: number) => void) =>
+    new Promise<{ audio_url: string }>((resolve, reject) => {
+      const wsScheme = config.apiUrl.startsWith('https') ? 'wss' : 'ws';
+      const wsUrl = config.apiUrl.replace(/^https?/, wsScheme) + `/ws/tts/${jobId}`;
+      const socket = new WebSocket(wsUrl);
+      socket.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if (typeof payload.progress_pct === 'number') onProgress?.(payload.progress_pct);
+          if (payload.stage === 'done' && payload.audio_url) {
+            socket.close();
+            resolve({ audio_url: payload.audio_url });
+          } else if (payload.stage === 'failed') {
+            socket.close();
+            reject(new Error(payload.error_message || 'TTS render failed'));
+          }
+        } catch {
+          /* keep listening */
+        }
+      };
+      socket.onerror = () => reject(new Error('TTS progress socket error'));
+      socket.onclose = (ev) => {
+        if (ev.code !== 1000 && ev.code !== 1005) {
+          // close codes other than normal/no-status mean we lost the socket
+          // before stage=done; surface that as a failure.
+          reject(new Error(`TTS progress socket closed (${ev.code})`));
+        }
+      };
+    });
+
   const synthesizeSummary = async (regenerate = false) => {
     if (!session) return;
     setSummaryAudioLoading(true);
@@ -233,18 +266,18 @@ export const SessionDetails: React.FC = () => {
     try {
       const id = session.id || sessionId;
       const voiceParam = summaryVoice ? `&voice=${encodeURIComponent(summaryVoice)}` : '';
-      const res = await fetch(
-        `${config.apiUrl}/api/sessions/${id}/tts/summary?format=mp3${voiceParam}${regenerate ? '&regenerate=true' : ''}`,
+      const startRes = await fetch(
+        `${config.apiUrl}/api/sessions/${id}/tts/summary/start?format=mp3${voiceParam}`,
         { method: 'POST', headers: ttsHeaders() },
       );
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail || `HTTP ${res.status}`);
+      if (!startRes.ok) {
+        const detail = await startRes.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${startRes.status}`);
       }
-      const data = await res.json();
-      // Cache-bust on regenerate so the <audio> element re-fetches.
+      const job = await startRes.json();
+      const result = await trackTtsJob(job.job_id);
       const stamp = regenerate ? `?ts=${Date.now()}` : '';
-      setSummaryAudioUrl(`${config.apiUrl}${data.audio_url}${stamp}`);
+      setSummaryAudioUrl(`${config.apiUrl}${result.audio_url}${stamp}`);
     } catch (err: any) {
       setSummaryAudioError(err?.message || 'Failed to synthesize audio.');
     } finally {
@@ -261,22 +294,35 @@ export const SessionDetails: React.FC = () => {
       const voiceParams =
         (hostVoice ? `&host_voice=${encodeURIComponent(hostVoice)}` : '') +
         (analystVoice ? `&analyst_voice=${encodeURIComponent(analystVoice)}` : '');
-      const res = await fetch(
-        `${config.apiUrl}/api/sessions/${id}/tts/podcast?format=mp3${voiceParams}${regenerate ? '&regenerate=true' : ''}`,
+      const startRes = await fetch(
+        `${config.apiUrl}/api/sessions/${id}/tts/podcast/start?format=mp3${voiceParams}`,
         { method: 'POST', headers: ttsHeaders() },
       );
-      if (res.status === 501) {
-        const detail = await res.json().catch(() => ({}));
+      if (startRes.status === 501) {
+        const detail = await startRes.json().catch(() => ({}));
         throw new Error(detail.detail || 'Active TTS provider does not support podcast mode.');
       }
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail || `HTTP ${res.status}`);
+      if (!startRes.ok) {
+        const detail = await startRes.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${startRes.status}`);
       }
-      const data = await res.json();
+      const job = await startRes.json();
+      const result = await trackTtsJob(job.job_id);
       const stamp = regenerate ? `?ts=${Date.now()}` : '';
-      setPodcastAudioUrl(`${config.apiUrl}${data.audio_url}${stamp}`);
-      setPodcastScript(data.script || []);
+      setPodcastAudioUrl(`${config.apiUrl}${result.audio_url}${stamp}`);
+      // Fetch the script artifact now that synthesis succeeded.
+      try {
+        const scriptRes = await fetch(
+          `${config.apiUrl}/api/sessions/${id}/tts/podcast/script`,
+          { headers: ttsHeaders() },
+        );
+        if (scriptRes.ok) {
+          const data = await scriptRes.json();
+          setPodcastScript(data.script || []);
+        }
+      } catch {
+        /* script fetch is non-fatal */
+      }
     } catch (err: any) {
       setPodcastAudioError(err?.message || 'Failed to generate podcast.');
     } finally {
