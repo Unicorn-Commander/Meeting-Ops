@@ -157,7 +157,6 @@ _load_router(app, "ai_insights", "api.ai_insights")
 _load_router(app, "ai_chat", "api.ai_chat")
 _load_router(app, "vocabulary", "api.vocabulary")
 _load_router(app, "batch_export", "api.batch_export")
-_load_router(app, "audio_upload", "api.audio_upload")
 _load_router(app, "simple_settings", "api.simple_settings")
 
 # === SATELLITE DEVICE ROUTERS (optional) ===

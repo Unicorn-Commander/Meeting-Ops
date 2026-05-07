@@ -15,6 +15,7 @@ import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
+import { useUploads } from '../contexts/UploadsContext';
 
 interface TranscriptionSegment {
   start: number;
@@ -108,6 +109,7 @@ export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { getOrgQueryUrl, activeOrganization } = useOrg();
+  const { startUploads } = useUploads();
   
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -574,47 +576,30 @@ export const SessionDetails: React.FC = () => {
   const handleAudioUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !session) return;
-    
-    // Validate file type
-    if (!file.type.startsWith('audio/')) {
-      alert('Please select an audio file');
+
+    if (!file.type.startsWith('audio/') && !file.type.startsWith('video/')) {
+      alert('Please select an audio or video file');
       return;
     }
-    
-    // Validate file size (max 500MB)
-    if (file.size > 500 * 1024 * 1024) {
-      alert('Audio file is too large. Please select a file under 500MB.');
-      return;
-    }
-    
+
     setUploading(true);
-    
     try {
-      const formData = new FormData();
-      formData.append('audio', file);
-      
-      const response = await fetch(
-        `${config.apiUrl}/api/simple/recording-sessions/${session.id}/upload-audio`,
-        {
-          method: 'POST',
-          body: formData
-        }
-      );
-      
-      if (response.ok) {
-        alert('Audio uploaded successfully! Processing will begin shortly.');
-        // Refresh session data
-        await fetchSession();
-        setShowUploadModal(false);
-      } else {
-        const error = await response.text();
-        alert(`Failed to upload audio: ${error}`);
-      }
-    } catch (error) {
+      // Hand off to the chunked uploads pipeline with action=attach so the
+      // file binds to this session, gets transcribed/diarized/summarized via
+      // ProviderRegistry, and shows progress + retry in the global upload
+      // tray. Tier quotas are enforced server-side at /uploads/start.
+      const targetSessionId = String(session.session_id || session.id || sessionId);
+      await startUploads([file], { action: 'attach', targetSessionId });
+      setShowUploadModal(false);
+      // Pipeline updates session.status / transcript asynchronously; refresh
+      // here so the page reflects the queued state immediately.
+      await fetchSession();
+    } catch (error: any) {
       console.error('Upload failed:', error);
-      alert('Failed to upload audio file');
+      alert(error?.message || 'Failed to upload audio file');
     } finally {
       setUploading(false);
+      event.target.value = '';
     }
   };
 

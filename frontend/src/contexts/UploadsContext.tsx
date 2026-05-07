@@ -29,9 +29,14 @@ export interface UploadItem {
   createdAt: number;
 }
 
+export interface StartUploadsOptions {
+  action?: UploadAction;
+  targetSessionId?: string;
+}
+
 interface UploadsContextValue {
   uploads: UploadItem[];
-  startUploads: (files: File[], action?: UploadAction) => Promise<void>;
+  startUploads: (files: File[], options?: StartUploadsOptions) => Promise<void>;
   cancelUpload: (item: UploadItem) => Promise<void>;
   openSession: (item: UploadItem) => void;
 }
@@ -115,7 +120,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     uploads.forEach(reconcileUpload);
   }, [activeOrganization?.slug]);
 
-  const startOne = useCallback(async (file: File, forcedAction?: UploadAction) => {
+  const startOne = useCallback(async (file: File, forcedAction?: UploadAction, targetSessionId?: string) => {
     const localId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const action = forcedAction ?? defaultActionForFile(file);
     const item: UploadItem = {
@@ -145,6 +150,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           total_size: file.size,
           content_type: file.type || `${detectFileKind(file)}/unknown`,
           action,
+          ...(targetSessionId ? { target_session_id: targetSessionId } : {}),
         }),
         signal: abort.signal,
       });
@@ -188,12 +194,12 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     }
   }, [activeOrganization?.slug, connectStatusSocket, updateUpload]);
 
-  const startUploads = useCallback(async (files: File[], forcedAction?: UploadAction) => {
+  const startUploads = useCallback(async (files: File[], options?: StartUploadsOptions) => {
     const pending = [...files];
     const workers = Array.from({ length: Math.min(MAX_PARALLEL_STARTS, pending.length) }, async () => {
       while (pending.length > 0) {
         const file = pending.shift();
-        if (file) await startOne(file, forcedAction);
+        if (file) await startOne(file, options?.action, options?.targetSessionId);
       }
     });
     await Promise.all(workers);

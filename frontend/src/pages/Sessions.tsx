@@ -365,7 +365,7 @@ export const Sessions: React.FC = () => {
   const handleUploadPicked = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) {
-      void startUploads(files, 'transcribe');
+      void startUploads(files, { action: 'transcribe' });
     }
     event.target.value = '';
   };

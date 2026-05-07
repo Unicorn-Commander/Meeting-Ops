@@ -457,15 +457,9 @@ async def finalize_upload(
     if actual_size != job.total_size:
         raise HTTPException(status_code=400, detail=f"Size mismatch: expected {job.total_size}, got {actual_size}.")
 
-    if job.action == "attach":
-        job.stage = "done"
-        job.progress_pct = 100
-        job.last_completed_stage = "done"
-        job.job_completed_at = datetime.now(timezone.utc)
-        db.commit()
-        await ws_manager.broadcast(upload_id, _status_payload(job))
-        return UploadFinalizeResponse(job_id=upload_id, session_id=job.session_id)
-
+    # Both transcribe (new session) and attach (existing session) flow through
+    # the same processing pipeline; run_upload_pipeline branches on job.action
+    # to either create a new RecordingSession or reuse the target one.
     job.stage = "queued"
     job.progress_pct = 0
     job.error_message = None
@@ -637,7 +631,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
             await _extract_audio(source_path, audio_path, upload_id, db, job)
             await _set_job_state(db, job, progress_pct=100, last_completed_stage="extracting")
 
-        session = await _create_upload_session(db, job, audio_path)
+        session = await _resolve_session_for_job(db, job, audio_path)
         await _set_job_state(db, job, stage="transcribing", progress_pct=5, session_id=session.id)
         transcription_result = await _transcribe_audio(audio_path, session.organization_id, db)
         await _persist_transcription(db, session, transcription_result)
@@ -738,6 +732,52 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
     db.commit()
     db.refresh(session)
     return session
+
+
+async def _attach_to_existing_session(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
+    """Bind the uploaded audio onto a pre-existing RecordingSession.
+
+    The session row was selected at /uploads/start and its id stored on
+    job.session_id. We update the audio path, mark it processing, and let the
+    pipeline transcribe / diarize / summarize / embed exactly as it would for
+    a brand-new upload — so attach gets the same provider-resolved STT and
+    LLM as any other upload, instead of going through the legacy NPU-first
+    path the old api/audio_upload.py used.
+    """
+    if not job.session_id:
+        raise RuntimeError("attach upload has no target_session_id on the job row.")
+    session = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.id == job.session_id,
+            RecordingSession.organization_id == job.organization_id,
+        )
+        .first()
+    )
+    if not session:
+        raise RuntimeError(f"target session {job.session_id} not found in org {job.organization_id}.")
+
+    session.audio_file = str(audio_path)
+    session.status = "processing"
+    session.updated_at = datetime.now(timezone.utc)
+    metadata = dict(session.processing_metadata or {})
+    metadata.update({
+        "attached_upload_id": str(job.upload_id),
+        "attached_filename": job.filename,
+        "attached_content_type": job.content_type,
+        "attached_at": datetime.now(timezone.utc).isoformat(),
+    })
+    session.processing_metadata = metadata
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+async def _resolve_session_for_job(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
+    """Branch on job.action: attach reuses the target session, transcribe creates a new one."""
+    if job.action == "attach":
+        return await _attach_to_existing_session(db, job, audio_path)
+    return await _create_upload_session(db, job, audio_path)
 
 
 async def _transcribe_audio(audio_path: Path, org_id: int, db: Session) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import { ProjectLinkPicker, type ProjectLink } from './ProjectLinkPicker';
+import { useUploads } from '../contexts/UploadsContext';
 
 interface SessionCreatorProps {
   onClose: () => void;
@@ -26,6 +27,7 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
   const [sessionType, setSessionType] = useState<'live' | 'upload'>('live');
   const [creating, setCreating] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const { startUploads } = useUploads();
   const [projectLink, setProjectLink] = useState<ProjectLink>({
     project_app: null,
     project_id: null,
@@ -159,53 +161,18 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
       const session = await response.json();
       console.log('[SessionCreator] Session created:', session.id);
 
-      // Upload audio file if provided
+      // Hand the audio off to the chunked uploads pipeline with action=attach
+      // so it routes through ProviderRegistry STT + summarization with proper
+      // progress + retry. Upload tray surfaces status; no need to poll here.
       if (audioFile) {
-        console.log('[SessionCreator] Uploading audio file...');
-        const formData = new FormData();
-        formData.append('audio', audioFile);
-
-        const uploadResponse = await fetch(
-          `${config.apiBaseUrl}/api/simple/recording-sessions/${session.id}/upload-audio`, 
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-            },
-            body: formData
-          }
-        );
-
-        if (!uploadResponse.ok) {
-          throw new Error('Failed to upload audio file');
-        }
+        console.log('[SessionCreator] Queuing chunked attach upload...');
+        const targetSessionId = String(session.session_id || session.id);
+        await startUploads([audioFile], { action: 'attach', targetSessionId });
         setUploadProgress(50);
       }
 
       setUploadProgress(100);
       console.log('[SessionCreator] Session created successfully:', session.id);
-      
-      // Auto-start transcription if audio was uploaded
-      if (audioFile) {
-        try {
-          const startResponse = await fetch(
-            `${config.apiBaseUrl}/api/simple/recording-sessions/${session.id}/start`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${localStorage.getItem('access_token')}`
-              }
-            }
-          );
-          
-          if (startResponse.ok) {
-            console.log('[SessionCreator] Auto-started transcription for uploaded audio');
-          }
-        } catch (error) {
-          console.warn('[SessionCreator] Failed to auto-start transcription:', error);
-        }
-      }
-
       onSessionCreated(session.id);
     } catch (error) {
       console.error('[SessionCreator] Failed to create session:', error);
