@@ -84,12 +84,23 @@ export const ProjectLinkPicker: React.FC<ProjectLinkPickerProps> = ({
       setLoading(true);
       setError(null);
       try {
+        // Relative URL so the request goes through the same oauth2-proxy
+        // session cookie as /api/auth/me. Using config.apiBaseUrl can land
+        // on a stale subdomain (api.{root}) that does not exist for the
+        // multi-tenant cloud build, which manifests as "Project list
+        // unavailable".
         const url =
-          `${config.apiBaseUrl}/api/integrations/${encodeURIComponent(app)}/projects` +
+          `/api/integrations/${encodeURIComponent(app)}/projects` +
           `?organization_id=${activeOrganization.id}`;
-        const res = await fetch(url, { credentials: 'same-origin' });
+        const headers: Record<string, string> = { Accept: 'application/json' };
+        if (activeOrganization.slug) {
+          headers['X-MeetingOps-Org'] = activeOrganization.slug;
+        }
+        const res = await fetch(url, { credentials: 'same-origin', headers });
         if (!res.ok) {
           // Graceful no-op: clear list, surface a tiny inline message
+          // eslint-disable-next-line no-console
+          console.warn(`[ProjectLinkPicker] fetch HTTP ${res.status} for ${url}`);
           setProjects([]);
           setError(`No projects available (${res.status})`);
           return;

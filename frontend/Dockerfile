@@ -3,6 +3,13 @@
 # Build stage
 FROM node:20-alpine as builder
 
+# Vite reads VITE_*-prefixed env vars at build time and inlines them into
+# the bundle. Declare ARG + ENV so docker-compose build-args reach the npm
+# script. Without this the bundle falls through to the runtime same-origin
+# default in src/config.ts.
+ARG VITE_API_URL
+ENV VITE_API_URL=$VITE_API_URL
+
 WORKDIR /app
 
 # Copy package files

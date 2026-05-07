@@ -2,25 +2,28 @@
 
 const isDevelopment = import.meta.env.DEV;
 
-// Make API URL dynamic - evaluated each time it's accessed
+// Make API URL dynamic - evaluated each time it's accessed.
+//
+// Production cloud build (deploy/bigboy) serves the SPA and the FastAPI
+// backend on the same host (meetingops.magicunicorn.dev) via oauth2-proxy +
+// Traefik. So same-origin is the right default — no separate api.{domain}
+// subdomain, no extra DNS, and the session cookie flows naturally.
+//
+// Build-time override remains available via VITE_API_URL for deployments
+// that DO want a separate API host (legacy on-prem appliance setups).
 const getApiUrl = () => {
-  // Check for environment variable first
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
-  
-  // Check if we're in SSO mode (served via HTTPS with subdomains)
-  const isSSO = window.location.protocol === 'https:' && window.location.hostname.includes('.');
-  
-  if (isSSO) {
-    // SSO mode: use api subdomain
-    const domain = window.location.hostname.split('.').slice(1).join('.');
-    return `https://api.${domain}`;
+
+  // Local dev: backend lives on a different port than the Vite dev server.
+  if (import.meta.env.DEV) {
+    return `http://${window.location.hostname}:9050`;
   }
-  
-  // Local/development mode: use the current hostname with backend port
-  const host = window.location.hostname;
-  return `http://${host}:9050`;
+
+  // Production / preview: same-origin. window.location.origin returns
+  // protocol + host + port, e.g. "https://meetingops.magicunicorn.dev".
+  return window.location.origin;
 };
 
 // Helper to get WebSocket base URL - also dynamic

@@ -88,22 +88,29 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
 
   const handleAudioUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      // Validate audio file
-      const validTypes = ['audio/wav', 'audio/mp3', 'audio/m4a', 'audio/ogg', 'audio/flac'];
-      if (!validTypes.includes(file.type)) {
-        alert('Please select a valid audio file (WAV, MP3, M4A, OGG, FLAC)');
-        return;
-      }
-      
-      // Check file size (max 500MB)
-      if (file.size > 500 * 1024 * 1024) {
-        alert('Audio file is too large. Please select a file under 500MB.');
-        return;
-      }
-      
-      setAudioFile(file);
+    if (!file) return;
+
+    // Validate by MIME family OR by extension. Browser MIME detection for
+    // m4a is inconsistent (Safari -> audio/x-m4a, Chrome on Mac -> audio/mp4
+    // or empty), and the chunked upload pipeline accepts video too (it
+    // extracts the audio stream via ffmpeg). Be liberal here; the backend
+    // does the authoritative check at /uploads/start with quota enforcement.
+    const audioExt = /\.(wav|mp3|m4a|ogg|flac|opus|aac|webm|mp4|mov|mkv|avi)$/i;
+    const looksLikeMedia =
+      (file.type && (file.type.startsWith('audio/') || file.type.startsWith('video/'))) ||
+      audioExt.test(file.name);
+    if (!looksLikeMedia) {
+      alert('Please select an audio or video file.');
+      return;
     }
+
+    // Soft client-side cap; server-side per-org quota is the source of truth.
+    if (file.size > 500 * 1024 * 1024) {
+      alert('File is larger than 500MB. Per-org quota may apply server-side.');
+      return;
+    }
+
+    setAudioFile(file);
   };
 
   const formatFileSize = (bytes: number) => {

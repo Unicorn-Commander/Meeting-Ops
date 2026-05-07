@@ -38,6 +38,8 @@ interface UploadsContextValue {
   uploads: UploadItem[];
   startUploads: (files: File[], options?: StartUploadsOptions) => Promise<void>;
   cancelUpload: (item: UploadItem) => Promise<void>;
+  dismissUpload: (item: UploadItem) => Promise<void>;
+  retryUpload: (item: UploadItem) => Promise<void>;
   openSession: (item: UploadItem) => void;
 }
 
@@ -220,6 +222,49 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     updateUpload(item.localId, { stage: 'cancelled', progress: 0 });
   }, [activeOrganization?.slug, updateUpload]);
 
+  const dismissUpload = useCallback(async (item: UploadItem) => {
+    // Pure-frontend remove: drop the row from the tray and persisted list.
+    // If the upload reached the backend, also fire-and-forget DELETE so the
+    // server-side job and chunk dir are cleaned up.
+    setUploads((prev) => prev.filter((u) => u.localId !== item.localId));
+    if (item.uploadId && item.stage !== 'done') {
+      try {
+        await fetch(`${config.apiBaseUrl}/api/uploads/${item.uploadId}`, {
+          method: 'DELETE',
+          headers: buildUploadHeaders(activeOrganization?.slug),
+        });
+      } catch {
+        // Local dismiss already applied.
+      }
+    }
+  }, [activeOrganization?.slug]);
+
+  const retryUpload = useCallback(async (item: UploadItem) => {
+    if (!item.uploadId) {
+      // Frontend-only failure (e.g. file rejected before /uploads/start).
+      // Nothing to retry server-side; user must re-pick the file.
+      return;
+    }
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/uploads/${item.uploadId}/retry`, {
+        method: 'POST',
+        headers: buildUploadHeaders(activeOrganization?.slug),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        updateUpload(item.localId, {
+          error: detail || `Retry failed (${res.status})`,
+        });
+        return;
+      }
+      updateUpload(item.localId, { stage: 'queued', progress: 0, error: null });
+      // Reconnect the WebSocket so progress events flow again.
+      connectStatusSocket(item.localId, item.uploadId);
+    } catch (err: any) {
+      updateUpload(item.localId, { error: err?.message || 'Retry failed' });
+    }
+  }, [activeOrganization?.slug, connectStatusSocket, updateUpload]);
+
   const openSession = useCallback((item: UploadItem) => {
     if (item.sessionId) navigate(`/sessions/${item.sessionId}`);
   }, [navigate]);
@@ -229,7 +274,10 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     aborts.current.forEach((abort) => abort.abort());
   }, []);
 
-  const value = useMemo(() => ({ uploads, startUploads, cancelUpload, openSession }), [uploads, startUploads, cancelUpload, openSession]);
+  const value = useMemo(
+    () => ({ uploads, startUploads, cancelUpload, dismissUpload, retryUpload, openSession }),
+    [uploads, startUploads, cancelUpload, dismissUpload, retryUpload, openSession],
+  );
   return <UploadsContext.Provider value={value}>{children}</UploadsContext.Provider>;
 }
 

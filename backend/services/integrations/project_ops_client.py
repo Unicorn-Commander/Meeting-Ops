@@ -78,7 +78,35 @@ class ProjectOpsClient:
             return []
 
         if resp.status_code == 401:
-            logger.info("project-ops list_projects rejected token (401)")
+            # Decode without verifying so we can log claims that might
+            # explain the rejection (iss, aud, exp, alg, kid). Never logs
+            # the signature or the full token; these claims are non-secret
+            # and diagnostic for cross-app federation issues.
+            try:
+                import base64 as _b64
+                import json as _json
+                parts = (self.bearer_token or "").split(".")
+                if len(parts) >= 2:
+                    def _pad(s: str) -> str:
+                        return s + "=" * (-len(s) % 4)
+                    header = _json.loads(_b64.urlsafe_b64decode(_pad(parts[0])))
+                    payload = _json.loads(_b64.urlsafe_b64decode(_pad(parts[1])))
+                    logger.info(
+                        "project-ops list_projects rejected token (401) "
+                        "alg=%s kid=%s iss=%s aud=%s typ=%s exp=%s email_present=%s preferred_username=%s",
+                        header.get("alg"),
+                        (header.get("kid") or "")[:8] + "...",
+                        payload.get("iss"),
+                        payload.get("aud"),
+                        payload.get("typ"),
+                        payload.get("exp"),
+                        bool(payload.get("email")),
+                        payload.get("preferred_username"),
+                    )
+                else:
+                    logger.info("project-ops list_projects rejected token (401) - token unparseable")
+            except Exception as exc:
+                logger.info(f"project-ops list_projects rejected token (401) - decode failed: {exc}")
             return []
         if resp.status_code >= 400:
             logger.warning(
