@@ -5,15 +5,25 @@ import { useOrg } from '../contexts/OrgContext';
 
 export interface ProjectLink {
   project_app: string | null;   // 'project-ops' | 'crisis-ops' | null
-  project_id: number | null;
+  // project_id is a string. For project-ops it is a UUID; for crisis-ops it
+  // will be whatever shape that app exposes. Backed by a TEXT column on
+  // recording_sessions (migrated 010_project_id_to_text).
+  project_id: string | null;
   project_slug: string | null;
 }
 
 interface Project {
-  id: number;
+  id: string;
   name: string;
   slug: string;
   app: string;
+  // Optional richer fields surfaced from project-ops so the dropdown can
+  // show humans-friendly labels: "Q2 Roadmap (PROJ-2026-000067)".
+  project_number?: string | null;
+  status?: string | null;
+  priority?: string | null;
+  client_name?: string | null;
+  due_date?: string | null;
 }
 
 interface ProjectLinkPickerProps {
@@ -124,11 +134,10 @@ export const ProjectLinkPicker: React.FC<ProjectLinkPickerProps> = ({
       });
       return;
     }
-    const pid = Number(projectIdRaw);
-    const proj = projects.find((p) => p.id === pid);
+    const proj = projects.find((p) => p.id === projectIdRaw);
     onChange({
       project_app: value.project_app,
-      project_id: pid,
+      project_id: projectIdRaw,
       project_slug: proj?.slug ?? null,
     });
   };
@@ -189,11 +198,18 @@ export const ProjectLinkPicker: React.FC<ProjectLinkPickerProps> = ({
             ) : (
               <>
                 <option value="">— Select a project —</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
+                {projects.map((p) => {
+                  // Build a richer label so users can disambiguate by
+                  // project number and client when titles repeat.
+                  const parts = [p.name];
+                  if (p.project_number) parts.push(`(${p.project_number})`);
+                  if (p.client_name) parts.push(`— ${p.client_name}`);
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {parts.join(' ')}
+                    </option>
+                  );
+                })}
               </>
             )}
           </select>

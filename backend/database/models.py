@@ -52,7 +52,9 @@ class RecordingSession(Base):
     room_name = Column(String(200), nullable=True)  # Physical room name
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     project_app = Column(String(50), nullable=True)  # 'project-ops', 'crisis-ops', or NULL
-    project_id = Column(Integer, nullable=True)
+    # project_id is a string (UUID for project-ops; whatever crisis-ops uses).
+    # Migrated from Integer in 010_project_id_to_text.
+    project_id = Column(Text, nullable=True)
     project_slug = Column(String(200), nullable=True)
 
     def to_dict(self):
@@ -228,7 +230,7 @@ class MeetingDigest(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     period = Column(String(20), nullable=False)  # day, week, month, quarter, year
     date = Column(String(10), nullable=False)  # YYYY-MM-DD
-    project_id = Column(Integer, nullable=True)
+    project_id = Column(Text, nullable=True)
     content = Column(Text, nullable=False)
     meeting_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

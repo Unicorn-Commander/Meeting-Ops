@@ -287,7 +287,10 @@ class TestDigestsEndpoint:
 class TestIntegrations:
     """Project integrations endpoint."""
 
-    def test_integrations_returns_mock_data(self, client):
+    def test_integrations_returns_list(self, client):
+        """Endpoint proxies to project-ops with the user's bearer token.
+        In the test environment project-ops is not reachable, so the
+        response is an empty list (graceful degrade rather than 5xx)."""
         _, _, _, SessionLocal, _, _, _ = _current_models()
         db = SessionLocal()
         try:
@@ -299,8 +302,14 @@ class TestIntegrations:
             resp = client.get(f"/api/integrations/project-ops/projects?organization_id={org.id}", headers=headers)
             assert resp.status_code == 200
             data = resp.json()
-            assert len(data) >= 1
-            assert data[0]["app"] == "project-ops"
+            # Either a real list of projects (when project-ops is reachable
+            # and the bearer token is accepted) or an empty list (test env).
+            # Both are valid; the picker tolerates both shapes. Each entry
+            # uses string IDs (project-ops UUIDs).
+            assert isinstance(data, list)
+            for entry in data:
+                assert entry["app"] == "project-ops"
+                assert isinstance(entry["id"], str)
         finally:
             db.close()
 
@@ -326,6 +335,8 @@ class TestProjectLinkingSchema:
     """Meeting session project linking fields."""
 
     def test_session_has_project_fields(self, client):
+        """project_id is now TEXT (UUID for project-ops); migration 010
+        widened it from INT for cross-app federation."""
         _, _, _, SessionLocal, RecordingSession, _, _ = _current_models()
         db = SessionLocal()
         try:
@@ -333,14 +344,15 @@ class TestProjectLinkingSchema:
             org = _seed_org(db, "Project Org", "proj-org")
             _seed_membership(db, user.id, org.id, "user")
 
+            project_uuid = "17004202-cfe1-4b6e-833e-1290e4367b21"
             session = RecordingSession(
                 session_id=str(uuid.uuid4()),
                 name="Project Meeting",
                 status="active",
                 organization_id=org.id,
                 project_app="project-ops",
-                project_id=42,
-                project_slug="q2-roadmap",
+                project_id=project_uuid,
+                project_slug="PROJ-2026-000067",
                 duration=30.0,
             )
             db.add(session)
@@ -348,8 +360,8 @@ class TestProjectLinkingSchema:
             db.refresh(session)
 
             assert session.project_app == "project-ops"
-            assert session.project_id == 42
-            assert session.project_slug == "q2-roadmap"
+            assert session.project_id == project_uuid
+            assert session.project_slug == "PROJ-2026-000067"
         finally:
             db.rollback()
             db.close()

@@ -96,7 +96,7 @@ interface Session {
   transcription_segments?: TranscriptionSegment[];
   // Project linking (Phase 2)
   project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
-  project_id?: number | null;
+  project_id?: string | null;
   project_slug?: string | null;
 }
 

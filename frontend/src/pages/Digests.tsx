@@ -9,7 +9,7 @@ interface DigestData {
   content: string;
   meeting_count: number;
   cached: boolean;
-  project_id?: number | null;
+  project_id?: string | null;
 }
 
 const PERIODS = [
