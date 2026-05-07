@@ -316,9 +316,19 @@ async def start_upload(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    max_file_bytes = get_max_file_bytes()
     if request.action not in {"transcribe", "attach"}:
         raise HTTPException(status_code=400, detail="action must be 'transcribe' or 'attach'.")
+
+    # Per-org tier quota check (file size, concurrent uploads, monthly hours).
+    # Raises HTTPException(402/429) with a structured detail payload so the
+    # frontend can show a useful upsell when the user hits a tier ceiling.
+    from services.quotas import check_upload_quota
+    check_upload_quota(db, active_org.organization, request.total_size)
+
+    # Host-level hard cap (env-tunable). Enforces a global ceiling on top of
+    # the tier limits — useful when an operator wants to keep total per-host
+    # bandwidth bounded regardless of org tier.
+    max_file_bytes = get_max_file_bytes()
     if request.total_size > max_file_bytes:
         raise HTTPException(
             status_code=413,
@@ -366,6 +376,22 @@ async def start_upload(
         total_chunks=total_chunks,
         stage="uploading",
     )
+
+
+@router.get("/quotas")
+async def get_quota_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Snapshot of the active org's quota usage and tier limits.
+
+    Returns the data the frontend needs to show usage bars + upsell prompts
+    before a user even attempts an upload. Pure read: no quota enforcement
+    happens here, only at /uploads/start.
+    """
+    from services.quotas import get_usage
+    return get_usage(db, active_org.organization)
 
 
 @router.post("/{upload_id}/chunk")

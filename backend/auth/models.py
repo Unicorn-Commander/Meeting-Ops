@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import (
+    BigInteger,
     Column,
     Integer,
     String,
@@ -31,12 +32,21 @@ class Organization(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
-    # Plan and limits
+    # Plan and limits. NULL on max_file_bytes / max_concurrent_uploads means
+    # "use the tier default from services.quotas.TIER_DEFAULTS". Use the
+    # helpers in services/quotas.py rather than reading these columns
+    # directly so per-org overrides and tier defaults compose correctly.
     plan = Column(String, default="free")  # free, pro, enterprise
     storage_quota_gb = Column(Integer, default=10)
     storage_used_gb = Column(Float, default=0.0)
     max_users = Column(Integer, default=5)
-    max_monthly_hours = Column(Integer, default=100)
+    # max_monthly_hours / max_file_bytes / max_concurrent_uploads are NULL by
+    # default so services.quotas falls through to tier defaults. Existing
+    # orgs that were created with the old default of 100 keep their value
+    # (the migration does not retroactively NULL it).
+    max_monthly_hours = Column(Integer, nullable=True)
+    max_file_bytes = Column(BigInteger, nullable=True)
+    max_concurrent_uploads = Column(Integer, nullable=True)
     
     # Settings
     settings = Column(get_json_type(), default={})
