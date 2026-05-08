@@ -34,17 +34,36 @@ class LocalSpeakerSvcProvider:
 
     # ---------- diarize ----------
 
-    async def diarize(self, audio_path: str) -> list[dict]:
-        """Return a list of diarized segments. Shape kept compatible with the
-        legacy provider — list[dict] with at least start/end/speaker keys.
-        Each segment may also carry an `embedding` key (192-d ECAPA float
-        list) so the caller can pipe directly into /identify."""
+    async def diarize(
+        self,
+        audio_path: str,
+        *,
+        num_speakers: Optional[int] = None,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+    ) -> list[dict]:
+        """Return a list of diarized segments.
+
+        Shape kept compatible with the legacy provider — list[dict] with at
+        least start/end/speaker keys. Each segment may also carry an
+        `embedding` key (192-d ECAPA float list) so the caller can pipe
+        directly into /identify.
+
+        num_speakers / min_speakers / max_speakers are forwarded to
+        speaker-svc when set; the upstream pyannote diarizer respects them.
+        Leave all three None for full auto-detection (the default).
+        """
+        data: dict[str, str] = {"audio_path": audio_path, "return_embeddings": "true"}
+        if num_speakers is not None:
+            data["num_speakers"] = str(num_speakers)
+        if min_speakers is not None:
+            data["min_speakers"] = str(min_speakers)
+        if max_speakers is not None:
+            data["max_speakers"] = str(max_speakers)
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
-                    f"{self.endpoint}/diarize",
-                    data={"audio_path": audio_path, "return_embeddings": "true"},
-                )
+                resp = await client.post(f"{self.endpoint}/diarize", data=data)
                 resp.raise_for_status()
                 payload = resp.json()
                 segments = payload.get("segments", []) or []

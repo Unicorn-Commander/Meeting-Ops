@@ -44,6 +44,9 @@ class UploadStartRequest(BaseModel):
     content_type: Optional[str] = None
     action: str
     target_session_id: Optional[str] = None
+    # Per-upload pipeline overrides — falls back to org defaults when missing.
+    # Schema: services/transcription_options.TranscriptionOptions.
+    transcription_options: Optional[dict] = None
 
 
 class UploadStartResponse(BaseModel):
@@ -350,6 +353,14 @@ async def start_upload(
         if not target_session:
             raise HTTPException(status_code=404, detail="Target session not found in active organization.")
 
+    # Validate + normalize per-upload transcription options. Bad values
+    # raise 422 with field-level detail (Pydantic). None means "use org
+    # defaults", which the pipeline workers handle naturally.
+    options_payload: Optional[dict] = None
+    if request.transcription_options:
+        from services.transcription_options import TranscriptionOptions
+        options_payload = TranscriptionOptions(**request.transcription_options).to_jsonb()
+
     upload_id = uuid.uuid4()
     total_chunks = max(1, math.ceil(request.total_size / DEFAULT_CHUNK_SIZE))
     job = UploadJob(
@@ -364,6 +375,7 @@ async def start_upload(
         stage="uploading",
         progress_pct=0,
         session_id=target_session.id if target_session else None,
+        transcription_options=options_payload,
     )
     db.add(job)
     db.commit()
@@ -574,6 +586,88 @@ async def retry_upload(
     return UploadStatusResponse(**_status_payload(job))
 
 
+class ReprocessRequest(BaseModel):
+    """Body for the reprocess endpoint — same options as a fresh upload."""
+    transcription_options: Optional[dict] = None
+
+
+@router.post("/sessions/{session_id}/reprocess", response_model=UploadStatusResponse)
+async def reprocess_session(
+    session_id: int,
+    request: ReprocessRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Re-run the transcription / diarization / summarization / embedding
+    pipeline against an existing session's audio file.
+
+    Reuses the chunked-upload UploadJob shape so the frontend's existing
+    progress + retry tray surfaces the work uniformly. The audio bytes are
+    NOT re-uploaded — we point a synthetic UploadJob at the session's
+    existing audio path on disk.
+    """
+    rec = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.id == session_id,
+            RecordingSession.organization_id == active_org.organization.id,
+        )
+        .first()
+    )
+    if not rec:
+        raise HTTPException(status_code=404, detail="Session not found in active organization.")
+    if not rec.audio_file or not Path(rec.audio_file).exists():
+        raise HTTPException(status_code=410, detail="Session audio file is not on disk; cannot reprocess.")
+
+    # Validate options early.
+    options_payload: Optional[dict] = None
+    if request.transcription_options:
+        from services.transcription_options import TranscriptionOptions
+        options_payload = TranscriptionOptions(**request.transcription_options).to_jsonb()
+
+    # Park the existing audio under a fresh upload_id directory so the
+    # pipeline's source-of-truth path matches the chunked flow's layout.
+    job_id = uuid.uuid4()
+    job_dir = _job_dir(active_org.organization.slug, str(job_id))
+    job_dir.mkdir(parents=True, exist_ok=True)
+    src_audio = Path(rec.audio_file)
+    parked = job_dir / src_audio.name
+    if not parked.exists():
+        try:
+            os.symlink(src_audio.resolve(), parked)
+        except OSError:
+            shutil.copy2(src_audio, parked)
+
+    job = UploadJob(
+        organization_id=active_org.organization.id,
+        user_id=current_user.id,
+        upload_id=job_id,
+        filename=src_audio.name,
+        content_type="application/octet-stream",
+        action="attach",
+        total_size=src_audio.stat().st_size,
+        bytes_received=src_audio.stat().st_size,
+        chunks_received=1,
+        total_chunks=1,
+        stage="queued",
+        progress_pct=0,
+        session_id=rec.id,
+        transcription_options=options_payload,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    await ws_manager.broadcast(str(job_id), _status_payload(job))
+    await upload_pipeline_queue.enqueue(str(job_id))
+    logger.info(
+        f"Reprocess enqueued for session {session_id} (job {job_id}) by user {current_user.id} "
+        f"(org {active_org.organization.slug}) with options={options_payload}"
+    )
+    return UploadStatusResponse(**_status_payload(job))
+
+
 async def mark_upload_cancelled(upload_id: str) -> None:
     db = SessionLocal()
     try:
@@ -624,29 +718,72 @@ async def run_upload_pipeline(upload_id: str) -> None:
         if media_kind not in {"audio", "video"}:
             raise RuntimeError("Unsupported media format for transcription.")
 
-        audio_path = source_path
-        if media_kind == "video":
-            audio_path = base_dir / "extracted.wav"
+        # Always normalize to 16 kHz mono PCM WAV before handing off to the
+        # STT provider. whisper.cpp's HTTP server can decode m4a/mp3 internally
+        # but it is strictly faster + more reliable on a pre-extracted WAV,
+        # and the wav file size gives the timeout heuristic an accurate
+        # signal (compressed audio MB/min lies about real duration). The
+        # extra ffmpeg pass is cheap (~1.4 kx realtime in practice).
+        audio_path = base_dir / "extracted.wav"
+        if not audio_path.exists() or audio_path.stat().st_size == 0:
             await _set_job_state(db, job, stage="extracting", progress_pct=3)
             await _extract_audio(source_path, audio_path, upload_id, db, job)
             await _set_job_state(db, job, progress_pct=100, last_completed_stage="extracting")
 
+        # Materialize per-upload preferences. Empty / None object = use the
+        # active org's saved settings end-to-end.
+        from services.transcription_options import coerce_options
+        opts = coerce_options(job.transcription_options)
+
         session = await _resolve_session_for_job(db, job, audio_path)
         await _set_job_state(db, job, stage="transcribing", progress_pct=5, session_id=session.id)
-        transcription_result = await _transcribe_audio(audio_path, session.organization_id, db)
+        transcription_result = await _transcribe_audio(
+            audio_path,
+            session.organization_id,
+            db,
+            provider_override=opts.stt_provider,
+            model_override=opts.stt_model,
+            language=opts.language or "en",
+        )
         await _persist_transcription(db, session, transcription_result)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="transcribing")
 
-        await _set_job_state(db, job, stage="diarizing", progress_pct=10)
-        try:
-            from services.speaker_service import identify_speakers
-            await asyncio.to_thread(identify_speakers, session, db)
-        except Exception as exc:
-            logger.warning("Speaker identification failed for upload %s: %s", upload_id, exc)
-        await _set_job_state(db, job, progress_pct=100, last_completed_stage="diarizing")
+        # Diarization. Honor explicit off / manual count overrides; auto is
+        # the default when the option is missing.
+        if (opts.diarization_mode or "auto") != "off":
+            await _set_job_state(db, job, stage="diarizing", progress_pct=10)
+            num_speakers = (
+                opts.diarization_num_speakers
+                if opts.diarization_mode == "manual"
+                else None
+            )
+            try:
+                # 1) Run speaker-svc diarization to get speaker segments
+                from services.providers.registry import get_provider_registry
+                diar_registry = get_provider_registry(db)
+                diar_provider = diar_registry.get_diarization(session.organization_id)
+                diar_segments = await diar_provider.diarize(
+                    str(audio_path),
+                    num_speakers=num_speakers,
+                )
+                # 2) Merge labels onto the transcription segments + persist
+                if diar_segments:
+                    _assign_speakers_from_diarization(session, diar_segments)
+                    db.commit()
+                # 3) Optionally enrich with library matches (voice fingerprinting)
+                fingerprint_enabled = (
+                    True if opts.voice_fingerprint is None
+                    else bool(opts.voice_fingerprint)
+                )
+                if fingerprint_enabled:
+                    from services.speaker_service import identify_speakers
+                    await asyncio.to_thread(identify_speakers, session, db)
+            except Exception as exc:
+                logger.warning("Speaker diarization/identification failed for upload %s: %s", upload_id, exc)
+            await _set_job_state(db, job, progress_pct=100, last_completed_stage="diarizing")
 
         await _set_job_state(db, job, stage="summarizing", progress_pct=10)
-        await _summarize_session(db, session)
+        await _summarize_session(db, session, template=opts.summary_template or "standard")
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="summarizing")
 
         await _set_job_state(db, job, stage="embedding", progress_pct=10)
@@ -780,17 +917,34 @@ async def _resolve_session_for_job(db: Session, job: UploadJob, audio_path: Path
     return await _create_upload_session(db, job, audio_path)
 
 
-async def _transcribe_audio(audio_path: Path, org_id: int, db: Session) -> dict[str, Any]:
-    """Transcribe via the org's configured STT provider (Whisper or Parakeet).
+async def _transcribe_audio(
+    audio_path: Path,
+    org_id: int,
+    db: Session,
+    *,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
+    language: str = "en",
+) -> dict[str, Any]:
+    """Transcribe via the configured STT provider (Whisper or Parakeet).
 
-    Diarization happens separately via speaker_service after this step.
-    The provider is resolved through ProviderRegistry so org admins can
-    switch engines via Settings -> AI Providers.
+    Diarization runs separately after this step. The provider is resolved
+    through ProviderRegistry; per-upload overrides win over the org's
+    saved Provider Settings so a single recording can route through
+    Parakeet while the org default stays Whisper (or vice versa).
     """
     from services.providers.registry import get_provider_registry
+    from services.transcription_options import normalized_provider_name, TranscriptionOptions
     registry = get_provider_registry(db)
-    stt = registry.get_stt(org_id)
-    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language="en"), timeout=1800)
+    norm_provider = normalized_provider_name(
+        TranscriptionOptions(stt_provider=provider_override) if provider_override else TranscriptionOptions()
+    )
+    stt = registry.get_stt(
+        org_id,
+        provider_override=norm_provider,
+        model_override=model_override,
+    )
+    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language), timeout=1800)
     if not result or not result.get("segments"):
         raise RuntimeError("Transcription produced no segments.")
     # _persist_transcription expects audio_duration; the providers return
@@ -798,6 +952,69 @@ async def _transcribe_audio(audio_path: Path, org_id: int, db: Session) -> dict[
     result.setdefault("audio_duration", result.get("duration", 0.0))
     result.setdefault("model", "whisper.cpp-large-v3-turbo")
     return result
+
+
+def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: list[dict]) -> None:
+    """Merge diarization output onto the transcription segments.
+
+    For each transcription segment, pick the diarization speaker that
+    covers the most of its [start, end] interval. Updates the JSONB
+    `transcript_diarized.segments` and the rows in the `transcriptions`
+    table. Idempotent — safe to re-run on re-process.
+    """
+    if not diar_segments:
+        return
+    transcript = session.transcript_diarized
+    if not isinstance(transcript, dict):
+        return
+    segments = transcript.get("segments") or []
+    if not segments:
+        return
+
+    # Sort diarization segments once; use a small linear scan per segment
+    # since both lists are usually <500 items.
+    diar_sorted = sorted(diar_segments, key=lambda s: float(s.get("start") or 0))
+
+    def _label_for(seg_start: float, seg_end: float) -> Optional[str]:
+        best_label: Optional[str] = None
+        best_overlap = 0.0
+        for d in diar_sorted:
+            d_start = float(d.get("start") or 0)
+            d_end = float(d.get("end") or 0)
+            if d_end < seg_start:
+                continue
+            if d_start > seg_end:
+                break
+            overlap = max(0.0, min(seg_end, d_end) - max(seg_start, d_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_label = d.get("speaker")
+        return best_label
+
+    for seg in segments:
+        start = float(seg.get("start") or 0)
+        end = float(seg.get("end") or 0)
+        label = _label_for(start, end)
+        if label:
+            seg["speaker"] = label
+
+    transcript["segments"] = segments
+    transcript["diarization_backend"] = (
+        diar_sorted[0].get("backend") if diar_sorted else None
+    )
+    session.transcript_diarized = transcript
+
+    # Also rewrite the per-segment Transcription rows so list/detail views
+    # render speaker labels even when they don't go through transcript_diarized.
+    from sqlalchemy.orm.session import Session as _SAS  # local import to avoid module cycle
+    db: Optional[_SAS] = getattr(session, "_sa_instance_state", None) and session._sa_instance_state.session  # type: ignore[union-attr]
+    if db is None:
+        return
+    rows = db.query(Transcription).filter(Transcription.session_id == session.id).all()
+    for row in rows:
+        label = _label_for(float(row.start_time or 0), float(row.end_time or 0))
+        if label:
+            row.speaker = label
 
 
 async def _persist_transcription(db: Session, session: RecordingSession, result: dict[str, Any]) -> None:
@@ -843,17 +1060,44 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     db.refresh(session)
 
 
-async def _summarize_session(db: Session, session: RecordingSession) -> None:
+_SUMMARY_TEMPLATE_GUIDANCE: dict[str, str] = {
+    "standard": (
+        "Produce a balanced meeting summary covering main topics, key "
+        "decisions, action items, and follow-ups. Keep tone neutral and "
+        "useful for someone who missed the meeting."
+    ),
+    "executive": (
+        "Produce an executive-style summary: lead with strategic implications "
+        "and decisions, then action items with owners, then a one-line "
+        "recap. Skip routine status updates."
+    ),
+    "technical": (
+        "Produce a technical summary: architecture/design decisions, "
+        "implementation details, technical debt mentioned, dependencies and "
+        "blockers, then action items. Keep code/system terms verbatim."
+    ),
+}
+
+
+async def _summarize_session(
+    db: Session,
+    session: RecordingSession,
+    *,
+    template: str = "standard",
+) -> None:
     transcript = session.transcript_simple or ""
     if not transcript.strip():
         session.summary = json.dumps({"executive": "No transcript text was available.", "bullets": [], "actions": [], "decisions": []})
         db.commit()
         return
 
+    style = _SUMMARY_TEMPLATE_GUIDANCE.get(template, _SUMMARY_TEMPLATE_GUIDANCE["standard"])
+
     from services.providers.registry import get_provider_registry
     registry = get_provider_registry(db)
     llm = registry.get_llm(session.organization_id, task="quality")
     prompt = (
+        f"{style}\n\n"
         "Return strict JSON with keys executive, bullets, actions, decisions, title. "
         "actions should be an array of objects with action, owner, priority when known.\n\n"
         f"Transcript:\n{transcript[:24000]}"

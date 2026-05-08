@@ -30,8 +30,21 @@ from .protocols import STTProvider  # noqa: F401  (re-exported)
 logger = logging.getLogger(__name__)
 
 
-def _http_timeout_for_path(file_path: str, base: float = 30.0, per_mb: float = 1.0) -> float:
-    """Scale request timeout with file size — same heuristic as WhisperServerClient."""
+def _http_timeout_for_path(file_path: str, base: float = 120.0, per_mb: float = 20.0) -> float:
+    """Scale request timeout with file size.
+
+    The defaults are tuned for compressed audio (mp3/m4a/ogg) where 1 MB
+    can hold roughly 1 minute of audio. whisper-large-v3-turbo on an
+    RTX 6000 Turing runs around 9x realtime, so a 1-minute clip needs
+    around 7s of inference plus a few seconds of model warmup. 20 s/MB
+    covers that with margin and base=120 keeps short clips healthy even
+    with cold-cache overhead.
+
+    Pre-extracted PCM WAV is much larger per minute (around 1.9 MB/min
+    at 16 kHz mono), so the same formula gives WAV uploads even more
+    headroom — that overshoots safely rather than killing transcription
+    mid-way.
+    """
     try:
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
     except OSError:

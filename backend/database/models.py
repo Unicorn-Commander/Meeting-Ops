@@ -263,6 +263,11 @@ class UploadJob(Base):
     session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=True)
     job_started_at = Column(DateTime, nullable=True)
     job_completed_at = Column(DateTime, nullable=True)
+    # Per-upload transcription preferences. Falls back to org-level
+    # ProviderRegistry settings when fields are missing. Schema in
+    # services/transcription_options.py. JSON for SQLite test fixtures,
+    # the alembic migration uses JSONB on Postgres directly.
+    transcription_options = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
