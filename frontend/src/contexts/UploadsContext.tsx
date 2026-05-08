@@ -32,6 +32,10 @@ export interface UploadItem {
 export interface StartUploadsOptions {
   action?: UploadAction;
   targetSessionId?: string;
+  /** Per-upload pipeline preferences. Schema lives in
+   * components/TranscriptionOptionsPanel.tsx — fields are optional and fall
+   * back to org-level Provider Settings on the backend. */
+  transcriptionOptions?: Record<string, any>;
 }
 
 interface UploadsContextValue {
@@ -122,7 +126,12 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     uploads.forEach(reconcileUpload);
   }, [activeOrganization?.slug]);
 
-  const startOne = useCallback(async (file: File, forcedAction?: UploadAction, targetSessionId?: string) => {
+  const startOne = useCallback(async (
+    file: File,
+    forcedAction?: UploadAction,
+    targetSessionId?: string,
+    transcriptionOptions?: Record<string, any>,
+  ) => {
     const localId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const action = forcedAction ?? defaultActionForFile(file);
     const item: UploadItem = {
@@ -153,6 +162,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           content_type: file.type || `${detectFileKind(file)}/unknown`,
           action,
           ...(targetSessionId ? { target_session_id: targetSessionId } : {}),
+          ...(transcriptionOptions ? { transcription_options: transcriptionOptions } : {}),
         }),
         signal: abort.signal,
       });
@@ -201,7 +211,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     const workers = Array.from({ length: Math.min(MAX_PARALLEL_STARTS, pending.length) }, async () => {
       while (pending.length > 0) {
         const file = pending.shift();
-        if (file) await startOne(file, options?.action, options?.targetSessionId);
+        if (file) await startOne(file, options?.action, options?.targetSessionId, options?.transcriptionOptions);
       }
     });
     await Promise.all(workers);

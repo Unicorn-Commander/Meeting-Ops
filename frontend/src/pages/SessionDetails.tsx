@@ -11,6 +11,12 @@ import {
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
+import {
+  TranscriptionOptionsPanel,
+  serializeTranscriptionOptions,
+  DEFAULT_TRANSCRIPTION_OPTIONS,
+  type TranscriptionOptions,
+} from '../components/TranscriptionOptionsPanel';
 import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
 import { config } from '../config';
@@ -122,6 +128,18 @@ export const SessionDetails: React.FC = () => {
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>('all');
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Re-process modal: re-runs the transcribe -> diarize -> summarize -> embed
+  // pipeline against the existing audio with new options.
+  const [showReprocessModal, setShowReprocessModal] = useState(false);
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessOpts, setReprocessOpts] = useState<TranscriptionOptions>(
+    DEFAULT_TRANSCRIPTION_OPTIONS,
+  );
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
+  // Per-upload options for the audio-attach flow on this page.
+  const [attachOpts, setAttachOpts] = useState<TranscriptionOptions>(
+    DEFAULT_TRANSCRIPTION_OPTIONS,
+  );
   const [generatingEmail, setGeneratingEmail] = useState(false);
   const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
   
@@ -619,6 +637,38 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const runReprocess = async () => {
+    if (!session) return;
+    setReprocessing(true);
+    setReprocessError(null);
+    try {
+      const id = session.id || sessionId;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+      const res = await fetch(`/api/uploads/sessions/${id}/reprocess`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          transcription_options: serializeTranscriptionOptions(reprocessOpts),
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail?.detail || `Reprocess failed (${res.status})`);
+      }
+      setShowReprocessModal(false);
+      // Pipeline reruns asynchronously; the upload tray will surface progress.
+      // Refresh session view so the user sees status flip back to "processing".
+      await fetchSession();
+    } catch (err: any) {
+      setReprocessError(err?.message || 'Reprocess failed.');
+    } finally {
+      setReprocessing(false);
+    }
+  };
+
   const handleAudioUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !session) return;
@@ -635,7 +685,11 @@ export const SessionDetails: React.FC = () => {
       // ProviderRegistry, and shows progress + retry in the global upload
       // tray. Tier quotas are enforced server-side at /uploads/start.
       const targetSessionId = String(session.session_id || session.id || sessionId);
-      await startUploads([file], { action: 'attach', targetSessionId });
+      await startUploads([file], {
+        action: 'attach',
+        targetSessionId,
+        transcriptionOptions: serializeTranscriptionOptions(attachOpts),
+      });
       setShowUploadModal(false);
       // Pipeline updates session.status / transcript asynchronously; refresh
       // here so the page reflects the queued state immediately.
@@ -975,6 +1029,24 @@ export const SessionDetails: React.FC = () => {
                       Upload Audio
                     </>
                   )}
+                </button>
+              )}
+              {/* Re-process button — re-runs transcribe/diarize/summarize against
+                  the existing audio. Lets users change STT engine, speaker
+                  count, summary template etc. without re-uploading. */}
+              {session.audio_file && (
+                <button
+                  onClick={() => {
+                    setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
+                    setReprocessError(null);
+                    setShowReprocessModal(true);
+                  }}
+                  disabled={reprocessing}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                  title="Re-run transcription with different options"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Re-process
                 </button>
               )}
               
@@ -1994,6 +2066,70 @@ export const SessionDetails: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Re-process modal */}
+      {showReprocessModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-lg rounded-lg border border-gray-700 bg-gray-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
+              <div className="flex items-center gap-2">
+                <RefreshCw className="h-4 w-4 text-purple-400" />
+                <h3 className="text-base font-semibold text-white">Re-process this recording</h3>
+              </div>
+              <button
+                onClick={() => setShowReprocessModal(false)}
+                className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+              >
+                <Check className="hidden" />
+                ✕
+              </button>
+            </div>
+            <div className="space-y-4 px-5 py-4 text-sm text-gray-300">
+              <p className="text-xs text-gray-400">
+                Re-runs transcription, diarization, summarization, and embedding
+                against the existing audio file. Override any options below; the
+                rest fall back to your org's default Provider Settings.
+              </p>
+              <TranscriptionOptionsPanel
+                value={reprocessOpts}
+                onChange={setReprocessOpts}
+                defaultOpen={true}
+              />
+              {reprocessError && (
+                <p className="rounded border border-red-700 bg-red-900/30 px-3 py-2 text-xs text-red-300">
+                  {reprocessError}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-800 px-5 py-3">
+              <button
+                onClick={() => setShowReprocessModal(false)}
+                disabled={reprocessing}
+                className="rounded px-3 py-2 text-sm text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runReprocess}
+                disabled={reprocessing}
+                className="inline-flex items-center gap-2 rounded bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+              >
+                {reprocessing ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    Queuing...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4" />
+                    Queue re-process
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

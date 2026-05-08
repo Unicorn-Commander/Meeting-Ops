@@ -6,6 +6,12 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import { ProjectLinkPicker, type ProjectLink } from './ProjectLinkPicker';
+import {
+  TranscriptionOptionsPanel,
+  serializeTranscriptionOptions,
+  DEFAULT_TRANSCRIPTION_OPTIONS,
+  type TranscriptionOptions,
+} from './TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
 
 interface SessionCreatorProps {
@@ -33,6 +39,9 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
     project_id: null,
     project_slug: null,
   });
+  const [transcriptionOptions, setTranscriptionOptions] = useState<TranscriptionOptions>(
+    DEFAULT_TRANSCRIPTION_OPTIONS,
+  );
 
   const audioInputRef = useRef<HTMLInputElement>(null);
 
@@ -174,7 +183,11 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
       if (audioFile) {
         console.log('[SessionCreator] Queuing chunked attach upload...');
         const targetSessionId = String(session.session_id || session.id);
-        await startUploads([audioFile], { action: 'attach', targetSessionId });
+        await startUploads([audioFile], {
+          action: 'attach',
+          targetSessionId,
+          transcriptionOptions: serializeTranscriptionOptions(transcriptionOptions),
+        });
         setUploadProgress(50);
       }
 
@@ -356,6 +369,14 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
           value={projectLink}
           onChange={setProjectLink}
         />
+
+        {/* Transcription options — applies when audio is uploaded */}
+        {sessionType === 'upload' && (
+          <TranscriptionOptionsPanel
+            value={transcriptionOptions}
+            onChange={setTranscriptionOptions}
+          />
+        )}
 
         {/* Audio Upload (for upload type) */}
         {sessionType === 'upload' && (

@@ -194,6 +194,7 @@ _load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
 # === PHASE 4C-2 ROUTERS ===
 _load_router(app, "tts", "api.tts")
 _load_router(app, "tts_websocket", "api.tts", router_attr="ws_router")
+_load_router(app, "system_caps", "api.system_caps")
 
 
 

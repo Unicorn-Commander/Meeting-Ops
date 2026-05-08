@@ -39,8 +39,33 @@ interface AudioDevice {
 
 const SETTINGS_KEY = 'meeting-ops-settings';
 
+interface HostCapabilities {
+  local_audio: boolean;
+  npu: boolean;
+  build: 'appliance' | 'cloud' | string;
+}
+
 export default function SettingsEnhanced() {
-  const [activeSection, setActiveSection] = useState('audio');
+  const [activeSection, setActiveSection] = useState('providers');
+  const [hostCaps, setHostCaps] = useState<HostCapabilities>({
+    local_audio: true, // assume appliance until told otherwise; safest default
+    npu: false,
+    build: 'unknown',
+  });
+
+  // Probe the backend for build capabilities so we can hide UC-1
+  // appliance-only tabs (mic picker, NPU monitor, network/wifi config) on
+  // the cloud SaaS build.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/system/capabilities');
+        if (res.ok) setHostCaps(await res.json());
+      } catch {
+        /* leave defaults */
+      }
+    })();
+  }, []);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
   const [networkInfo, setNetworkInfo] = useState<any>({});
@@ -261,21 +286,28 @@ export default function SettingsEnhanced() {
     }
   }, [activeSection]);
 
-  const sections: SettingsSection[] = [
+  const allSections: SettingsSection[] = [
     // App Settings
     { id: 'audio', title: 'Audio & Recording', icon: Mic, description: 'Audio devices and recording configuration', category: 'app' },
-    { id: 'ai', title: 'AI & Transcription', icon: Cpu, description: 'AI models and processing options', category: 'app' },
+    { id: 'ai', title: 'AI & Transcription', icon: Cpu, description: 'Legacy NPU model picker — superseded by AI Providers', category: 'app' },
     { id: 'vocabulary', title: 'Custom Vocabulary', icon: BookOpen, description: 'Industry terms and acronyms for transcription', category: 'app' },
     { id: 'providers', title: 'AI Providers', icon: Network, description: 'Per-service AI provider configuration', category: 'app' },
 
     // Admin Settings
     { id: 'authentik', title: 'Authentication (Authentik)', icon: Lock, description: 'Authentik SSO configuration', category: 'admin' },
 
-    // System Settings
+    // System Settings (UC-1 appliance-only)
     { id: 'network', title: 'Network Configuration', icon: Network, description: 'Ethernet, IP, DNS settings', category: 'system' },
     { id: 'wifi', title: 'WiFi Settings', icon: Wifi, description: 'Wireless network configuration', category: 'system' },
     { id: 'performance', title: 'Performance & NPU', icon: Monitor, description: 'Hardware acceleration and limits', category: 'system' },
   ];
+
+  // Tabs that only make sense on the UC-1 appliance build (local mic /
+  // NPU / host-level network config). Hidden on the cloud SaaS build.
+  const APPLIANCE_ONLY_TABS = new Set(['audio', 'ai', 'network', 'wifi', 'performance']);
+  const sections = hostCaps.local_audio
+    ? allSections
+    : allSections.filter((s) => !APPLIANCE_ONLY_TABS.has(s.id));
 
   useEffect(() => {
     // Fetch real audio devices
