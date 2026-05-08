@@ -153,8 +153,36 @@ class ProviderRegistry:
         return InfinityRerankingProvider(api_key=api_key, endpoint=endpoint, model=model)
 
     def get_stt(self, org_id: int) -> Any:
+        """Resolve the org's configured STT provider.
+
+        Defaults to whisper.cpp at meet-whisper:8178; orgs that prefer
+        Parakeet flip provider_name="parakeet" in Provider Settings and we
+        route to meet-parakeet-svc instead. Endpoint env vars
+        (WHISPER_SERVER_URL, PARAKEET_SERVER_URL) override per deployment.
+        """
+        settings = self._get_settings(org_id, "stt")
+        provider_name = (settings.get("provider_name") or "whisper").lower()
+        endpoint_override = settings.get("endpoint_url") or ""
+        model_override = settings.get("model_name") or ""
+
+        if provider_name in ("parakeet", "nemo", "parakeet-tdt"):
+            from .impl_stt import LocalParakeetProvider
+            endpoint = endpoint_override or os.getenv(
+                "PARAKEET_SERVER_URL", "http://meet-parakeet-svc:8881"
+            )
+            return LocalParakeetProvider(
+                endpoint=endpoint,
+                model=model_override or "parakeet-tdt-1.1b",
+            )
+
         from .impl_stt import LocalWhisperProvider
-        return LocalWhisperProvider(endpoint="http://meet-whisper:8080")
+        endpoint = endpoint_override or os.getenv(
+            "WHISPER_SERVER_URL", "http://meet-whisper:8178"
+        )
+        return LocalWhisperProvider(
+            endpoint=endpoint,
+            model=model_override or "whisper.cpp-large-v3-turbo",
+        )
 
     def get_tts(self, org_id: int) -> Any:
         settings = self._get_settings(org_id, "tts")
