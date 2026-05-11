@@ -21,6 +21,21 @@ from pydantic import BaseModel, Field, field_validator
 _ALLOWED_PROVIDERS = ("whisper", "local_whisper", "parakeet", "nemo", "parakeet-tdt")
 _ALLOWED_DIARIZATION = ("auto", "manual", "off")
 _ALLOWED_SUMMARY = ("standard", "executive", "technical")
+# LiteLLM model ids currently loaded on bigboy's local GPU tier (kept in sync
+# with /home/muut/UC-Cloud-production/billing/litellm/config.yaml). Advisory
+# only — the registry doesn't validate against this list; LiteLLM rejects
+# unknown ids at request time. Frontend uses this to populate a dropdown.
+LOCAL_LLM_MODELS = (
+    "gemma-4-26b-moe",
+    "gemma-4-e4b",
+    "qwen3.6-35b-moe",
+    "qwen3.6-35b-moe-ud",
+    "qwen3.5-27b",
+    "qwen3.5-27b-opus-distill",
+    "qwen3.5-35b-a3b",
+    "gpt-oss-20b-cuda",
+    "gpt-oss-120b",
+)
 
 
 class TranscriptionOptions(BaseModel):
@@ -73,6 +88,23 @@ class TranscriptionOptions(BaseModel):
     summary_template: Optional[str] = Field(
         default=None,
         description="standard | executive | technical (default: standard).",
+    )
+
+    # LLM override for summarization. None = use the org's task=quality default
+    # (currently gemma-4-26b-moe on bigboy). Free-form string so users can pick
+    # any LiteLLM model id — the registry / LiteLLM does the validation.
+    llm_model: Optional[str] = Field(
+        default=None,
+        description="LiteLLM model id for summarization, e.g. gemma-4-26b-moe.",
+    )
+
+    # Thinking mode toggle. Qwen 3.5/3.6 and some Gemma 4 variants emit a
+    # <think>...</think> block that bloats output and adds latency. Default
+    # is OFF (chat_template_kwargs.enable_thinking=False); flip to True only
+    # for reasoning-heavy tasks where you want the trace.
+    llm_thinking: Optional[bool] = Field(
+        default=None,
+        description="If False (default), suppress <think> tags for Qwen/Gemma 4 templates.",
     )
 
     @field_validator("stt_provider")

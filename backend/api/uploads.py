@@ -783,7 +783,13 @@ async def run_upload_pipeline(upload_id: str) -> None:
             await _set_job_state(db, job, progress_pct=100, last_completed_stage="diarizing")
 
         await _set_job_state(db, job, stage="summarizing", progress_pct=10)
-        await _summarize_session(db, session, template=opts.summary_template or "standard")
+        await _summarize_session(
+            db,
+            session,
+            template=opts.summary_template or "standard",
+            llm_model=opts.llm_model,
+            llm_thinking=opts.llm_thinking,
+        )
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="summarizing")
 
         await _set_job_state(db, job, stage="embedding", progress_pct=10)
@@ -1084,6 +1090,8 @@ async def _summarize_session(
     session: RecordingSession,
     *,
     template: str = "standard",
+    llm_model: Optional[str] = None,
+    llm_thinking: Optional[bool] = None,
 ) -> None:
     transcript = session.transcript_simple or ""
     if not transcript.strip():
@@ -1095,7 +1103,12 @@ async def _summarize_session(
 
     from services.providers.registry import get_provider_registry
     registry = get_provider_registry(db)
-    llm = registry.get_llm(session.organization_id, task="quality")
+    llm = registry.get_llm(
+        session.organization_id,
+        task="quality",
+        model_override=llm_model,
+        thinking_override=llm_thinking,
+    )
     prompt = (
         f"{style}\n\n"
         "Return strict JSON with keys executive, bullets, actions, decisions, title. "

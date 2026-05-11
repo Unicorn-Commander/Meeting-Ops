@@ -14,16 +14,25 @@ DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
 
 
 class LiteLLMProvider:
-    def __init__(self, api_key: str, endpoint: str = "", model: str = "gemma-4-26b-moe"):
+    def __init__(
+        self,
+        api_key: str,
+        endpoint: str = "",
+        model: str = "gemma-4-26b-moe",
+        thinking: bool = False,
+    ):
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/") if endpoint else DEFAULT_LITELLM_ENDPOINT
         self.model = model
+        # When False (default), suppress the <think>...</think> block that
+        # Qwen 3.5+ and some Gemma 4 chat templates emit by default. Flip
+        # True for reasoning-heavy tasks where you want the trace.
+        self.thinking = thinking
 
     def _build_payload(self, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float, stream: bool) -> dict:
         # Some LiteLLM upstreams (notably the openai provider for Gemma 4 GGUFs)
         # reject the `reasoning_effort` field outright. We rely on
-        # `chat_template_kwargs.enable_thinking=False` to suppress reasoning
-        # preambles instead.
+        # `chat_template_kwargs.enable_thinking=...` to flip reasoning on/off.
         return {
             "model": self.model,
             "messages": [
@@ -33,7 +42,7 @@ class LiteLLMProvider:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
-            "chat_template_kwargs": {"enable_thinking": False},
+            "chat_template_kwargs": {"enable_thinking": bool(self.thinking)},
         }
 
     def _build_headers(self) -> dict:

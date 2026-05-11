@@ -86,7 +86,23 @@ class ProviderRegistry:
             model=model,
         )
 
-    def get_llm(self, org_id: int, task: str = "quality") -> Any:
+    def get_llm(
+        self,
+        org_id: int,
+        task: str = "quality",
+        *,
+        model_override: Optional[str] = None,
+        thinking_override: Optional[bool] = None,
+    ) -> Any:
+        """Resolve the active LLM provider for an org+task.
+
+        Precedence for the model id: caller override > per-task override on
+        the org row > org row model_name > LLM_MODEL_{FAST,QUALITY,CHAT} env
+        > hardcoded gemma-4-26b-moe fallback.
+
+        thinking_override flips chat_template_kwargs.enable_thinking; when
+        None, defaults to False (suppress <think> tags).
+        """
         settings = self._get_settings(org_id, "llm")
         provider_name = settings.get("provider_name") or "litellm"
         endpoint = settings.get("endpoint_url") or DEFAULT_LITELLM_ENDPOINT
@@ -105,22 +121,27 @@ class ProviderRegistry:
         task_override = overrides.get(task, {})
         model = task_override.get("model", model)
 
+        # Per-call overrides win over org-level settings.
+        if model_override:
+            model = model_override
+        thinking = False if thinking_override is None else bool(thinking_override)
+
         if provider_name == "litellm" or provider_name == "openai":
             from .impl_llm import LiteLLMProvider
-            return LiteLLMProvider(api_key=api_key, endpoint=endpoint, model=model)
+            return LiteLLMProvider(api_key=api_key, endpoint=endpoint, model=model, thinking=thinking)
         elif provider_name == "openrouter":
             from .impl_llm import LiteLLMProvider
-            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://openrouter.ai/api/v1", model=model)
+            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://openrouter.ai/api/v1", model=model, thinking=thinking)
         elif provider_name == "lambda":
             from .impl_llm import LiteLLMProvider
-            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://api.lambdalabs.com/v1", model=model)
+            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://api.lambdalabs.com/v1", model=model, thinking=thinking)
         elif provider_name == "bedrock":
             from .impl_llm import LiteLLMProvider
-            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://bedrock-runtime.us-east-1.amazonaws.com", model=model)
+            return LiteLLMProvider(api_key=api_key, endpoint=endpoint or "https://bedrock-runtime.us-east-1.amazonaws.com", model=model, thinking=thinking)
         else:
             from .impl_llm import LiteLLMProvider
             logger.warning(f"Unknown LLM provider '{provider_name}', falling back to LiteLLM")
-            return LiteLLMProvider(api_key=api_key, endpoint=endpoint, model=model)
+            return LiteLLMProvider(api_key=api_key, endpoint=endpoint, model=model, thinking=thinking)
 
     def get_embeddings(self, org_id: int) -> Any:
         settings = self._get_settings(org_id, "embeddings")
@@ -172,11 +193,16 @@ class ProviderRegistry:
         route through Parakeet while the org default stays Whisper (or
         vice versa).
         """
+        # Default to Parakeet on the cloud build: it runs ~3x faster than
+        # whisper-large-v3-turbo on the same hardware, returns word-level
+        # timestamps natively (whisper.cpp only does segment-level), and
+        # gives the upload pipeline a cleaner shape for the diarization
+        # merge. Orgs can flip back to whisper in Provider Settings.
         settings = self._get_settings(org_id, "stt")
         provider_name = (
             provider_override
             or settings.get("provider_name")
-            or "whisper"
+            or os.getenv("STT_DEFAULT_PROVIDER", "parakeet")
         ).lower()
         endpoint_override = settings.get("endpoint_url") or ""
         model = model_override or settings.get("model_name") or ""

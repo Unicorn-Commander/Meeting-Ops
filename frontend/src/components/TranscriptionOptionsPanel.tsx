@@ -1,5 +1,20 @@
 import React from 'react';
-import { Cpu, Users, Sparkles, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { Cpu, Users, Sparkles, FileText, ChevronDown, ChevronRight, Brain } from 'lucide-react';
+
+// LiteLLM model ids currently loaded on the local GPU tier. Keep in sync
+// with services/transcription_options.py LOCAL_LLM_MODELS.
+export const LOCAL_LLM_MODELS: { id: string; label: string }[] = [
+  { id: '', label: 'Org default (Gemma 4 26B MoE)' },
+  { id: 'gemma-4-26b-moe', label: 'Gemma 4 26B MoE (default, fast + accurate)' },
+  { id: 'qwen3.6-35b-moe', label: 'Qwen 3.6 35B MoE (highest quality)' },
+  { id: 'qwen3.6-35b-moe-ud', label: 'Qwen 3.6 35B MoE UD (long-context)' },
+  { id: 'qwen3.5-27b', label: 'Qwen 3.5 27B' },
+  { id: 'qwen3.5-27b-opus-distill', label: 'Qwen 3.5 27B (Opus-distilled)' },
+  { id: 'qwen3.5-35b-a3b', label: 'Qwen 3.5 35B A3B' },
+  { id: 'gpt-oss-20b-cuda', label: 'GPT-OSS 20B (CUDA)' },
+  { id: 'gpt-oss-120b', label: 'GPT-OSS 120B' },
+  { id: 'gemma-4-e4b', label: 'Gemma 4 E4B (tiny / fast tier)' },
+];
 
 export interface TranscriptionOptions {
   stt_provider?: 'whisper' | 'parakeet' | null;
@@ -9,6 +24,12 @@ export interface TranscriptionOptions {
   diarization_num_speakers?: number | null;
   voice_fingerprint?: boolean | null;
   summary_template?: 'standard' | 'executive' | 'technical' | null;
+  // LLM override for summarization. Empty = org default
+  // (LLM_MODEL_QUALITY env -> gemma-4-26b-moe today).
+  llm_model?: string | null;
+  // When false (default), suppresses <think> blocks for Qwen 3.5/3.6 and
+  // Gemma 4 chat templates. Flip on for reasoning-heavy work.
+  llm_thinking?: boolean | null;
 }
 
 export const DEFAULT_TRANSCRIPTION_OPTIONS: TranscriptionOptions = {
@@ -168,6 +189,37 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* LLM model + thinking mode */}
+          <div>
+            <label className="mb-1 flex items-center gap-2 text-xs font-medium text-gray-300">
+              <Brain className="h-3.5 w-3.5 text-pink-400" />
+              Summarization model
+            </label>
+            <select
+              value={value.llm_model ?? ''}
+              onChange={(e) => set('llm_model', e.target.value || null)}
+              className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-pink-500 focus:outline-none"
+            >
+              {LOCAL_LLM_MODELS.map((m) => (
+                <option key={m.id || '_default'} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+            <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
+              <input
+                type="checkbox"
+                checked={value.llm_thinking === true}
+                onChange={(e) => set('llm_thinking', e.target.checked ? true : null)}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-pink-500"
+              />
+              <span>
+                Enable model thinking traces (Qwen 3.5+ / Gemma 4)
+                <span className="ml-1 text-[11px] text-gray-500">
+                  (default off — thinking traces bloat output)
+                </span>
+              </span>
+            </label>
           </div>
         </div>
       )}
