@@ -133,6 +133,130 @@ def _read_audio_to_wav(buf: bytes | str) -> tuple[str, float]:
     return path, duration
 
 
+CHUNK_SECONDS = float(os.getenv("PARAKEET_CHUNK_SECONDS", "600"))   # 10 min default
+CHUNK_GRACE = float(os.getenv("PARAKEET_CHUNK_GRACE", "30"))        # allow up to 10:30 in a single call
+
+
+def _split_wav_chunks(audio_path: str, chunk_seconds: float = CHUNK_SECONDS) -> list[tuple[float, str]]:
+    """Slice a 16 kHz mono wav into ~chunk_seconds segments via ffmpeg.
+
+    Returns a list of (start_time_offset, chunk_path) tuples in time order.
+    Caller is responsible for unlinking the chunk files.
+    """
+    import math
+    import subprocess
+
+    # ffprobe duration is authoritative; we already have it from _read_audio_to_wav
+    # but ffmpeg's stream-copy split needs a clean slice spec anyway.
+    probe = subprocess.run(
+        ["ffprobe", "-i", audio_path, "-show_entries", "format=duration",
+         "-v", "quiet", "-of", "csv=p=0"],
+        capture_output=True, text=True,
+    )
+    try:
+        total = float(probe.stdout.strip())
+    except ValueError:
+        total = 0.0
+
+    if total <= 0:
+        return [(0.0, audio_path)]
+
+    num_chunks = max(1, math.ceil(total / chunk_seconds))
+    chunks: list[tuple[float, str]] = []
+    for i in range(num_chunks):
+        offset = i * chunk_seconds
+        fd, path = tempfile.mkstemp(prefix=f"parakeet_chunk{i:02d}_", suffix=".wav")
+        os.close(fd)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{offset:.3f}",
+            "-t", f"{chunk_seconds:.3f}",
+            "-i", audio_path,
+            "-ar", str(TARGET_SR), "-ac", "1",
+            "-c:a", "pcm_s16le",
+            path,
+        ]
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            logger.warning(
+                "ffmpeg split chunk %d/%d failed: %s",
+                i + 1, num_chunks, res.stderr.decode("utf-8", "replace")[:200],
+            )
+            continue
+        chunks.append((offset, path))
+    return chunks
+
+
+def _transcribe_chunked(audio_path: str, duration_seconds: float) -> dict[str, Any]:
+    """Dispatch wrapper: short audio goes straight to NeMo; long audio is
+    split into CHUNK_SECONDS-sized pieces, transcribed independently, and
+    merged with timestamp offsets so the response shape stays drop-in
+    compatible with the single-shot path.
+
+    Mirrors the chunking pattern in the Cognitive Companion / Meeting
+    Minutes Mac app (scripts/transcribe_parakeet.py) — Parakeet's
+    conformer attention matrix grows quadratically with audio length, so
+    full-length forward passes over multi-hour audio OOM even on 24 GB
+    GPUs.
+    """
+    if duration_seconds <= CHUNK_SECONDS + CHUNK_GRACE:
+        return _transcribe_with_timestamps(audio_path)
+
+    chunks = _split_wav_chunks(audio_path, CHUNK_SECONDS)
+    if not chunks:
+        raise HTTPException(status_code=500, detail="audio split into 0 chunks")
+
+    merged_segments: list[dict[str, Any]] = []
+    merged_words: list[dict[str, Any]] = []
+    merged_text: list[str] = []
+    used_model = None
+    try:
+        for idx, (offset, chunk_path) in enumerate(chunks):
+            logger.info("transcribing chunk %d/%d (offset=%.1fs)", idx + 1, len(chunks), offset)
+            part = _transcribe_with_timestamps(chunk_path)
+            used_model = part.get("model") or used_model
+            for seg in (part.get("segments") or []):
+                merged_segments.append({
+                    **seg,
+                    "start": float(seg.get("start", 0)) + offset,
+                    "end": float(seg.get("end", 0)) + offset,
+                })
+            for w in (part.get("words") or []):
+                merged_words.append({
+                    **w,
+                    "start": float(w.get("start", 0)) + offset,
+                    "end": float(w.get("end", 0)) + offset,
+                })
+            if part.get("text"):
+                merged_text.append(part["text"])
+            # Drop GPU caches between chunks so attention buffers from
+            # chunk N don't strand memory for chunk N+1.
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+    finally:
+        for _, p in chunks:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    return {
+        "text": " ".join(merged_text).strip(),
+        "segments": merged_segments,
+        "words": merged_words,
+        "model": used_model or _model_name,
+        "duration": duration_seconds,
+        "language": "en",
+    }
+
+
 def _transcribe_with_timestamps(audio_path: str) -> dict[str, Any]:
     """Call NeMo transcribe() with timestamp output enabled.
 
@@ -305,7 +429,7 @@ async def transcribe(
     started = time.time()
     wav_path, duration = _read_audio_to_wav(raw)
     try:
-        result = _transcribe_with_timestamps(wav_path)
+        result = _transcribe_chunked(wav_path, duration)
     finally:
         try:
             os.remove(wav_path)
