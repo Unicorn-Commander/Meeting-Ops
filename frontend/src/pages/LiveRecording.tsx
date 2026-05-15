@@ -440,28 +440,37 @@ export default function LiveRecording() {
   }, [isRecording]);
 
   // Fetch LLM model name from backend
+  // Live pipeline status — STT engine, diarization backend, LLM model.
+  // Replaces the legacy /api/settings/models read which only understood the
+  // UC-1 NPU-flavored response shape; cloud build now exposes the truth at
+  // /api/system/pipeline.
+  const [pipelineStatus, setPipelineStatus] = useState<{
+    stt: { engine: string; model: string; endpoint: string; ready: boolean; gpu?: string | null; label: string };
+    diarization: { backend: string; endpoint: string; ready: boolean; gpu?: string | null; label: string; hf_token_required?: boolean };
+    llm: { route: 'direct' | 'litellm'; model: string; endpoint: string; ready: boolean; label: string; thinking: boolean };
+    build: 'cloud' | 'appliance' | string;
+  } | null>(null);
+
   useEffect(() => {
-    const fetchModelInfo = async () => {
+    let cancelled = false;
+    const fetchPipeline = async () => {
       try {
-        const response = await fetch(`${config.apiUrl}/api/settings/models`);
-        if (response.ok) {
-          const data = await response.json();
-          const label = data.llm?.model_label || data.llm?.model || 'Granite 3.3 2B';
-          setLlmModelName(label);
-          // Set STT model name based on active backend
-          if (data.stt?.active === 'whisper-server-vulkan') {
-            const model = data.stt?.primary?.model || 'large-v3-turbo';
-            setSttModelName(`Whisper ${model} (Vulkan)`);
-          } else {
-            const fallbackName = data.stt?.fallback?.name || 'WhisperX NPU';
-            setSttModelName(fallbackName);
-          }
+        const res = await fetch('/api/system/pipeline');
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setPipelineStatus(data);
+          setLlmModelName(data.llm?.label || data.llm?.model || 'unknown');
+          setSttModelName(data.stt?.label || data.stt?.model || 'unknown');
         }
-      } catch (error) {
-        // Use default model names
+      } catch {
+        /* leave defaults */
       }
     };
-    fetchModelInfo();
+    fetchPipeline();
+    // Refresh every 30s so transient unreachability (e.g. midboy1 restart)
+    // is reflected in the panel within a reasonable window.
+    const id = setInterval(fetchPipeline, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
 
   // Fetch auto-summarization settings and active agent
@@ -1502,9 +1511,9 @@ export default function LiveRecording() {
               </div>
             </div>
             
-            {/* Pipeline Status Grid */}
+            {/* Pipeline Status Grid — live, sourced from /api/system/pipeline */}
             <div className="grid grid-cols-2 gap-3 mb-4">
-              {/* Recording Status */}
+              {/* Recording Status (local UI state, not server-side) */}
               <div className="p-3 bg-zinc-800/50 rounded-lg">
                 <div className="flex items-center gap-2 mb-1">
                   <Mic className={`w-4 h-4 ${isRecording ? 'text-red-400' : 'text-blue-400'}`} />
@@ -1515,41 +1524,53 @@ export default function LiveRecording() {
                 </div>
                 <div className="text-xs text-zinc-500">{formatDuration(duration)}</div>
               </div>
-              
-              {/* Transcription Status */}
+
+              {/* Transcription (STT) */}
               <div className="p-3 bg-zinc-800/50 rounded-lg">
                 <div className="flex items-center gap-2 mb-1">
-                  <FileText className="w-4 h-4 text-green-400" />
+                  <FileText className={`w-4 h-4 ${pipelineStatus?.stt?.ready ? 'text-green-400' : 'text-zinc-500'}`} />
                   <span className="text-xs text-zinc-400">Transcription</span>
                 </div>
-                <div className="text-sm font-medium text-green-300">
-                  {isRecording ? 'Live' : 'Ready'}
+                <div className={`text-sm font-medium ${pipelineStatus?.stt?.ready ? 'text-green-300' : 'text-red-300'}`}>
+                  {pipelineStatus?.stt?.label ?? sttModelName}
                 </div>
-                <div className="text-xs text-orange-300">{sttModelName}</div>
+                <div className="text-xs text-orange-300">
+                  {pipelineStatus?.stt?.ready
+                    ? (pipelineStatus.stt.gpu || pipelineStatus.stt.engine)
+                    : 'unreachable'}
+                </div>
               </div>
-              
-              {/* AI Model Status */}
+
+              {/* Diarization — real backend reported, real GPU */}
               <div className="p-3 bg-zinc-800/50 rounded-lg">
                 <div className="flex items-center gap-2 mb-1">
-                  <Zap className={`w-4 h-4 ${summarySettings.enableLiveSummarization ? 'text-yellow-400' : 'text-zinc-500'}`} />
-                  <span className="text-xs text-zinc-400">AI Model</span>
+                  <Users className={`w-4 h-4 ${pipelineStatus?.diarization?.ready ? 'text-emerald-400' : 'text-zinc-500'}`} />
+                  <span className="text-xs text-zinc-400">Diarization</span>
+                </div>
+                <div className={`text-sm font-medium ${pipelineStatus?.diarization?.ready ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {pipelineStatus?.diarization?.label ?? '—'}
+                </div>
+                <div className="text-xs text-emerald-400">
+                  {pipelineStatus?.diarization?.ready
+                    ? (pipelineStatus.diarization.gpu || pipelineStatus.diarization.backend)
+                    : 'unreachable'}
+                </div>
+              </div>
+
+              {/* Summarizer LLM */}
+              <div className="p-3 bg-zinc-800/50 rounded-lg">
+                <div className="flex items-center gap-2 mb-1">
+                  <Zap className={`w-4 h-4 ${pipelineStatus?.llm?.ready ? 'text-yellow-400' : 'text-zinc-500'}`} />
+                  <span className="text-xs text-zinc-400">Summarizer</span>
                 </div>
                 <div className="text-sm font-medium text-yellow-300">
-                  {summarySettings.enableLiveSummarization ? llmModelName : 'Standby'}
+                  {pipelineStatus?.llm?.label ?? llmModelName}
                 </div>
-                <div className="text-xs text-yellow-400">{summarySettings.enableLiveSummarization ? 'Port 11437' : 'Offline'}</div>
-              </div>
-              
-              {/* Word Count Progress */}
-              <div className="p-3 bg-zinc-800/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Target className="w-4 h-4 text-cyan-400" />
-                  <span className="text-xs text-zinc-400">Progress</span>
+                <div className="text-xs text-yellow-400">
+                  {pipelineStatus?.llm
+                    ? `${pipelineStatus.llm.route}${pipelineStatus.llm.thinking ? ' · thinking' : ''}`
+                    : 'unknown'}
                 </div>
-                <div className="text-sm font-medium text-cyan-300">
-                  {wordCount} words
-                </div>
-                <div className="text-xs text-cyan-400">Next: {Math.ceil(wordCount / 500) * 500}</div>
               </div>
             </div>
             
