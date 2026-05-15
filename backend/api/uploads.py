@@ -593,7 +593,7 @@ class ReprocessRequest(BaseModel):
 
 @router.post("/sessions/{session_id}/reprocess", response_model=UploadStatusResponse)
 async def reprocess_session(
-    session_id: int,
+    session_id: str,
     request: ReprocessRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -606,15 +606,35 @@ async def reprocess_session(
     progress + retry tray surfaces the work uniformly. The audio bytes are
     NOT re-uploaded — we point a synthetic UploadJob at the session's
     existing audio path on disk.
+
+    Accepts either the UUID `session_id` column or the integer primary key
+    so callers can use whichever they already have in hand. Mirrors the
+    lookup pattern used by ai_chat and other session-scoped endpoints.
     """
     rec = (
         db.query(RecordingSession)
         .filter(
-            RecordingSession.id == session_id,
+            RecordingSession.session_id == session_id,
             RecordingSession.organization_id == active_org.organization.id,
         )
         .first()
     )
+    if not rec:
+        # Fall back to integer primary key lookup for older frontend paths
+        # that pass the numeric id.
+        try:
+            pk = int(session_id)
+        except (TypeError, ValueError):
+            pk = None
+        if pk is not None:
+            rec = (
+                db.query(RecordingSession)
+                .filter(
+                    RecordingSession.id == pk,
+                    RecordingSession.organization_id == active_org.organization.id,
+                )
+                .first()
+            )
     if not rec:
         raise HTTPException(status_code=404, detail="Session not found in active organization.")
     if not rec.audio_file or not Path(rec.audio_file).exists():

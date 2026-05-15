@@ -23,6 +23,44 @@ import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
 
+/**
+ * Normalize a backend error body into a user-readable string.
+ *
+ * FastAPI returns several shapes on errors:
+ *  - 422 validation: { detail: [{loc:[...], msg:"...", type:"..."}] }
+ *  - 4xx HTTPException(detail=string): { detail: "human message" }
+ *  - 4xx HTTPException(detail=dict): { detail: { code, message, ... } } — used by quota errors
+ *  - 5xx without a detail field: { } or HTML
+ *
+ * Passing any of these straight into new Error(x) where x is an object
+ * produces the famous "[object Object]" UI bug. This helper prefers a
+ * string message in priority order, then falls back to a stringified
+ * representation that is still readable.
+ */
+function formatBackendError(body: any, status: number, fallback: string): string {
+  const tag = `${fallback} (${status})`;
+  if (!body) return tag;
+  const d = body.detail ?? body;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) {
+    // FastAPI 422 validation errors
+    const msgs = d
+      .map((e) => (e && (e.msg || e.message)) || '')
+      .filter(Boolean);
+    return msgs.length ? `${tag}: ${msgs.join('; ')}` : tag;
+  }
+  if (typeof d === 'object') {
+    if (typeof d.message === 'string') return d.message;
+    if (typeof d.error === 'string') return d.error;
+    try {
+      return `${tag}: ${JSON.stringify(d)}`;
+    } catch {
+      return tag;
+    }
+  }
+  return tag;
+}
+
 interface TranscriptionSegment {
   start: number;
   end: number;
@@ -656,7 +694,7 @@ export const SessionDetails: React.FC = () => {
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
-        throw new Error(detail?.detail || `Reprocess failed (${res.status})`);
+        throw new Error(formatBackendError(detail, res.status, 'Reprocess failed'));
       }
       setShowReprocessModal(false);
       // Pipeline reruns asynchronously; the upload tray will surface progress.
