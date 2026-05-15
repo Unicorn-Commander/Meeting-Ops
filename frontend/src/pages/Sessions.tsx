@@ -875,7 +875,7 @@ export const Sessions: React.FC = () => {
                     {/* Header */}
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <h3 className="font-semibold text-white text-lg truncate">
+                        <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight">
                           {session.title || session.name}
                         </h3>
                         {session.title && session.name !== session.title && (

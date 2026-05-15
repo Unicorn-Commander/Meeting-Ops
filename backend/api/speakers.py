@@ -564,6 +564,86 @@ async def update_speaker_link(
     return _link_to_response(db, link)
 
 
+class RediarizeRequest(BaseModel):
+    num_speakers: Optional[int] = None
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
+
+
+class RediarizeResponse(BaseModel):
+    segments: int
+    unique_speakers: int
+    linked: int
+    unmatched: int
+
+
+@router.post("/api/sessions/{session_id}/rediarize", response_model=RediarizeResponse)
+async def rediarize_session_endpoint(
+    session_id: str,
+    request: RediarizeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Re-run diarization only (no STT, no summary). Useful when pyannote
+    under-counts speakers and the user wants to force a specific count.
+
+    Wipes existing speaker_session_link rows first so identify_speakers
+    can re-seed them. Does not touch transcript_simple or any of the
+    summary fields.
+    """
+    import os
+    from services.providers.registry import get_provider_registry
+    from sqlalchemy.orm.attributes import flag_modified
+
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+
+    if not session.audio_file or not os.path.exists(session.audio_file):
+        raise HTTPException(status_code=400, detail="Session has no audio file to re-diarize")
+
+    registry = get_provider_registry(db)
+    diar_provider = registry.get_diarization(session.organization_id)
+
+    try:
+        diar_segments = await diar_provider.diarize(
+            session.audio_file,
+            num_speakers=request.num_speakers,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+        )
+    except Exception as exc:
+        logger.exception("Re-diarize failed for session %s", session.id)
+        raise HTTPException(status_code=502, detail=f"Diarization service error: {exc}")
+
+    if not diar_segments:
+        raise HTTPException(status_code=502, detail="Diarization returned no segments")
+
+    # Reset transcript_diarized with the new run + wipe stale links so
+    # identify_speakers re-creates them from the new labels.
+    from api.uploads import _assign_speakers_from_diarization
+    _assign_speakers_from_diarization(session, diar_segments)
+    db.query(SpeakerSessionLink).filter(SpeakerSessionLink.session_id == session.id).delete()
+    db.commit()
+
+    summary = identify_speakers(session, db)
+
+    # Reset ai_insights so the SessionDetails page re-extracts insights
+    # with the new speaker labels on next load.
+    session.ai_insights = None
+    db.commit()
+
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
+    unique = len({(s.get("raw_label") or s.get("speaker") or "") for s in segs if s.get("speaker")})
+
+    return RediarizeResponse(
+        segments=len(segs),
+        unique_speakers=unique,
+        linked=summary.get("linked", 0),
+        unmatched=summary.get("unmatched", 0),
+    )
+
+
 @router.post("/api/sessions/{session_id}/identify-speakers", response_model=IdentifyResponse)
 async def identify_speakers_endpoint(
     session_id: str,

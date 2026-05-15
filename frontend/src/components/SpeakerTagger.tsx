@@ -39,6 +39,9 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   const [error, setError] = useState<string | null>(null);
   const [identifying, setIdentifying] = useState(false);
   const [pendingLinkId, setPendingLinkId] = useState<number | null>(null);
+  const [redetecting, setRedetecting] = useState(false);
+  const [redetectCount, setRedetectCount] = useState<number>(2);
+
 
   const orgHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = {};
@@ -97,6 +100,30 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
     setIdentifying(false);
   };
 
+  const redetectSpeakers = async () => {
+    setRedetecting(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/sessions/${sessionId}/rediarize`,
+        {
+          method: 'POST',
+          headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ num_speakers: redetectCount }),
+        },
+      );
+      if (res.ok) {
+        await loadAll();
+      } else {
+        const txt = await res.text();
+        setError(`Re-detect failed (HTTP ${res.status}): ${txt.slice(0, 120)}`);
+      }
+    } catch (e) {
+      setError('Network error during re-detect.');
+    }
+    setRedetecting(false);
+  };
+
   const updateLink = async (link: SpeakerLink, speakerId: number | null) => {
     setPendingLinkId(link.id);
     try {
@@ -134,40 +161,77 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   if (links.length === 0) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm text-gray-500">
-            <Users className="w-4 h-4" />
-            No diarized speakers detected for this session.
-          </div>
+        <div className="flex items-center gap-2 text-sm text-gray-500 mb-3">
+          <Users className="w-4 h-4" />
+          No diarized speakers detected for this session.
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-600">Re-detect with</label>
+          <input
+            type="number"
+            min={1}
+            max={24}
+            value={redetectCount}
+            onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+            className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
+          />
+          <label className="text-xs text-gray-600">speakers</label>
           <button
-            onClick={reidentify}
-            disabled={identifying}
-            className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50 flex items-center gap-1"
+            onClick={redetectSpeakers}
+            disabled={redetecting}
+            className="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
           >
-            {identifying ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-            Run identification
+            {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+            Run
           </button>
         </div>
+        {error && (
+          <div className="mt-2 text-xs text-red-600 flex items-center gap-1">
+            <AlertCircle className="w-3 h-3" />
+            {error}
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-2">
         <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
           <Users className="w-4 h-4 text-purple-600" />
           Speaker labels
           <span className="text-xs text-gray-400">({links.length})</span>
         </div>
-        <button
-          onClick={reidentify}
-          disabled={identifying}
-          className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50 flex items-center gap-1"
-        >
-          {identifying ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-          Re-identify
-        </button>
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            min={1}
+            max={24}
+            value={redetectCount}
+            onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+            className="w-12 rounded border border-gray-300 px-1 py-0.5 text-xs"
+            title="Speakers"
+          />
+          <button
+            onClick={redetectSpeakers}
+            disabled={redetecting}
+            className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
+            title="Re-run diarization with this speaker count"
+          >
+            {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+            Re-detect
+          </button>
+          <button
+            onClick={reidentify}
+            disabled={identifying}
+            className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50 flex items-center gap-1"
+            title="Match existing labels against the speaker library"
+          >
+            {identifying ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Re-identify
+          </button>
+        </div>
       </div>
 
       {error && (
