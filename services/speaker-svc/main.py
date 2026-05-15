@@ -74,6 +74,19 @@ def _load_diarizer():
         )
         if DEVICE == "cuda":
             pipeline.to(torch.device("cuda"))
+        # Tune clustering + segmentation. Defaults under-count when
+        # voices are similar — the Meeting Minutes Mac app uses these
+        # numbers and the auto mode correctly splits 2-3 person meetings
+        # without manual hints. Best-effort: some pipeline versions
+        # don't expose .parameters() in the same shape.
+        try:
+            params = pipeline.parameters(instantiated=True)
+            params["clustering"]["threshold"] = 0.65  # default ~0.7, lower = more aggressive separation
+            params["segmentation"]["min_duration_off"] = 0.3  # min silence between turns (s)
+            pipeline.instantiate(params)
+            logger.info("Pyannote tuned: clustering.threshold=0.65, segmentation.min_duration_off=0.3")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pyannote tuning skipped: %s", exc)
         _diarizer = pipeline
         return _diarizer
     except Exception as exc:  # noqa: BLE001
@@ -232,6 +245,9 @@ async def diarize(
     audio: Optional[UploadFile] = File(default=None),
     audio_path: Optional[str] = Form(default=None),
     return_embeddings: bool = Form(default=True),
+    num_speakers: Optional[int] = Form(default=None),
+    min_speakers: Optional[int] = Form(default=None),
+    max_speakers: Optional[int] = Form(default=None),
 ):
     """Diarize. Uses Pyannote 3.1 if HUGGINGFACE_TOKEN is set; otherwise
     falls back to single-speaker ECAPA pseudo-diarization (one segment for
@@ -263,7 +279,23 @@ async def diarize(
     # Pyannote path — write the resampled wav back to a temp file because
     # pyannote pipelines expect a file path or a torchaudio waveform tuple.
     waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, T)
-    diarization = pipeline({"waveform": waveform, "sample_rate": TARGET_SR})
+    diarize_kwargs: dict[str, int] = {}
+    if num_speakers is not None:
+        diarize_kwargs["num_speakers"] = int(num_speakers)
+    else:
+        if min_speakers is not None:
+            diarize_kwargs["min_speakers"] = int(min_speakers)
+        if max_speakers is not None:
+            diarize_kwargs["max_speakers"] = int(max_speakers)
+    logger.info(
+        "/diarize duration=%.1fs hints=%s",
+        duration,
+        diarize_kwargs or "auto",
+    )
+    diarization = pipeline(
+        {"waveform": waveform, "sample_rate": TARGET_SR},
+        **diarize_kwargs,
+    )
 
     segments: list[DiarizeSegment] = []
     speakers_seen: set[str] = set()
