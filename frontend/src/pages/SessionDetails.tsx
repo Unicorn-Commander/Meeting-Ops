@@ -989,16 +989,16 @@ export const SessionDetails: React.FC = () => {
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-4 min-w-0 flex-1">
               <button
                 onClick={() => navigate('/sessions')}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
               
-              <div>
+              <div className="min-w-0 flex-1">
                 {editingTitle ? (
                   <div className="flex items-center gap-2">
                     <input
@@ -1041,7 +1041,7 @@ export const SessionDetails: React.FC = () => {
                     className="flex items-center gap-2 text-left group"
                     title="Click to rename"
                   >
-                    <h1 className="text-2xl font-bold text-gray-900">
+                    <h1 className="text-2xl font-bold text-gray-900 break-words leading-tight">
                       {session.title || session.name || 'Meeting Session'}
                     </h1>
                     <Edit2 className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
