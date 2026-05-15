@@ -1,20 +1,20 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Cpu, Users, Sparkles, FileText, ChevronDown, ChevronRight, Brain } from 'lucide-react';
 
-// LiteLLM model ids currently loaded on the local GPU tier. Keep in sync
-// with services/transcription_options.py LOCAL_LLM_MODELS.
-export const LOCAL_LLM_MODELS: { id: string; label: string }[] = [
-  { id: '', label: 'Org default (Gemma 4 26B MoE)' },
-  { id: 'gemma-4-26b-moe', label: 'Gemma 4 26B MoE (default, fast + accurate)' },
-  { id: 'qwen3.6-35b-moe', label: 'Qwen 3.6 35B MoE (highest quality)' },
-  { id: 'qwen3.6-35b-moe-ud', label: 'Qwen 3.6 35B MoE UD (long-context)' },
-  { id: 'qwen3.5-27b', label: 'Qwen 3.5 27B' },
-  { id: 'qwen3.5-27b-opus-distill', label: 'Qwen 3.5 27B (Opus-distilled)' },
-  { id: 'qwen3.5-35b-a3b', label: 'Qwen 3.5 35B A3B' },
-  { id: 'gpt-oss-20b-cuda', label: 'GPT-OSS 20B (CUDA)' },
-  { id: 'gpt-oss-120b', label: 'GPT-OSS 120B' },
-  { id: 'gemma-4-e4b', label: 'Gemma 4 E4B (tiny / fast tier)' },
+// Static fallback used while /api/system/pipeline is in flight or unreachable.
+// The live list always wins when it loads. Kept short on purpose — the real
+// catalog comes from the backend.
+const FALLBACK_LLM_MODELS: { id: string; label: string; default?: boolean }[] = [
+  { id: '', label: 'Use backend default' },
 ];
+
+interface AvailableLlmModel {
+  id: string;
+  label: string;
+  route: 'direct' | 'litellm';
+  ready: boolean;
+  default: boolean;
+}
 
 export interface TranscriptionOptions {
   stt_provider?: 'whisper' | 'parakeet' | null;
@@ -54,7 +54,36 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
   defaultOpen = false,
   hideHelp = false,
 }) => {
-  const [open, setOpen] = React.useState(defaultOpen);
+  const [open, setOpen] = useState(defaultOpen);
+  const [llmModels, setLlmModels] = useState<AvailableLlmModel[]>([]);
+  const [defaultLlmLabel, setDefaultLlmLabel] = useState<string>('');
+
+  // Live model catalog from the backend — replaces the old hardcoded
+  // LOCAL_LLM_MODELS array so the dropdown always shows what is actually
+  // loaded on our GPUs (currently Qwen3.6-35B-A3B-Vision on midboy1 P40,
+  // plus the LiteLLM local catalog).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/system/pipeline');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const models: AvailableLlmModel[] = Array.isArray(data?.available_llm_models)
+          ? data.available_llm_models
+          : [];
+        setLlmModels(models);
+        const def = models.find((m) => m.default);
+        setDefaultLlmLabel(def?.label || data?.llm?.label || data?.llm?.model || '');
+      } catch {
+        /* leave fallback */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const set = <K extends keyof TranscriptionOptions>(k: K, v: TranscriptionOptions[K]) =>
     onChange({ ...value, [k]: v });
 
@@ -202,10 +231,28 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
               onChange={(e) => set('llm_model', e.target.value || null)}
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-pink-500 focus:outline-none"
             >
-              {LOCAL_LLM_MODELS.map((m) => (
-                <option key={m.id || '_default'} value={m.id}>{m.label}</option>
-              ))}
+              <option value="">
+                {defaultLlmLabel
+                  ? `Use backend default (${defaultLlmLabel})`
+                  : 'Use backend default'}
+              </option>
+              {(llmModels.length ? llmModels : FALLBACK_LLM_MODELS.filter((m) => m.id)).map((m) => {
+                const route = 'route' in m ? (m as AvailableLlmModel).route : 'litellm';
+                const isDefault = 'default' in m && (m as AvailableLlmModel).default;
+                return (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                    {isDefault ? ' (current default)' : ''}
+                    {route === 'direct' ? ' [direct]' : ''}
+                  </option>
+                );
+              })}
             </select>
+            {llmModels.length === 0 && (
+              <p className="mt-1 text-[11px] text-gray-500">
+                Model list unavailable — backend default will be used.
+              </p>
+            )}
             <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
               <input
                 type="checkbox"
