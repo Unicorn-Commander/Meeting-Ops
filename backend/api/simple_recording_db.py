@@ -1375,6 +1375,40 @@ async def download_summary_pdf(
         logger.error(f"PDF generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
+@router.get("/recording-sessions/{session_id}/download/summary/md")
+async def download_summary_md(
+    session_id: str,
+    include_transcript: bool = False,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db)
+):
+    """Download meeting summary as GitHub-flavored markdown.
+
+    Set ?include_transcript=true to append the full diarized transcript
+    after the summary sections.
+    """
+    from fastapi.responses import Response
+
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        from api.batch_export import export_to_markdown, ExportOptions
+        options = ExportOptions(includeTranscript=include_transcript)
+        md = export_to_markdown(session, options)
+        filename = f"{(session.title or session.name or 'meeting').replace(' ', '_')}_summary.md"
+        return Response(
+            content=md,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as e:
+        logger.error(f"Markdown generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Markdown generation failed: {e}")
+
+
 @router.get("/recording-sessions/{session_id}/download/summary/docx")
 async def download_summary_docx(
     session_id: str,

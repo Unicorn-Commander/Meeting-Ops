@@ -8,6 +8,8 @@ import {
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
   Briefcase, Edit2, Check
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
@@ -1339,6 +1341,35 @@ export const SessionDetails: React.FC = () => {
                       <FileText className="w-4 h-4 text-blue-600" />
                       Summary (DOCX)
                     </button>
+
+                    <button
+                      onClick={async () => {
+                        try {
+                          const token = localStorage.getItem('access_token');
+                          const response = await fetch(
+                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/md`,
+                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
+                          );
+                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.md`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        } catch (err) {
+                          console.error('Markdown export error:', err);
+                          alert('Markdown export failed. Please try again.');
+                        }
+                      }}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <FileDown className="w-4 h-4 text-gray-700" />
+                      Summary (Markdown)
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1383,9 +1414,11 @@ export const SessionDetails: React.FC = () => {
                     {(session.final_summary?.executive || session.summary?.executive || session.summary?.analysis?.executive) && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Executive Summary</h3>
-                        <p className="text-gray-700 bg-gray-50 p-4 rounded-lg">
-                          {session.final_summary?.executive || session.summary?.executive || session.summary?.analysis?.executive}
-                        </p>
+                        <div className="text-gray-700 bg-gray-50 p-4 rounded-lg session-md">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {String(session.final_summary?.executive || session.summary?.executive || session.summary?.analysis?.executive || '')}
+                          </ReactMarkdown>
+                        </div>
                       </div>
                     )}
                     
@@ -1455,8 +1488,10 @@ export const SessionDetails: React.FC = () => {
                     {session.final_summary?.minutes && (
                       <div>
                         <h3 className="text-md font-medium text-gray-800 mb-2">Meeting Minutes</h3>
-                        <div className="text-gray-700 bg-gray-50 p-4 rounded-lg whitespace-pre-wrap">
-                          {session.final_summary.minutes}
+                        <div className="text-gray-700 bg-gray-50 p-4 rounded-lg session-md">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {String(session.final_summary.minutes)}
+                          </ReactMarkdown>
                         </div>
                       </div>
                     )}

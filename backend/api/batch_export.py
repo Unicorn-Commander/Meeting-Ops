@@ -880,6 +880,122 @@ def export_to_txt(session: RecordingSession, options: ExportOptions) -> str:
     
     return "\n".join(lines)
 
+def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str:
+    """Render the session summary as a GitHub-flavored markdown document.
+
+    Pulls structured fields from final_summary first, then falls back to
+    parsing session.summary (JSON-stringified). Includes transcript only
+    when options.includeTranscript is set.
+    """
+    title = session.title or session.name or "Untitled Meeting"
+    duration_min = round((session.duration or 0) / 60, 1)
+    created = session.created_at.strftime("%Y-%m-%d %H:%M") if session.created_at else "(unknown date)"
+
+    # Pull the summary payload — final_summary is canonical (JSON column).
+    fs = session.final_summary if isinstance(session.final_summary, dict) else {}
+    if not fs and session.summary:
+        try:
+            fs = json.loads(session.summary) if isinstance(session.summary, str) else session.summary
+        except Exception:
+            fs = {}
+
+    lines: list[str] = []
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append(f"**Date:** {created}  ")
+    lines.append(f"**Duration:** {duration_min} minutes")
+    if session.description:
+        lines.append(f"**Notes:** {session.description}")
+    lines.append("")
+
+    executive = (fs.get("executive") or "").strip()
+    if executive:
+        lines.append("## Executive Summary")
+        lines.append("")
+        lines.append(executive)
+        lines.append("")
+
+    bullets = fs.get("bullets") or []
+    if isinstance(bullets, list) and bullets:
+        lines.append("## Key Discussion Points")
+        lines.append("")
+        for b in bullets:
+            if isinstance(b, str) and b.strip():
+                lines.append(f"- {b.strip()}")
+        lines.append("")
+
+    actions = fs.get("actions") or fs.get("action_items") or []
+    if isinstance(actions, list) and actions:
+        lines.append("## Action Items")
+        lines.append("")
+        for a in actions:
+            if isinstance(a, str):
+                lines.append(f"- [ ] {a}")
+            elif isinstance(a, dict):
+                text = a.get("action") or a.get("text") or ""
+                owner = a.get("owner") or a.get("assignee")
+                priority = a.get("priority")
+                suffix = []
+                if owner:
+                    suffix.append(f"Owner: {owner}")
+                if priority:
+                    suffix.append(f"Priority: {priority}")
+                tail = f" ({', '.join(suffix)})" if suffix else ""
+                lines.append(f"- [ ] {text}{tail}")
+        lines.append("")
+
+    decisions = fs.get("decisions") or fs.get("key_decisions") or []
+    if isinstance(decisions, list) and decisions:
+        lines.append("## Decisions")
+        lines.append("")
+        for d in decisions:
+            if isinstance(d, str):
+                lines.append(f"- {d}")
+            elif isinstance(d, dict):
+                lines.append(f"- {d.get('text') or d.get('decision') or json.dumps(d)}")
+        lines.append("")
+
+    questions = fs.get("questions") or fs.get("open_questions") or fs.get("follow_ups") or []
+    if isinstance(questions, list) and questions:
+        lines.append("## Open Questions")
+        lines.append("")
+        for q in questions:
+            if isinstance(q, str):
+                lines.append(f"- {q}")
+        lines.append("")
+
+    minutes = (fs.get("minutes") or "").strip()
+    if minutes:
+        lines.append("## Meeting Minutes")
+        lines.append("")
+        lines.append(minutes)
+        lines.append("")
+
+    # Optional transcript
+    if options.includeTranscript:
+        lines.append("## Transcript")
+        lines.append("")
+        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else None
+        segs = diarized.get("segments") if diarized else None
+        if segs:
+            for seg in segs:
+                t = seg.get("text") or ""
+                if not t.strip():
+                    continue
+                spk = seg.get("speaker") or ""
+                ts = ""
+                if options.includeTimestamps and "start" in seg:
+                    ts = f"[{format_timestamp(seg['start'])}] "
+                speaker = f"**{spk}:** " if spk and options.includeSpeakers else ""
+                lines.append(f"{ts}{speaker}{t.strip()}")
+                lines.append("")
+        elif session.transcript_simple:
+            lines.append(session.transcript_simple)
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def export_to_json(session: RecordingSession, options: ExportOptions) -> str:
     """Export session to JSON format"""
     data = {

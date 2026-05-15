@@ -447,6 +447,14 @@ async def list_speaker_links(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    """List speaker-session links for this session.
+
+    If no links exist yet but the diarized transcript has labeled
+    segments (SPEAKER_01, SPEAKER_02, etc.), auto-create one unconfirmed
+    link per unique label so the inline tagger has something to attach
+    names to. This makes the UI immediately useful after a fresh upload
+    without first having to click Re-identify.
+    """
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     links = (
         db.query(SpeakerSessionLink)
@@ -454,6 +462,35 @@ async def list_speaker_links(
         .order_by(SpeakerSessionLink.raw_label.asc())
         .all()
     )
+
+    if not links:
+        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+        segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
+        seen: set[str] = set()
+        ordered_labels: list[str] = []
+        for seg in segs:
+            label = (seg.get("raw_label") or seg.get("speaker") or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            ordered_labels.append(label)
+
+        for label in ordered_labels:
+            link = SpeakerSessionLink(
+                session_id=session.id,
+                organization_id=session.organization_id,
+                raw_label=label,
+            )
+            db.add(link)
+        if ordered_labels:
+            db.commit()
+            links = (
+                db.query(SpeakerSessionLink)
+                .filter(SpeakerSessionLink.session_id == session.id)
+                .order_by(SpeakerSessionLink.raw_label.asc())
+                .all()
+            )
+
     return [_link_to_response(db, link) for link in links]
 
 
