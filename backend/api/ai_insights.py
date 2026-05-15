@@ -77,11 +77,18 @@ class MeetingInsightsResponse(BaseModel):
 @router.get("/{session_id}/insights", response_model=MeetingInsightsResponse)
 async def get_meeting_insights(
     session_id: str,
+    regenerate: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get AI-generated insights for a recording session.
+
+    Cached in the session's `ai_insights` JSON column — first call hydrates
+    it (one LLM call, ~30-40s on Qwen 3.6 35B / P40), subsequent calls
+    return the cache in milliseconds. Pass ?regenerate=true to force a
+    fresh extraction (used by the Re-process flow and the explicit
+    regenerate endpoint).
 
     Looks up sessions by session_id (UUID string) first, then by integer id.
     Requires authentication.
@@ -132,6 +139,20 @@ async def get_meeting_insights(
             for t in transcriptions if t.text
         ])
 
+        # Return cached insights when present unless the caller explicitly
+        # asked for regeneration. Each fresh extraction triggers a ~30-40s
+        # Qwen call on the P40 — caching turns subsequent page loads into
+        # millisecond DB reads.
+        cached = session.ai_insights
+        if cached and not regenerate and isinstance(cached, dict):
+            try:
+                return MeetingInsightsResponse(**cached)
+            except Exception as exc:
+                logger.warning(
+                    "Cached insights for session %s failed validation, regenerating: %s",
+                    session.id, exc,
+                )
+
         # Generate insights using the org's configured LLM
         insights = await _generate_ai_insights(
             full_transcript,
@@ -140,6 +161,13 @@ async def get_meeting_insights(
             db,
             active_org.organization.id,
         )
+        # Persist for the next page load.
+        try:
+            session.ai_insights = insights.model_dump()
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to cache insights for session %s: %s", session.id, exc)
+            db.rollback()
         return insights
         
     except HTTPException:
@@ -167,7 +195,13 @@ async def regenerate_insights(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Force regeneration of AI insights for a session. Requires authentication."""
-    return await get_meeting_insights(session_id, db, current_user, active_org)
+    return await get_meeting_insights(
+        session_id=session_id,
+        regenerate=True,
+        db=db,
+        current_user=current_user,
+        active_org=active_org,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -640,6 +640,12 @@ async def reprocess_session(
     if not rec.audio_file or not Path(rec.audio_file).exists():
         raise HTTPException(status_code=410, detail="Session audio file is not on disk; cannot reprocess.")
 
+    # Invalidate the cached ai_insights so the next /insights GET re-extracts
+    # against the new transcript/diarization. The pipeline also overwrites
+    # summary fields when it completes, but ai_insights lives separately.
+    rec.ai_insights = None
+    db.commit()
+
     # Validate options early.
     options_payload: Optional[dict] = None
     if request.transcription_options:
