@@ -1140,15 +1140,22 @@ strings), title (short string). The fenced block looks like:
 
 
 def _direct_summarizer_provider():
-    """Build a LiteLLMProvider pointing at MEETING_OPS_SUMMARIZER_URL, or
-    return None when the env is not configured (fall back to registry)."""
-    base = os.getenv("MEETING_OPS_SUMMARIZER_URL", "").strip()
-    model = os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
+    """Build a LiteLLMProvider pointing at the direct meeting-ops LLM
+    endpoint, or return None when no env is configured (caller falls back
+    to ProviderRegistry).
+
+    Prefers MEETING_OPS_LLM_URL (the broader knob that ProviderRegistry
+    also reads). Falls back to MEETING_OPS_SUMMARIZER_URL for backward
+    compat with the earlier deploy that only had a summarizer-specific
+    override.
+    """
+    base = os.getenv("MEETING_OPS_LLM_URL", "").strip() or os.getenv("MEETING_OPS_SUMMARIZER_URL", "").strip()
+    model = os.getenv("MEETING_OPS_LLM_MODEL", "").strip() or os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
     if not base or not model:
         return None
     from services.providers.impl_llm import LiteLLMProvider
     return LiteLLMProvider(
-        api_key=os.getenv("MEETING_OPS_SUMMARIZER_API_KEY", ""),
+        api_key=os.getenv("MEETING_OPS_LLM_API_KEY", "") or os.getenv("MEETING_OPS_SUMMARIZER_API_KEY", ""),
         endpoint=base,
         model=model,
         thinking=False,  # Qwen 3.6 emits <think> by default; suppress.

@@ -96,20 +96,62 @@ class ProviderRegistry:
     ) -> Any:
         """Resolve the active LLM provider for an org+task.
 
-        Precedence for the model id: caller override > per-task override on
-        the org row > org row model_name > LLM_MODEL_{FAST,QUALITY,CHAT} env
-        > hardcoded gemma-4-26b-moe fallback.
+        Precedence (highest to lowest):
+            1. caller model_override
+            2. per-org provider_settings (DB row) — explicit choice from the
+               AI Providers settings panel
+            3. MEETING_OPS_LLM_URL + MEETING_OPS_LLM_MODEL — host-level
+               direct-route override (used by the cloud build to send all
+               meeting-ops LLM traffic at the dedicated Qwen on midboy1
+               P40 #0, bypassing the bigboy LiteLLM gateway entirely)
+            4. LLM_MODEL_{FAST,QUALITY,CHAT} env
+            5. hardcoded gemma-4-26b-moe fallback
 
-        thinking_override flips chat_template_kwargs.enable_thinking; when
-        None, defaults to False (suppress <think> tags).
+        Layer 3 is intentional: without it, every meeting-ops LLM call
+        path (ai_insights / ai_chat / digests / rag_chat / summary)
+        defaults back to ProviderRegistry's LiteLLM endpoint regardless
+        of what the upload pipeline's _direct_summarizer_provider does.
+        Adding the override here means flipping the env once routes ALL
+        meeting-ops LLM workload to the same direct upstream.
+
+        thinking_override flips chat_template_kwargs.enable_thinking;
+        None defaults to False (suppress <think> tags).
         """
         settings = self._get_settings(org_id, "llm")
-        provider_name = settings.get("provider_name") or "litellm"
-        endpoint = settings.get("endpoint_url") or DEFAULT_LITELLM_ENDPOINT
-        api_key = self.get_api_key(org_id, "llm")
-        model = settings.get("model_name", "")
+        per_org_provider = settings.get("provider_name")
+        per_org_endpoint = settings.get("endpoint_url")
+        per_org_model = settings.get("model_name", "")
 
-        if not model:
+        # Host-level direct route (layer 3). Only kicks in when the org
+        # hasn't explicitly chosen a provider in Provider Settings, so
+        # paying customers can still pick OpenAI/Anthropic/etc.
+        direct_url = os.getenv("MEETING_OPS_LLM_URL", "").strip()
+        direct_model = os.getenv("MEETING_OPS_LLM_MODEL", "").strip()
+        # Backwards-compat: if MEETING_OPS_LLM_URL isn't set but the
+        # legacy summarizer-specific env is, treat that as the direct route.
+        if not direct_url:
+            direct_url = os.getenv("MEETING_OPS_SUMMARIZER_URL", "").strip()
+            direct_model = direct_model or os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
+
+        provider_name = per_org_provider or "litellm"
+        endpoint = per_org_endpoint or DEFAULT_LITELLM_ENDPOINT
+        api_key = self.get_api_key(org_id, "llm")
+        model = per_org_model
+
+        # If the org hasn't customized provider AND a host-level direct
+        # route is configured, use it. The model_override (caller) still
+        # wins to keep per-upload picks honored.
+        use_direct = (
+            not per_org_provider
+            and not per_org_model
+            and direct_url
+            and direct_model
+            and not model_override
+        )
+        if use_direct:
+            endpoint = direct_url
+            model = direct_model
+        elif not model:
             env_keys = {
                 "fast": "LLM_MODEL_FAST",
                 "quality": "LLM_MODEL_QUALITY",
@@ -121,7 +163,7 @@ class ProviderRegistry:
         task_override = overrides.get(task, {})
         model = task_override.get("model", model)
 
-        # Per-call overrides win over org-level settings.
+        # Per-call overrides win over everything above.
         if model_override:
             model = model_override
         thinking = False if thinking_override is None else bool(thinking_override)
