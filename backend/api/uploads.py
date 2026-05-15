@@ -1168,6 +1168,38 @@ def _direct_summarizer_provider():
     )
 
 
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_BARE_JSON_RE = re.compile(r"(\{(?:[^{}]|\{[^{}]*\})*\})", re.DOTALL)
+
+
+def _parse_summarizer_json(text: str, *, fallback_title: str) -> dict[str, Any]:
+    """Pull the JSON object the summarizer was asked to emit.
+
+    Qwen 3.6 emits prose then a ```json fenced block; older models return
+    bare JSON. Try fenced first, then bare, then surface the raw text as
+    the executive summary so the rest of the pipeline still gets
+    something readable.
+    """
+    text = text or ""
+    for pattern in (_FENCED_JSON_RE, _BARE_JSON_RE):
+        for match in pattern.finditer(text):
+            blob = match.group(1)
+            try:
+                data = json.loads(blob)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+    return {
+        "executive": text.strip() or "Summary generation returned no content.",
+        "bullets": [],
+        "actions": [],
+        "decisions": [],
+        "title": fallback_title,
+    }
+
+
 async def _summarize_session(
     db: Session,
     session: RecordingSession,
@@ -1221,17 +1253,7 @@ async def _summarize_session(
         ),
         timeout=240,
     )
-    analysis: dict[str, Any]
-    try:
-        analysis = json.loads(text)
-    except Exception:
-        analysis = {
-            "executive": text or "Summary generation returned no content.",
-            "bullets": [],
-            "actions": [],
-            "decisions": [],
-            "title": session.title,
-        }
+    analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
     session.summary = json.dumps(analysis)
     session.final_summary = {
         "executive": analysis.get("executive", ""),
@@ -1242,8 +1264,11 @@ async def _summarize_session(
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     session.ai_insights = analysis
-    if analysis.get("title"):
-        session.title = str(analysis["title"])[:200]
+    new_title = analysis.get("title")
+    if isinstance(new_title, str):
+        new_title = new_title.strip()
+        if new_title and new_title.lower() not in {"untitled", "meeting", "recording"}:
+            session.title = new_title[:200]
     db.commit()
     db.refresh(session)
 
