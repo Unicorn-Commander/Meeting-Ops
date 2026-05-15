@@ -16,6 +16,19 @@ interface AvailableLlmModel {
   default: boolean;
 }
 
+// Module-level cache so /api/system/pipeline is fetched at most once per
+// page load no matter how many Panel instances mount (Re-process modal,
+// SessionCreator inline, etc.). Cleared on a full SPA reload.
+const pipelineCache = (() => {
+  let value: { models: AvailableLlmModel[]; defaultLabel: string } | null = null;
+  return {
+    read: () => value,
+    write: (v: { models: AvailableLlmModel[]; defaultLabel: string }) => {
+      value = v;
+    },
+  };
+})();
+
 export interface TranscriptionOptions {
   stt_provider?: 'whisper' | 'parakeet' | null;
   stt_model?: string | null;
@@ -64,17 +77,35 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
   // plus the LiteLLM local catalog).
   useEffect(() => {
     let cancelled = false;
+    // Module-level cache so multiple Panel instances on the same page
+    // (Re-process modal + SessionCreator + SessionDetails) share one
+    // request. The cache persists for the lifetime of the SPA load so
+    // refresh-on-reopen is intentional via component remount, not via
+    // polling.
+    const cached = pipelineCache.read();
+    if (cached) {
+      setLlmModels(cached.models);
+      setDefaultLlmLabel(cached.defaultLabel);
+      return;
+    }
     (async () => {
       try {
         const res = await fetch('/api/system/pipeline');
-        if (!res.ok || cancelled) return;
+        if (cancelled) return;
+        // Auth gone — leave the fallback in place and stop. AuthContext
+        // handles the re-login prompt elsewhere; we shouldn't spam more
+        // 401s from the picker.
+        if (res.status === 401 || res.status === 403) return;
+        if (!res.ok) return;
         const data = await res.json();
         const models: AvailableLlmModel[] = Array.isArray(data?.available_llm_models)
           ? data.available_llm_models
           : [];
-        setLlmModels(models);
         const def = models.find((m) => m.default);
-        setDefaultLlmLabel(def?.label || data?.llm?.label || data?.llm?.model || '');
+        const defaultLabel = def?.label || data?.llm?.label || data?.llm?.model || '';
+        pipelineCache.write({ models, defaultLabel });
+        setLlmModels(models);
+        setDefaultLlmLabel(defaultLabel);
       } catch {
         /* leave fallback */
       }

@@ -453,10 +453,23 @@ export default function LiveRecording() {
 
   useEffect(() => {
     let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
     const fetchPipeline = async () => {
       try {
         const res = await fetch('/api/system/pipeline');
-        if (res.ok && !cancelled) {
+        if (cancelled) return;
+        // Stop the refresh loop when auth has gone away — otherwise the
+        // interval keeps spamming 401s every 30s while the user sees a
+        // login prompt. The AuthContext stale-session handler picks up
+        // the next failed call and prompts a re-auth.
+        if (res.status === 401 || res.status === 403) {
+          if (intervalId !== null) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          return;
+        }
+        if (res.ok) {
           const data = await res.json();
           setPipelineStatus(data);
           setLlmModelName(data.llm?.label || data.llm?.model || 'unknown');
@@ -468,8 +481,10 @@ export default function LiveRecording() {
     };
     fetchPipeline();
     // Refresh every 30s so transient unreachability (e.g. midboy1 restart)
-    // is reflected in the panel within a reasonable window.
-    const id = setInterval(fetchPipeline, 30_000);
+    // is reflected in the panel within a reasonable window. The handler
+    // kills the interval if auth expires so we don't log-spam.
+    intervalId = setInterval(fetchPipeline, 30_000);
+    const id = intervalId;
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
