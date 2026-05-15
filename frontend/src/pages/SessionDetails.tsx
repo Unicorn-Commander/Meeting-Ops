@@ -1908,14 +1908,21 @@ export const SessionDetails: React.FC = () => {
                     <div>
                       <p className="text-sm font-medium text-gray-600 mb-1">Key Topics</p>
                       <div className="flex flex-wrap gap-2">
-                        {insights.keywords.map((topic: string) => (
-                          <span
-                            key={topic}
-                            className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
-                          >
-                            {topic}
-                          </span>
-                        ))}
+                        {insights.keywords.map((topic: any, idx: number) => {
+                          // Backend returns KeywordTrend objects {word, frequency, trend, category};
+                          // older payloads / non-extracted runs send plain strings. Coerce either way
+                          // so React never tries to render an object as a child (error #31).
+                          const word = typeof topic === "string" ? topic : topic?.word ?? "";
+                          if (!word) return null;
+                          return (
+                            <span
+                              key={`${idx}-${word}`}
+                              className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
+                            >
+                              {word}
+                            </span>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
