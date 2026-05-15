@@ -53,7 +53,18 @@ class LocalSpeakerSvcProvider:
         speaker-svc when set; the upstream pyannote diarizer respects them.
         Leave all three None for full auto-detection (the default).
         """
-        data: dict[str, str] = {"audio_path": audio_path, "return_embeddings": "true"}
+        # Always send audio as a multipart upload rather than relying on the
+        # legacy audio_path form field. When speaker-svc runs on a different
+        # host than the backend (e.g. midboy1 vs bigboy), the path on the
+        # backend host does not resolve on the speaker-svc host. Streaming
+        # the bytes works regardless of host topology and the in-cluster
+        # case is fast enough that the extra copy is invisible.
+        import os as _os
+        if not _os.path.exists(audio_path):
+            logger.error("speaker-svc /diarize: audio file missing on disk: %s", audio_path)
+            return []
+
+        data: dict[str, str] = {"return_embeddings": "true"}
         if num_speakers is not None:
             data["num_speakers"] = str(num_speakers)
         if min_speakers is not None:
@@ -63,7 +74,13 @@ class LocalSpeakerSvcProvider:
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(f"{self.endpoint}/diarize", data=data)
+                with open(audio_path, "rb") as f:
+                    files = {"audio": (_os.path.basename(audio_path), f, "audio/wav")}
+                    resp = await client.post(
+                        f"{self.endpoint}/diarize",
+                        data=data,
+                        files=files,
+                    )
                 resp.raise_for_status()
                 payload = resp.json()
                 segments = payload.get("segments", []) or []

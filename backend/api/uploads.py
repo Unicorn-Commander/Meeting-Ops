@@ -1085,6 +1085,56 @@ _SUMMARY_TEMPLATE_GUIDANCE: dict[str, str] = {
 }
 
 
+# When MEETING_OPS_SUMMARIZER_URL is set, the upload pipeline's summary step
+# routes directly there instead of through the per-org ProviderRegistry/
+# LiteLLM gateway. Keeps the hop count low (fewer things to debug) and lets
+# us reuse the Qwen3.6-35B-A3B-Vision instance already loaded for David's
+# listing-ops flow on midboy1:8088. v1 only — long-term this should fold
+# back into ProviderRegistry for unified usage metering and per-org auth.
+MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT = """You are the meeting-ops-summarizer.
+
+Given a meeting transcript with speaker labels and timestamps, produce:
+
+1. **Executive summary** — 3-5 sentences. What was this meeting about, what was the outcome.
+2. **Decisions made** — bullet list. Format: "decision (decided by Speaker)".
+3. **Action items** — bullet list. Format: "Owner: action by deadline if specified".
+   If no owner or deadline mentioned, say so explicitly.
+4. **Open questions** — bullet list of things raised but not resolved.
+
+Writing rules:
+- No em-dashes. Use commas, periods, or two sentences.
+- Casual professional tone. Not corporate, not pitch-y.
+- Don't fabricate. If a section is empty, write "none" rather than inventing.
+- If the transcript is unclear at any point, say so rather than guessing.
+- Quote sparingly only when exact wording matters.
+
+After the human-readable sections, emit a final fenced JSON block with the
+same content split into keys executive (string), decisions (array of
+strings), actions (array of {action,owner,priority}), questions (array of
+strings), title (short string). The fenced block looks like:
+
+```json
+{"executive": "...", "decisions": [...], "actions": [...], "questions": [...], "title": "..."}
+```
+"""
+
+
+def _direct_summarizer_provider():
+    """Build a LiteLLMProvider pointing at MEETING_OPS_SUMMARIZER_URL, or
+    return None when the env is not configured (fall back to registry)."""
+    base = os.getenv("MEETING_OPS_SUMMARIZER_URL", "").strip()
+    model = os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
+    if not base or not model:
+        return None
+    from services.providers.impl_llm import LiteLLMProvider
+    return LiteLLMProvider(
+        api_key=os.getenv("MEETING_OPS_SUMMARIZER_API_KEY", ""),
+        endpoint=base,
+        model=model,
+        thinking=False,  # Qwen 3.6 emits <think> by default; suppress.
+    )
+
+
 async def _summarize_session(
     db: Session,
     session: RecordingSession,
@@ -1101,14 +1151,28 @@ async def _summarize_session(
 
     style = _SUMMARY_TEMPLATE_GUIDANCE.get(template, _SUMMARY_TEMPLATE_GUIDANCE["standard"])
 
-    from services.providers.registry import get_provider_registry
-    registry = get_provider_registry(db)
-    llm = registry.get_llm(
-        session.organization_id,
-        task="quality",
-        model_override=llm_model,
-        thinking_override=llm_thinking,
-    )
+    # Per-upload override wins, then env-configured direct route, then the
+    # org's ProviderRegistry default.
+    direct = None if llm_model else _direct_summarizer_provider()
+    if direct is not None:
+        llm = direct
+        # Use the deploy-doc system prompt verbatim when on the direct
+        # route — that's the prompt David and Aaron specced for the
+        # midboy1:8088 Qwen path.
+        system_prompt = MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT
+    else:
+        from services.providers.registry import get_provider_registry
+        registry = get_provider_registry(db)
+        llm = registry.get_llm(
+            session.organization_id,
+            task="quality",
+            model_override=llm_model,
+            thinking_override=llm_thinking,
+        )
+        system_prompt = (
+            f"You are a meeting analyst. {style} Produce concise, useful meeting summaries."
+        )
+
     prompt = (
         f"{style}\n\n"
         "Return strict JSON with keys executive, bullets, actions, decisions, title. "
@@ -1117,9 +1181,9 @@ async def _summarize_session(
     )
     text = await asyncio.wait_for(
         llm.chat(
-            system_prompt="You are a meeting analyst. Produce concise, useful meeting summaries.",
+            system_prompt=system_prompt,
             user_prompt=prompt,
-            max_tokens=900,
+            max_tokens=2000,
             temperature=0.2,
         ),
         timeout=240,
