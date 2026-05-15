@@ -200,6 +200,12 @@ export const SessionDetails: React.FC = () => {
 
   // Project link editor state
   const [editingProjectLink, setEditingProjectLink] = useState(false);
+  // Title editing: title_user_set flips True in the backend when the user
+  // saves a custom title, which then prevents auto-summary from
+  // overwriting the rename on the next reprocess.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [projectLinkDraft, setProjectLinkDraft] = useState<ProjectLink>({
     project_app: null,
     project_id: null,
@@ -787,6 +793,49 @@ export const SessionDetails: React.FC = () => {
     setEditingProjectLink(true);
   };
 
+  const startEditTitle = () => {
+    if (!session) return;
+    setTitleDraft(session.title || session.name || "");
+    setEditingTitle(true);
+  };
+
+  const saveTitle = async () => {
+    if (!session) return;
+    setSavingTitle(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ title: titleDraft }),
+        },
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setSession({
+          ...session,
+          title: data.title ?? titleDraft,
+          name: data.title ?? titleDraft,
+          title_user_set: data.title_user_set ?? true,
+        });
+        setEditingTitle(false);
+      } else {
+        const errText = await response.text();
+        alert(`Failed to rename session: ${errText}`);
+      }
+    } catch (err) {
+      console.error('Title save failed:', err);
+      alert('Failed to rename session');
+    } finally {
+      setSavingTitle(false);
+    }
+  };
+
   const saveProjectLink = async () => {
     if (!session) return;
     setSavingProjectLink(true);
@@ -948,10 +997,55 @@ export const SessionDetails: React.FC = () => {
               </button>
               
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">
-                  {session.title || session.name || 'Meeting Session'}
-                </h1>
-                {session.title && session.name !== session.title && (
+                {editingTitle ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={titleDraft}
+                      onChange={(e) => setTitleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveTitle();
+                        if (e.key === 'Escape') setEditingTitle(false);
+                      }}
+                      autoFocus
+                      maxLength={200}
+                      className="text-2xl font-bold text-gray-900 border-b-2 border-purple-500 focus:outline-none bg-transparent flex-1 min-w-[200px]"
+                      placeholder="Meeting title..."
+                    />
+                    <button
+                      onClick={saveTitle}
+                      disabled={savingTitle}
+                      className="p-1.5 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+                      title="Save (Enter)"
+                    >
+                      {savingTitle ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Check className="w-4 h-4" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setEditingTitle(false)}
+                      disabled={savingTitle}
+                      className="px-2 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
+                      title="Cancel (Esc)"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={startEditTitle}
+                    className="flex items-center gap-2 text-left group"
+                    title="Click to rename"
+                  >
+                    <h1 className="text-2xl font-bold text-gray-900">
+                      {session.title || session.name || 'Meeting Session'}
+                    </h1>
+                    <Edit2 className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </button>
+                )}
+                {!editingTitle && session.title && session.name && session.name !== session.title && (
                   <p className="text-sm text-gray-500 mt-1">Original: {session.name}</p>
                 )}
                 <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">

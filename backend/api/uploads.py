@@ -1265,7 +1265,7 @@ async def _summarize_session(
     }
     session.ai_insights = analysis
     new_title = analysis.get("title")
-    if isinstance(new_title, str):
+    if isinstance(new_title, str) and not getattr(session, "title_user_set", False):
         new_title = new_title.strip()
         if new_title and new_title.lower() not in {"untitled", "meeting", "recording"}:
             session.title = new_title[:200]

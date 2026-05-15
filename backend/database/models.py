@@ -36,6 +36,10 @@ class RecordingSession(Base):
     user_id = Column(Integer)  # Foreign key to User
     audio_file = Column(String(500))  # Changed from audio_file_path
     title = Column(String(500))  # Added title column
+    # When True, the user has manually set the title and the
+    # auto-summary step must not overwrite it on reprocess. Set by
+    # the rename endpoint; cleared if the user clears the title.
+    title_user_set = Column(Boolean, default=False, nullable=False, server_default="false")
     transcript = Column(Text)  # Added transcript column
     transcript_simple = Column(Text)  # Simple text transcript without speakers
     transcript_diarized = Column(JSON)  # Full diarized transcript with speakers

@@ -1092,6 +1092,55 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
     finally:
         db.close()
 
+class RenameSessionRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.patch("/recording-sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    request: RenameSessionRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Update user-editable session metadata (title, description).
+
+    Setting title flips title_user_set=True, which prevents the
+    auto-summary step from overwriting the rename on the next reprocess.
+    Clearing title back to empty string flips it False again so the
+    next summarize pass can re-generate one.
+    """
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.title is not None:
+        title = request.title.strip()
+        if title:
+            session.title = title[:200]
+            session.name = title[:200]
+            session.title_user_set = True
+        else:
+            # Empty title resets so auto-titling can take over again.
+            session.title_user_set = False
+
+    if request.description is not None:
+        session.description = request.description
+
+    session.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(session)
+
+    return {
+        "status": "updated",
+        "session_id": session.session_id,
+        "title": session.title,
+        "title_user_set": session.title_user_set,
+    }
+
+
 @router.patch("/recording-sessions/{session_id}/project-link")
 async def update_session_project_link(
     session_id: str,
