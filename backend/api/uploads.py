@@ -817,6 +817,35 @@ async def run_upload_pipeline(upload_id: str) -> None:
             llm_model=opts.llm_model,
             llm_thinking=opts.llm_thinking,
         )
+
+        # Pre-warm the AI Insights side-panel so the first view of this
+        # session doesn't trigger an LLM call. Without this the
+        # /insights endpoint regenerates on first access (and on every
+        # access if the cached payload fails validation), which Aaron
+        # was seeing as the GPU kicking off on view. Best-effort: if
+        # the insights call fails, the upload still completes; the
+        # endpoint will lazily regenerate on first view.
+        try:
+            await _set_job_state(db, job, stage="summarizing", progress_pct=80)
+            from api.ai_insights import _generate_ai_insights
+            transcriptions = (
+                db.query(Transcription)
+                .filter(Transcription.session_id == session.id)
+                .order_by(Transcription.start_time.asc())
+                .all()
+            )
+            full_text = (session.transcript_simple or session.transcript or "").strip()
+            insights = await _generate_ai_insights(
+                full_text,
+                transcriptions,
+                session,
+                db,
+                session.organization_id,
+            )
+            session.ai_insights = insights.model_dump()
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pre-warm of ai_insights failed for session %s: %s", session.id, exc)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="summarizing")
 
         await _set_job_state(db, job, stage="embedding", progress_pct=10)
@@ -1585,7 +1614,10 @@ async def _summarize_session(
         "title": analysis.get("title", session.title),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    session.ai_insights = analysis
+    # ai_insights is owned by api.ai_insights and stored under a
+    # MeetingInsightsResponse schema. Writing the summarizer's shape
+    # here used to fail Pydantic validation on every /insights GET and
+    # forced a fresh LLM regeneration every page load.
     new_title = analysis.get("title")
     if isinstance(new_title, str) and not getattr(session, "title_user_set", False):
         new_title = new_title.strip()
