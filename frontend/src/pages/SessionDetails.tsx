@@ -23,6 +23,7 @@ import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
 import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
 import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
+import { SpeakerTimeline } from '../components/SpeakerTimeline';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -1505,6 +1506,25 @@ export const SessionDetails: React.FC = () => {
                 </div>
               </div>
 
+              {/* Speaker timeline swimlane — one lane per speaker, colored
+                  bars at the time-ranges where they spoke, click any bar
+                  to seek the audio player. Renders only when we have a
+                  duration and multiple speakers. */}
+              {speakers.length > 1 && (
+                <SpeakerTimeline
+                  duration={session.duration || segments.reduce((m, s) => Math.max(m, s.end || 0), 0)}
+                  segments={segments.map((s) => ({ start: s.start, end: s.end, speaker: s.speaker }))}
+                  speakers={speakers}
+                  currentTime={currentTime}
+                  onSeek={(t) => {
+                    if (audioRef.current) {
+                      audioRef.current.currentTime = t;
+                      audioRef.current.play().catch(() => undefined);
+                    }
+                  }}
+                />
+              )}
+
               {/* Speaker filter chips — click to filter to one speaker */}
               {speakers.length > 1 && (
                 <div className="flex flex-wrap gap-2 mb-3 flex-shrink-0">
@@ -1604,6 +1624,8 @@ export const SessionDetails: React.FC = () => {
                 <AudioPlayer
                   src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
                   downloadAs={`${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.wav`}
+                  externalAudioRef={audioRef}
+                  onTimeUpdate={(t) => setCurrentTime(t)}
                 />
               ) : (
                 <p className="text-gray-500 text-center py-2 text-sm">No audio recording available</p>

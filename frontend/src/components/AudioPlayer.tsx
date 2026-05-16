@@ -11,6 +11,13 @@ interface AudioPlayerProps {
   onRegenerate?: () => void;
   regenerating?: boolean;
   className?: string;
+  /** External ref forwarded to the underlying <audio> element so callers
+   *  (e.g. SessionDetails) can seek via .currentTime when the user
+   *  clicks a transcript segment or a timeline bar. */
+  externalAudioRef?: React.MutableRefObject<HTMLAudioElement | null>;
+  /** Called whenever playback position updates. Lets the parent
+   *  highlight the active segment in the transcript. */
+  onTimeUpdate?: (currentTime: number) => void;
 }
 
 function fmtTime(seconds: number): string {
@@ -29,8 +36,18 @@ export default function AudioPlayer({
   onRegenerate,
   regenerating,
   className,
+  externalAudioRef,
+  onTimeUpdate,
 }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Mirror our local audio element to the caller's ref so external code
+  // can seek/play without re-implementing the controls. Done in a ref
+  // callback rather than passing externalAudioRef directly so both
+  // refs end up wired without losing the local one we use for state.
+  const setAudioEl = (el: HTMLAudioElement | null) => {
+    audioRef.current = el;
+    if (externalAudioRef) externalAudioRef.current = el;
+  };
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -79,13 +96,17 @@ export default function AudioPlayer({
   return (
     <div className={`rounded-lg border border-zinc-200 bg-zinc-50 p-3 ${className || ''}`}>
       <audio
-        ref={audioRef}
+        ref={setAudioEl}
         src={src}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration((e.target as HTMLAudioElement).duration || 0)}
-        onTimeUpdate={(e) => setPosition((e.target as HTMLAudioElement).currentTime || 0)}
+        onTimeUpdate={(e) => {
+          const t = (e.target as HTMLAudioElement).currentTime || 0;
+          setPosition(t);
+          if (onTimeUpdate) onTimeUpdate(t);
+        }}
         onEnded={() => setPlaying(false)}
       />
       <div className="flex items-center gap-3">
