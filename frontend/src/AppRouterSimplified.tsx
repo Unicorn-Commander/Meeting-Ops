@@ -12,6 +12,7 @@ import { SessionDetails } from './pages/SessionDetails';
 import { SpeakerLibrary } from './pages/SpeakerLibrary';
 import SettingsEnhanced from './pages/SettingsEnhanced';
 import { AgentConfiguration } from './pages/admin/AgentConfiguration';
+import { SharedSessionRedirect } from './components/SharedSessionRedirect';
 import { AgentDashboard } from './pages/admin/AgentDashboard';
 import { Menu, X, Circle, Clock } from 'lucide-react';
 
@@ -230,6 +231,13 @@ export function AppRouterSimplified() {
       <Route path="/sessions/:id" element={
         <ProtectedRoute>
           <SessionDetails />
+        </ProtectedRoute>
+      } />
+
+      {/* Magic-link landing: post-login redemption -> navigates to /sessions/:id */}
+      <Route path="/shared/sessions" element={
+        <ProtectedRoute>
+          <SharedSessionRedirect />
         </ProtectedRoute>
       } />
 

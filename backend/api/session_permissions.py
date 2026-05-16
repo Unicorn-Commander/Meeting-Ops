@@ -710,6 +710,88 @@ async def revoke_collaborator(
     return {"status": "revoked", "collaborator_id": collaborator_id}
 
 
+class RedeemTokenRequest(BaseModel):
+    token: str
+
+
+class RedeemTokenResponse(BaseModel):
+    valid: bool
+    session_id: Optional[str] = None
+    session_db_id: Optional[int] = None
+    access_level: Optional[AccessLevel] = None
+    reason: Optional[str] = None
+    bound_user_id: Optional[int] = None
+
+
+@router.post(
+    "/permissions/redeem",
+    response_model=RedeemTokenResponse,
+)
+async def redeem_magic_link(
+    payload: RedeemTokenRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Auth'd redemption of a magic-link share token. The frontend calls
+    this after Keycloak login on the shared-session landing page.
+
+    Binds the current user to the collaborator row (so subsequent
+    requests authorize through user_id rather than relying on the
+    token-in-URL pattern) and returns the session id + granted access
+    level. Idempotent.
+    """
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(payload.token)
+    except (ValueError, AttributeError):
+        return RedeemTokenResponse(valid=False, reason="invalid token format")
+
+    row = (
+        db.query(SessionCollaborator)
+        .filter(SessionCollaborator.token == token_uuid)
+        .first()
+    )
+    if not row:
+        return RedeemTokenResponse(valid=False, reason="token not found")
+    if not _is_collaborator_active(row):
+        reason = "revoked" if row.revoked_at is not None else "expired"
+        return RedeemTokenResponse(valid=False, reason=reason)
+
+    session = (
+        db.query(DBRecordingSession)
+        .filter(DBRecordingSession.id == row.session_id)
+        .first()
+    )
+    if not session:
+        return RedeemTokenResponse(valid=False, reason="session not found")
+
+    # Optional email match check. If the original invite was scoped to a
+    # specific email, refuse to bind a different user. Stops a leaked
+    # token from being redeemed by anyone other than the invitee.
+    if row.email and current_user.email and row.email.lower() != current_user.email.lower():
+        return RedeemTokenResponse(
+            valid=False,
+            reason="this invitation was sent to a different email address",
+        )
+
+    # Bind the user, mark accepted.
+    if row.user_id != current_user.id:
+        row.user_id = current_user.id
+    if not row.accepted_at:
+        from datetime import datetime, timezone as _tz
+        row.accepted_at = datetime.now(_tz.utc)
+    db.commit()
+
+    return RedeemTokenResponse(
+        valid=True,
+        session_id=session.session_id or str(session.id),
+        session_db_id=session.id,
+        access_level=row.access_level,
+        bound_user_id=current_user.id,
+    )
+
+
 @public_router.get(
     "/permissions/access",
     response_model=AccessTokenOut,
