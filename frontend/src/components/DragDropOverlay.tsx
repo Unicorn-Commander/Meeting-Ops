@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { UploadCloud } from 'lucide-react';
 import { UploadTriageModal } from './UploadTriageModal';
 import { useUploads } from '../contexts/UploadsContext';
+import { defaultActionForFile } from "../utils/uploads";
 
 export const DragDropOverlay: React.FC = () => {
   const { startUploads } = useUploads();

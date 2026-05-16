@@ -73,8 +73,10 @@ interface TranscriptionSegment {
 
 interface Session {
   id: string;
+  session_id?: string;          // UUID, distinct from numeric id
   name: string;
   title?: string;              // AI-generated title
+  title_user_set?: boolean;    // True once the user has manually renamed
   description?: string;
   created_at: string;
   started_at?: string;
