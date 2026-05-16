@@ -1,7 +1,7 @@
 """Database models for Meeting-Ops"""
 from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT
 from datetime import datetime, timezone
 import uuid
 
@@ -73,6 +73,85 @@ class RecordingSession(Base):
             "status": self.status,
             "extra_data": self.extra_data
         }
+
+
+class SessionCollaborator(Base):
+    """Per-meeting explicit collaborator grant.
+
+    Rows in this table live ALONGSIDE the org/project membership checks
+    in `has_session_access`. They cover two cases:
+
+    - Existing uchub Keycloak user invited by user_id (we know who they
+      are; user_id is set, email may also be cached for display).
+    - External email invitee (user_id is NULL until they accept; the
+      magic-link `token` is the only way in until then).
+
+    `access_level` is one of: 'read', 'comment', 'edit'.
+
+    Constraints are enforced by the migration (014_session_collaborators):
+    CHECK on access_level, CHECK that at least one of user_id/email is
+    set, unique index on token.
+    """
+    __tablename__ = "session_collaborators"
+    __table_args__ = (
+        Index(
+            "ix_session_collaborators_session_user",
+            "session_id",
+            "user_id",
+        ),
+        Index(
+            "ix_session_collaborators_session_email",
+            "session_id",
+            "email",
+        ),
+        Index(
+            "ix_session_collaborators_token",
+            "token",
+            unique=True,
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # user_id is set when the invitee already has a uchub-Keycloak account
+    # in our local users table. NULL means "external email only, not yet
+    # resolved to a user record".
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # CITEXT for case-insensitive matching in Postgres. SQLAlchemy will
+    # emit `CITEXT` DDL on Postgres and treat it like String elsewhere
+    # (SQLite test fixtures fall back to TEXT cleanly).
+    email = Column(CITEXT(), nullable=True)
+    access_level = Column(
+        String(20), nullable=False, default="read", server_default="read"
+    )
+    invited_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    token = Column(
+        UUID(as_uuid=True),
+        unique=True,
+        nullable=False,
+        default=uuid.uuid4,
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
 
 class Transcription(Base):
     """Transcription model - matches actual database schema"""

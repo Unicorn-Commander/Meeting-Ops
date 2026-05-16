@@ -7,7 +7,13 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from database.database import Base
-from database.models import RecordingSession, AudioFile, ChatHistory, SatelliteDevice  # noqa: F401
+from database.models import (  # noqa: F401
+    RecordingSession,
+    AudioFile,
+    ChatHistory,
+    SatelliteDevice,
+    SessionCollaborator,
+)
 from auth.models import Organization, User, UserOrganization, AuditLog  # noqa: F401
 from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary  # noqa: F401
 

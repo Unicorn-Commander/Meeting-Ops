@@ -151,6 +151,16 @@ app.add_middleware(
 _load_router(app, "auth", "auth.routes", required=True)
 _load_router(app, "recording", "api.simple_recording_db", required=True)
 _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
+# Per-meeting permissions (collaborators + magic-link share). Two
+# routers in one module: `router` carries the auth'd per-session
+# endpoints, `public_router` exposes the anonymous token-resolve.
+_load_router(app, "session_permissions", "api.session_permissions")
+_load_router(
+    app,
+    "session_permissions_public",
+    "api.session_permissions",
+    router_attr="public_router",
+)
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")

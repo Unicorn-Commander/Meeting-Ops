@@ -396,9 +396,24 @@ async def get_session(
 ) -> dict:
     """Get a specific recording session from database with error handling"""
     try:
-        # Find by session_id (UUID string)
+        # Find by session_id (UUID string), org-scoped first.
         session = _get_session_for_org(db, active_org.organization.id, session_id)
-        
+
+        # Fallback: if the session isn't in the active org, the caller
+        # might still be a per-meeting collaborator (or hold access via
+        # a future project-membership lookup). Resolve cross-org and
+        # delegate the final permission check to has_session_access so
+        # external collaborators can fetch meeting detail without being
+        # in the org's users table.
+        if not session:
+            from api.session_permissions import (
+                _get_session_by_str_id,
+                has_session_access,
+            )
+            candidate = _get_session_by_str_id(db, session_id)
+            if candidate and has_session_access(candidate.id, current_user, db) != "denied":
+                session = candidate
+
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
