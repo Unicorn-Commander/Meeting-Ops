@@ -24,6 +24,7 @@ import AudioPlayer from '../components/AudioPlayer';
 import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
 import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
 import { SpeakerTimeline } from '../components/SpeakerTimeline';
+import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -177,6 +178,7 @@ export const SessionDetails: React.FC = () => {
   // pipeline against the existing audio with new options.
   const [showReprocessModal, setShowReprocessModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showEmailModal, setShowEmailModal] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   // Speaker link + org speaker library — fetched once per session so the
   // inline SpeakerLabelEditor popover can render assign/merge targets
@@ -1236,6 +1238,17 @@ export const SessionDetails: React.FC = () => {
               >
                 <Share2 className="w-4 h-4" />
                 Share
+              </button>
+              {/* Email button — opens the email-attendees modal where the
+                  user picks named speakers + content (link / summary PDF /
+                  transcript PDF) and sends via Postmark Meeting-Ops server. */}
+              <button
+                onClick={() => setShowEmailModal(true)}
+                className="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 flex items-center gap-2 text-sm"
+                title="Email this meeting to attendees"
+              >
+                <Mail className="w-4 h-4" />
+                Email
               </button>
               {/* Re-process button — re-runs transcribe/diarize/summarize against
                   the existing audio. Lets users change STT engine, speaker
@@ -2340,6 +2353,13 @@ export const SessionDetails: React.FC = () => {
         sessionId={session.id || sessionId || ''}
         isOpen={showShareModal}
         onClose={() => setShowShareModal(false)}
+      />
+
+      {/* Email-to-attendees modal */}
+      <EmailAttendeesModal
+        sessionId={session.id || sessionId || ''}
+        isOpen={showEmailModal}
+        onClose={() => setShowEmailModal(false)}
       />
 
       {/* Re-process modal */}

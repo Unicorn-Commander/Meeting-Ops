@@ -161,6 +161,7 @@ _load_router(
     "api.session_permissions",
     router_attr="public_router",
 )
+_load_router(app, "session_emails", "api.session_emails")
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")
