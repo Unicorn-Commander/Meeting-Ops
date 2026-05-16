@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Edit2, Check, RefreshCw, GitMerge, X } from 'lucide-react';
+import { Edit2, Check, RefreshCw, GitMerge, X, User } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 
@@ -55,8 +55,18 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
 }) => {
   const { activeOrganization } = useOrg();
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<'menu' | 'rename'>('menu');
+  const [mode, setMode] = useState<'menu' | 'rename' | 'contact'>('menu');
   const [draftName, setDraftName] = useState('');
+  // Contact-card edit state. Hydrated from the API when the user opens
+  // the Edit contact action.
+  const [contactDraft, setContactDraft] = useState<{
+    display_name: string;
+    email: string;
+    phone: string;
+    title: string;
+    company: string;
+    notes: string;
+  }>({ display_name: '', email: '', phone: '', title: '', company: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -183,12 +193,75 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
     setBusy(false);
   };
 
+  const openContactEditor = async () => {
+    if (!ownLink || !ownLink.speaker_id) {
+      setError("This cluster isn't linked to a contact yet. Rename + enroll first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${ownLink.speaker_id}`, {
+        headers: orgHeaders(),
+      });
+      if (!res.ok) {
+        setError(`Couldn't load contact (HTTP ${res.status}).`);
+        setBusy(false);
+        return;
+      }
+      const data = await res.json();
+      setContactDraft({
+        display_name: data.display_name ?? '',
+        email: data.email ?? '',
+        phone: data.phone ?? '',
+        title: data.title ?? '',
+        company: data.company ?? '',
+        notes: data.notes ?? '',
+      });
+      setMode('contact');
+    } catch (e) {
+      setError('Network error loading contact.');
+    }
+    setBusy(false);
+  };
+
+  const saveContact = async () => {
+    if (!ownLink?.speaker_id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${ownLink.speaker_id}`, {
+        method: 'PATCH',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_name: contactDraft.display_name || undefined,
+          email: contactDraft.email || undefined,
+          phone: contactDraft.phone || undefined,
+          title: contactDraft.title || undefined,
+          company: contactDraft.company || undefined,
+          notes: contactDraft.notes || undefined,
+        }),
+      });
+      if (res.ok) {
+        setOpen(false);
+        setMode('menu');
+        onChanged();
+      } else {
+        const txt = await res.text();
+        setError(`Save failed (${res.status}): ${txt.slice(0, 140)}`);
+      }
+    } catch (e) {
+      setError('Network error.');
+    }
+    setBusy(false);
+  };
+
   return (
     <span className="relative inline-flex items-center">
       <button
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); setMode('menu'); setError(null); }}
         className="inline-flex items-center gap-1 text-sm font-medium text-purple-600 hover:text-purple-800 hover:underline group"
-        title="Click to rename or merge this speaker"
+        title="Click to rename, edit contact, or merge this speaker"
       >
         {speaker}
         <Edit2 className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -224,6 +297,16 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
               >
                 Rename + enroll voice…
               </button>
+              {ownLink?.speaker_id && (
+                <button
+                  onClick={openContactEditor}
+                  disabled={busy}
+                  className="w-full text-left px-2 py-1.5 rounded text-sm hover:bg-purple-50 text-gray-700 hover:text-purple-700 flex items-center gap-2 disabled:opacity-50"
+                >
+                  <User className="h-3.5 w-3.5" />
+                  Edit contact details…
+                </button>
+              )}
 
               {speakers.length > 0 && (
                 <div className="pt-1 pb-0.5">
@@ -312,6 +395,96 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
                 sample from this cluster's longest turn for auto-recognition in
                 future meetings.
               </p>
+            </div>
+          )}
+
+          {mode === 'contact' && (
+            <div className="p-3 space-y-2 max-h-80 overflow-y-auto">
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Name</label>
+                <input
+                  type="text"
+                  value={contactDraft.display_name}
+                  onChange={(e) => setContactDraft({ ...contactDraft, display_name: e.target.value })}
+                  disabled={busy}
+                  className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Email</label>
+                  <input
+                    type="email"
+                    value={contactDraft.email}
+                    placeholder="aaron@example.com"
+                    onChange={(e) => setContactDraft({ ...contactDraft, email: e.target.value })}
+                    disabled={busy}
+                    className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Phone</label>
+                  <input
+                    type="tel"
+                    value={contactDraft.phone}
+                    placeholder="+1-555-..."
+                    onChange={(e) => setContactDraft({ ...contactDraft, phone: e.target.value })}
+                    disabled={busy}
+                    className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Title</label>
+                  <input
+                    type="text"
+                    value={contactDraft.title}
+                    placeholder="CEO, PM, ..."
+                    onChange={(e) => setContactDraft({ ...contactDraft, title: e.target.value })}
+                    disabled={busy}
+                    className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Company</label>
+                  <input
+                    type="text"
+                    value={contactDraft.company}
+                    placeholder="Magic Unicorn, etc."
+                    onChange={(e) => setContactDraft({ ...contactDraft, company: e.target.value })}
+                    disabled={busy}
+                    className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Notes</label>
+                <textarea
+                  value={contactDraft.notes}
+                  onChange={(e) => setContactDraft({ ...contactDraft, notes: e.target.value })}
+                  disabled={busy}
+                  rows={2}
+                  className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  onClick={() => { setMode('menu'); setError(null); }}
+                  disabled={busy}
+                  className="px-2.5 py-1 text-xs text-gray-600 hover:text-gray-800 disabled:opacity-50"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={saveContact}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1 rounded bg-purple-600 px-3 py-1 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+                >
+                  {busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  Save contact
+                </button>
+              </div>
             </div>
           )}
         </div>
