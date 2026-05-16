@@ -765,6 +765,215 @@ async def _DEAD_OLD_REDIARIZE_FALLBACK_DO_NOT_CALL():
     return None  # type: ignore[return-value]  # placeholder
 
 
+class EnrollFromSessionRequest(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=120)
+    email: Optional[str] = Field(default=None, max_length=200)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+@router.post(
+    "/api/sessions/{session_id}/speaker-links/{link_id}/enroll",
+    response_model=SpeakerLinkResponse,
+)
+async def enroll_speaker_from_session(
+    session_id: str,
+    link_id: int,
+    payload: EnrollFromSessionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """One-click enrollment: take the user-supplied name + the longest
+    turn of this cluster's audio, create (or reuse) a SpeakerProfile,
+    save a voice sample (ECAPA embedding), and confirm the speaker_link.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+    link = (
+        db.query(SpeakerSessionLink)
+        .filter(
+            SpeakerSessionLink.id == link_id,
+            SpeakerSessionLink.session_id == session.id,
+        )
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Speaker link not found")
+
+    if not session.audio_file or not os.path.exists(session.audio_file):
+        raise HTTPException(status_code=400, detail="Session audio file is missing")
+
+    # 1) Find the longest turn for this raw_label in transcript_diarized.
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
+    longest = None
+    longest_duration = 0.0
+    for seg in segs:
+        raw = seg.get("raw_label") or seg.get("speaker") or ""
+        if raw != link.raw_label:
+            continue
+        try:
+            start = float(seg.get("start") or 0)
+            end = float(seg.get("end") or 0)
+        except (TypeError, ValueError):
+            continue
+        dur = end - start
+        if dur > longest_duration and dur >= 1.0:
+            longest_duration = dur
+            longest = (start, end)
+    if longest is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No usable turn (>=1s) for {link.raw_label} found in this session",
+        )
+
+    # 2) Slice that turn into a temp wav. Cap at 30s so embedding stays
+    # fast and the sample is a representative chunk.
+    seg_start, seg_end = longest
+    if longest_duration > 30.0:
+        seg_end = seg_start + 30.0
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        slice_path = tmp.name
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{seg_start:.3f}",
+                "-i", session.audio_file,
+                "-t", f"{(seg_end - seg_start):.3f}",
+                "-ac", "1", "-ar", "16000",
+                slice_path,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode(errors="ignore")[:300]
+            raise HTTPException(
+                status_code=500,
+                detail=f"ffmpeg slice failed: {err}",
+            )
+        with open(slice_path, "rb") as fh:
+            audio_bytes = fh.read()
+    finally:
+        try:
+            os.remove(slice_path)
+        except OSError:
+            pass
+
+    # 3) Find or create the SpeakerProfile.
+    speaker = (
+        db.query(SpeakerProfile)
+        .filter(
+            SpeakerProfile.organization_id == active_org.organization.id,
+            SpeakerProfile.display_name == payload.display_name,
+        )
+        .first()
+    )
+    created_new = False
+    if not speaker:
+        speaker = SpeakerProfile(
+            organization_id=active_org.organization.id,
+            display_name=payload.display_name,
+            email=payload.email,
+            notes=payload.notes,
+            created_by_user_id=current_user.id,
+        )
+        db.add(speaker)
+        db.flush()
+        created_new = True
+
+    # 4) Embed the slice via speaker-svc and add as a voice sample.
+    registry = get_provider_registry(db)
+    provider = registry.get_speaker_svc(active_org.organization.id)
+    embed_result = await provider.embed_bytes(audio_bytes, filename=f"sess{session.id}_{link.raw_label}.wav")
+    embedding = embed_result.get("embedding") or []
+    if not embedding:
+        if created_new:
+            db.delete(speaker)
+            db.commit()
+        raise HTTPException(status_code=502, detail="speaker-svc returned no embedding")
+
+    embedding_model = embed_result.get("model") or DEFAULT_EMBEDDING_MODEL
+    duration = embed_result.get("duration_seconds") or (seg_end - seg_start)
+
+    audio_path: Optional[str] = None
+    if STORE_SPEAKER_AUDIO:
+        os.makedirs(VOICE_SAMPLE_DIR, exist_ok=True)
+        audio_path = os.path.join(
+            VOICE_SAMPLE_DIR,
+            f"speaker_{speaker.id}_sess{session.id}_{os.urandom(4).hex()}.wav",
+        )
+        try:
+            with open(audio_path, "wb") as fh:
+                fh.write(audio_bytes)
+        except OSError as exc:
+            logger.warning("Failed to persist enrollment audio: %s", exc)
+            audio_path = None
+
+    add_voice_sample(
+        db,
+        speaker,
+        embedding,
+        source="session",
+        embedding_model=embedding_model,
+        audio_path=audio_path,
+        duration_seconds=duration,
+        source_session_id=session.id,
+    )
+
+    # 5) Confirm the speaker_session_link.
+    link.speaker_id = speaker.id
+    link.source = "manual"
+    link.confirmed = True
+    link.confirmed_by_user_id = current_user.id
+    link.similarity = 1.0  # user-asserted match
+
+    # 6) Rewrite transcript_diarized.segments so the speaker label is
+    # the display_name everywhere this raw_label appears.
+    if isinstance(diarized, dict):
+        for seg in diarized.get("segments", []):
+            raw = seg.get("raw_label") or seg.get("speaker") or ""
+            if raw == link.raw_label:
+                seg["raw_label"] = raw
+                seg["speaker"] = speaker.display_name
+        if "speakers" in diarized:
+            seen, ordered = set(), []
+            for seg in diarized.get("segments", []):
+                s = seg.get("speaker", "Unknown")
+                if s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            diarized["speakers"] = ordered
+        session.transcript_diarized = diarized
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "transcript_diarized")
+
+    # 7) Also update Transcription rows with this raw_label so the list
+    # view picks up the display name.
+    rows = (
+        db.query(Transcription)
+        .filter(
+            Transcription.session_id == session.id,
+            Transcription.speaker == link.raw_label,
+        )
+        .all()
+    )
+    for row in rows:
+        row.speaker = speaker.display_name
+
+    db.commit()
+    db.refresh(link)
+    logger.info(
+        "Enrolled speaker '%s' (id=%d, new=%s) from session %s cluster %s (turn %.1fs-%.1fs)",
+        speaker.display_name, speaker.id, created_new, session.id, link.raw_label, seg_start, seg_end,
+    )
+    return _link_to_response(db, link)
+
+
 @router.post("/api/sessions/{session_id}/identify-speakers", response_model=IdentifyResponse)
 async def identify_speakers_endpoint(
     session_id: str,

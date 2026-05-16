@@ -44,6 +44,13 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   // null = auto-detect speaker count (no num_speakers hint); use threshold instead.
   const [redetectAuto, setRedetectAuto] = useState<boolean>(false);
   const [redetectThreshold, setRedetectThreshold] = useState<number>(0.72);
+  // Per-link "Enroll new speaker" inline form state. When set, the
+  // matching link row swaps its dropdown for a name input + Save button
+  // that calls the enroll-from-session endpoint to create a
+  // SpeakerProfile + voice sample in one step.
+  const [enrollingLinkId, setEnrollingLinkId] = useState<number | null>(null);
+  const [enrollName, setEnrollName] = useState<string>("");
+  const [enrolling, setEnrolling] = useState(false);
 
 
   const orgHeaders = (): Record<string, string> => {
@@ -156,6 +163,39 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
       setError('Network error during re-detect.');
     }
     setRedetecting(false);
+  };
+
+  const enrollFromSession = async (link: SpeakerLink, displayName: string) => {
+    const name = displayName.trim();
+    if (!name) {
+      setError('Enter a name for this speaker.');
+      return;
+    }
+    setEnrolling(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${link.id}/enroll`,
+        {
+          method: 'POST',
+          headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ display_name: name }),
+        },
+      );
+      if (res.ok) {
+        // Re-pull both lists: a new SpeakerProfile may have been created
+        // and the link is now confirmed against it.
+        await loadAll();
+        setEnrollingLinkId(null);
+        setEnrollName("");
+      } else {
+        const txt = await res.text();
+        setError(`Enroll failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
+      }
+    } catch (e) {
+      setError('Network error during enrollment.');
+    }
+    setEnrolling(false);
   };
 
   const updateLink = async (link: SpeakerLink, speakerId: number | null) => {
@@ -301,43 +341,86 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         {links.map(link => {
           const sim = link.similarity ?? null;
           const simBadge = sim !== null ? `${(sim * 100).toFixed(0)}%` : null;
+          const isEnrolling = enrollingLinkId === link.id;
           return (
             <div key={link.id} className="flex items-center gap-3 text-sm">
               <span className="font-mono text-xs text-gray-500 w-24 truncate" title={link.raw_label}>
                 {link.raw_label}
               </span>
-              <select
-                aria-label={`Speaker for ${link.raw_label}`}
-                value={link.speaker_id ?? ''}
-                onChange={e => {
-                  const v = e.target.value;
-                  updateLink(link, v ? Number(v) : null);
-                }}
-                disabled={pendingLinkId === link.id}
-                className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50"
-              >
-                <option value="">— Unknown —</option>
-                {speakers.map(s => (
-                  <option key={s.id} value={s.id}>
-                    {s.display_name}
-                    {!s.has_centroid && ' (no enrollment)'}
-                  </option>
-                ))}
-              </select>
-              {link.confirmed && (
-                <span title="Manually confirmed" className="text-green-600">
-                  <Check className="w-4 h-4" />
-                </span>
-              )}
-              {!link.confirmed && link.source === 'auto' && simBadge && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700" title="Auto-matched confidence">
-                  {simBadge}
-                </span>
-              )}
-              {!link.confirmed && link.source === 'auto' && !simBadge && link.speaker_id === null && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700" title="No match found">
-                  no match
-                </span>
+              {isEnrolling ? (
+                <>
+                  <input
+                    type="text"
+                    value={enrollName}
+                    placeholder="e.g. Aaron Stransky"
+                    autoFocus
+                    onChange={(e) => setEnrollName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !enrolling) enrollFromSession(link, enrollName);
+                      if (e.key === 'Escape') { setEnrollingLinkId(null); setEnrollName(""); }
+                    }}
+                    disabled={enrolling}
+                    className="flex-1 rounded border border-purple-400 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
+                  <button
+                    onClick={() => enrollFromSession(link, enrollName)}
+                    disabled={enrolling || !enrollName.trim()}
+                    className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
+                    title="Create speaker profile + enroll voice from this clip"
+                  >
+                    {enrolling ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    Save
+                  </button>
+                  <button
+                    onClick={() => { setEnrollingLinkId(null); setEnrollName(""); }}
+                    disabled={enrolling}
+                    className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <select
+                    aria-label={`Speaker for ${link.raw_label}`}
+                    value={link.speaker_id ?? ''}
+                    onChange={e => {
+                      const v = e.target.value;
+                      if (v === '__enroll__') {
+                        setEnrollingLinkId(link.id);
+                        setEnrollName("");
+                        return;
+                      }
+                      updateLink(link, v ? Number(v) : null);
+                    }}
+                    disabled={pendingLinkId === link.id}
+                    className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50"
+                  >
+                    <option value="">— Unknown —</option>
+                    {speakers.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.display_name}
+                        {!s.has_centroid && ' (no enrollment)'}
+                      </option>
+                    ))}
+                    <option value="__enroll__">+ Enroll new speaker…</option>
+                  </select>
+                  {link.confirmed && (
+                    <span title="Manually confirmed" className="text-green-600">
+                      <Check className="w-4 h-4" />
+                    </span>
+                  )}
+                  {!link.confirmed && link.source === 'auto' && simBadge && (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700" title="Auto-matched confidence">
+                      {simBadge}
+                    </span>
+                  )}
+                  {!link.confirmed && link.source === 'auto' && !simBadge && link.speaker_id === null && (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700" title="No match found">
+                      no match
+                    </span>
+                  )}
+                </>
               )}
             </div>
           );
