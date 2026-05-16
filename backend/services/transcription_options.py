@@ -75,6 +75,17 @@ class TranscriptionOptions(BaseModel):
         le=24,
         description="Used only when diarization_mode='manual'.",
     )
+    diarization_clustering_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.3,
+        le=0.95,
+        description=(
+            "Pyannote agglomerative clustering threshold. Lower => more aggressive "
+            "separation (more speakers); higher => more merging (fewer speakers). "
+            "None = use the service env default (currently 0.72). UI typically "
+            "picks one of 0.66 / 0.72 / 0.78."
+        ),
+    )
 
     # Voice fingerprint enrichment: match each diarized cluster against the
     # org's SpeakerProfile library and label automatically.

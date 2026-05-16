@@ -568,6 +568,7 @@ class RediarizeRequest(BaseModel):
     num_speakers: Optional[int] = None
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
+    clustering_threshold: Optional[float] = None
 
 
 class RediarizeResponse(BaseModel):
@@ -610,6 +611,7 @@ async def rediarize_session_endpoint(
             num_speakers=request.num_speakers,
             min_speakers=request.min_speakers,
             max_speakers=request.max_speakers,
+            clustering_threshold=request.clustering_threshold,
         )
     except Exception as exc:
         logger.exception("Re-diarize failed for session %s", session.id)

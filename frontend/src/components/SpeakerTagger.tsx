@@ -41,6 +41,9 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   const [pendingLinkId, setPendingLinkId] = useState<number | null>(null);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectCount, setRedetectCount] = useState<number>(2);
+  // null = auto-detect speaker count (no num_speakers hint); use threshold instead.
+  const [redetectAuto, setRedetectAuto] = useState<boolean>(false);
+  const [redetectThreshold, setRedetectThreshold] = useState<number>(0.72);
 
 
   const orgHeaders = (): Record<string, string> => {
@@ -104,12 +107,15 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
     setRedetecting(true);
     setError(null);
     try {
+      const body: any = redetectAuto
+        ? { clustering_threshold: redetectThreshold }
+        : { num_speakers: redetectCount };
       const res = await fetch(
         `${config.apiBaseUrl}/api/sessions/${sessionId}/rediarize`,
         {
           method: 'POST',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ num_speakers: redetectCount }),
+          body: JSON.stringify(body),
         },
       );
       if (res.ok) {
@@ -203,21 +209,43 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
           Speaker labels
           <span className="text-xs text-gray-400">({links.length})</span>
         </div>
-        <div className="flex items-center gap-1">
-          <input
-            type="number"
-            min={1}
-            max={24}
-            value={redetectCount}
-            onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
-            className="w-12 rounded border border-gray-300 px-1 py-0.5 text-xs"
-            title="Speakers"
-          />
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={redetectAuto}
+              onChange={(e) => setRedetectAuto(e.target.checked)}
+              className="h-3 w-3"
+            />
+            Auto
+          </label>
+          {redetectAuto ? (
+            <select
+              value={redetectThreshold}
+              onChange={(e) => setRedetectThreshold(Number(e.target.value))}
+              className="text-xs rounded border border-gray-300 px-1 py-0.5"
+              title="Speaker sensitivity"
+            >
+              <option value={0.78}>Strict</option>
+              <option value={0.72}>Balanced</option>
+              <option value={0.66}>Loose</option>
+            </select>
+          ) : (
+            <input
+              type="number"
+              min={1}
+              max={24}
+              value={redetectCount}
+              onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+              className="w-12 rounded border border-gray-300 px-1 py-0.5 text-xs"
+              title="Speakers"
+            />
+          )}
           <button
             onClick={redetectSpeakers}
             disabled={redetecting}
             className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
-            title="Re-run diarization with this speaker count"
+            title={redetectAuto ? "Re-run with auto-detect at this sensitivity" : "Re-run diarization with this speaker count"}
           >
             {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
             Re-detect

@@ -41,6 +41,7 @@ class LocalSpeakerSvcProvider:
         num_speakers: Optional[int] = None,
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
+        clustering_threshold: Optional[float] = None,
     ) -> list[dict]:
         """Return a list of diarized segments.
 
@@ -71,6 +72,8 @@ class LocalSpeakerSvcProvider:
             data["min_speakers"] = str(min_speakers)
         if max_speakers is not None:
             data["max_speakers"] = str(max_speakers)
+        if clustering_threshold is not None:
+            data["clustering_threshold"] = str(clustering_threshold)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:

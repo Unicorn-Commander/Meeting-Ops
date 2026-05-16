@@ -35,6 +35,10 @@ export interface TranscriptionOptions {
   language?: string | null;
   diarization_mode?: 'auto' | 'manual' | 'off' | null;
   diarization_num_speakers?: number | null;
+  // Lower threshold => more speakers (aggressive splitting); higher => fewer
+  // (conservative merging). Stock pyannote default is ~0.7045; we ship 0.72.
+  // UI presents this as a 3-tier picker (Loose / Balanced / Strict).
+  diarization_clustering_threshold?: number | null;
   voice_fingerprint?: boolean | null;
   summary_template?: 'standard' | 'executive' | 'technical' | null;
   // LLM override for summarization. Empty = org default
@@ -201,6 +205,40 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
                   }
                   className="w-20 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-white"
                 />
+              </div>
+            )}
+            {diarMode === 'auto' && (
+              <div className="mt-3">
+                <label className="mb-1 block text-xs text-gray-400">
+                  Sensitivity
+                  <span className="ml-1 text-gray-500">
+                    (Strict groups similar voices; Loose splits them apart)
+                  </span>
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { id: 0.78, label: 'Strict' },
+                    { id: 0.72, label: 'Balanced' },
+                    { id: 0.66, label: 'Loose' },
+                  ] as const).map((p) => {
+                    const current = value.diarization_clustering_threshold ?? 0.72;
+                    const active = Math.abs(current - p.id) < 0.001;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => set('diarization_clustering_threshold', p.id)}
+                        className={`rounded border px-3 py-2 text-xs ${
+                          active
+                            ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200'
+                            : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>

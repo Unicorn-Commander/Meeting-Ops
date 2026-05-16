@@ -791,6 +791,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 diar_segments = await diar_provider.diarize(
                     str(audio_path),
                     num_speakers=num_speakers,
+                    clustering_threshold=opts.diarization_clustering_threshold,
                 )
                 # 2) Merge labels onto the transcription segments + persist
                 if diar_segments:

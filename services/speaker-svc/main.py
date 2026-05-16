@@ -74,17 +74,27 @@ def _load_diarizer():
         )
         if DEVICE == "cuda":
             pipeline.to(torch.device("cuda"))
-        # Tune clustering + segmentation. Defaults under-count when
-        # voices are similar — the Meeting Minutes Mac app uses these
-        # numbers and the auto mode correctly splits 2-3 person meetings
-        # without manual hints. Best-effort: some pipeline versions
-        # don't expose .parameters() in the same shape.
+        # Tune clustering + segmentation. Threshold has two failure modes:
+        # - too low (e.g. 0.65 from Meeting Minutes): over-splits one
+        #   speaker's varied speech into multiple clusters. Aaron's
+        #   5-speaker Legacy 21 came back as 14 at 0.65.
+        # - too high (~0.7045 model default): merges similar voices into
+        #   one. The Citadel meeting came back as 1 speaker at default
+        #   before this knob existed.
+        # 0.72 sits a hair above the model default, biasing toward
+        # merging when in doubt. Env-tunable so we can dial per deploy
+        # without rebuilding.
+        clustering_thr = float(os.getenv("PYANNOTE_CLUSTERING_THRESHOLD", "0.72"))
+        min_off = float(os.getenv("PYANNOTE_MIN_DURATION_OFF", "0.5"))
         try:
             params = pipeline.parameters(instantiated=True)
-            params["clustering"]["threshold"] = 0.65  # default ~0.7, lower = more aggressive separation
-            params["segmentation"]["min_duration_off"] = 0.3  # min silence between turns (s)
+            params["clustering"]["threshold"] = clustering_thr
+            params["segmentation"]["min_duration_off"] = min_off
             pipeline.instantiate(params)
-            logger.info("Pyannote tuned: clustering.threshold=0.65, segmentation.min_duration_off=0.3")
+            logger.info(
+                "Pyannote tuned: clustering.threshold=%.3f, segmentation.min_duration_off=%.3f",
+                clustering_thr, min_off,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pyannote tuning skipped: %s", exc)
         _diarizer = pipeline
@@ -248,6 +258,7 @@ async def diarize(
     num_speakers: Optional[int] = Form(default=None),
     min_speakers: Optional[int] = Form(default=None),
     max_speakers: Optional[int] = Form(default=None),
+    clustering_threshold: Optional[float] = Form(default=None),
 ):
     """Diarize. Uses Pyannote 3.1 if HUGGINGFACE_TOKEN is set; otherwise
     falls back to single-speaker ECAPA pseudo-diarization (one segment for
@@ -279,6 +290,22 @@ async def diarize(
     # Pyannote path — write the resampled wav back to a temp file because
     # pyannote pipelines expect a file path or a torchaudio waveform tuple.
     waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, T)
+
+    # Per-call clustering threshold override. Re-instantiate the pipeline
+    # only when the caller asked for a value different from what's
+    # already loaded — re-instantiation is cheap (no model reload) but
+    # not free, and most calls use the env default.
+    if clustering_threshold is not None:
+        try:
+            params = pipeline.parameters(instantiated=True)
+            current_thr = float(params.get("clustering", {}).get("threshold") or 0)
+            if abs(current_thr - float(clustering_threshold)) > 1e-4:
+                params["clustering"]["threshold"] = float(clustering_threshold)
+                pipeline.instantiate(params)
+                logger.info("Pyannote per-call threshold override: %.3f", clustering_threshold)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Per-call threshold override skipped: %s", exc)
+
     diarize_kwargs: dict[str, int] = {}
     if num_speakers is not None:
         diarize_kwargs["num_speakers"] = int(num_speakers)
@@ -288,9 +315,10 @@ async def diarize(
         if max_speakers is not None:
             diarize_kwargs["max_speakers"] = int(max_speakers)
     logger.info(
-        "/diarize duration=%.1fs hints=%s",
+        "/diarize duration=%.1fs hints=%s threshold=%s",
         duration,
         diarize_kwargs or "auto",
+        clustering_threshold if clustering_threshold is not None else "env-default",
     )
     diarization = pipeline(
         {"waveform": waveform, "sample_rate": TARGET_SR},
