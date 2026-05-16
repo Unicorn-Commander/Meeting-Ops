@@ -590,6 +590,12 @@ async def update_speaker_link(
         from sqlalchemy.orm.attributes import flag_modified
         flag_modified(session, "transcript_diarized")
 
+    # If we just assigned a speaker, propagate the rename into summary text.
+    if link.speaker_id:
+        sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
+        if sp:
+            _propagate_speaker_rename(session, [link.raw_label], sp.display_name)
+
     db.commit()
     db.refresh(link)
     return _link_to_response(db, link)
