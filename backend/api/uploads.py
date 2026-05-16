@@ -1282,30 +1282,78 @@ _SUMMARY_TEMPLATE_GUIDANCE: dict[str, str] = {
 # us reuse the Qwen3.6-35B-A3B-Vision instance already loaded for David's
 # listing-ops flow on midboy1:8088. v1 only — long-term this should fold
 # back into ProviderRegistry for unified usage metering and per-org auth.
-MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT = """You are the meeting-ops-summarizer.
+# System prompt + style template ported from the Meeting Minutes Mac app
+# (scripts/summarize.py qwen3.6-moe variant). Same wording so the two
+# stacks produce comparable output. The fenced-JSON tail at the bottom
+# of the user prompt is meeting-ops-specific — our DB stores structured
+# fields (bullets, actions[], decisions[], title) so we ask the model to
+# emit both the human-readable markdown AND a JSON payload at the end.
+MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT = """You are an expert executive assistant specializing in meeting analysis and summarization. Your task is to produce comprehensive, well-structured meeting notes from transcripts.
 
-Given a meeting transcript with speaker labels and timestamps, produce:
+Critical rules you must follow:
+1. Only include information explicitly stated in the transcript. Never fabricate details.
+2. If an action item owner or deadline is not mentioned, write "Not specified."
+3. Use direct quotes only when the speaker's exact words appear in the transcript.
+4. Attribute all statements and decisions to the specific speaker who made them.
+5. Format your output with clear markdown structure using headers, lists, and tables.
+6. Be thorough but concise - include all substantive points without padding."""
 
-1. **Executive summary** — 3-5 sentences. What was this meeting about, what was the outcome.
-2. **Decisions made** — bullet list. Format: "decision (decided by Speaker)".
-3. **Action items** — bullet list. Format: "Owner: action by deadline if specified".
-   If no owner or deadline mentioned, say so explicitly.
-4. **Open questions** — bullet list of things raised but not resolved.
 
-Writing rules:
-- No em-dashes. Use commas, periods, or two sentences.
-- Casual professional tone. Not corporate, not pitch-y.
-- Don't fabricate. If a section is empty, write "none" rather than inventing.
-- If the transcript is unclear at any point, say so rather than guessing.
-- Quote sparingly only when exact wording matters.
+# The user-prompt scaffold. Speaker context (if any) plus the transcript
+# get spliced in by _summarize_session().
+MEETING_OPS_SUMMARIZER_STYLE_PROMPT = """Analyze the following meeting transcript and produce comprehensive, structured meeting notes.
 
-After the human-readable sections, emit a final fenced JSON block with the
-same content split into keys executive (string), decisions (array of
-strings), actions (array of {action,owner,priority}), questions (array of
-strings), title (short string). The fenced block looks like:
+{speaker_context}
+
+Output the following sections in order. Include ALL substantive information from the transcript.
+
+## Executive Summary
+Write 2-3 sentences capturing the meeting's main purpose, key outcomes, and overall tone.
+
+## Key Discussion Points
+For each major topic discussed, create a numbered section:
+1. **[Topic Title]**
+   - [Key point] ([Speaker Name] raised this)
+   - [Supporting detail or counterpoint] ([Speaker Name])
+   Include all perspectives shared, areas of agreement, and disagreements.
+
+## Action Items
+Create a markdown table with these columns:
+| Owner | Action | Priority | Deadline |
+For each action item mentioned or implied. If owner/deadline not stated, write "Not specified."
+
+## Key Decisions
+List each decision made during the meeting:
+- **[Decision]** - Made by [who], rationale: [why, if discussed]
+
+## Key Quotes
+Select 3-5 notable quotes that capture important positions, commitments, or insights:
+> "[Exact words from transcript]" - [Speaker Name]
+> Context: [One sentence explaining why this quote matters]
+
+## Next Steps
+- [Next step with responsible person if mentioned]
+
+## Open Questions
+- [Any unresolved items that need follow-up]
+
+---
+TRANSCRIPT:
+{transcript}
+
+---
+After the markdown sections above, emit a single fenced JSON block with the same content split into structured keys. This is required for downstream tooling. The fenced block looks like:
 
 ```json
-{"executive": "...", "decisions": [...], "actions": [...], "questions": [...], "title": "..."}
+{{"executive": "...",
+  "bullets": ["topic 1: point", "topic 2: point", ...],
+  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "..."}}],
+  "decisions": ["decision (decided by Speaker)", ...],
+  "questions": ["..."],
+  "quotes": [{{"text": "...", "speaker": "...", "context": "..."}}],
+  "next_steps": ["..."],
+  "minutes": "the full markdown output above as a single string",
+  "title": "short descriptive title for this meeting"}}
 ```
 """
 
@@ -1365,6 +1413,20 @@ def _parse_summarizer_json(text: str, *, fallback_title: str) -> dict[str, Any]:
     }
 
 
+
+def _markdown_from_response(text: str) -> str:
+    """Strip the trailing fenced JSON block so we can store the human-
+    readable markdown as final_summary.minutes. If there is no fence,
+    returns the full text unchanged."""
+    if not text:
+        return ""
+    import re
+    m = re.search(r"```(?:json)?\s*\{", text)
+    if m:
+        return text[: m.start()].rstrip()
+    return text.strip()
+
+
 async def _summarize_session(
     db: Session,
     session: RecordingSession,
@@ -1403,20 +1465,69 @@ async def _summarize_session(
             f"You are a meeting analyst. {style} Produce concise, useful meeting summaries."
         )
 
-    prompt = (
-        f"{style}\n\n"
-        "Return strict JSON with keys executive, bullets, actions, decisions, title. "
-        "actions should be an array of objects with action, owner, priority when known.\n\n"
-        f"Transcript:\n{transcript[:24000]}"
-    )
+    # Speaker context: list the distinct speaker labels so the model
+    # can attribute statements correctly. When pyannote produced
+    # SPEAKER_00 / SPEAKER_01 / ..., these become the names to use; once
+    # SpeakerTagger maps them to real names, those replace the raw labels
+    # in transcript_simple already.
+    speakers_seen: list[str] = []
+    diarized = session.transcript_diarized
+    if isinstance(diarized, dict):
+        for seg in diarized.get("segments", []):
+            spk = seg.get("speaker") or seg.get("raw_label")
+            if spk and spk not in speakers_seen:
+                speakers_seen.append(spk)
+    if speakers_seen:
+        speaker_context = (
+            "Speakers present in this meeting: "
+            + ", ".join(speakers_seen)
+            + ". Attribute statements to them by name."
+        )
+    else:
+        speaker_context = "Speaker labels are not available; describe statements neutrally."
+
+    # Qwen3.6 has 256K context; we cap at 60K characters (~15K tokens) so
+    # there is plenty of headroom for the response + system prompt while
+    # still capturing meetings up to ~3 hours of dense talk. The Meeting
+    # Minutes Mac app uses 120K tokens of context for Qwen3.6; we are
+    # well below that.
+    body_template = MEETING_OPS_SUMMARIZER_STYLE_PROMPT
+    if direct is not None:
+        # The full Meeting Minutes prompt only ships when we're routed to
+        # the dedicated Qwen endpoint. The org-default LLM path keeps the
+        # lighter template guidance so it works with any model.
+        prompt = body_template.format(
+            speaker_context=speaker_context,
+            transcript=transcript[:60000],
+        )
+    else:
+        prompt = (
+            f"{style}\n\n{speaker_context}\n\n"
+            "Return strict JSON with keys executive, bullets, actions, decisions, title. "
+            "actions should be an array of objects with action, owner, priority when known.\n\n"
+            f"Transcript:\n{transcript[:60000]}"
+        )
+
+    # Qwen3.6 inference params per the model card + Meeting Minutes
+    # tuning: temperature 0.6, top_p 0.9, top_k 30, presence_penalty 1.2,
+    # repetition_penalty 1.0. These reduce both repetition loops (the
+    # Qwen model card explicitly warns greedy decoding causes loops) and
+    # off-topic drift. Pass them through extra_params so generic
+    # OpenAI-compatible endpoints get them too.
     text = await asyncio.wait_for(
         llm.chat(
             system_prompt=system_prompt,
             user_prompt=prompt,
-            max_tokens=2000,
-            temperature=0.2,
+            max_tokens=8192,
+            temperature=0.6,
+            extra_params={
+                "top_p": 0.9,
+                "top_k": 30,
+                "presence_penalty": 1.2,
+                "repetition_penalty": 1.0,
+            },
         ),
-        timeout=240,
+        timeout=420,
     )
     analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
     session.summary = json.dumps(analysis)
@@ -1425,6 +1536,10 @@ async def _summarize_session(
         "bullets": analysis.get("bullets", []),
         "actions": analysis.get("actions", []),
         "decisions": analysis.get("decisions", []),
+        "questions": analysis.get("questions", []),
+        "quotes": analysis.get("quotes", []),
+        "next_steps": analysis.get("next_steps", []),
+        "minutes": analysis.get("minutes") or _markdown_from_response(text),
         "title": analysis.get("title", session.title),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

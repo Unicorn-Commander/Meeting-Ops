@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import time
-from typing import AsyncGenerator
+from typing import Optional, AsyncGenerator
 
 import httpx
 
@@ -29,11 +29,19 @@ class LiteLLMProvider:
         # True for reasoning-heavy tasks where you want the trace.
         self.thinking = thinking
 
-    def _build_payload(self, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float, stream: bool) -> dict:
+    def _build_payload(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        stream: bool,
+        extra_params: Optional[dict] = None,
+    ) -> dict:
         # Some LiteLLM upstreams (notably the openai provider for Gemma 4 GGUFs)
         # reject the `reasoning_effort` field outright. We rely on
         # `chat_template_kwargs.enable_thinking=...` to flip reasoning on/off.
-        return {
+        payload: dict = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -44,6 +52,13 @@ class LiteLLMProvider:
             "stream": stream,
             "chat_template_kwargs": {"enable_thinking": bool(self.thinking)},
         }
+        if extra_params:
+            # Merge model-tuning knobs (top_p, top_k, presence_penalty,
+            # repetition_penalty, etc.) without clobbering the core fields.
+            for k, v in extra_params.items():
+                if v is not None and k not in payload:
+                    payload[k] = v
+        return payload
 
     def _build_headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -51,9 +66,9 @@ class LiteLLMProvider:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    async def chat(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7) -> str:
+    async def chat(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7, extra_params: Optional[dict] = None) -> str:
         headers = self._build_headers()
-        payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False)
+        payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False, extra_params=extra_params)
 
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(f"{self.endpoint}/chat/completions", headers=headers, json=payload)
@@ -68,10 +83,10 @@ class LiteLLMProvider:
                 logger.error(f"LLM API error: {response.status_code} - {response.text[:200]}")
                 return ""
 
-    def chat_sync(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7) -> str:
+    def chat_sync(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7, extra_params: Optional[dict] = None) -> str:
         """Synchronous chat call. Safe to invoke from sync code or via run_in_executor."""
         headers = self._build_headers()
-        payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False)
+        payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False, extra_params=extra_params)
 
         try:
             with httpx.Client(timeout=120) as client:
