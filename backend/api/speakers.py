@@ -65,6 +65,11 @@ class SpeakerResponse(BaseModel):
     organization_id: int
     display_name: str
     email: Optional[str] = None
+    phone: Optional[str] = None
+    title: Optional[str] = None
+    company: Optional[str] = None
+    linked_user_id: Optional[int] = None
+    external_refs: Optional[dict] = None
     notes: Optional[str] = None
     embedding_dim: Optional[int] = None
     embedding_model: Optional[str] = None
@@ -77,12 +82,22 @@ class SpeakerResponse(BaseModel):
 class SpeakerCreate(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=200)
     email: Optional[str] = Field(default=None, max_length=320)
+    phone: Optional[str] = None
+    title: Optional[str] = None
+    company: Optional[str] = None
+    linked_user_id: Optional[int] = None
+    external_refs: Optional[dict] = None
     notes: Optional[str] = None
 
 
 class SpeakerUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     email: Optional[str] = Field(default=None, max_length=320)
+    phone: Optional[str] = None
+    title: Optional[str] = None
+    company: Optional[str] = None
+    linked_user_id: Optional[int] = None
+    external_refs: Optional[dict] = None
     notes: Optional[str] = None
 
 
@@ -137,6 +152,11 @@ def _to_response(speaker: SpeakerProfile) -> SpeakerResponse:
         organization_id=speaker.organization_id,
         display_name=speaker.display_name,
         email=speaker.email,
+        phone=speaker.phone,
+        title=speaker.title,
+        company=speaker.company,
+        linked_user_id=speaker.linked_user_id,
+        external_refs=speaker.external_refs,
         notes=speaker.notes,
         embedding_dim=speaker.embedding_dim,
         embedding_model=speaker.embedding_model,
@@ -235,6 +255,11 @@ async def create_speaker(
         organization_id=active_org.organization.id,
         display_name=payload.display_name,
         email=payload.email,
+        phone=payload.phone,
+        title=payload.title,
+        company=payload.company,
+        linked_user_id=payload.linked_user_id,
+        external_refs=payload.external_refs,
         notes=payload.notes,
         created_by_user_id=current_user.id,
     )
@@ -290,6 +315,12 @@ async def update_speaker(
         speaker.email = payload.email or None
     if payload.notes is not None:
         speaker.notes = payload.notes or None
+    # Optional contact fields (phone/title/company/linked_user_id/external_refs).
+    # Pydantic gives us None when unset, so a real value overrides only when present.
+    for fld in ("phone", "title", "company", "linked_user_id", "external_refs"):
+        val = getattr(payload, fld, None)
+        if val is not None:
+            setattr(speaker, fld, val or None if isinstance(val, str) else val)
     db.commit()
     db.refresh(speaker)
     return _to_response(speaker)

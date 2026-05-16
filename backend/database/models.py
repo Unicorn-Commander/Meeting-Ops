@@ -380,6 +380,17 @@ class SpeakerProfile(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     display_name = Column(String(200), nullable=False)
     email = Column(String(320), nullable=True)
+    # Contact / CRM fields. SpeakerProfile is the per-org contact
+    # directory today; these promote it from a name+voice-fingerprint
+    # row into a full contact record. Forward path is a shared
+    # unicorn-contacts service that other apps reference by id.
+    phone = Column(String(64), nullable=True)
+    title = Column(String(200), nullable=True)   # CEO, PM, etc — their role at their company
+    company = Column(String(200), nullable=True) # their employer / org (NOT our `organization_id`)
+    linked_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # External CRM references: {hubspot_id, salesforce_id, ...}. Schema
+    # is per-org; backend stores it verbatim, callers normalize.
+    external_refs = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
     centroid_embedding = Column(LargeBinary, nullable=True)
     embedding_dim = Column(Integer, nullable=True)
