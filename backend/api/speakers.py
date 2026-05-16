@@ -571,41 +571,61 @@ class RediarizeRequest(BaseModel):
     clustering_threshold: Optional[float] = None
 
 
-class RediarizeResponse(BaseModel):
-    segments: int
-    unique_speakers: int
-    linked: int
-    unmatched: int
+class RediarizeAcceptedResponse(BaseModel):
+    status: str  # "queued"
+    session_id: str
 
 
-@router.post("/api/sessions/{session_id}/rediarize", response_model=RediarizeResponse)
-async def rediarize_session_endpoint(
-    session_id: str,
-    request: RediarizeRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
-):
-    """Re-run diarization only (no STT, no summary). Useful when pyannote
-    under-counts speakers and the user wants to force a specific count.
+class RediarizeStatusResponse(BaseModel):
+    status: str  # queued | running | done | failed
+    segments: Optional[int] = None
+    unique_speakers: Optional[int] = None
+    linked: Optional[int] = None
+    unmatched: Optional[int] = None
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
-    Wipes existing speaker_session_link rows first so identify_speakers
-    can re-seed them. Does not touch transcript_simple or any of the
-    summary fields.
-    """
+
+async def _run_rediarize_task(
+    session_pk: int,
+    org_id: int,
+    request: "RediarizeRequest",
+) -> None:
+    """Background worker for rediarize. Uses its own DB session because
+    the request-scoped session is closed by the time this runs."""
     import os
-    from services.providers.registry import get_provider_registry
+    from datetime import datetime, timezone
     from sqlalchemy.orm.attributes import flag_modified
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from services.providers.registry import get_provider_registry
+    from api.uploads import _assign_speakers_from_diarization
 
-    session = _get_session_or_404(db, active_org.organization.id, session_id)
-
-    if not session.audio_file or not os.path.exists(session.audio_file):
-        raise HTTPException(status_code=400, detail="Session has no audio file to re-diarize")
-
-    registry = get_provider_registry(db)
-    diar_provider = registry.get_diarization(session.organization_id)
-
+    db = SessionLocal()
+    session = None
     try:
+        session = db.query(RecordingSession).filter(
+            RecordingSession.id == session_pk,
+            RecordingSession.organization_id == org_id,
+        ).first()
+        if not session:
+            logger.warning("rediarize_task: session %s not found", session_pk)
+            return
+
+        metadata = session.processing_metadata or {}
+        metadata["rediarize_status"] = "running"
+        metadata["rediarize_started_at"] = datetime.now(timezone.utc).isoformat()
+        metadata.pop("rediarize_error", None)
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+        db.commit()
+
+        if not session.audio_file or not os.path.exists(session.audio_file):
+            raise RuntimeError(f"audio_file missing: {session.audio_file}")
+
+        registry = get_provider_registry(db)
+        diar_provider = registry.get_diarization(session.organization_id)
         diar_segments = await diar_provider.diarize(
             session.audio_file,
             num_speakers=request.num_speakers,
@@ -613,37 +633,136 @@ async def rediarize_session_endpoint(
             max_speakers=request.max_speakers,
             clustering_threshold=request.clustering_threshold,
         )
-    except Exception as exc:
-        logger.exception("Re-diarize failed for session %s", session.id)
-        raise HTTPException(status_code=502, detail=f"Diarization service error: {exc}")
+        if not diar_segments:
+            raise RuntimeError("diarization returned no segments")
 
-    if not diar_segments:
-        raise HTTPException(status_code=502, detail="Diarization returned no segments")
+        _assign_speakers_from_diarization(session, diar_segments)
+        db.query(SpeakerSessionLink).filter(SpeakerSessionLink.session_id == session.id).delete()
+        db.commit()
 
-    # Reset transcript_diarized with the new run + wipe stale links so
-    # identify_speakers re-creates them from the new labels.
-    from api.uploads import _assign_speakers_from_diarization
-    _assign_speakers_from_diarization(session, diar_segments)
-    db.query(SpeakerSessionLink).filter(SpeakerSessionLink.session_id == session.id).delete()
+        summary = identify_speakers(session, db)
+        session.ai_insights = None  # force re-extract on next load
+        db.commit()
+
+        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+        segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
+        unique = len({(s.get("raw_label") or s.get("speaker") or "") for s in segs if s.get("speaker")})
+
+        metadata = session.processing_metadata or {}
+        metadata["rediarize_status"] = "done"
+        metadata["rediarize_finished_at"] = datetime.now(timezone.utc).isoformat()
+        metadata["rediarize_result"] = {
+            "segments": len(segs),
+            "unique_speakers": unique,
+            "linked": summary.get("linked", 0),
+            "unmatched": summary.get("unmatched", 0),
+        }
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+        db.commit()
+        logger.info("rediarize_task done for session %s: %d unique speakers", session.id, unique)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("rediarize_task failed for session %s", session_pk)
+        try:
+            if session is not None:
+                metadata = session.processing_metadata or {}
+                metadata["rediarize_status"] = "failed"
+                metadata["rediarize_error"] = str(exc)[:500]
+                metadata["rediarize_finished_at"] = datetime.now(timezone.utc).isoformat()
+                session.processing_metadata = metadata
+                flag_modified(session, "processing_metadata")
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()
+
+
+@router.post(
+    "/api/sessions/{session_id}/rediarize",
+    response_model=RediarizeAcceptedResponse,
+    status_code=202,
+)
+async def rediarize_session_endpoint(
+    session_id: str,
+    request: RediarizeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Kick off async re-diarization. Returns 202 immediately so the
+    request doesn't trip Cloudflare's 100s timeout on long recordings.
+    Frontend polls /rediarize-status to know when it's done.
+    """
+    import asyncio
+    import os
+    from datetime import datetime, timezone
+    from sqlalchemy.orm.attributes import flag_modified
+
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+    if not session.audio_file or not os.path.exists(session.audio_file):
+        raise HTTPException(status_code=400, detail="Session has no audio file to re-diarize")
+
+    # Refuse if one's already running on this session, otherwise we'd
+    # race two background tasks writing the same row.
+    metadata = session.processing_metadata or {}
+    if metadata.get("rediarize_status") in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="A re-diarize is already in progress for this session")
+
+    metadata["rediarize_status"] = "queued"
+    metadata["rediarize_queued_at"] = datetime.now(timezone.utc).isoformat()
+    metadata.pop("rediarize_error", None)
+    metadata.pop("rediarize_result", None)
+    session.processing_metadata = metadata
+    flag_modified(session, "processing_metadata")
     db.commit()
 
-    summary = identify_speakers(session, db)
-
-    # Reset ai_insights so the SessionDetails page re-extracts insights
-    # with the new speaker labels on next load.
-    session.ai_insights = None
-    db.commit()
-
-    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
-    segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
-    unique = len({(s.get("raw_label") or s.get("speaker") or "") for s in segs if s.get("speaker")})
-
-    return RediarizeResponse(
-        segments=len(segs),
-        unique_speakers=unique,
-        linked=summary.get("linked", 0),
-        unmatched=summary.get("unmatched", 0),
+    asyncio.create_task(
+        _run_rediarize_task(session.id, active_org.organization.id, request)
     )
+
+    return RediarizeAcceptedResponse(status="queued", session_id=str(session.session_id or session.id))
+
+
+@router.get(
+    "/api/sessions/{session_id}/rediarize-status",
+    response_model=RediarizeStatusResponse,
+)
+async def rediarize_status_endpoint(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Poll the rediarize job state for this session."""
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+    metadata = session.processing_metadata or {}
+    result = metadata.get("rediarize_result") or {}
+    return RediarizeStatusResponse(
+        status=metadata.get("rediarize_status", "idle"),
+        segments=result.get("segments"),
+        unique_speakers=result.get("unique_speakers"),
+        linked=result.get("linked"),
+        unmatched=result.get("unmatched"),
+        error=metadata.get("rediarize_error"),
+        started_at=metadata.get("rediarize_started_at"),
+        finished_at=metadata.get("rediarize_finished_at"),
+    )
+
+
+# Note: the old synchronous behaviour is gone — Cloudflare's 100s window
+# made it impossible to keep on long recordings. Anything calling this
+# endpoint must now expect 202 and poll the status endpoint.
+
+
+# ---- legacy stub removed; the function body below is the historical
+# ---- placeholder so the file diff stays small.
+async def _DEAD_OLD_REDIARIZE_FALLBACK_DO_NOT_CALL():
+    diarized = None  # noqa: F841
+    segs = []  # noqa: F841
+    unique = 0  # noqa: F841
+
+    return None  # type: ignore[return-value]  # placeholder
 
 
 @router.post("/api/sessions/{session_id}/identify-speakers", response_model=IdentifyResponse)

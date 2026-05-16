@@ -103,6 +103,33 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
     setIdentifying(false);
   };
 
+  const pollRediarize = async (): Promise<void> => {
+    const deadline = Date.now() + 6 * 60 * 1000; // 6 minutes
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 4000));
+      try {
+        const res = await fetch(
+          `${config.apiBaseUrl}/api/sessions/${sessionId}/rediarize-status`,
+          { headers: orgHeaders() },
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data.status === 'done') {
+          await loadAll();
+          return;
+        }
+        if (data.status === 'failed') {
+          setError(`Re-detect failed: ${data.error || 'unknown error'}`);
+          return;
+        }
+        // queued or running — keep polling
+      } catch {
+        // transient network blip; just keep polling
+      }
+    }
+    setError('Re-detect timed out after 6 minutes. The job may still be running; refresh shortly.');
+  };
+
   const redetectSpeakers = async () => {
     setRedetecting(true);
     setError(null);
@@ -118,8 +145,9 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
           body: JSON.stringify(body),
         },
       );
-      if (res.ok) {
-        await loadAll();
+      if (res.status === 202 || res.ok) {
+        // Async path: backend accepted the job, poll for completion.
+        await pollRediarize();
       } else {
         const txt = await res.text();
         setError(`Re-detect failed (HTTP ${res.status}): ${txt.slice(0, 120)}`);
