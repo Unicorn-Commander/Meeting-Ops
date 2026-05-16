@@ -808,6 +808,85 @@ class EnrollFromSessionRequest(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=1000)
 
 
+
+def _propagate_speaker_rename(
+    session,
+    old_labels,
+    new_label: str,
+) -> bool:
+    """Rewrite every occurrence of any string in old_labels (word-bounded)
+    to new_label across the LLM-generated summary fields on the session.
+
+    Called after enroll-from-session, assign-to-existing, and merge so the
+    AI Summary text (executive / bullets / actions / decisions / quotes /
+    next_steps / minutes) plus the legacy summary JSON column plus the
+    ai_insights side panel all show the named speaker instead of the
+    raw SPEAKER_XX cluster id. Caller is responsible for db.commit().
+    Returns True if anything changed.
+    """
+    import json
+    import re
+    from sqlalchemy.orm.attributes import flag_modified
+
+    if not old_labels or not new_label:
+        return False
+
+    olds = sorted(
+        {label for label in old_labels if label and label != new_label},
+        key=len,
+        reverse=True,
+    )
+    if not olds:
+        return False
+
+    pattern = re.compile(
+        r"\b(" + "|".join(re.escape(label) for label in olds) + r")\b"
+    )
+
+    def _walk(val):
+        if isinstance(val, str):
+            return pattern.sub(new_label, val)
+        if isinstance(val, list):
+            return [_walk(x) for x in val]
+        if isinstance(val, dict):
+            return {k: _walk(v) for k, v in val.items()}
+        return val
+
+    changed = False
+
+    fs = session.final_summary
+    if isinstance(fs, dict):
+        new_fs = _walk(fs)
+        if new_fs != fs:
+            session.final_summary = new_fs
+            flag_modified(session, "final_summary")
+            changed = True
+
+    summary = session.summary
+    if isinstance(summary, str) and summary.strip():
+        try:
+            data = json.loads(summary)
+            new_data = _walk(data)
+            if new_data != data:
+                session.summary = json.dumps(new_data)
+                changed = True
+        except json.JSONDecodeError:
+            new_text = pattern.sub(new_label, summary)
+            if new_text != summary:
+                session.summary = new_text
+                changed = True
+
+    insights = session.ai_insights
+    if isinstance(insights, dict):
+        new_ins = _walk(insights)
+        if new_ins != insights:
+            session.ai_insights = new_ins
+            flag_modified(session, "ai_insights")
+            changed = True
+
+    return changed
+
+
 @router.post(
     "/api/sessions/{session_id}/speaker-links/{link_id}/enroll",
     response_model=SpeakerLinkResponse,
@@ -1002,6 +1081,7 @@ async def enroll_speaker_from_session(
     for row in rows:
         row.speaker = speaker.display_name
 
+    _propagate_speaker_rename(session, [link.raw_label], speaker.display_name)
     db.commit()
     db.refresh(link)
     logger.info(
@@ -1110,7 +1190,14 @@ async def merge_speaker_links(
     # 3) Drop the source link.
     db.delete(source)
 
-    # 4) Clear ai_insights so the next view re-extracts with the new
+    # 4) Propagate source -> target labels in the summary text fields so
+    # the AI Summary stops referencing the merged-away SPEAKER_XX.
+    olds = [source.raw_label]
+    if source_display and source_display != source.raw_label:
+        olds.append(source_display)
+    _propagate_speaker_rename(session, olds, target_display)
+
+    # 5) Clear ai_insights so the next view re-extracts with the new
     # collapsed speaker list (speaker_insights counts will differ).
     session.ai_insights = None
 
