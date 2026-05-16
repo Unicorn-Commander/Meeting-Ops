@@ -986,36 +986,161 @@ async def _transcribe_audio(
     return result
 
 
+def _build_segments_from_words(
+    words: list[dict],
+    diar_segments: list[dict],
+) -> list[dict]:
+    """Group word-level timestamps into per-speaker utterances.
+
+    For each word: find the pyannote turn whose [start, end] contains the
+    word's midpoint, and assign that turn's speaker label. Then walk the
+    labeled words left-to-right, starting a new utterance whenever the
+    speaker label changes (or there's a gap > 0.8s of silence). Each
+    utterance carries the joined text + start/end of its first/last word.
+    """
+    if not words or not diar_segments:
+        return []
+
+    diar_sorted = sorted(diar_segments, key=lambda s: float(s.get("start") or 0))
+    starts = [float(d.get("start") or 0) for d in diar_sorted]
+    ends = [float(d.get("end") or 0) for d in diar_sorted]
+    labels = [d.get("speaker") for d in diar_sorted]
+
+    def _speaker_for(mid: float) -> Optional[str]:
+        # Linear scan is fine — diar_sorted is rarely >2000 turns.
+        for s, e, lab in zip(starts, ends, labels):
+            if s <= mid <= e:
+                return lab
+        # Fallback: nearest turn boundary.
+        best_label = None
+        best_dist = float("inf")
+        for s, e, lab in zip(starts, ends, labels):
+            d = min(abs(mid - s), abs(mid - e))
+            if d < best_dist:
+                best_dist = d
+                best_label = lab
+        return best_label
+
+    utterances: list[dict] = []
+    cur_speaker: Optional[str] = None
+    cur_words: list[dict] = []
+    cur_start = 0.0
+    last_end = 0.0
+    SILENCE_GAP = 0.8
+
+    for w in words:
+        try:
+            w_start = float(w.get("start") or 0)
+            w_end = float(w.get("end") or 0)
+        except (TypeError, ValueError):
+            continue
+        word_text = (w.get("word") or w.get("text") or "").strip()
+        if not word_text:
+            continue
+        mid = (w_start + w_end) / 2
+        speaker = _speaker_for(mid)
+
+        new_speaker = speaker != cur_speaker
+        gap_break = (w_start - last_end) > SILENCE_GAP and cur_words
+        if new_speaker or gap_break:
+            if cur_words:
+                utterances.append({
+                    "start": cur_start,
+                    "end": last_end,
+                    "speaker": cur_speaker,
+                    "text": " ".join(x.get("word", "") for x in cur_words).strip(),
+                })
+            cur_words = []
+            cur_speaker = speaker
+            cur_start = w_start
+        cur_words.append(w)
+        last_end = w_end
+
+    if cur_words:
+        utterances.append({
+            "start": cur_start,
+            "end": last_end,
+            "speaker": cur_speaker,
+            "text": " ".join(x.get("word", "") for x in cur_words).strip(),
+        })
+
+    return utterances
+
+
 def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: list[dict]) -> None:
     """Merge diarization output onto the transcription segments.
 
-    For each transcription segment, pick the diarization speaker that
-    covers the most of its [start, end] interval. Updates the JSONB
-    `transcript_diarized.segments` and the rows in the `transcriptions`
-    table. Idempotent — safe to re-run on re-process.
+    Two paths:
 
-    When the transcription is *under-segmented* relative to the
-    diarization output (e.g. NeMo Parakeet returned one big segment
-    covering the whole recording, but pyannote found 855 turns across 3
-    speakers), the per-segment label-and-overlap loop collapses all 855
-    turns onto the single transcription row. We detect this case
-    (transcript_segments < diar_segments / 10) and instead replace the
-    diarized track with pyannote's segments so SpeakerTagger and the UI
-    can still surface all the speakers pyannote found. The full text
-    remains in transcript_simple for readability.
+    1. Word-level alignment (preferred — NeMo 2.4+ Parakeet returns word
+       timestamps). Walks each word, picks the pyannote turn containing
+       its midpoint, and groups adjacent words by speaker into proper
+       per-speaker utterances. Produces a transcript that looks like
+       "Speaker A: ...\nSpeaker B: ...\nSpeaker A: ..." with accurate
+       turn boundaries.
+
+    2. Segment-overlap fallback. If no word timestamps are available,
+       walk the existing transcript_diarized.segments and label each
+       with the diarization-segment that overlaps it most. If the
+       transcription is under-segmented relative to diarization, replace
+       the segment list with pyannote's turns so SpeakerTagger still
+       sees all the labels (text will be empty on those segments but
+       transcript_simple preserves the full text).
     """
+    from sqlalchemy.orm.attributes import flag_modified
+
     if not diar_segments:
         return
     transcript = session.transcript_diarized
     if not isinstance(transcript, dict):
         transcript = {}
-    segments = transcript.get("segments") or []
 
-    # Under-segmentation fallback: pyannote gave us a much richer
-    # segmentation than the transcription. Prefer pyannote's segments so
-    # we don't lose its speaker information.
+    # --- Path 1: word-level alignment (preferred) ---------------------------
+    words = []
+    pm = session.processing_metadata or {}
+    if isinstance(pm, dict):
+        words = pm.get("word_timestamps") or []
+
+    if words and isinstance(words, list):
+        utterances = _build_segments_from_words(words, diar_segments)
+        if utterances:
+            speakers_ordered: list[str] = []
+            seen: set[str] = set()
+            for u in utterances:
+                spk = u.get("speaker")
+                if spk and spk not in seen:
+                    seen.add(spk)
+                    speakers_ordered.append(spk)
+            transcript["segments"] = utterances
+            transcript["speakers"] = speakers_ordered
+            transcript["diarization_backend"] = (
+                diar_segments[0].get("backend") if diar_segments else None
+            )
+            transcript["aligned_by"] = "word_timestamps"
+            session.transcript_diarized = transcript
+            flag_modified(session, "transcript_diarized")
+            # Also refresh the Transcription rows with the new per-utterance
+            # segments so list/detail views render speaker labels.
+            from sqlalchemy.orm.session import Session as _SAS
+            db = getattr(session, "_sa_instance_state", None) and session._sa_instance_state.session  # type: ignore[union-attr]
+            if db is not None:
+                db.query(Transcription).filter(Transcription.session_id == session.id).delete()
+                for u in utterances:
+                    if not u.get("text"):
+                        continue
+                    db.add(Transcription(
+                        session_id=session.id,
+                        text=u["text"],
+                        speaker=u.get("speaker"),
+                        start_time=float(u.get("start") or 0),
+                        end_time=float(u.get("end") or 0),
+                        confidence=0.95,
+                    ))
+            return
+
+    # --- Path 2: under-segmentation fallback --------------------------------
+    segments = transcript.get("segments") or []
     if len(segments) <= max(1, len(diar_segments) // 10):
-        from sqlalchemy.orm.attributes import flag_modified
         new_segments = [
             {
                 "start": float(d.get("start") or 0),

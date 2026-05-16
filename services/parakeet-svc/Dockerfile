@@ -38,9 +38,10 @@ COPY requirements.txt .
 # torch/torchaudio first (CUDA 12.4 wheels), then NeMo on top.
 # NeMo's pip resolver fights torch/torchaudio versions if installed together.
 RUN python -m pip install --upgrade pip wheel setuptools \
-    && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+    && python -m pip install \
+        --extra-index-url https://download.pytorch.org/whl/cu124 \
         torch==2.4.1 torchaudio==2.4.1 \
-    && python -m pip install -r requirements.txt
+        -r requirements.txt
 
 COPY . .
 
