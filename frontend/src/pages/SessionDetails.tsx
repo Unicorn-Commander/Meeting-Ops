@@ -987,7 +987,7 @@ export const SessionDetails: React.FC = () => {
   const hasTranscript = Boolean(transcriptText || segments.length > 0);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4">
@@ -1393,6 +1393,147 @@ export const SessionDetails: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
+            {/* Transcript — moved to top of left column so it dominates the
+                primary view instead of being buried below the summary. Aaron
+                explicitly asked for this. */}
+            <div className="bg-white rounded-lg shadow-sm p-6 flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: '480px' }}>
+              <div className="flex items-center justify-between mb-4 flex-shrink-0">
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-purple-600" />
+                  Transcript
+                  {speakers.length > 0 && (
+                    <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full">
+                      {speakers.length} speaker{speakers.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                </h2>
+
+                {/* Filters */}
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Search transcript..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="pl-10 pr-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+
+                  <select
+                    value={selectedSpeaker}
+                    onChange={(e) => setSelectedSpeaker(e.target.value)}
+                    className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="all">All Speakers</option>
+                    {speakers.map((speaker, idx) => (
+                      <option key={idx} value={speaker}>
+                        {speaker}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Speaker filter chips — click to filter to one speaker */}
+              {speakers.length > 1 && (
+                <div className="flex flex-wrap gap-2 mb-3 flex-shrink-0">
+                  <button
+                    onClick={() => setSelectedSpeaker('all')}
+                    className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                      selectedSpeaker === 'all'
+                        ? 'bg-purple-600 text-white border-purple-600'
+                        : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-400'
+                    }`}
+                  >
+                    All ({segments.length})
+                  </button>
+                  {speakers.map((sp) => {
+                    const count = segments.filter((s) => s.speaker === sp).length;
+                    return (
+                      <button
+                        key={sp}
+                        onClick={() => setSelectedSpeaker(sp)}
+                        className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                          selectedSpeaker === sp
+                            ? 'bg-purple-600 text-white border-purple-600'
+                            : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-400'
+                        }`}
+                      >
+                        {sp} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div ref={transcriptRef} className="space-y-3 flex-1 min-h-0 overflow-y-auto pr-1">
+                {/* Show full transcript text if available */}
+                {filteredSegments.length === 0 && transcriptText ? (
+                  <div className="p-4 rounded-lg bg-gray-50">
+                    <p className="text-gray-700 whitespace-pre-wrap">
+                      {transcriptText}
+                    </p>
+                  </div>
+                ) : filteredSegments.length === 0 && session.status === 'processing' ? (
+                  <div className="text-center py-8">
+                    <div className="flex items-center justify-center mb-4">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
+                    </div>
+                    <p className="text-gray-500">Transcription in progress...</p>
+                  </div>
+                ) : filteredSegments.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">
+                    {searchTerm ? 'No matching segments found' :
+                     session.status === 'completed' ? 'No transcript available' : 'Transcription pending'}
+                  </p>
+                ) : (
+                  filteredSegments.map((segment, index) => (
+                    <div
+                      key={index}
+                      ref={(el: HTMLDivElement | null) => { segmentRefs.current[index] = el; }}
+                      onClick={() => handleSegmentClick(segment)}
+                      className={`p-3 rounded-lg cursor-pointer transition-all ${
+                        activeSegment === index
+                          ? 'bg-purple-50 border-l-4 border-purple-600'
+                          : 'hover:bg-gray-50 border-l-4 border-transparent'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 mb-1">
+                        <span className="text-sm font-medium text-purple-600">
+                          {segment.speaker || 'Speaker'}
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          {formatTime(segment.start)} - {formatTime(segment.end)}
+                        </span>
+                        {segment.confidence && (
+                          <span className="text-xs text-gray-400">
+                            {Math.round(segment.confidence * 100)}%
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-gray-700 text-sm leading-relaxed">{segment.text}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Audio Player — sits right below the transcript so playback
+                is paired with the transcript view; AudioPlayer component
+                has its own volume + scrub + download controls. */}
+            <div className="bg-white rounded-lg shadow-sm p-4">
+              {session.audio_file ? (
+                <AudioPlayer
+                  src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
+                  downloadAs={`${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.wav`}
+                />
+              ) : (
+                <p className="text-gray-500 text-center py-2 text-sm">No audio recording available</p>
+              )}
+            </div>
+
             {/* Phase 3: speaker tagger — confirm/change diarized labels */}
             <SpeakerTagger sessionId={String(session.id || sessionId)} />
 
@@ -1794,114 +1935,6 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* Audio Player */}
-            <div className="bg-white rounded-lg shadow-sm p-6">
-              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <Volume2 className="w-5 h-5 text-purple-600" />
-                Audio Playback
-              </h2>
-
-              {session.audio_file ? (
-                <AudioPlayer
-                  src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
-                  downloadAs={`${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.wav`}
-                />
-              ) : (
-                <p className="text-gray-500 text-center py-4">No audio recording available</p>
-              )}
-            </div>
-
-            {/* Transcript */}
-            <div className="bg-white rounded-lg shadow-sm p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-purple-600" />
-                  Transcript
-                </h2>
-                
-                {/* Filters */}
-                <div className="flex items-center gap-3">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input
-                      type="text"
-                      placeholder="Search transcript..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="pl-10 pr-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    />
-                  </div>
-                  
-                  <select
-                    value={selectedSpeaker}
-                    onChange={(e) => setSelectedSpeaker(e.target.value)}
-                    className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  >
-                    <option value="all">All Speakers</option>
-                    {speakers.map((speaker, idx) => (
-                      <option key={idx} value={speaker}>
-                        {speaker}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              
-              <div ref={transcriptRef} className="space-y-3 max-h-96 overflow-y-auto">
-                {/* Show full transcript text if available */}
-                {filteredSegments.length === 0 && transcriptText ? (
-                  <div className="p-4 rounded-lg bg-gray-50">
-                    <p className="text-gray-700 whitespace-pre-wrap">
-                      {transcriptText}
-                    </p>
-                  </div>
-                ) : filteredSegments.length === 0 && session.status === 'processing' ? (
-                  <div className="text-center py-8">
-                    <div className="flex items-center justify-center mb-4">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
-                    </div>
-                    <p className="text-gray-500">Transcription in progress...</p>
-                  </div>
-                ) : filteredSegments.length === 0 ? (
-                  <p className="text-gray-500 text-center py-8">
-                    {searchTerm ? 'No matching segments found' : 
-                     session.status === 'completed' ? 'No transcript available' : 'Transcription pending'}
-                  </p>
-                ) : (
-                  filteredSegments.map((segment, index) => (
-                    <div
-                      key={index}
-                      ref={(el: HTMLDivElement | null) => { segmentRefs.current[index] = el; }}
-                      onClick={() => handleSegmentClick(segment)}
-                      className={`p-4 rounded-lg cursor-pointer transition-all ${
-                        activeSegment === index
-                          ? 'bg-purple-50 border-l-4 border-purple-600'
-                          : 'hover:bg-gray-50'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-1">
-                            <span className="text-sm font-medium text-purple-600">
-                              {segment.speaker || 'Speaker'}
-                            </span>
-                            <span className="text-xs text-gray-500">
-                              {formatTime(segment.start)} - {formatTime(segment.end)}
-                            </span>
-                            {segment.confidence && (
-                              <span className="text-xs text-gray-400">
-                                {Math.round(segment.confidence * 100)}%
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-gray-700">{segment.text}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
           </div>
 
           {/* Sidebar */}
