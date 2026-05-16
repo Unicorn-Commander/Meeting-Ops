@@ -21,6 +21,7 @@ import {
 } from '../components/TranscriptionOptionsPanel';
 import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
+import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -173,6 +174,7 @@ export const SessionDetails: React.FC = () => {
   // Re-process modal: re-runs the transcribe -> diarize -> summarize -> embed
   // pipeline against the existing audio with new options.
   const [showReprocessModal, setShowReprocessModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessOpts, setReprocessOpts] = useState<TranscriptionOptions>(
     DEFAULT_TRANSCRIPTION_OPTIONS,
@@ -1167,6 +1169,18 @@ export const SessionDetails: React.FC = () => {
                   )}
                 </button>
               )}
+              {/* Share button — opens the per-meeting permissions modal where
+                  you can invite individual users (internal or external) and
+                  manage access levels. Default access (org-wide, project) is
+                  surfaced inside the modal. */}
+              <button
+                onClick={() => setShowShareModal(true)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 text-sm"
+                title="Share this meeting with others"
+              >
+                <Share2 className="w-4 h-4" />
+                Share
+              </button>
               {/* Re-process button — re-runs transcribe/diarize/summarize against
                   the existing audio. Lets users change STT engine, speaker
                   count, summary template etc. without re-uploading. */}
@@ -2234,6 +2248,13 @@ export const SessionDetails: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Per-meeting permissions modal */}
+      <SessionPermissionsModal
+        sessionId={session.id || sessionId || ''}
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+      />
 
       {/* Re-process modal */}
       {showReprocessModal && (
