@@ -70,7 +70,11 @@ class LiteLLMProvider:
         headers = self._build_headers()
         payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False, extra_params=extra_params)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        # 8192 max_tokens on Qwen 3.6 / P40 can run 3-5 min; the previous
+        # 120s default raised ReadTimeout mid-generation and killed the
+        # upload pipeline at the summary step. 480s gives generous
+        # headroom even for slow models with long outputs.
+        async with httpx.AsyncClient(timeout=480) as client:
             response = await client.post(f"{self.endpoint}/chat/completions", headers=headers, json=payload)
             if response.status_code == 200:
                 result = response.json()
@@ -89,7 +93,7 @@ class LiteLLMProvider:
         payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stream=False, extra_params=extra_params)
 
         try:
-            with httpx.Client(timeout=120) as client:
+            with httpx.Client(timeout=480) as client:
                 response = client.post(f"{self.endpoint}/chat/completions", headers=headers, json=payload)
                 if response.status_code == 200:
                     result = response.json()

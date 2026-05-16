@@ -372,7 +372,6 @@ export const Sessions: React.FC = () => {
   const [uploadOptions, setUploadOptions] = useState<TranscriptionOptions>(
     DEFAULT_TRANSCRIPTION_OPTIONS,
   );
-  const [isDragging, setIsDragging] = useState(false);
 
   const handleUploadPicked = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -400,37 +399,7 @@ export const Sessions: React.FC = () => {
     setPendingFiles([]);
   };
 
-  // Drag-and-drop on the whole page when there are no pending files.
-  useEffect(() => {
-    if (pendingFiles.length > 0) return;
-    const onDragOver = (e: DragEvent) => {
-      if (!e.dataTransfer?.types?.includes('Files')) return;
-      e.preventDefault();
-      setIsDragging(true);
-    };
-    const onDragLeave = (e: DragEvent) => {
-      if (e.relatedTarget === null) setIsDragging(false);
-    };
-    const onDrop = (e: DragEvent) => {
-      if (!e.dataTransfer?.files?.length) return;
-      e.preventDefault();
-      setIsDragging(false);
-      const files = Array.from(e.dataTransfer.files).filter(
-        (f) => f.type.startsWith('audio/') || f.type.startsWith('video/') || /\.(m4a|wav|mp3|aac|flac|ogg|opus|mp4|mov|mkv|webm)$/i.test(f.name),
-      );
-      if (files.length === 0) return;
-      setPendingFiles(files);
-      setUploadOptions(DEFAULT_TRANSCRIPTION_OPTIONS);
-    };
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('dragleave', onDragLeave);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('dragleave', onDragLeave);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, [pendingFiles.length]);
+
 
   const deleteSession = async (sessionId: string) => {
     if (!confirm('Are you sure you want to delete this session?')) return;
@@ -1190,11 +1159,7 @@ export const Sessions: React.FC = () => {
     </div>
   </div>
 )}
-{isDragging && pendingFiles.length === 0 && (
-  <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-purple-900/40 border-4 border-dashed border-purple-300">
-    <p className="text-2xl font-semibold text-white">Drop files to upload</p>
-  </div>
-)}
+
     </div>
   );
 };
