@@ -1166,6 +1166,48 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
         transcript["used_pyannote_segmentation"] = True
         session.transcript_diarized = transcript
         flag_modified(session, "transcript_diarized")
+
+        # Also relabel the Transcription rows so the frontend (which
+        # prefers transcription_segments) shows speakers. Each row gets
+        # the speaker that overlaps it the most. Without this, sessions
+        # processed before NeMo 2.4 (no word timestamps) render every
+        # row as the generic 'Speaker' fallback even though pyannote
+        # found the right speakers.
+        diar_sorted = sorted(diar_segments, key=lambda s: float(s.get("start") or 0))
+
+        def _dominant_speaker(row_start: float, row_end: float) -> Optional[str]:
+            # Tally total overlap-seconds per speaker label within
+            # [row_start, row_end], then pick the heaviest. Linear scan
+            # is fine — diar_segments is usually <1000.
+            tally: dict[str, float] = {}
+            for d in diar_sorted:
+                d_start = float(d.get("start") or 0)
+                d_end = float(d.get("end") or 0)
+                if d_end < row_start:
+                    continue
+                if d_start > row_end:
+                    break
+                ov = max(0.0, min(row_end, d_end) - max(row_start, d_start))
+                if ov <= 0:
+                    continue
+                label = d.get("speaker") or ""
+                if not label:
+                    continue
+                tally[label] = tally.get(label, 0.0) + ov
+            if not tally:
+                return None
+            return max(tally.items(), key=lambda kv: kv[1])[0]
+
+        db = getattr(session, "_sa_instance_state", None) and session._sa_instance_state.session
+        if db is not None:
+            rows = db.query(Transcription).filter(Transcription.session_id == session.id).all()
+            for row in rows:
+                label = _dominant_speaker(
+                    float(row.start_time or 0),
+                    float(row.end_time or 0),
+                )
+                if label:
+                    row.speaker = label
         return
 
     # Sort diarization segments once; use a small linear scan per segment
