@@ -22,6 +22,7 @@ import {
 import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
 import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
+import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -176,6 +177,12 @@ export const SessionDetails: React.FC = () => {
   const [showReprocessModal, setShowReprocessModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  // Speaker link + org speaker library — fetched once per session so the
+  // inline SpeakerLabelEditor popover can render assign/merge targets
+  // without making the user open the side-panel SpeakerTagger.
+  const [speakerLinks, setSpeakerLinks] = useState<Array<{ id: number; raw_label: string; speaker_id: number | null; speaker_display?: string | null }>>([]);
+  const [orgSpeakers, setOrgSpeakers] = useState<Array<{ id: number; display_name: string; has_centroid: boolean }>>([]);
+  const [speakerVersion, setSpeakerVersion] = useState(0);  // bump to refresh after edits
   const [reprocessOpts, setReprocessOpts] = useState<TranscriptionOptions>(
     DEFAULT_TRANSCRIPTION_OPTIONS,
   );
@@ -440,6 +447,54 @@ export const SessionDetails: React.FC = () => {
     };
     loadChatHistory();
   }, [chatOpen, chatHistoryLoaded, sessionId, session]);
+
+  // Fetch speaker_session_link rows + the org's enrolled speakers once
+  // per session (and re-fetch whenever speakerVersion bumps after an
+  // inline rename/assign/merge). Powers the SpeakerLabelEditor popover
+  // inside each transcript turn.
+  useEffect(() => {
+    if (!sessionId || !session) return;
+    const orgSlug = activeOrganization?.slug;
+    const headers: Record<string, string> = {};
+    if (orgSlug) headers['X-MeetingOps-Org'] = orgSlug;
+    const sid = String(session.id || sessionId);
+    (async () => {
+      try {
+        const [linksRes, speakersRes] = await Promise.all([
+          fetch(`${config.apiBaseUrl}/api/sessions/${sid}/speaker-links`, { headers }),
+          fetch(`${config.apiBaseUrl}/api/speakers`, { headers }),
+        ]);
+        if (linksRes.ok) {
+          const linksData = await linksRes.json();
+          setSpeakerLinks(
+            Array.isArray(linksData)
+              ? linksData.map((l: any) => ({
+                  id: l.id,
+                  raw_label: l.raw_label,
+                  speaker_id: l.speaker_id ?? null,
+                  speaker_display: l.speaker?.display_name ?? l.speaker_display ?? null,
+                }))
+              : [],
+          );
+        }
+        if (speakersRes.ok) {
+          const speakersData = await speakersRes.json();
+          setOrgSpeakers(
+            Array.isArray(speakersData)
+              ? speakersData.map((s: any) => ({
+                  id: s.id,
+                  display_name: s.display_name,
+                  has_centroid: !!s.has_centroid,
+                }))
+              : [],
+          );
+        }
+      } catch {
+        /* non-fatal — the editor will just show empty lists */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, session?.id, activeOrganization?.slug, speakerVersion]);
 
   // Fetch AI insights from the real backend endpoint
   useEffect(() => {
@@ -1515,9 +1570,16 @@ export const SessionDetails: React.FC = () => {
                       }`}
                     >
                       <div className="flex items-center gap-3 mb-1">
-                        <span className="text-sm font-medium text-purple-600">
-                          {segment.speaker || 'Speaker'}
-                        </span>
+                        <SpeakerLabelEditor
+                          speaker={segment.speaker || 'Speaker'}
+                          sessionId={String(session.id || sessionId)}
+                          links={speakerLinks}
+                          speakers={orgSpeakers}
+                          onChanged={() => {
+                            setSpeakerVersion((v) => v + 1);
+                            fetchSession();
+                          }}
+                        />
                         <span className="text-xs text-gray-500">
                           {formatTime(segment.start)} - {formatTime(segment.end)}
                         </span>

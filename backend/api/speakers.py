@@ -974,6 +974,125 @@ async def enroll_speaker_from_session(
     return _link_to_response(db, link)
 
 
+class MergeLinksRequest(BaseModel):
+    source_link_id: int
+    target_link_id: int
+
+
+@router.post(
+    "/api/sessions/{session_id}/speaker-links/merge",
+    response_model=list[SpeakerLinkResponse],
+)
+async def merge_speaker_links(
+    session_id: str,
+    payload: MergeLinksRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Merge two clusters in this session: source -> target. Useful when
+    pyannote over-splits a single voice into multiple SPEAKER_XX
+    clusters. The target's identity (speaker_id, display name) is
+    preserved; source's segments and Transcription rows are relabeled
+    to target. Source link row is deleted.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    if payload.source_link_id == payload.target_link_id:
+        raise HTTPException(status_code=400, detail="source and target must differ")
+
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+    source = (
+        db.query(SpeakerSessionLink)
+        .filter(
+            SpeakerSessionLink.id == payload.source_link_id,
+            SpeakerSessionLink.session_id == session.id,
+        )
+        .first()
+    )
+    target = (
+        db.query(SpeakerSessionLink)
+        .filter(
+            SpeakerSessionLink.id == payload.target_link_id,
+            SpeakerSessionLink.session_id == session.id,
+        )
+        .first()
+    )
+    if not source or not target:
+        raise HTTPException(status_code=404, detail="One or both links not found")
+
+    # Resolve target's display name: prefer named SpeakerProfile, else
+    # the raw_label as a fallback.
+    target_display = target.raw_label
+    if target.speaker_id:
+        sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == target.speaker_id).first()
+        if sp:
+            target_display = sp.display_name
+
+    # Track what the SOURCE was displaying so we can rewrite Transcription
+    # rows that may have been re-labeled by enrollment already.
+    source_display = source.raw_label
+    if source.speaker_id:
+        sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == source.speaker_id).first()
+        if sp:
+            source_display = sp.display_name
+
+    # 1) Rewrite transcript_diarized.segments
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    if isinstance(diarized, dict):
+        for seg in diarized.get("segments", []):
+            raw = seg.get("raw_label") or seg.get("speaker") or ""
+            cur = seg.get("speaker") or ""
+            if raw == source.raw_label or cur == source.raw_label or cur == source_display:
+                seg["raw_label"] = target.raw_label
+                seg["speaker"] = target_display
+        # Refresh speakers list.
+        if "speakers" in diarized:
+            seen, ordered = set(), []
+            for seg in diarized.get("segments", []):
+                s = seg.get("speaker", "Unknown")
+                if s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            diarized["speakers"] = ordered
+        session.transcript_diarized = diarized
+        flag_modified(session, "transcript_diarized")
+
+    # 2) Rewrite Transcription rows for the source's labels.
+    rows = (
+        db.query(Transcription)
+        .filter(
+            Transcription.session_id == session.id,
+            Transcription.speaker.in_([source.raw_label, source_display]),
+        )
+        .all()
+    )
+    for row in rows:
+        row.speaker = target_display
+
+    # 3) Drop the source link.
+    db.delete(source)
+
+    # 4) Clear ai_insights so the next view re-extracts with the new
+    # collapsed speaker list (speaker_insights counts will differ).
+    session.ai_insights = None
+
+    db.commit()
+
+    # Return the updated link list (just the target + any other links).
+    remaining = (
+        db.query(SpeakerSessionLink)
+        .filter(SpeakerSessionLink.session_id == session.id)
+        .order_by(SpeakerSessionLink.raw_label.asc())
+        .all()
+    )
+    logger.info(
+        "Merged speaker link %s into %s for session %s (%d segments + %d rows updated)",
+        source.raw_label, target.raw_label, session.id, len(diarized.get("segments", []) or []), len(rows),
+    )
+    return [_link_to_response(db, link) for link in remaining]
+
+
 @router.post("/api/sessions/{session_id}/identify-speakers", response_model=IdentifyResponse)
 async def identify_speakers_endpoint(
     session_id: str,
