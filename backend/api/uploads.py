@@ -993,14 +993,53 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
     covers the most of its [start, end] interval. Updates the JSONB
     `transcript_diarized.segments` and the rows in the `transcriptions`
     table. Idempotent — safe to re-run on re-process.
+
+    When the transcription is *under-segmented* relative to the
+    diarization output (e.g. NeMo Parakeet returned one big segment
+    covering the whole recording, but pyannote found 855 turns across 3
+    speakers), the per-segment label-and-overlap loop collapses all 855
+    turns onto the single transcription row. We detect this case
+    (transcript_segments < diar_segments / 10) and instead replace the
+    diarized track with pyannote's segments so SpeakerTagger and the UI
+    can still surface all the speakers pyannote found. The full text
+    remains in transcript_simple for readability.
     """
     if not diar_segments:
         return
     transcript = session.transcript_diarized
     if not isinstance(transcript, dict):
-        return
+        transcript = {}
     segments = transcript.get("segments") or []
-    if not segments:
+
+    # Under-segmentation fallback: pyannote gave us a much richer
+    # segmentation than the transcription. Prefer pyannote's segments so
+    # we don't lose its speaker information.
+    if len(segments) <= max(1, len(diar_segments) // 10):
+        from sqlalchemy.orm.attributes import flag_modified
+        new_segments = [
+            {
+                "start": float(d.get("start") or 0),
+                "end": float(d.get("end") or 0),
+                "speaker": d.get("speaker"),
+                "text": "",
+            }
+            for d in diar_segments
+        ]
+        speakers_ordered: list[str] = []
+        seen: set[str] = set()
+        for d in new_segments:
+            spk = d.get("speaker")
+            if spk and spk not in seen:
+                seen.add(spk)
+                speakers_ordered.append(spk)
+        transcript["segments"] = new_segments
+        transcript["speakers"] = speakers_ordered
+        transcript["diarization_backend"] = (
+            diar_segments[0].get("backend") if diar_segments else None
+        )
+        transcript["used_pyannote_segmentation"] = True
+        session.transcript_diarized = transcript
+        flag_modified(session, "transcript_diarized")
         return
 
     # Sort diarization segments once; use a small linear scan per segment

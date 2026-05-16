@@ -9,6 +9,12 @@ import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
 import { config } from '../config';
 import { useNavigate } from 'react-router-dom';
+import {
+  TranscriptionOptionsPanel,
+  DEFAULT_TRANSCRIPTION_OPTIONS,
+  serializeTranscriptionOptions,
+  type TranscriptionOptions,
+} from '../components/TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
 
 interface Session {
@@ -362,13 +368,69 @@ export const Sessions: React.FC = () => {
     navigate(`/sessions/${sessionId}`);
   };
 
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [uploadOptions, setUploadOptions] = useState<TranscriptionOptions>(
+    DEFAULT_TRANSCRIPTION_OPTIONS,
+  );
+  const [isDragging, setIsDragging] = useState(false);
+
   const handleUploadPicked = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) {
-      void startUploads(files, { action: 'transcribe' });
+      // Queue the files into the options modal instead of starting
+      // immediately. Lets the user pick STT engine, diarization mode,
+      // summary template, etc. before the slow run begins.
+      setPendingFiles(files);
+      setUploadOptions(DEFAULT_TRANSCRIPTION_OPTIONS);
     }
     event.target.value = '';
   };
+
+  const confirmUpload = () => {
+    if (pendingFiles.length === 0) return;
+    const opts = serializeTranscriptionOptions(uploadOptions);
+    void startUploads(pendingFiles, {
+      action: 'transcribe',
+      ...(opts ? { transcriptionOptions: opts } : {}),
+    });
+    setPendingFiles([]);
+  };
+
+  const cancelUpload = () => {
+    setPendingFiles([]);
+  };
+
+  // Drag-and-drop on the whole page when there are no pending files.
+  useEffect(() => {
+    if (pendingFiles.length > 0) return;
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer?.types?.includes('Files')) return;
+      e.preventDefault();
+      setIsDragging(true);
+    };
+    const onDragLeave = (e: DragEvent) => {
+      if (e.relatedTarget === null) setIsDragging(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      setIsDragging(false);
+      const files = Array.from(e.dataTransfer.files).filter(
+        (f) => f.type.startsWith('audio/') || f.type.startsWith('video/') || /\.(m4a|wav|mp3|aac|flac|ogg|opus|mp4|mov|mkv|webm)$/i.test(f.name),
+      );
+      if (files.length === 0) return;
+      setPendingFiles(files);
+      setUploadOptions(DEFAULT_TRANSCRIPTION_OPTIONS);
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [pendingFiles.length]);
 
   const deleteSession = async (sessionId: string) => {
     if (!confirm('Are you sure you want to delete this session?')) return;
@@ -1087,6 +1149,52 @@ export const Sessions: React.FC = () => {
           </div>
         )}
       </div>
+
+{pendingFiles.length > 0 && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div className="w-full max-w-2xl rounded-lg bg-gray-900 border border-gray-700 shadow-2xl">
+      <div className="border-b border-gray-800 px-6 py-4">
+        <h3 className="text-lg font-semibold text-white">Confirm upload</h3>
+        <p className="mt-1 text-sm text-gray-400">
+          {pendingFiles.length} file{pendingFiles.length === 1 ? '' : 's'} ready. Pick options below, then Start.
+        </p>
+      </div>
+      <div className="max-h-[60vh] overflow-y-auto px-6 py-4 space-y-4">
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Files</p>
+          <ul className="space-y-1">
+            {pendingFiles.map((f, idx) => (
+              <li key={idx} className="flex items-center justify-between text-sm text-gray-200 bg-gray-800/60 rounded px-3 py-2">
+                <span className="truncate pr-2">{f.name}</span>
+                <span className="text-xs text-gray-500">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <TranscriptionOptionsPanel value={uploadOptions} onChange={setUploadOptions} defaultOpen />
+      </div>
+      <div className="flex items-center justify-end gap-3 border-t border-gray-800 px-6 py-3">
+        <button
+          onClick={cancelUpload}
+          className="px-4 py-2 text-sm text-gray-300 hover:text-white"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={confirmUpload}
+          className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+        >
+          Start processing
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+{isDragging && pendingFiles.length === 0 && (
+  <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-purple-900/40 border-4 border-dashed border-purple-300">
+    <p className="text-2xl font-semibold text-white">Drop files to upload</p>
+  </div>
+)}
     </div>
   );
 };

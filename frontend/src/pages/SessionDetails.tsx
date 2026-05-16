@@ -1800,51 +1800,10 @@ export const SessionDetails: React.FC = () => {
               </h2>
 
               {session.audio_file ? (
-                <>
-                  <audio
-                    ref={audioRef}
-                    src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
-                    onTimeUpdate={handleTimeUpdate}
-                    onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                    onError={(e) => {
-                      console.error('Audio load error:', e);
-                    }}
-                    className="hidden"
-                  />
-
-                  <div className="space-y-4">
-                    {/* Controls */}
-                    <div className="flex items-center gap-4">
-                      <button
-                        onClick={togglePlayPause}
-                        className="p-3 bg-purple-600 text-white rounded-full hover:bg-purple-700 transition-colors"
-                      >
-                        {isPlaying ? (
-                          <Pause className="w-6 h-6" />
-                        ) : (
-                          <Play className="w-6 h-6" />
-                        )}
-                      </button>
-
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm text-gray-500 w-12">
-                            {formatTime(currentTime)}
-                          </span>
-                          <div className="flex-1 bg-gray-200 rounded-full h-2 relative">
-                            <div
-                              className="absolute top-0 left-0 h-full bg-purple-600 rounded-full"
-                              style={{ width: `${(currentTime / duration) * 100}%` }}
-                            />
-                          </div>
-                          <span className="text-sm text-gray-500 w-12">
-                            {formatTime(duration)}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
+                <AudioPlayer
+                  src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
+                  downloadAs={`${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.wav`}
+                />
               ) : (
                 <p className="text-gray-500 text-center py-4">No audio recording available</p>
               )}
