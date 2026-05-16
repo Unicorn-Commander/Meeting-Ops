@@ -372,17 +372,29 @@ export const Sessions: React.FC = () => {
   const [uploadOptions, setUploadOptions] = useState<TranscriptionOptions>(
     DEFAULT_TRANSCRIPTION_OPTIONS,
   );
+  // When true, the *next* file picked via the file input opens the
+  // options modal instead of auto-starting. The big upload tile leaves
+  // this false (fastest path); the smaller "with options" link flips
+  // it true just before invoking the picker.
+  const [pickerWithOptions, setPickerWithOptions] = useState(false);
 
   const handleUploadPicked = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
-    if (files.length > 0) {
-      // Queue the files into the options modal instead of starting
-      // immediately. Lets the user pick STT engine, diarization mode,
-      // summary template, etc. before the slow run begins.
+    event.target.value = '';
+    if (files.length === 0) return;
+    if (pickerWithOptions) {
+      // Explicit "with options" path: route through the modal so the
+      // user can pick STT engine, diarization sensitivity, summary
+      // template, etc. before the run begins.
+      setPickerWithOptions(false);
       setPendingFiles(files);
       setUploadOptions(DEFAULT_TRANSCRIPTION_OPTIONS);
+      return;
     }
-    event.target.value = '';
+    // Default fast path: kick off processing with the org defaults.
+    // Matches drag-and-drop behaviour for consistency. The Re-process
+    // button on SessionDetails covers tweaking options after the fact.
+    void startUploads(files, { action: 'transcribe' });
   };
 
   const confirmUpload = () => {
@@ -892,6 +904,17 @@ export const Sessions: React.FC = () => {
                 <Upload className="mb-3 h-10 w-10 text-cyan-300" />
                 <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
                 <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
+                <span
+                  role="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPickerWithOptions(true);
+                    uploadInputRef.current?.click();
+                  }}
+                  className="mt-3 text-xs text-cyan-300/80 hover:text-cyan-200 underline-offset-2 hover:underline cursor-pointer"
+                >
+                  Upload with options…
+                </span>
               </button>
             )}
             {filteredSessions.map(session => (

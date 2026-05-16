@@ -47,12 +47,19 @@ export const DragDropOverlay: React.FC = () => {
   }, []);
 
   const handleFiles = (files: File[]) => {
-    // Always show the triage modal. The auto-start path was eating user
-    // intent: a dropped file would kick off processing before they could
-    // pick options (STT engine, diarization sensitivity, summary
-    // template). Showing the modal even for the obvious-audio case
-    // costs one extra click but lets users actually configure runs.
     if (files.length === 0) return;
+    // Drag-drop is the fast path: single obvious audio/video file goes
+    // straight to processing with the org defaults (Parakeet STT,
+    // pyannote auto-detect, balanced sensitivity). Mixed file selections
+    // or non-obvious file types fall through to the triage modal where
+    // the user picks per-file options. The Re-process button on
+    // SessionDetails covers tweaking options after the fact.
+    const single = files.length === 1 ? files[0] : null;
+    const defaultAction = single ? defaultActionForFile(single) : null;
+    if (single && defaultAction === "transcribe") {
+      void startUploads(files);
+      return;
+    }
     setTriageFiles(files);
   };
 
