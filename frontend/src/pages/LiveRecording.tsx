@@ -26,6 +26,7 @@ import {
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
+import MobileLiveRecording from '../components/MobileLiveRecording';
 
 interface SummaryFormats {
   executive: boolean;
@@ -967,7 +968,9 @@ export default function LiveRecording() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-4 pt-14 md:p-6 md:pt-6">
+    <>
+      <MobileLiveRecording />
+      <div className="hidden md:block min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-4 pt-14 md:p-6 md:pt-6">
       {/* Header */}
       <div className="max-w-7xl mx-auto mb-6 md:mb-8">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -1768,6 +1771,7 @@ export default function LiveRecording() {
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

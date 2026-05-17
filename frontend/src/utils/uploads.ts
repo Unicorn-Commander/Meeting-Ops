@@ -102,6 +102,46 @@ export function buildUploadHeaders(orgSlug?: string | null): HeadersInit {
   };
 }
 
+const MAX_CHUNK_RETRIES = 5;
+const BASE_RETRY_DELAY_MS = 750;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const id = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(id);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchAlreadyReceived(
+  uploadId: string,
+  orgSlug: string | null | undefined,
+  signal?: AbortSignal,
+): Promise<{ received: number; total: number } | null> {
+  try {
+    const res = await fetch(`${config.apiBaseUrl}/api/uploads/${uploadId}/status`, {
+      headers: buildUploadHeaders(orgSlug),
+      signal,
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as UploadStatus;
+    return { received: data.received_chunks ?? 0, total: data.total_chunks ?? 0 };
+  } catch {
+    return null;
+  }
+}
+
 export async function uploadFileInChunks(
   file: File,
   uploadId: string,
@@ -111,24 +151,51 @@ export async function uploadFileInChunks(
   signal?: AbortSignal,
 ) {
   const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
-  for (let index = 0; index < totalChunks; index += 1) {
+  const existing = await fetchAlreadyReceived(uploadId, orgSlug, signal);
+  const resumeFrom = existing && existing.received > 0 && existing.received <= totalChunks
+    ? existing.received
+    : 0;
+  if (resumeFrom > 0) onChunk(resumeFrom, totalChunks);
+
+  for (let index = resumeFrom; index < totalChunks; index += 1) {
     const start = index * chunkSize;
     const end = Math.min(start + chunkSize, file.size);
-    const form = new FormData();
-    form.append('chunk_index', String(index));
-    form.append('data', file.slice(start, end), file.name);
-    const res = await fetch(`${config.apiBaseUrl}/api/uploads/${uploadId}/chunk`, {
-      method: 'POST',
-      headers: buildUploadHeaders(orgSlug),
-      body: form,
-      signal,
-    });
-    if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(detail || `Chunk ${index + 1} failed`);
+    let attempt = 0;
+    let lastError: unknown = null;
+    while (attempt < MAX_CHUNK_RETRIES) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      try {
+        const form = new FormData();
+        form.append('chunk_index', String(index));
+        form.append('data', file.slice(start, end), file.name);
+        const res = await fetch(`${config.apiBaseUrl}/api/uploads/${uploadId}/chunk`, {
+          method: 'POST',
+          headers: buildUploadHeaders(orgSlug),
+          body: form,
+          signal,
+        });
+        if (!res.ok) {
+          const detail = await res.text();
+          if ([400, 403, 404, 409, 413].includes(res.status)) {
+            throw new Error(detail || `Chunk ${index + 1} rejected (${res.status})`);
+          }
+          throw new Error(detail || `Chunk ${index + 1} failed (${res.status})`);
+        }
+        const data = await res.json();
+        onChunk(data.received_chunks, data.total_chunks);
+        lastError = null;
+        break;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err;
+        if (/rejected \((400|403|404|409|413)\)/.test(String(err?.message ?? ''))) throw err;
+        lastError = err;
+        attempt += 1;
+        if (attempt >= MAX_CHUNK_RETRIES) break;
+        const jitter = Math.random() * 250;
+        await sleep(BASE_RETRY_DELAY_MS * 2 ** (attempt - 1) + jitter, signal);
+      }
     }
-    const data = await res.json();
-    onChunk(data.received_chunks, data.total_chunks);
+    if (lastError) throw lastError;
   }
 }
 
