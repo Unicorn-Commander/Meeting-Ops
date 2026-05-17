@@ -34,7 +34,9 @@ router = APIRouter(prefix="/api/simple/recording-sessions", tags=["session-email
 
 
 class EmailAttendeesRequest(BaseModel):
-    speaker_ids: List[int] = Field(..., min_length=1, max_length=64)
+    # When speaker_ids is provided, send to those SpeakerProfile emails (existing
+    # behavior). When omitted/empty, fall back to session.participants[*].email.
+    speaker_ids: Optional[List[int]] = Field(default=None, max_length=64)
     include: List[str] = Field(
         default_factory=lambda: ["link"],
         description="Which artifacts to include: link, summary_pdf, transcript_pdf",
@@ -243,16 +245,45 @@ async def email_attendees(
     if not (is_admin or is_creator or getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Not permitted to email attendees for this session")
 
-    speakers = (
-        db.query(SpeakerProfile)
-        .filter(
-            SpeakerProfile.id.in_(payload.speaker_ids),
-            SpeakerProfile.organization_id == active_org.organization.id,
+    # Build the recipient list. If the caller named speaker_ids, that wins
+    # (existing UI flow from the EmailAttendeesModal). If not, fall back to
+    # session.participants so the new "send to the people who were here"
+    # button on SessionDetails just works without a separate picker.
+    recipients: List[dict] = []
+    if payload.speaker_ids:
+        speakers = (
+            db.query(SpeakerProfile)
+            .filter(
+                SpeakerProfile.id.in_(payload.speaker_ids),
+                SpeakerProfile.organization_id == active_org.organization.id,
+            )
+            .all()
         )
-        .all()
-    )
-    if not speakers:
-        raise HTTPException(status_code=404, detail="No matching speakers")
+        if not speakers:
+            raise HTTPException(status_code=404, detail="No matching speakers")
+        for sp in speakers:
+            recipients.append({
+                "ref": f"speaker:{sp.id}",
+                "speaker_id": sp.id,
+                "name": sp.display_name,
+                "email": (sp.email or "").strip(),
+            })
+    else:
+        raw = session.participants if isinstance(session.participants, list) else []
+        for p in raw:
+            if not isinstance(p, dict):
+                continue
+            recipients.append({
+                "ref": f"participant:{p.get('id')}",
+                "participant_id": p.get("id"),
+                "name": (p.get("name") or "").strip() or None,
+                "email": (p.get("email") or "").strip(),
+            })
+        if not recipients:
+            raise HTTPException(
+                status_code=400,
+                detail="No recipients: session has no participants and no speaker_ids passed",
+            )
 
     include = [s.lower() for s in (payload.include or ["link"])]
     attachments = _build_attachments(db, session, include) or None
@@ -264,17 +295,23 @@ async def email_attendees(
     subject_title = session.title or session.name or "Meeting recording"
     subject = f"Meeting: {subject_title}"
 
-    for sp in speakers:
-        email = (sp.email or "").strip()
+    for r in recipients:
+        email = (r.get("email") or "").strip()
+        name = r.get("name")
         if not email:
             skipped += 1
-            failures.append({"speaker_id": sp.id, "name": sp.display_name, "reason": "no email on file"})
+            failure: dict = {"name": name, "reason": "no email on file"}
+            if "speaker_id" in r:
+                failure["speaker_id"] = r["speaker_id"]
+            elif "participant_id" in r:
+                failure["participant_id"] = r["participant_id"]
+            failures.append(failure)
             continue
         link = _resolve_link_for_email(db, session, current_user, email) if "link" in include else None
-        html_body = _build_html(session, current_user, sp.display_name or email, link, payload.message)
+        html_body = _build_html(session, current_user, name or email, link, payload.message)
         result = _postmark_send(
             to_email=email,
-            to_name=sp.display_name,
+            to_name=name,
             subject=subject,
             html_body=html_body,
             reply_to=current_user.email,
@@ -283,15 +320,16 @@ async def email_attendees(
         if result.get("ok"):
             sent += 1
         else:
-            failures.append({
-                "speaker_id": sp.id,
-                "name": sp.display_name,
-                "email": email,
-                "reason": result.get("error") or "send failed",
-            })
+            failure = {"name": name, "email": email, "reason": result.get("error") or "send failed"}
+            if "speaker_id" in r:
+                failure["speaker_id"] = r["speaker_id"]
+            elif "participant_id" in r:
+                failure["participant_id"] = r["participant_id"]
+            failures.append(failure)
 
     logger.info(
-        "email-attendees: session=%s sent=%d skipped=%d failed=%d",
+        "email-attendees: session=%s sent=%d skipped=%d failed=%d (source=%s)",
         session.id, sent, skipped, len(failures),
+        "speakers" if payload.speaker_ids else "participants",
     )
     return EmailAttendeesResponse(sent=sent, skipped=skipped, failures=failures)

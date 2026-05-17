@@ -162,6 +162,7 @@ _load_router(
     router_attr="public_router",
 )
 _load_router(app, "session_emails", "api.session_emails")
+_load_router(app, "session_participants", "api.sessions_participants")
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")

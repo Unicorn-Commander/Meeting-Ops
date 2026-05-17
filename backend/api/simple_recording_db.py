@@ -102,6 +102,13 @@ class UpdateSessionProjectRequest(BaseModel):
     project_id: Optional[int] = None
     project_slug: Optional[str] = None
 
+class ParticipantSummary(BaseModel):
+    id: str
+    name: str
+    email: Optional[str] = None
+    role: Optional[str] = None
+
+
 class SessionResponse(BaseModel):
     id: str
     name: str
@@ -112,12 +119,32 @@ class SessionResponse(BaseModel):
     duration: float
     audio_file: Optional[str] = None
     transcription: Optional[dict] = None
+    participants: List[ParticipantSummary] = []
 
 
 def _scoped_session_query(db: Session, organization_id: int):
     return db.query(DBRecordingSession).filter(
         DBRecordingSession.organization_id == organization_id
     )
+
+
+def _participants_payload(session: DBRecordingSession) -> List[dict]:
+    """Coerce the JSONB column into a clean response list. Tolerates legacy
+    NULLs and stray non-list values without 500ing the caller."""
+    raw = session.participants
+    if not isinstance(raw, list):
+        return []
+    out: List[dict] = []
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        out.append({
+            "id": str(p.get("id") or ""),
+            "name": str(p.get("name") or ""),
+            "email": p.get("email") or None,
+            "role": p.get("role") or None,
+        })
+    return out
 
 
 def _get_session_for_org(
@@ -223,7 +250,8 @@ async def list_sessions(
             status=session.status or "completed",
             duration=session.duration or 0.0,
             audio_file=session.audio_file,
-            transcription=transcription_data
+            transcription=transcription_data,
+            participants=_participants_payload(session),
         ))
     
     return result
@@ -508,6 +536,9 @@ async def get_session(
             "project_app": session.project_app,
             "project_id": session.project_id,
             "project_slug": session.project_slug,
+            # Per-session participants (attendees). Editable from the
+            # session detail sidebar; feeds the email-attendees default.
+            "participants": _participants_payload(session),
         }
         
     except HTTPException:

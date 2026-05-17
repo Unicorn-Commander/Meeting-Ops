@@ -60,6 +60,10 @@ class RecordingSession(Base):
     # Migrated from Integer in 010_project_id_to_text.
     project_id = Column(Text, nullable=True)
     project_slug = Column(String(200), nullable=True)
+    # List of {name: str, email?: str, role?: str}. JSONB so we can index/query
+    # later if attendance reporting needs it; for now it's a plain list scanned
+    # in application code.
+    participants = Column(JSONB, nullable=False, server_default="[]")
 
     def to_dict(self):
         return {

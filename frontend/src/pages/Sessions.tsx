@@ -17,6 +17,13 @@ import {
 } from '../components/TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
 
+interface Participant {
+  id: string;
+  name: string;
+  email?: string | null;
+  role?: string | null;
+}
+
 interface Session {
   id: string;
   name: string;
@@ -26,7 +33,7 @@ interface Session {
   updated_at: string;
   duration?: number;
   status: 'idle' | 'active' | 'recording' | 'completed' | 'processing' | 'failed';
-  participants?: string[];
+  participants?: Participant[];
   tags?: string[];
   audio_file?: string;
   transcript?: string;
@@ -570,7 +577,7 @@ export const Sessions: React.FC = () => {
       notes: null,
       sessionId: selectedSession.id,
       duration: selectedSession.duration || 0,
-      participants: selectedSession.participants || [],
+      participants: (selectedSession.participants || []).map((p) => p.name),
       topics: []
     };
 
@@ -966,7 +973,10 @@ export const Sessions: React.FC = () => {
                       {session.participants && session.participants.length > 0 && (
                         <div className="flex items-center gap-2">
                           <Users className="w-4 h-4" />
-                          {session.participants.length} participant{session.participants.length !== 1 ? 's' : ''}
+                          <span className="truncate">
+                            {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
+                            {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -1091,8 +1101,11 @@ export const Sessions: React.FC = () => {
                       <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
                         <span>{new Date(session.created_at).toLocaleDateString()}</span>
                         {session.duration && <span>{formatDuration(session.duration)}</span>}
-                        {session.participants && (
-                          <span>{session.participants.length} participant{session.participants.length !== 1 ? 's' : ''}</span>
+                        {session.participants && session.participants.length > 0 && (
+                          <span>
+                            {session.participants.length} participant{session.participants.length !== 1 ? 's' : ''}: {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
+                            {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
+                          </span>
                         )}
                       </div>
                     </div>

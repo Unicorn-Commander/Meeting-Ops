@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
-  Briefcase, Edit2, Check
+  Briefcase, Edit2, Check, X
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -150,6 +150,14 @@ interface Session {
   project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
   project_id?: string | null;
   project_slug?: string | null;
+  participants?: Participant[];
+}
+
+interface Participant {
+  id: string;
+  name: string;
+  email?: string | null;
+  role?: string | null;
 }
 
 const PROJECT_APP_LABELS: Record<string, string> = {
@@ -196,7 +204,20 @@ export const SessionDetails: React.FC = () => {
   );
   const [generatingEmail, setGeneratingEmail] = useState(false);
   const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
-  
+
+  // Per-session participants. Mirrored from session.participants for snappier
+  // editing; sources of truth are the POST/PATCH/DELETE responses.
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [newParticipantName, setNewParticipantName] = useState('');
+  const [newParticipantEmail, setNewParticipantEmail] = useState('');
+  const [newParticipantRole, setNewParticipantRole] = useState('');
+  const [participantBusy, setParticipantBusy] = useState(false);
+  const [participantError, setParticipantError] = useState<string | null>(null);
+  const [editingParticipantId, setEditingParticipantId] = useState<string | null>(null);
+  const [editParticipantName, setEditParticipantName] = useState('');
+  const [editParticipantEmail, setEditParticipantEmail] = useState('');
+  const [editParticipantRole, setEditParticipantRole] = useState('');
+
   const audioRef = useRef<HTMLAudioElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -554,8 +575,9 @@ export const SessionDetails: React.FC = () => {
         if (!data.transcription.text && data.transcript_simple) {
           data.transcription.text = data.transcript_simple;
         }
-        
+
         setSession(data);
+        setParticipants(Array.isArray(data.participants) ? data.participants : []);
       } else {
         const errorText = await response.text();
         console.error('❌ Failed to fetch session:', response.status, errorText);
@@ -566,6 +588,121 @@ export const SessionDetails: React.FC = () => {
       setError(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const readParticipantError = async (res: Response): Promise<string> => {
+    let body: any = null;
+    try { body = await res.json(); } catch { /* not JSON */ }
+    return formatBackendError(body, res.status, 'Participant request failed');
+  };
+
+  const participantHeaders = (): HeadersInit => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+    return headers;
+  };
+
+  const participantsBase = () =>
+    `${config.apiUrl}/api/simple/recording-sessions/${session?.id || sessionId}/participants`;
+
+  const addParticipant = async () => {
+    const name = newParticipantName.trim();
+    if (!name) return;
+    setParticipantBusy(true);
+    setParticipantError(null);
+    try {
+      const body: Record<string, string> = { name };
+      const email = newParticipantEmail.trim();
+      const role = newParticipantRole.trim();
+      if (email) body.email = email;
+      if (role) body.role = role;
+      const res = await fetch(participantsBase(), {
+        method: 'POST',
+        headers: participantHeaders(),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setParticipantError(await readParticipantError(res));
+        return;
+      }
+      const created: Participant = await res.json();
+      setParticipants((prev) => [...prev, created]);
+      setNewParticipantName('');
+      setNewParticipantEmail('');
+      setNewParticipantRole('');
+    } catch (e) {
+      setParticipantError(e instanceof Error ? e.message : 'Failed to add participant');
+    } finally {
+      setParticipantBusy(false);
+    }
+  };
+
+  const startEditParticipant = (p: Participant) => {
+    setEditingParticipantId(p.id);
+    setEditParticipantName(p.name);
+    setEditParticipantEmail(p.email || '');
+    setEditParticipantRole(p.role || '');
+  };
+
+  const cancelEditParticipant = () => {
+    setEditingParticipantId(null);
+    setEditParticipantName('');
+    setEditParticipantEmail('');
+    setEditParticipantRole('');
+  };
+
+  const saveEditParticipant = async () => {
+    if (!editingParticipantId) return;
+    const name = editParticipantName.trim();
+    if (!name) return;
+    setParticipantBusy(true);
+    setParticipantError(null);
+    try {
+      const body = {
+        name,
+        email: editParticipantEmail.trim() || null,
+        role: editParticipantRole.trim() || null,
+      };
+      const res = await fetch(`${participantsBase()}/${editingParticipantId}`, {
+        method: 'PATCH',
+        headers: participantHeaders(),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setParticipantError(await readParticipantError(res));
+        return;
+      }
+      const updated: Participant = await res.json();
+      setParticipants((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      cancelEditParticipant();
+    } catch (e) {
+      setParticipantError(e instanceof Error ? e.message : 'Failed to update participant');
+    } finally {
+      setParticipantBusy(false);
+    }
+  };
+
+  const deleteParticipant = async (id: string) => {
+    if (!confirm('Remove this participant?')) return;
+    setParticipantBusy(true);
+    setParticipantError(null);
+    try {
+      const res = await fetch(`${participantsBase()}/${id}`, {
+        method: 'DELETE',
+        headers: participantHeaders(),
+      });
+      if (!res.ok && res.status !== 204) {
+        setParticipantError(await readParticipantError(res));
+        return;
+      }
+      setParticipants((prev) => prev.filter((p) => p.id !== id));
+    } catch (e) {
+      setParticipantError(e instanceof Error ? e.message : 'Failed to remove participant');
+    } finally {
+      setParticipantBusy(false);
     }
   };
 
@@ -2052,6 +2189,144 @@ export const SessionDetails: React.FC = () => {
 
           {/* Sidebar */}
           <div className="space-y-6">
+            {/* Participants */}
+            <div className="bg-white rounded-lg shadow-sm p-6">
+              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <Users className="w-5 h-5 text-purple-600" />
+                Participants
+                {participants.length > 0 && (
+                  <span className="text-sm font-normal text-gray-500">({participants.length})</span>
+                )}
+              </h3>
+
+              {participantError && (
+                <div className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {participantError}
+                </div>
+              )}
+
+              {participants.length === 0 && (
+                <p className="mb-3 text-sm text-gray-500">No participants yet.</p>
+              )}
+
+              <ul className="mb-4 space-y-2">
+                {participants.map((p) => (
+                  <li key={p.id} className="rounded border border-gray-200 px-3 py-2">
+                    {editingParticipantId === p.id ? (
+                      <div className="space-y-2">
+                        <input
+                          type="text"
+                          value={editParticipantName}
+                          onChange={(e) => setEditParticipantName(e.target.value)}
+                          placeholder="Name"
+                          className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                        />
+                        <input
+                          type="email"
+                          value={editParticipantEmail}
+                          onChange={(e) => setEditParticipantEmail(e.target.value)}
+                          placeholder="Email (optional)"
+                          className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                        />
+                        <input
+                          type="text"
+                          value={editParticipantRole}
+                          onChange={(e) => setEditParticipantRole(e.target.value)}
+                          placeholder="Role (optional)"
+                          className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={saveEditParticipant}
+                            disabled={participantBusy || !editParticipantName.trim()}
+                            className="rounded bg-purple-600 px-3 py-1 text-xs font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelEditParticipant}
+                            disabled={participantBusy}
+                            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <p className="truncate text-sm font-medium text-gray-900">{p.name}</p>
+                            {p.role && (
+                              <span className="rounded bg-purple-100 px-2 py-0.5 text-xs text-purple-700">
+                                {p.role}
+                              </span>
+                            )}
+                          </div>
+                          {p.email && (
+                            <p className="truncate text-xs text-gray-500">{p.email}</p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 gap-1">
+                          <button
+                            onClick={() => startEditParticipant(p)}
+                            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                            title="Edit participant"
+                          >
+                            <Edit2 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => deleteParticipant(p.id)}
+                            className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                            title="Remove participant"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+
+              <div className="space-y-2 border-t border-gray-200 pt-3">
+                <p className="text-xs font-medium text-gray-600">Add participant</p>
+                <input
+                  type="text"
+                  value={newParticipantName}
+                  onChange={(e) => setNewParticipantName(e.target.value)}
+                  placeholder="Name (required)"
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <input
+                  type="email"
+                  value={newParticipantEmail}
+                  onChange={(e) => setNewParticipantEmail(e.target.value)}
+                  placeholder="Email (optional)"
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <input
+                  type="text"
+                  value={newParticipantRole}
+                  onChange={(e) => setNewParticipantRole(e.target.value)}
+                  placeholder="Role (e.g. host, interviewee)"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newParticipantName.trim() && !participantBusy) {
+                      addParticipant();
+                    }
+                  }}
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <button
+                  onClick={addParticipant}
+                  disabled={participantBusy || !newParticipantName.trim()}
+                  className="w-full rounded bg-purple-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+
             {/* Processing Metadata */}
             {session.metadata && (
               <div className="bg-white rounded-lg shadow-sm p-6">
