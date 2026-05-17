@@ -31,6 +31,8 @@ interface MobileSession {
   participants?: Participant[];
   tags?: string[];
   transcription?: { segments?: Array<{ speaker?: string }> } | null;
+  summary_preview?: string;
+  speaker_count?: number;
 }
 
 interface Props {
@@ -46,6 +48,9 @@ interface Props {
 }
 
 function deriveSpeakerCount(session: MobileSession): number {
+  if (typeof session.speaker_count === 'number' && session.speaker_count > 0) {
+    return session.speaker_count;
+  }
   const segs = session.transcription?.segments;
   if (!Array.isArray(segs) || segs.length === 0) return 0;
   const set = new Set<string>();
@@ -272,6 +277,12 @@ const MobileSessionsList: React.FC<Props> = ({
                         {pill.label}
                       </span>
                     </div>
+
+                    {session.summary_preview && (
+                      <p className="text-xs text-gray-400 leading-relaxed line-clamp-2">
+                        {session.summary_preview}
+                      </p>
+                    )}
 
                     <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
                       <span className="inline-flex items-center gap-1">

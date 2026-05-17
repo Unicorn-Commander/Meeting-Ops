@@ -42,6 +42,8 @@ interface Session {
   audio_file?: string;
   transcript?: string;
   summary?: any;               // AI-generated summary
+  summary_preview?: string;    // Plain-text snippet for list views
+  speaker_count?: number;      // Distinct speakers, server-computed
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
@@ -60,6 +62,9 @@ const VIEW_MODE_KEY = 'meetingops.sessionsViewMode.v1';
 const VALID_SORT_KEYS: ReadonlyArray<SortKey> = ['date', 'name', 'duration', 'speakers', 'status'];
 
 function deriveSpeakerCount(session: Session): number {
+  if (typeof session.speaker_count === 'number' && session.speaker_count > 0) {
+    return session.speaker_count;
+  }
   const segs = (session as any)?.transcription?.segments;
   if (!Array.isArray(segs) || segs.length === 0) return 0;
   const set = new Set<string>();
@@ -298,10 +303,18 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                         type="button"
                         onClick={() => onOpen(session.id)}
                         title={fullTitle}
-                        className="text-left font-medium text-white hover:text-purple-300 transition-colors max-w-[40ch] truncate"
+                        className="block text-left font-medium text-white hover:text-purple-300 transition-colors max-w-[44ch] truncate"
                       >
                         {truncated}
                       </button>
+                      {session.summary_preview && (
+                        <div
+                          className="mt-1 text-xs text-gray-400 max-w-[44ch] line-clamp-2"
+                          title={session.summary_preview}
+                        >
+                          {session.summary_preview}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300">
                       {session.created_at ? new Date(session.created_at).toLocaleDateString() : '—'}

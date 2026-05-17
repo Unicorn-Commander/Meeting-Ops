@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
 import asyncio
 import os
+import re
 import json
 import logging
 import uuid
@@ -121,6 +122,59 @@ class SessionResponse(BaseModel):
     transcription: Optional[dict] = None
     participants: List[ParticipantSummary] = []
     tags: List[str] = []
+    summary_preview: Optional[str] = None
+    speaker_count: int = 0
+
+
+def _summary_preview(session: DBRecordingSession, max_chars: int = 220) -> Optional[str]:
+    """Pull a short plain-text snippet of the AI summary for the list view.
+
+    Prefers ai_insights.summary (most recent + LLM-cleaned), then
+    final_summary.summary, then the legacy session.summary JSON blob.
+    """
+    candidates = []
+    if isinstance(session.ai_insights, dict):
+        candidates.append(session.ai_insights.get("summary"))
+    if isinstance(session.final_summary, dict):
+        candidates.append(session.final_summary.get("summary"))
+        candidates.append(session.final_summary.get("text"))
+    if session.summary:
+        try:
+            raw = json.loads(session.summary) if isinstance(session.summary, str) else session.summary
+            if isinstance(raw, dict):
+                candidates.append(raw.get("summary"))
+                candidates.append(raw.get("text"))
+            elif isinstance(raw, str):
+                candidates.append(raw)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            candidates.append(str(session.summary))
+    for c in candidates:
+        if c and isinstance(c, str):
+            # Strip markdown decoration so a list-view snippet stays readable.
+            text = c
+            for marker in ("**", "##", "###", "####", "`"):
+                text = text.replace(marker, "")
+            # Bullet asterisks and leading dashes: turn into a separator so we
+            # still get list-readable prose ("X. Y. Z" feel) without raw
+            # markdown clutter.
+            text = re.sub(r"(^|\n)\s*[\*\-•]\s+", r"\1", text)
+            text = " ".join(text.split())
+            if not text:
+                continue
+            if len(text) <= max_chars:
+                return text
+            return text[:max_chars - 1].rstrip() + "…"
+    return None
+
+
+def _speaker_count(session: DBRecordingSession) -> int:
+    """Count distinct speakers from transcript_diarized.speakers if present."""
+    td = session.transcript_diarized
+    if isinstance(td, dict):
+        speakers = td.get("speakers")
+        if isinstance(speakers, list):
+            return len([s for s in speakers if s])
+    return 0
 
 
 def _scoped_session_query(db: Session, organization_id: int):
@@ -270,6 +324,8 @@ async def list_sessions(
             transcription=transcription_data,
             participants=_participants_payload(session),
             tags=_tags_payload(session),
+            summary_preview=_summary_preview(session),
+            speaker_count=_speaker_count(session),
         ))
     
     return result
