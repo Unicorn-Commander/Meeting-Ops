@@ -42,6 +42,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TARGET_SR = 16000  # Parakeet expects 16 kHz mono
 DEFAULT_MODEL = os.getenv("PARAKEET_MODEL", "nvidia/parakeet-tdt-1.1b")
 FALLBACK_MODEL = os.getenv("PARAKEET_FALLBACK_MODEL", "nvidia/parakeet-tdt-0.6b")
+PARAKEET_BACKEND = os.getenv("PARAKEET_BACKEND", "pytorch").strip().lower()
+MODEL_PRECISION = os.getenv("PARAKEET_MODEL_PRECISION", os.getenv("MODEL_PRECISION", "fp32")).strip().lower()
 MIN_SECONDS = float(os.getenv("MIN_AUDIO_SECONDS", "0.1"))
 MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "7200"))  # 2 hours
 SERVICE_VERSION = "0.1.0"
@@ -59,6 +61,11 @@ def _load_model() -> Any:
     global _model, _model_name, _model_load_error
     if _model is not None:
         return _model
+    if PARAKEET_BACKEND != "pytorch":
+        raise RuntimeError(
+            f"PARAKEET_BACKEND={PARAKEET_BACKEND!r} is not available in this image; "
+            "use PARAKEET_BACKEND=pytorch with PARAKEET_MODEL_PRECISION=fp16 for the accelerated path"
+        )
 
     # Defer the import so /health stays cheap even if NeMo has issues.
     from nemo.collections.asr.models import ASRModel
@@ -74,6 +81,16 @@ def _load_model() -> Any:
             t0 = time.time()
             model = ASRModel.from_pretrained(model_name=name)
             model = model.to(DEVICE)
+            if MODEL_PRECISION in ("fp16", "half", "float16"):
+                if DEVICE != "cuda":
+                    logger.warning("Ignoring fp16 precision on non-CUDA device")
+                else:
+                    model = model.half()
+                    logger.info("Parakeet precision set to fp16")
+            elif MODEL_PRECISION in ("fp32", "float32", ""):
+                pass
+            else:
+                raise ValueError(f"Unsupported PARAKEET_MODEL_PRECISION={MODEL_PRECISION!r}")
             try:
                 model.eval()
             except Exception:
@@ -404,6 +421,8 @@ class HealthResponse(BaseModel):
     fallback_model: Optional[str] = None
     load_error: Optional[str] = None
     version: str = SERVICE_VERSION
+    backend: str = PARAKEET_BACKEND
+    precision: str = MODEL_PRECISION
 
 
 class TranscribeSegment(BaseModel):
@@ -468,6 +487,8 @@ def health() -> HealthResponse:
         fallback_model=FALLBACK_MODEL,
         load_error=_model_load_error,
         version=SERVICE_VERSION,
+        backend=PARAKEET_BACKEND,
+        precision=MODEL_PRECISION,
     )
 
 
