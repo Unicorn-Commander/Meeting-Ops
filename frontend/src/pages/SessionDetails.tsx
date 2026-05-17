@@ -26,6 +26,7 @@ import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
 import { SpeakerTimeline } from '../components/SpeakerTimeline';
 import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
+import MobileSessionDetails from '../components/MobileSessionDetails';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -1250,8 +1251,70 @@ export const SessionDetails: React.FC = () => {
 
   const hasTranscript = Boolean(transcriptText || segments.length > 0);
 
+  const audioSrc = session.audio_file
+    ? getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)
+    : null;
+
+  const mobileProps = {
+    session,
+    sessionId,
+    segments,
+    speakers,
+    transcriptText,
+    hasTranscript,
+    selectedSpeaker,
+    setSelectedSpeaker,
+    searchTerm,
+    setSearchTerm,
+    audioRef,
+    audioSrc,
+    currentTime,
+    setCurrentTime,
+    speakerLinks,
+    orgSpeakers,
+    onSpeakerChanged: () => {
+      setSpeakerVersion((v) => v + 1);
+      fetchSession();
+    },
+    insights,
+    insightsLoading,
+    editingTitle,
+    titleDraft,
+    savingTitle,
+    startEditTitle,
+    setTitleDraft,
+    setEditingTitle,
+    saveTitle,
+    participants,
+    newParticipantName, setNewParticipantName,
+    newParticipantEmail, setNewParticipantEmail,
+    newParticipantRole, setNewParticipantRole,
+    participantBusy, participantError,
+    editingParticipantId,
+    editParticipantName, setEditParticipantName,
+    editParticipantEmail, setEditParticipantEmail,
+    editParticipantRole, setEditParticipantRole,
+    startEditParticipant, cancelEditParticipant, saveEditParticipant,
+    addParticipant, deleteParticipant,
+    tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
+    onBack: () => navigate('/sessions'),
+    onOpenShare: () => setShowShareModal(true),
+    onOpenEmail: () => setShowEmailModal(true),
+    onOpenReprocess: () => {
+      setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
+      setReprocessError(null);
+      setShowReprocessModal(true);
+    },
+    onUploadAudio: () => fileInputRef.current?.click(),
+    uploading,
+    formatTime,
+    formatDate,
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
+    <>
+    <MobileSessionDetails {...mobileProps} />
+    <div className="hidden md:flex min-h-screen bg-gray-50 flex-col">
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4">
@@ -2878,5 +2941,6 @@ export const SessionDetails: React.FC = () => {
         </div>
       )}
     </div>
+    </>
   );
 };
