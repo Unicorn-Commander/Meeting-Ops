@@ -2,13 +2,11 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
 python-multipart==0.0.20
-numpy==1.26.4
+numpy>=2.0.0
 soundfile==0.12.1
-librosa==0.10.2.post1
-# SpeechBrain ECAPA-TDNN — open weights, no HF token required
-speechbrain==1.0.2
-# Pyannote 3.1 — gated (HF token + access grant), loaded lazily at runtime
-pyannote.audio==3.3.2
-huggingface_hub==0.26.5
-# Audio resampling utility used by torchaudio backends
-scipy==1.13.1
+torch==2.8.0+cu126
+torchaudio==2.8.0+cu126
+torchcodec==0.7.0+cu126
+# Pyannote community-1 diarization + wespeaker embeddings — gated (HF token + access grant)
+pyannote.audio>=4.0.0
+huggingface_hub>=0.28.1

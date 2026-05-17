@@ -1,10 +1,10 @@
-"""speaker-svc — FastAPI wrapper around SpeechBrain ECAPA + optional Pyannote 3.1.
+"""speaker-svc — FastAPI wrapper around pyannote wespeaker + diarization.
 
 Endpoints
 ---------
 GET  /health                — liveness, model status, GPU info
-POST /embed                 — extract a 192-d ECAPA embedding from a clip
-POST /diarize               — diarize an audio file (Pyannote if token, else ECAPA-cluster fallback)
+POST /embed                 — extract a 256-d wespeaker embedding from a clip
+POST /diarize               — diarize an audio file (Pyannote if token, else whole-clip fallback)
 POST /identify              — match a clip against a list of known embeddings (cosine sim)
 
 The container runs inside the meet-internal Docker network on bigboy GPU 1.
@@ -30,48 +30,72 @@ logger = logging.getLogger("speaker-svc")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TARGET_SR = 16000  # ECAPA + Pyannote both expect 16 kHz mono
+TARGET_SR = 16000  # wespeaker + Pyannote both expect 16 kHz mono
 MIN_SECONDS = float(os.getenv("MIN_AUDIO_SECONDS", "0.5"))
 MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "1800"))  # 30 min
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "").strip() or None
+EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+DIARIZATION_FALLBACK_MODEL = "pyannote/speaker-diarization-3.1"
 
 app = FastAPI(title="speaker-svc", version="0.1.0")
 
-_ecapa = None
+_embedder = None
 _diarizer = None
+_diarizer_backend: Optional[str] = None
 _diarizer_load_error: Optional[str] = None
 
 
-def _load_ecapa():
-    """Lazy-load the ECAPA encoder. Cached after first call."""
-    global _ecapa
-    if _ecapa is not None:
-        return _ecapa
-    from speechbrain.inference.speaker import EncoderClassifier
-    logger.info("Loading SpeechBrain ECAPA on %s", DEVICE)
-    _ecapa = EncoderClassifier.from_hparams(
-        source="speechbrain/spkrec-ecapa-voxceleb",
-        savedir="/models/ecapa",
-        run_opts={"device": DEVICE},
-    )
-    return _ecapa
+def _load_embedder():
+    """Lazy-load the wespeaker embedder. Cached after first call."""
+    global _embedder
+    if _embedder is not None:
+        return _embedder
+    if not HF_TOKEN:
+        raise RuntimeError(f"HUGGINGFACE_TOKEN not set; {EMBEDDING_MODEL} unavailable")
+    from pyannote.audio import Inference, Model
+    logger.info("Loading %s on %s", EMBEDDING_MODEL, DEVICE)
+    try:
+        embedding_model = Model.from_pretrained(EMBEDDING_MODEL, token=HF_TOKEN)
+    except TypeError:
+        embedding_model = Model.from_pretrained(EMBEDDING_MODEL, use_auth_token=HF_TOKEN)
+    _embedder = Inference(embedding_model, window="whole")
+    if DEVICE == "cuda":
+        _embedder = _embedder.to(torch.device("cuda"))
+    return _embedder
 
 
 def _load_diarizer():
-    """Lazy-load Pyannote 3.1 — only if HUGGINGFACE_TOKEN is set."""
-    global _diarizer, _diarizer_load_error
+    """Lazy-load Pyannote community-1 with a 3.1 fallback."""
+    global _diarizer, _diarizer_backend, _diarizer_load_error
     if _diarizer is not None:
         return _diarizer
     if not HF_TOKEN:
-        _diarizer_load_error = "HUGGINGFACE_TOKEN not set; pyannote/speaker-diarization-3.1 unavailable"
+        _diarizer_load_error = f"HUGGINGFACE_TOKEN not set; {DIARIZATION_MODEL} unavailable"
         return None
     try:
         from pyannote.audio import Pipeline
-        logger.info("Loading pyannote/speaker-diarization-3.1 on %s", DEVICE)
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=HF_TOKEN,
-        )
+        loaded_model = DIARIZATION_MODEL
+        logger.info("Loading %s on %s", DIARIZATION_MODEL, DEVICE)
+        try:
+            try:
+                pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=HF_TOKEN)
+            except TypeError:
+                pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, use_auth_token=HF_TOKEN)
+            _diarizer_backend = "pyannote-community-1"
+        except Exception as community_exc:  # noqa: BLE001
+            logger.warning(
+                "%s load failed, falling back to %s: %s",
+                DIARIZATION_MODEL,
+                DIARIZATION_FALLBACK_MODEL,
+                community_exc,
+            )
+            loaded_model = DIARIZATION_FALLBACK_MODEL
+            try:
+                pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, token=HF_TOKEN)
+            except TypeError:
+                pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, use_auth_token=HF_TOKEN)
+            _diarizer_backend = "pyannote-3.1"
         if DEVICE == "cuda":
             pipeline.to(torch.device("cuda"))
         # Tune clustering + segmentation. Threshold has two failure modes:
@@ -98,6 +122,7 @@ def _load_diarizer():
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pyannote tuning skipped: %s", exc)
         _diarizer = pipeline
+        logger.info("Loaded %s as %s", loaded_model, _diarizer_backend)
         return _diarizer
     except Exception as exc:  # noqa: BLE001
         _diarizer_load_error = f"{type(exc).__name__}: {exc}"
@@ -128,12 +153,14 @@ def _read_audio(buf: bytes | str) -> tuple[np.ndarray, int]:
 
 
 def _embed(wav: np.ndarray) -> list[float]:
-    encoder = _load_ecapa()
+    embedder = _load_embedder()
     with torch.no_grad():
         signal = torch.from_numpy(wav).unsqueeze(0)
-        if DEVICE == "cuda":
-            signal = signal.to("cuda")
-        emb = encoder.encode_batch(signal).squeeze().cpu().numpy().astype("float32")
+        emb = embedder({"waveform": signal, "sample_rate": TARGET_SR})
+    emb = np.asarray(emb, dtype="float32").flatten()
+    norm = np.linalg.norm(emb)
+    if norm > 0:
+        emb = emb / norm
     return emb.tolist()
 
 
@@ -153,30 +180,30 @@ class HealthResponse(BaseModel):
     device: str
     cuda_available: bool
     gpu_name: Optional[str] = None
-    ecapa_loaded: bool
+    embedder_loaded: bool
     diarizer_available: bool
     diarizer_error: Optional[str] = None
-    embedding_dim: int = 192
+    embedding_dim: int = 256
 
 
 class EmbedResponse(BaseModel):
     embedding: list[float]
     embedding_dim: int
     duration_seconds: float
-    model: str = "speechbrain/spkrec-ecapa-voxceleb"
+    model: str = EMBEDDING_MODEL
 
 
 class DiarizeSegment(BaseModel):
     start: float
     end: float
     speaker: str  # e.g. "SPEAKER_00"
-    embedding: Optional[list[float]] = None  # ECAPA embedding for the segment
+    embedding: Optional[list[float]] = None  # wespeaker embedding for the segment
 
 
 class DiarizeResponse(BaseModel):
     segments: list[DiarizeSegment]
     num_speakers: int
-    backend: str  # "pyannote-3.1" or "ecapa-cluster-fallback"
+    backend: str  # "pyannote-community-1", "pyannote-3.1", or "ecapa-cluster-fallback"
     duration_seconds: float
 
 
@@ -219,10 +246,10 @@ def health():
         device=DEVICE,
         cuda_available=torch.cuda.is_available(),
         gpu_name=gpu_name,
-        ecapa_loaded=_ecapa is not None,
+        embedder_loaded=_embedder is not None,
         diarizer_available=diarizer_available,
         diarizer_error=_diarizer_load_error,
-        embedding_dim=192,
+        embedding_dim=256,
     )
 
 
@@ -231,7 +258,7 @@ async def embed(
     audio: Optional[UploadFile] = File(default=None),
     audio_path: Optional[str] = Form(default=None),
 ):
-    """Embed a single short clip (typically 3-30s) into a 192-d ECAPA vector."""
+    """Embed a single short clip (typically 3-30s) into a 256-d wespeaker vector."""
     if audio is None and not audio_path:
         raise HTTPException(status_code=400, detail="provide audio (multipart) or audio_path (form field)")
     started = time.time()
@@ -260,8 +287,8 @@ async def diarize(
     max_speakers: Optional[int] = Form(default=None),
     clustering_threshold: Optional[float] = Form(default=None),
 ):
-    """Diarize. Uses Pyannote 3.1 if HUGGINGFACE_TOKEN is set; otherwise
-    falls back to single-speaker ECAPA pseudo-diarization (one segment for
+    """Diarize. Uses Pyannote community-1 if HUGGINGFACE_TOKEN is set; otherwise
+    falls back to single-speaker pseudo-diarization (one segment for
     the whole clip) so callers always get a usable response shape."""
     if audio is None and not audio_path:
         raise HTTPException(status_code=400, detail="provide audio or audio_path")
@@ -276,7 +303,7 @@ async def diarize(
 
     pipeline = _load_diarizer()
     if pipeline is None:
-        # Graceful degradation — one segment, one ECAPA embedding for the
+        # Graceful degradation — one segment, one wespeaker embedding for the
         # whole clip. Caller can still cluster across many segments using
         # /identify if they want.
         emb = _embed(wav) if return_embeddings else None
@@ -320,14 +347,21 @@ async def diarize(
         diarize_kwargs or "auto",
         clustering_threshold if clustering_threshold is not None else "env-default",
     )
-    diarization = pipeline(
+    result = pipeline(
         {"waveform": waveform, "sample_rate": TARGET_SR},
         **diarize_kwargs,
     )
+    if hasattr(result, "exclusive_speaker_diarization"):
+        diarization = result.exclusive_speaker_diarization
+    elif hasattr(result, "speaker_diarization"):
+        diarization = result.speaker_diarization
+    else:
+        diarization = result
 
     segments: list[DiarizeSegment] = []
     speakers_seen: set[str] = set()
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
+
+    def add_segment(turn, speaker: str) -> None:
         speakers_seen.add(speaker)
         seg_emb = None
         if return_embeddings:
@@ -345,10 +379,19 @@ async def diarize(
             embedding=seg_emb,
         ))
 
+    try:
+        for turn, speaker in diarization:
+            add_segment(turn, speaker)
+    except (TypeError, ValueError):
+        segments = []
+        speakers_seen = set()
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            add_segment(turn, speaker)
+
     return DiarizeResponse(
         segments=segments,
         num_speakers=len(speakers_seen),
-        backend="pyannote-3.1",
+        backend=_diarizer_backend or "pyannote-3.1",
         duration_seconds=duration,
     )
 
@@ -359,7 +402,7 @@ def identify(req: IdentifyRequest):
 
     Pure cosine similarity. Caller is responsible for picking the right
     threshold for their environment (we default to 0.55 which is a reasonable
-    starting point for ECAPA on conference-room mics)."""
+    starting point for conference-room mics)."""
     if not req.embedding:
         raise HTTPException(status_code=400, detail="empty embedding")
     if not req.candidates:
@@ -370,7 +413,7 @@ def identify(req: IdentifyRequest):
     for cand in req.candidates:
         c = np.asarray(cand.embedding, dtype="float32")
         if c.shape != q.shape:
-            # Skip mismatched-dim embeddings (e.g. legacy 256-d enrollments)
+            # Skip mismatched-dim embeddings (e.g. legacy ECAPA enrollments)
             matches.append(IdentifyMatch(speaker_id=cand.speaker_id, similarity=0.0, matched=False))
             continue
         sim = _cos(q, c)
@@ -387,12 +430,12 @@ def identify(req: IdentifyRequest):
 
 @app.on_event("startup")
 def _warm():
-    # Eagerly load ECAPA so the first /embed isn't a 30s cold start.
+    # Eagerly load wespeaker so the first /embed isn't a cold start.
     try:
-        _load_ecapa()
-        logger.info("ECAPA warmed on %s", DEVICE)
+        _load_embedder()
+        logger.info("wespeaker warmed on %s", DEVICE)
     except Exception as exc:  # noqa: BLE001
-        logger.error("ECAPA warm failed: %s", exc)
+        logger.error("wespeaker warm failed: %s", exc)
     if HF_TOKEN:
         _load_diarizer()  # warm pyannote if we can
 

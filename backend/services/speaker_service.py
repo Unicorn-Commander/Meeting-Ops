@@ -29,7 +29,7 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_MODEL = os.getenv("SPEAKER_EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb")
+DEFAULT_EMBEDDING_MODEL = os.getenv("SPEAKER_EMBEDDING_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM")
 DEFAULT_IDENTIFY_THRESHOLD = float(os.getenv("SPEAKER_IDENTIFY_THRESHOLD", "0.55"))
 STORE_SPEAKER_AUDIO = os.getenv("STORE_SPEAKER_AUDIO", "false").lower() in ("1", "true", "yes")
 

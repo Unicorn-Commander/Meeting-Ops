@@ -1,4 +1,4 @@
-# speaker-svc — SpeechBrain ECAPA + optional Pyannote 3.1 diarization
+# speaker-svc — pyannote community-1 diarization + wespeaker embeddings
 # Targets: bigboy GPU 1 (Quadro RTX 6000), CUDA 12.x, joined to meet-internal network
 #
 # Build:  docker build -t meet-speaker-svc:local .
@@ -16,28 +16,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/models/torch
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv python3-pip \
+        python3 python3-venv python3-pip \
         ffmpeg libsndfile1 libsox-fmt-all sox \
         ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 
 WORKDIR /app
 
 COPY requirements.txt .
 
 RUN python -m pip install --upgrade pip wheel \
-    && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-        torch==2.4.1 torchaudio==2.4.1 \
-    && python -m pip install -r requirements.txt
+    && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu126 -r requirements.txt
 
-# Pre-fetch SpeechBrain ECAPA at build time so first request isn't a 200 MB cold start.
-# Pyannote 3.1 is gated; we do NOT pre-fetch it here. It is downloaded on first /diarize
-# call when HUGGINGFACE_TOKEN is set and the user has accepted the model terms.
-RUN python -c "from speechbrain.inference.speaker import EncoderClassifier; \
-EncoderClassifier.from_hparams(source='speechbrain/spkrec-ecapa-voxceleb', \
-savedir='/models/ecapa', run_opts={'device':'cpu'})"
+# Pyannote models are gated; they are downloaded on first startup/request when
+# HUGGINGFACE_TOKEN is set and the user has accepted the model terms.
 
 COPY . .
 
