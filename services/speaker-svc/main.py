@@ -30,6 +30,10 @@ logger = logging.getLogger("speaker-svc")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+EMBEDDER_DEVICE = os.getenv("SPEAKER_EMBEDDER_DEVICE", "cpu").strip().lower() or "cpu"
+DIARIZER_DEVICE = os.getenv("PYANNOTE_DIARIZER_DEVICE", "cpu").strip().lower() or "cpu"
+EAGER_LOAD_EMBEDDER = os.getenv("SPEAKER_EAGER_LOAD_EMBEDDER", "false").lower() in ("1", "true", "yes")
+EAGER_LOAD_DIARIZER = os.getenv("SPEAKER_EAGER_LOAD_DIARIZER", "false").lower() in ("1", "true", "yes")
 TARGET_SR = 16000  # wespeaker + Pyannote both expect 16 kHz mono
 MIN_SECONDS = float(os.getenv("MIN_AUDIO_SECONDS", "0.5"))
 MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "1800"))  # 30 min
@@ -54,14 +58,15 @@ def _load_embedder():
     if not HF_TOKEN:
         raise RuntimeError(f"HUGGINGFACE_TOKEN not set; {EMBEDDING_MODEL} unavailable")
     from pyannote.audio import Inference, Model
-    logger.info("Loading %s on %s", EMBEDDING_MODEL, DEVICE)
+    logger.info("Loading %s on %s", EMBEDDING_MODEL, EMBEDDER_DEVICE)
     try:
         embedding_model = Model.from_pretrained(EMBEDDING_MODEL, token=HF_TOKEN)
     except TypeError:
         embedding_model = Model.from_pretrained(EMBEDDING_MODEL, use_auth_token=HF_TOKEN)
     _embedder = Inference(embedding_model, window="whole")
-    if DEVICE == "cuda":
+    if EMBEDDER_DEVICE == "cuda":
         _embedder = _embedder.to(torch.device("cuda"))
+        torch.cuda.empty_cache()
     return _embedder
 
 
@@ -76,7 +81,7 @@ def _load_diarizer():
     try:
         from pyannote.audio import Pipeline
         loaded_model = DIARIZATION_MODEL
-        logger.info("Loading %s on %s", DIARIZATION_MODEL, DEVICE)
+        logger.info("Loading %s on %s", DIARIZATION_MODEL, DIARIZER_DEVICE)
         try:
             try:
                 pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=HF_TOKEN)
@@ -96,8 +101,9 @@ def _load_diarizer():
             except TypeError:
                 pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, use_auth_token=HF_TOKEN)
             _diarizer_backend = "pyannote-3.1"
-        if DEVICE == "cuda":
+        if DIARIZER_DEVICE == "cuda":
             pipeline.to(torch.device("cuda"))
+            torch.cuda.empty_cache()
         # Tune clustering + segmentation. Threshold has two failure modes:
         # - too low (e.g. 0.65 from Meeting Minutes): over-splits one
         #   speaker's varied speech into multiple clusters. Aaron's
@@ -184,6 +190,8 @@ class HealthResponse(BaseModel):
     diarizer_available: bool
     diarizer_error: Optional[str] = None
     embedding_dim: int = 256
+    embedder_device: str = EMBEDDER_DEVICE
+    diarizer_device: str = DIARIZER_DEVICE
 
 
 class EmbedResponse(BaseModel):
@@ -240,7 +248,7 @@ def health():
             gpu_name = torch.cuda.get_device_name(0)
         except Exception:  # noqa: BLE001
             gpu_name = None
-    diarizer_available = HF_TOKEN is not None and (_diarizer is not None or _load_diarizer() is not None)
+    diarizer_available = HF_TOKEN is not None
     return HealthResponse(
         status="ok",
         device=DEVICE,
@@ -250,6 +258,8 @@ def health():
         diarizer_available=diarizer_available,
         diarizer_error=_diarizer_load_error,
         embedding_dim=256,
+        embedder_device=EMBEDDER_DEVICE,
+        diarizer_device=DIARIZER_DEVICE,
     )
 
 
@@ -430,14 +440,18 @@ def identify(req: IdentifyRequest):
 
 @app.on_event("startup")
 def _warm():
-    # Eagerly load wespeaker so the first /embed isn't a cold start.
-    try:
-        _load_embedder()
-        logger.info("wespeaker warmed on %s", DEVICE)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("wespeaker warm failed: %s", exc)
-    if HF_TOKEN:
-        _load_diarizer()  # warm pyannote if we can
+    if EAGER_LOAD_EMBEDDER:
+        try:
+            _load_embedder()
+            logger.info("wespeaker warmed on %s", EMBEDDER_DEVICE)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("wespeaker warm failed: %s", exc)
+    else:
+        logger.info("wespeaker warm skipped; lazy load enabled")
+    if HF_TOKEN and EAGER_LOAD_DIARIZER:
+        _load_diarizer()  # warm pyannote if explicitly requested
+    elif HF_TOKEN:
+        logger.info("pyannote warm skipped; lazy load enabled")
 
 
 if __name__ == "__main__":
