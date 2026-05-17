@@ -38,6 +38,7 @@ from database.models import (
     SpeakerProfile,
     SpeakerSessionLink,
     SpeakerVoiceSample,
+    Transcription,
 )
 from services.providers.registry import get_provider_registry
 from services.speaker_service import (

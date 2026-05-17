@@ -292,8 +292,8 @@ export const Sessions: React.FC = () => {
   }, [activeOrganization?.slug, sessions]);
 
   useEffect(() => {
-    fetchSessions();
-    const interval = setInterval(fetchSessions, 10000);
+    fetchSessions({ showSpinner: true });
+    const interval = setInterval(() => fetchSessions({ showSpinner: false }), 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTags.join(','), activeOrganization?.slug]);
@@ -302,8 +302,11 @@ export const Sessions: React.FC = () => {
     filterSessions();
   }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sortBy, sortOrder]);
 
-  const fetchSessions = async () => {
-    setLoading(true);
+  // showSpinner=false on polling refresh so the list doesn't flash
+  // through the empty-loading state every 10 seconds. Initial mount + filter
+  // changes still show the spinner.
+  const fetchSessions = async ({ showSpinner = true }: { showSpinner?: boolean } = {}) => {
+    if (showSpinner) setLoading(true);
     try {
       const headers: any = {};
       const token = localStorage.getItem('access_token');
@@ -317,19 +320,14 @@ export const Sessions: React.FC = () => {
 
       if (response.ok) {
         const data = await response.json();
-        console.log('✅ Sessions fetched:', data.length, 'sessions');
-        console.log('Session data:', data);
         setSessions(data);
-        // Force immediate check
-        console.log('Sessions state will be set to:', data);
-        console.log('First session example:', data[0]);
       } else {
-        console.error('❌ Failed to fetch sessions:', response.status, response.statusText);
+        console.error('Failed to fetch sessions:', response.status, response.statusText);
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   };
 

@@ -2171,6 +2171,59 @@ export const SessionDetails: React.FC = () => {
                 />
               )}
 
+              {/* Speaker metrics — per-speaker total talk time + word count.
+                  Derived inline from the visible transcript segments so the
+                  numbers stay correct after rename/merge without waiting on
+                  ai_insights regeneration. */}
+              {speakers.length > 0 && segments.length > 0 && (() => {
+                const palette = [
+                  'bg-purple-500', 'bg-blue-500', 'bg-emerald-500',
+                  'bg-amber-500', 'bg-rose-500', 'bg-indigo-500',
+                  'bg-teal-500', 'bg-orange-500',
+                ];
+                const tally: Record<string, { seconds: number; words: number }> = {};
+                segments.forEach((seg) => {
+                  const spk = seg.speaker || 'Unknown';
+                  if (!tally[spk]) tally[spk] = { seconds: 0, words: 0 };
+                  const dur = Math.max(0, (seg.end || 0) - (seg.start || 0));
+                  tally[spk].seconds += dur;
+                  tally[spk].words += (seg.text || '').trim().split(/\s+/).filter(Boolean).length;
+                });
+                const total = Object.values(tally).reduce((a, b) => a + b.seconds, 0) || 1;
+                const rows = Object.entries(tally)
+                  .map(([speaker, v]) => ({ speaker, ...v, pct: (v.seconds / total) * 100 }))
+                  .sort((a, b) => b.seconds - a.seconds);
+                return (
+                  <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Speaker Metrics</p>
+                    <div className="space-y-2">
+                      {rows.map((r, idx) => {
+                        const mm = Math.floor(r.seconds / 60);
+                        const ss = Math.floor(r.seconds % 60).toString().padStart(2, '0');
+                        const colorClass = palette[idx % palette.length];
+                        return (
+                          <div key={r.speaker}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-sm text-gray-800 font-medium truncate">{r.speaker}</span>
+                              <span className="text-xs text-gray-600 tabular-nums whitespace-nowrap">
+                                {mm}:{ss} <span className="text-gray-400">·</span> {r.words.toLocaleString()}w
+                                <span className="ml-2 text-gray-800 font-semibold">{Math.round(r.pct)}%</span>
+                              </span>
+                            </div>
+                            <div className="h-2 rounded-full bg-white overflow-hidden border border-gray-200">
+                              <div
+                                className={`${colorClass} h-full rounded-full transition-[width] duration-500`}
+                                style={{ width: `${Math.min(100, Math.max(2, r.pct))}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Speaker filter chips — click to filter to one speaker */}
               {speakers.length > 1 && (
                 <div className="flex flex-wrap gap-2 mb-3 flex-shrink-0">
