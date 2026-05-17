@@ -1,14 +1,15 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Plus, Search, Filter, Calendar, Mic, Clock, Users,
   FileText, Download, Trash2, Play, Eye, Tag,
-  ChevronDown, Grid, List, SortAsc, SortDesc,
-  Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2
+  ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
+  Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
+  ArrowUp, ArrowDown, ArrowUpDown
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
 import { config } from '../config';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   TranscriptionOptionsPanel,
   DEFAULT_TRANSCRIPTION_OPTIONS,
@@ -18,6 +19,7 @@ import {
 import { useUploads } from '../contexts/UploadsContext';
 import { useOrg } from '../contexts/OrgContext';
 import { TagChip } from '../components/TagChip';
+import MobileSessionsList from '../components/MobileSessionsList';
 
 interface Participant {
   id: string;
@@ -52,10 +54,359 @@ interface RagMessage {
   rewrittenQuery?: string | null;
 }
 
+type SortKey = 'date' | 'name' | 'duration' | 'speakers' | 'status';
+
+const VIEW_MODE_KEY = 'meetingops.sessionsViewMode.v1';
+const VALID_SORT_KEYS: ReadonlyArray<SortKey> = ['date', 'name', 'duration', 'speakers', 'status'];
+
+function deriveSpeakerCount(session: Session): number {
+  const segs = (session as any)?.transcription?.segments;
+  if (!Array.isArray(segs) || segs.length === 0) return 0;
+  const set = new Set<string>();
+  for (const s of segs) {
+    if (s && s.speaker) set.add(s.speaker);
+  }
+  return set.size;
+}
+
+function truncate(text: string, max: number): string {
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + '…';
+}
+
+interface SessionsTableProps {
+  sessions: Session[];
+  sortBy: SortKey;
+  sortOrder: 'asc' | 'desc';
+  onHeaderSort: (key: SortKey) => void;
+  statusFilter: string[];
+  speakerFilter: string[];
+  onStatusFilterChange: (values: string[]) => void;
+  onSpeakerFilterChange: (values: string[]) => void;
+  openColumnFilter: null | 'status' | 'speakers';
+  onOpenColumnFilter: (col: null | 'status' | 'speakers') => void;
+  onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
+  formatDuration: (seconds?: number) => string;
+  getStatusColor: (status: string) => string;
+  getStatusLabel: (status: string) => string;
+}
+
+const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'completed', label: 'Completed' },
+  { value: 'processing', label: 'Processing' },
+  { value: 'active', label: 'Recording' },
+  { value: 'idle', label: 'Idle' },
+  { value: 'failed', label: 'Failed' },
+];
+
+const SPEAKER_BUCKETS: Array<{ value: string; label: string; test: (n: number) => boolean }> = [
+  { value: '0', label: 'No speakers', test: (n) => n === 0 },
+  { value: '1', label: '1 speaker', test: (n) => n === 1 },
+  { value: '2-3', label: '2–3 speakers', test: (n) => n >= 2 && n <= 3 },
+  { value: '4+', label: '4 or more', test: (n) => n >= 4 },
+];
+
+const SessionsTable: React.FC<SessionsTableProps> = ({
+  sessions,
+  sortBy,
+  sortOrder,
+  onHeaderSort,
+  statusFilter,
+  speakerFilter,
+  onStatusFilterChange,
+  onSpeakerFilterChange,
+  openColumnFilter,
+  onOpenColumnFilter,
+  onOpen,
+  onDelete,
+  formatDuration,
+  getStatusColor,
+  getStatusLabel,
+}) => {
+  const filtered = useMemo(() => {
+    return sessions.filter((s) => {
+      if (statusFilter.length > 0 && !statusFilter.includes(s.status)) return false;
+      if (speakerFilter.length > 0) {
+        const n = deriveSpeakerCount(s);
+        const ok = speakerFilter.some((v) => {
+          const b = SPEAKER_BUCKETS.find((x) => x.value === v);
+          return b ? b.test(n) : false;
+        });
+        if (!ok) return false;
+      }
+      return true;
+    });
+  }, [sessions, statusFilter, speakerFilter]);
+
+  const renderSortIcon = (key: SortKey) => {
+    if (sortBy !== key) {
+      return <ArrowUpDown className="w-3.5 h-3.5 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity" />;
+    }
+    return sortOrder === 'asc'
+      ? <ArrowUp className="w-3.5 h-3.5 text-purple-300" />
+      : <ArrowDown className="w-3.5 h-3.5 text-purple-300" />;
+  };
+
+  const headerBtn = (key: SortKey, label: string, extra?: string) => (
+    <button
+      type="button"
+      onClick={() => onHeaderSort(key)}
+      className={`group inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-300 hover:text-white transition-colors ${extra || ''}`}
+      aria-sort={sortBy === key ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <span>{label}</span>
+      {renderSortIcon(key)}
+    </button>
+  );
+
+  const toggleMulti = (current: string[], v: string, setter: (vals: string[]) => void) => {
+    if (current.includes(v)) setter(current.filter((x) => x !== v));
+    else setter([...current, v]);
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="max-h-[calc(100vh-260px)] overflow-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur">
+            <tr className="border-b border-gray-800">
+              <th className="px-4 py-3 text-left">{headerBtn('name', 'Title')}</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('date', 'Date')}</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('duration', 'Duration')}</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">
+                <div className="flex items-center gap-2">
+                  {headerBtn('speakers', 'Speakers')}
+                  <div className="relative" data-column-filter>
+                    <button
+                      type="button"
+                      onClick={() => onOpenColumnFilter(openColumnFilter === 'speakers' ? null : 'speakers')}
+                      className={`p-1 rounded hover:bg-gray-800 transition-colors ${speakerFilter.length > 0 ? 'text-purple-300' : 'text-gray-500 hover:text-gray-300'}`}
+                      aria-label="Filter by speakers"
+                      aria-expanded={openColumnFilter === 'speakers'}
+                    >
+                      <Filter className="w-3.5 h-3.5" />
+                      {speakerFilter.length > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-purple-500" />
+                      )}
+                    </button>
+                    {openColumnFilter === 'speakers' && (
+                      <div className="absolute left-0 top-7 w-44 rounded-lg border border-gray-700 bg-gray-900 shadow-xl p-2 z-20" data-column-filter>
+                        {SPEAKER_BUCKETS.map((b) => {
+                          const checked = speakerFilter.includes(b.value);
+                          return (
+                            <label key={b.value} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-gray-200">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleMulti(speakerFilter, b.value, onSpeakerFilterChange)}
+                                className="accent-purple-500"
+                              />
+                              {b.label}
+                            </label>
+                          );
+                        })}
+                        {speakerFilter.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onSpeakerFilterChange([])}
+                            className="mt-1 w-full text-xs text-gray-400 hover:text-white px-2 py-1 border-t border-gray-800"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </th>
+              <th className="px-4 py-3 text-left whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-gray-300">Participants</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-300">Tags</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">
+                <div className="flex items-center gap-2">
+                  {headerBtn('status', 'Status')}
+                  <div className="relative" data-column-filter>
+                    <button
+                      type="button"
+                      onClick={() => onOpenColumnFilter(openColumnFilter === 'status' ? null : 'status')}
+                      className={`p-1 rounded hover:bg-gray-800 transition-colors ${statusFilter.length > 0 ? 'text-purple-300' : 'text-gray-500 hover:text-gray-300'}`}
+                      aria-label="Filter by status"
+                      aria-expanded={openColumnFilter === 'status'}
+                    >
+                      <Filter className="w-3.5 h-3.5" />
+                      {statusFilter.length > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-purple-500" />
+                      )}
+                    </button>
+                    {openColumnFilter === 'status' && (
+                      <div className="absolute right-0 top-7 w-44 rounded-lg border border-gray-700 bg-gray-900 shadow-xl p-2 z-20" data-column-filter>
+                        {STATUS_OPTIONS.map((opt) => {
+                          const checked = statusFilter.includes(opt.value);
+                          return (
+                            <label key={opt.value} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-gray-200">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleMulti(statusFilter, opt.value, onStatusFilterChange)}
+                                className="accent-purple-500"
+                              />
+                              {opt.label}
+                            </label>
+                          );
+                        })}
+                        {statusFilter.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onStatusFilterChange([])}
+                            className="mt-1 w-full text-xs text-gray-400 hover:text-white px-2 py-1 border-t border-gray-800"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </th>
+              <th className="px-4 py-3 text-right whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-gray-300">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-10 text-center text-gray-500 text-sm">
+                  No sessions match the current filters.
+                </td>
+              </tr>
+            ) : (
+              filtered.map((session) => {
+                const fullTitle = session.title || session.name || 'Untitled';
+                const truncated = truncate(fullTitle, 60);
+                const speakerCount = deriveSpeakerCount(session);
+                const participants = session.participants || [];
+                const tags = session.tags || [];
+                const visibleTags = [...tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 3);
+                const hiddenTagCount = tags.length - visibleTags.length;
+                return (
+                  <tr
+                    key={session.id}
+                    className="border-b border-gray-800/60 hover:bg-gray-800/40 transition-colors"
+                  >
+                    <td className="px-4 py-3 align-middle">
+                      <button
+                        type="button"
+                        onClick={() => onOpen(session.id)}
+                        title={fullTitle}
+                        className="text-left font-medium text-white hover:text-purple-300 transition-colors max-w-[40ch] truncate"
+                      >
+                        {truncated}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300">
+                      {session.created_at ? new Date(session.created_at).toLocaleDateString() : '—'}
+                    </td>
+                    <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300 tabular-nums">
+                      {formatDuration(session.duration)}
+                    </td>
+                    <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300 tabular-nums">
+                      {speakerCount > 0 ? speakerCount : <span className="text-gray-600">—</span>}
+                    </td>
+                    <td className="px-4 py-3 align-middle text-gray-300">
+                      {participants.length > 0 ? (
+                        <span
+                          className="inline-block max-w-[28ch] truncate align-middle"
+                          title={participants.map((p) => p.name).join(', ')}
+                        >
+                          {participants.slice(0, 2).map((p) => p.name).join(', ')}
+                          {participants.length > 2 && ` +${participants.length - 2}`}
+                        </span>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 align-middle">
+                      {visibleTags.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 max-w-[32ch]">
+                          {visibleTags.map((tag) => (
+                            <TagChip key={tag} tag={tag} />
+                          ))}
+                          {hiddenTagCount > 0 && (
+                            <span
+                              className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400"
+                              title={tags.slice(visibleTags.length).join(', ')}
+                            >
+                              +{hiddenTagCount}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 align-middle whitespace-nowrap">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs border ${getStatusColor(session.status)}`}>
+                        {getStatusLabel(session.status)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 align-middle text-right whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onOpen(session.id)}
+                          className="p-2 rounded-md text-gray-300 hover:text-white hover:bg-purple-600/30 transition-colors"
+                          title="Open session"
+                          aria-label="Open session"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(session.id)}
+                          className="p-2 rounded-md text-red-400 hover:text-red-300 hover:bg-red-600/20 transition-colors"
+                          title="Delete session"
+                          aria-label="Delete session"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-500 flex items-center justify-between">
+        <span>
+          {filtered.length} {filtered.length === 1 ? 'session' : 'sessions'}
+          {(statusFilter.length > 0 || speakerFilter.length > 0) && (
+            <span className="text-gray-600"> (filtered from {sessions.length})</span>
+          )}
+        </span>
+        {(statusFilter.length > 0 || speakerFilter.length > 0) && (
+          <button
+            type="button"
+            onClick={() => {
+              onStatusFilterChange([]);
+              onSpeakerFilterChange([]);
+            }}
+            className="text-gray-400 hover:text-white"
+          >
+            Clear column filters
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const { startUploads } = useUploads();
   const { activeOrganization } = useOrg();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
   // Active tag filter chips (AND). Server applies the filter via ?tags=
@@ -64,18 +415,79 @@ export const Sessions: React.FC = () => {
   // All tags used across the org's sessions; powers the filter chip bar.
   const [orgTags, setOrgTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showCreator, setShowCreator] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  // viewMode persists to localStorage; mobile shell ignores it (always card list).
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
+    try {
+      const stored = localStorage.getItem(VIEW_MODE_KEY);
+      return stored === 'list' ? 'list' : 'grid';
+    } catch {
+      return 'grid';
+    }
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [sortBy, setSortBy] = useState<'date' | 'name' | 'duration'>('date');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  // Sort state hydrates from URL ?sort=&order= so refresh keeps the
+  // user's column choice. Falls back to date-desc if missing/invalid.
+  const initialSort: SortKey = (() => {
+    const s = searchParams.get('sort');
+    return s && (VALID_SORT_KEYS as ReadonlyArray<string>).includes(s) ? (s as SortKey) : 'date';
+  })();
+  const initialOrder: 'asc' | 'desc' = searchParams.get('order') === 'asc' ? 'asc' : 'desc';
+  const [sortBy, setSortByState] = useState<SortKey>(initialSort);
+  const [sortOrder, setSortOrderState] = useState<'asc' | 'desc'>(initialOrder);
+  // Table-only column filters (multi-select).
+  const [tableStatusFilter, setTableStatusFilter] = useState<string[]>([]);
+  const [tableSpeakerFilter, setTableSpeakerFilter] = useState<string[]>([]);
+  const [openColumnFilter, setOpenColumnFilter] = useState<null | 'status' | 'speakers'>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_MODE_KEY, viewMode);
+    } catch { /* non-fatal */ }
+  }, [viewMode]);
+
+  // Keep URL params in sync when sort changes. Replace=true so back-button
+  // doesn't fill up with every header click.
+  const setSort = useCallback((key: SortKey, order: 'asc' | 'desc') => {
+    setSortByState(key);
+    setSortOrderState(order);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('sort', key);
+      next.set('order', order);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  const handleHeaderSort = useCallback((key: SortKey) => {
+    if (sortBy === key) {
+      setSort(key, sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      // First click on a new column → sensible default: text asc, numbers desc.
+      const defaultOrder: 'asc' | 'desc' = (key === 'name' || key === 'status') ? 'asc' : 'desc';
+      setSort(key, defaultOrder);
+    }
+  }, [sortBy, sortOrder, setSort]);
+
+  // Close column-filter popovers on outside click.
+  useEffect(() => {
+    if (!openColumnFilter) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && t.closest('[data-column-filter]')) return;
+      setOpenColumnFilter(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [openColumnFilter]);
 
   // Cross-meeting RAG chat state (multi-turn)
   const [ragMessages, setRagMessages] = useState<RagMessage[]>([]);
@@ -304,9 +716,15 @@ export const Sessions: React.FC = () => {
 
   // showSpinner=false on polling refresh so the list doesn't flash
   // through the empty-loading state every 10 seconds. Initial mount + filter
-  // changes still show the spinner.
+  // changes still show the spinner. Background ticks set `refreshing` so the
+  // mobile shell can show a subtle "refreshing" indicator without ripping
+  // the list out from under the user.
   const fetchSessions = async ({ showSpinner = true }: { showSpinner?: boolean } = {}) => {
-    if (showSpinner) setLoading(true);
+    if (showSpinner) {
+      setLoading(true);
+    } else {
+      setRefreshing(true);
+    }
     try {
       const headers: any = {};
       const token = localStorage.getItem('access_token');
@@ -327,7 +745,11 @@ export const Sessions: React.FC = () => {
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     } finally {
-      if (showSpinner) setLoading(false);
+      if (showSpinner) {
+        setLoading(false);
+      } else {
+        setRefreshing(false);
+      }
     }
   };
 
@@ -362,15 +784,23 @@ export const Sessions: React.FC = () => {
     console.log('📊 After filtering:', filtered.length, 'sessions remain');
     filtered.sort((a, b) => {
       let aValue: any, bValue: any;
-      
+
       switch (sortBy) {
         case 'name':
-          aValue = a.name.toLowerCase();
-          bValue = b.name.toLowerCase();
+          aValue = (a.title || a.name || '').toLowerCase();
+          bValue = (b.title || b.name || '').toLowerCase();
           break;
         case 'duration':
           aValue = a.duration || 0;
           bValue = b.duration || 0;
+          break;
+        case 'speakers':
+          aValue = deriveSpeakerCount(a);
+          bValue = deriveSpeakerCount(b);
+          break;
+        case 'status':
+          aValue = (a.status || '').toLowerCase();
+          bValue = (b.status || '').toLowerCase();
           break;
         case 'date':
         default:
@@ -628,7 +1058,29 @@ export const Sessions: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
+    <>
+      <MobileSessionsList
+        sessions={filteredSessions as any}
+        loading={loading}
+        refreshing={refreshing || isSearching}
+        searchQuery={searchQuery}
+        onSearchChange={(value) => {
+          setSearchQuery(value);
+          if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+          searchTimerRef.current = setTimeout(() => {
+            performSearch(value);
+          }, 300);
+        }}
+        orgTags={orgTags}
+        selectedTags={selectedTags}
+        onToggleTag={(tag) => {
+          setSelectedTags((prev) =>
+            prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+          );
+        }}
+        onClearTags={() => setSelectedTags([])}
+      />
+      <div className="hidden md:block min-h-screen bg-gray-950 text-white">
       {showCreator && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-6">
           <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto">
@@ -762,16 +1214,18 @@ export const Sessions: React.FC = () => {
 
                 <select
                   value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as 'date' | 'name' | 'duration')}
+                  onChange={(e) => setSort(e.target.value as SortKey, sortOrder)}
                   className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-purple-500"
                 >
                   <option value="date">Sort by Date</option>
                   <option value="name">Sort by Name</option>
                   <option value="duration">Sort by Duration</option>
+                  <option value="speakers">Sort by Speakers</option>
+                  <option value="status">Sort by Status</option>
                 </select>
 
                 <button
-                  onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                  onClick={() => setSort(sortBy, sortOrder === 'asc' ? 'desc' : 'asc')}
                   className="flex items-center justify-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-white transition-colors"
                 >
                   {sortOrder === 'asc' ? <SortAsc className="w-4 h-4" /> : <SortDesc className="w-4 h-4" />}
@@ -954,266 +1408,184 @@ export const Sessions: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className={viewMode === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6' : 'space-y-4'}>
-            {viewMode === 'grid' && (
-              <button
-                onClick={() => uploadInputRef.current?.click()}
-                className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-cyan-500/70 bg-gray-900 p-6 text-center transition-colors hover:border-cyan-300 hover:bg-gray-900/80"
+          viewMode === 'grid' ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <button
+              onClick={() => uploadInputRef.current?.click()}
+              className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-cyan-500/70 bg-gray-900 p-6 text-center transition-colors hover:border-cyan-300 hover:bg-gray-900/80"
+            >
+              <Upload className="mb-3 h-10 w-10 text-cyan-300" />
+              <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
+              <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
+              <span
+                role="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPickerWithOptions(true);
+                  uploadInputRef.current?.click();
+                }}
+                className="mt-3 text-xs text-cyan-300/80 hover:text-cyan-200 underline-offset-2 hover:underline cursor-pointer"
               >
-                <Upload className="mb-3 h-10 w-10 text-cyan-300" />
-                <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
-                <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
-                <span
-                  role="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setPickerWithOptions(true);
-                    uploadInputRef.current?.click();
-                  }}
-                  className="mt-3 text-xs text-cyan-300/80 hover:text-cyan-200 underline-offset-2 hover:underline cursor-pointer"
-                >
-                  Upload with options…
-                </span>
-              </button>
-            )}
+                Upload with options…
+              </span>
+            </button>
             {filteredSessions.map(session => (
               <div
                 key={session.id}
-                className={`bg-gray-900 border border-gray-800 rounded-lg hover:border-gray-700 transition-all ${
-                  viewMode === 'list' ? 'flex items-center gap-6 p-4' : 'p-6'
-                }`}
+                className="bg-gray-900 border border-gray-800 rounded-lg hover:border-gray-700 transition-all p-6"
               >
-                {viewMode === 'grid' ? (
-                  <div className="space-y-4">
-                    {/* Header */}
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight">
-                          {session.title || session.name}
-                        </h3>
-                        {session.title && session.name !== session.title && (
-                          <p className="text-gray-500 text-xs mt-0.5">Original: {session.name}</p>
-                        )}
-                        {session.description && (
-                          <p className="text-gray-400 text-sm mt-1 line-clamp-2">{session.description}</p>
-                        )}
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
-                          {getStatusLabel(session.status)}
-                        </span>
-                        {session.summary && (
-                          <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
-                            AI Summary
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Meta */}
-                    <div className="space-y-2 text-sm text-gray-400">
-                      <div className="flex items-center gap-2">
-                        <Calendar className="w-4 h-4" />
-                        {new Date(session.created_at).toLocaleDateString()}
-                      </div>
-                      {session.duration && (
-                        <div className="flex items-center gap-2">
-                          <Clock className="w-4 h-4" />
-                          {formatDuration(session.duration)}
-                        </div>
-                      )}
-                      {session.participants && session.participants.length > 0 && (
-                        <div className="flex items-center gap-2">
-                          <Users className="w-4 h-4" />
-                          <span className="truncate">
-                            {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
-                            {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* AI Summary Preview */}
-                    {session.summary?.analysis?.executive && (
-                      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                        <div className="flex items-center gap-2 mb-2">
-                          <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
-                          <span className="text-xs text-purple-300 font-medium">AI Summary</span>
-                        </div>
-                        <p className="text-gray-300 text-sm line-clamp-2">
-                          {session.summary.analysis.executive}
-                        </p>
-                        {session.summary.analysis.actions && session.summary.analysis.actions.length > 0 && (
-                          <div className="mt-2 text-xs text-gray-400">
-                            {session.summary.analysis.actions.length} action item{session.summary.analysis.actions.length !== 1 ? 's' : ''}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    
-                    {/* Tags */}
-                    {session.tags && session.tags.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {[...session.tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 4).map((tag) => (
-                          <TagChip key={tag} tag={tag} />
-                        ))}
-                        {session.tags.length > 4 && (
-                          <span className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400">
-                            +{session.tags.length - 4}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Actions */}
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => navigate(`/sessions/${session.id}`)}
-                        className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
-                      >
-                        <Eye className="w-4 h-4" />
-                        View Details
-                      </button>
-                      
-                      {session.has_transcript && (
-                        <button
-                          onClick={() => downloadTranscript(session)}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                          title="Download Transcript"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
-                      )}
-                      
-                      {session.summary && (
-                        <button
-                          onClick={() => downloadSummary(session)}
-                          className="p-2 bg-green-700 hover:bg-green-600 text-green-300 rounded transition-colors"
-                          title="Download Summary"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
-                      )}
-                      
-                      {session.has_audio && (
-                        <button
-                          onClick={() => downloadAudio(session)}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                          title="Download Audio"
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                      )}
-                      
-                      <button
-                        onClick={() => deleteSession(session.id)}
-                        className="p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded transition-colors"
-                        title="Delete Session"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  /* List View */
-                  <>
+                <div className="space-y-4">
+                  {/* Header */}
+                  <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <div className="flex items-center gap-4 mb-2">
-                        <h3 className="font-semibold text-white text-lg">
-                          {session.title || session.name}
-                        </h3>
-                        {session.tags && session.tags.length > 0 && (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            {[...session.tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 4).map((tag) => (
-                              <TagChip key={tag} tag={tag} />
-                            ))}
-                            {session.tags.length > 4 && (
-                              <span className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400">
-                                +{session.tags.length - 4}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
-                          {getStatusLabel(session.status)}
-                        </span>
-                        {session.summary && (
-                          <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
-                            AI Summary
-                          </span>
-                        )}
-                        {session.session_type === 'upload' && (
-                          <span className="px-2 py-1 bg-blue-500/20 text-blue-300 text-xs rounded">
-                            <Upload className="w-3 h-3 inline mr-1" />
-                            Uploaded
-                          </span>
-                        )}
-                      </div>
+                      <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight">
+                        {session.title || session.name}
+                      </h3>
                       {session.title && session.name !== session.title && (
-                        <p className="text-gray-500 text-xs mb-1">Original: {session.name}</p>
+                        <p className="text-gray-500 text-xs mt-0.5">Original: {session.name}</p>
                       )}
                       {session.description && (
-                        <p className="text-gray-400 text-sm">{session.description}</p>
+                        <p className="text-gray-400 text-sm mt-1 line-clamp-2">{session.description}</p>
                       )}
-                      {session.summary?.analysis?.executive && (
-                        <p className="text-gray-300 text-sm mt-1 line-clamp-1 italic">
-                          {session.summary.analysis.executive}
-                        </p>
-                      )}
-                      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
-                        <span>{new Date(session.created_at).toLocaleDateString()}</span>
-                        {session.duration && <span>{formatDuration(session.duration)}</span>}
-                        {session.participants && session.participants.length > 0 && (
-                          <span>
-                            {session.participants.length} participant{session.participants.length !== 1 ? 's' : ''}: {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
-                            {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
-                          </span>
-                        )}
-                      </div>
                     </div>
-                    
+                    <div className="flex flex-col items-end gap-1">
+                      <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
+                        {getStatusLabel(session.status)}
+                      </span>
+                      {session.summary && (
+                        <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
+                          AI Summary
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Meta */}
+                  <div className="space-y-2 text-sm text-gray-400">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => navigate(`/sessions/${session.id}`)}
-                        className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
-                      >
-                        <Eye className="w-4 h-4" />
-                        View Details
-                      </button>
-                      
-                      {session.has_transcript && (
-                        <button
-                          onClick={() => downloadTranscript(session)}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                          title="Download Transcript"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
-                      )}
-                      
-                      {session.has_audio && (
-                        <button
-                          onClick={() => downloadAudio(session)}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                          title="Download Audio"
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                      )}
-                      
-                      <button
-                        onClick={() => deleteSession(session.id)}
-                        className="p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded transition-colors"
-                        title="Delete Session"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <Calendar className="w-4 h-4" />
+                      {new Date(session.created_at).toLocaleDateString()}
                     </div>
-                  </>
-                )}
+                    {session.duration && (
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4" />
+                        {formatDuration(session.duration)}
+                      </div>
+                    )}
+                    {session.participants && session.participants.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <Users className="w-4 h-4" />
+                        <span className="truncate">
+                          {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
+                          {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* AI Summary Preview */}
+                  {session.summary?.analysis?.executive && (
+                    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
+                        <span className="text-xs text-purple-300 font-medium">AI Summary</span>
+                      </div>
+                      <p className="text-gray-300 text-sm line-clamp-2">
+                        {session.summary.analysis.executive}
+                      </p>
+                      {session.summary.analysis.actions && session.summary.analysis.actions.length > 0 && (
+                        <div className="mt-2 text-xs text-gray-400">
+                          {session.summary.analysis.actions.length} action item{session.summary.analysis.actions.length !== 1 ? 's' : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tags */}
+                  {session.tags && session.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {[...session.tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 4).map((tag) => (
+                        <TagChip key={tag} tag={tag} />
+                      ))}
+                      {session.tags.length > 4 && (
+                        <span className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400">
+                          +{session.tags.length - 4}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => navigate(`/sessions/${session.id}`)}
+                      className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
+                    >
+                      <Eye className="w-4 h-4" />
+                      View Details
+                    </button>
+
+                    {session.has_transcript && (
+                      <button
+                        onClick={() => downloadTranscript(session)}
+                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                        title="Download Transcript"
+                      >
+                        <FileText className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    {session.summary && (
+                      <button
+                        onClick={() => downloadSummary(session)}
+                        className="p-2 bg-green-700 hover:bg-green-600 text-green-300 rounded transition-colors"
+                        title="Download Summary"
+                      >
+                        <FileText className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    {session.has_audio && (
+                      <button
+                        onClick={() => downloadAudio(session)}
+                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                        title="Download Audio"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => deleteSession(session.id)}
+                      className="p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded transition-colors"
+                      title="Delete Session"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
+          ) : (
+            <SessionsTable
+              sessions={filteredSessions}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onHeaderSort={handleHeaderSort}
+              statusFilter={tableStatusFilter}
+              speakerFilter={tableSpeakerFilter}
+              onStatusFilterChange={setTableStatusFilter}
+              onSpeakerFilterChange={setTableSpeakerFilter}
+              openColumnFilter={openColumnFilter}
+              onOpenColumnFilter={setOpenColumnFilter}
+              onOpen={(id) => navigate(`/sessions/${id}`)}
+              onDelete={deleteSession}
+              formatDuration={formatDuration}
+              getStatusColor={getStatusColor}
+              getStatusLabel={getStatusLabel}
+            />
+          )
         )}
       </div>
 
@@ -1259,5 +1631,6 @@ export const Sessions: React.FC = () => {
 )}
 
     </div>
+    </>
   );
 };
