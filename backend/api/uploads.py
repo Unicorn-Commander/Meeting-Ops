@@ -16,6 +16,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
@@ -1305,7 +1306,11 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
             end_time=float(segment.get("end") or 0),
             confidence=float(segment.get("confidence") or 0.95),
         ))
-    metadata = session.processing_metadata or {}
+    # JSON column: copy then flag_modified so SQLAlchemy actually emits
+    # the UPDATE. Without this, mutating the same dict reference and the
+    # following db.refresh() throws the new keys away — meaning
+    # word_timestamps never reaches the DB and Re-detect can't run Path 1.
+    metadata = dict(session.processing_metadata or {})
     metadata.update({
         "word_count": len((session.transcript_simple or "").split()),
         "transcription_model": result.get("model", "whisper"),
@@ -1313,9 +1318,6 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
         "npu_accelerated": result.get("npu_accelerated", False),
         "processing_started_from_upload": True,
     })
-    # Word-level timestamps: only Parakeet provides these natively. Store
-    # them separately so the frontend can render word-by-word highlighting
-    # without the segment-level renderer having to know about them.
     word_timestamps = result.get("words") or []
     if word_timestamps:
         metadata["word_timestamps"] = word_timestamps
@@ -1324,6 +1326,7 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     if rtf is not None:
         metadata["transcription_rtf"] = rtf
     session.processing_metadata = metadata
+    flag_modified(session, "processing_metadata")
     db.commit()
     db.refresh(session)
 

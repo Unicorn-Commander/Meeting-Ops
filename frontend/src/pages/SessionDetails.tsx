@@ -2459,21 +2459,52 @@ export const SessionDetails: React.FC = () => {
                     </div>
                   )}
 
-                  {insights.speaker_insights && insights.speaker_insights.length > 0 && (
-                    <div>
-                      <p className="text-sm font-medium text-gray-600 mb-1">Speaking Time</p>
-                      <div className="space-y-2">
-                        {insights.speaker_insights.map((si: any, idx: number) => (
-                          <div key={idx} className="flex items-center justify-between">
-                            <span className="text-sm text-gray-600">{si.speaker}</span>
-                            <span className="text-sm font-medium">
-                              {Math.round(si.talk_percentage ?? 0)}%
-                            </span>
-                          </div>
-                        ))}
+                  {insights.speaker_insights && insights.speaker_insights.length > 0 && (() => {
+                    const totalTalk = insights.speaker_insights.reduce(
+                      (acc: number, si: any) => acc + (si.talkTime ?? si.talk_time ?? 0),
+                      0,
+                    ) || 1;
+                    const palette = [
+                      'bg-purple-500', 'bg-blue-500', 'bg-emerald-500',
+                      'bg-amber-500', 'bg-rose-500', 'bg-indigo-500',
+                      'bg-teal-500', 'bg-orange-500',
+                    ];
+                    const sorted = [...insights.speaker_insights].sort(
+                      (a: any, b: any) => (b.talkTime ?? 0) - (a.talkTime ?? 0),
+                    );
+                    return (
+                      <div>
+                        <p className="text-sm font-medium text-gray-600 mb-2">Speaking Time</p>
+                        <div className="space-y-3">
+                          {sorted.map((si: any, idx: number) => {
+                            const seconds = si.talkTime ?? si.talk_time ?? 0;
+                            const words = si.wordCount ?? si.word_count ?? 0;
+                            const pct = (seconds / totalTalk) * 100;
+                            const mm = Math.floor(seconds / 60);
+                            const ss = Math.floor(seconds % 60).toString().padStart(2, '0');
+                            const colorClass = palette[idx % palette.length];
+                            return (
+                              <div key={idx}>
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-sm text-gray-700 truncate">{si.speaker}</span>
+                                  <span className="text-xs text-gray-500 tabular-nums">
+                                    {mm}:{ss} <span className="text-gray-400">·</span> {words.toLocaleString()}w
+                                    <span className="ml-1 text-gray-700 font-medium">{Math.round(pct)}%</span>
+                                  </span>
+                                </div>
+                                <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+                                  <div
+                                    className={`${colorClass} h-2 rounded-full transition-[width] duration-500`}
+                                    style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {insights.action_items && insights.action_items.length > 0 && (
                     <div>
