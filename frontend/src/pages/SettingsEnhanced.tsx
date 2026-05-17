@@ -1,61 +1,50 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Settings as SettingsIcon,
-  ExternalLink,
-  Mic,
-  Cpu,
-  Save,
-  ChevronRight,
-  Wifi,
-  Network,
-  Monitor,
-  Lock,
-  RefreshCw,
-  CheckCircle,
-  AlertCircle,
-  BookOpen,
-  Plus,
-  Trash2
-} from 'lucide-react';
+import { lazy, useEffect, useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import { config } from '../config';
-import ProviderSettingsPanel from '../components/ProviderSettingsPanel';
+import SettingsLayout, {
+  SaveStatus,
+} from '../components/settings/SettingsLayout';
+import {
+  ALL_SECTIONS,
+  APPLIANCE_ONLY_SECTIONS,
+  HostCapabilities,
+  SettingsProvider,
+  SettingsState,
+  SETTINGS_STORAGE_KEY,
+  loadStoredSettings,
+} from '../components/settings/SettingsContext';
 
-interface SettingsSection {
-  id: string;
-  title: string;
-  icon: React.ElementType;
-  description: string;
-  category: 'app' | 'admin' | 'system';
-}
-
-interface AudioDevice {
-  id: string;
-  name: string;
-  sampleRates: number[];
-  channels: number;
-  isDefault: boolean;
-  isUSB: boolean;
-}
-
-const SETTINGS_KEY = 'meeting-ops-settings';
-
-interface HostCapabilities {
-  local_audio: boolean;
-  npu: boolean;
-  build: 'appliance' | 'cloud' | string;
-}
+const AudioSettings = lazy(() => import('../components/settings/AudioSettings'));
+const AISettings = lazy(() => import('../components/settings/AISettings'));
+const VocabularySettings = lazy(
+  () => import('../components/settings/VocabularySettings')
+);
+const ProvidersSettings = lazy(
+  () => import('../components/settings/ProvidersSettings')
+);
+const AuthentikSettings = lazy(
+  () => import('../components/settings/AuthentikSettings')
+);
+const NetworkSettings = lazy(
+  () => import('../components/settings/NetworkSettings')
+);
+const WifiSettings = lazy(() => import('../components/settings/WifiSettings'));
+const PerformanceSettings = lazy(
+  () => import('../components/settings/PerformanceSettings')
+);
 
 export default function SettingsEnhanced() {
   const [activeSection, setActiveSection] = useState('providers');
   const [hostCaps, setHostCaps] = useState<HostCapabilities>({
-    local_audio: true, // assume appliance until told otherwise; safest default
+    local_audio: true,
     npu: false,
     build: 'unknown',
   });
+  const [settings, setSettings] = useState<SettingsState>(loadStoredSettings);
+  const [micVolume, setMicVolume] = useState(75);
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
 
-  // Probe the backend for build capabilities so we can hide UC-1
-  // appliance-only tabs (mic picker, NPU monitor, network/wifi config) on
-  // the cloud SaaS build.
   useEffect(() => {
     (async () => {
       try {
@@ -66,386 +55,63 @@ export default function SettingsEnhanced() {
       }
     })();
   }, []);
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
-  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
-  const [networkInfo, setNetworkInfo] = useState<any>({});
-  const [saving, setSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error' | 'backend-pending'>('idle');
-  const [micVolume, setMicVolume] = useState(75); // USB mic volume percentage
-  const [availableModels, setAvailableModels] = useState<Array<{
-    model_id: string;
-    display_name: string;
-    speed_estimate: string;
-    vram_estimate: string;
-    best_for: string;
-    is_active: boolean;
-  }>>([]);
-  const [modelSwitching, setModelSwitching] = useState(false);
-  
-  // Load settings from localStorage or use defaults
-  const loadSettings = () => {
-    const saved = localStorage.getItem(SETTINGS_KEY);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error('Failed to parse saved settings:', e);
-      }
-    }
-    return {
-    // Audio Settings
-    defaultDevice: 'hw:0,0', // USB PnP Sound Device
-    sampleRate: '44100', // 44.1kHz as this USB mic supports it
-    recordingFormat: 'wav',
-    transcriptionModel: 'large-v3',
-    liveTranscription: true,
-    vadEnabled: true,
-    vadThreshold: 500,
-    chunkDuration: 10,
-    
-    // AI Settings
-    enableAI: true,
-    summaryFormat: 'executive',
-    autoGenerateActions: true,
-    speakerDiarization: true,
-    maxSpeakers: 4,
-    llmModel: 'gpt-oss-20b',
-    llmProvider: 'llamacpp',
-    
-    // Export Settings
-    defaultExportFormat: 'txt',
-    includeTimestamps: true,
-    includeSpeakerLabels: true,
-    autoExport: false,
-    exportPath: '/home/ucadmin/Meeting-Ops/exports',
-    
-    // Authentik Settings
-    authentikEnabled: true,
-    authentikUrl: 'https://authentik.local',
-    authentikClientId: 'meeting-ops',
-    authentikClientSecret: '',
-    authentikRedirectUri: `${window.location.origin}/auth/callback`,
-    
-    // Network Settings
-    hostname: 'meeting-ops',
-    ipMode: 'dhcp', // or 'static'
-    ipAddress: '',
-    netmask: '255.255.255.0',
-    gateway: '',
-    dns1: '1.1.1.1',
-    dns2: '8.8.8.8',
-    vlan: '',
-    
-    // WiFi Settings
-    wifiEnabled: false,
-    wifiSSID: '',
-    wifiPassword: '',
-    wifiSecurity: 'WPA2',
-    
-    // System Settings
-    autoStart: true,
-    startOnBoot: true,
-    autoUpdate: false,
-    updateChannel: 'stable',
-    backupEnabled: false,
-    backupPath: '/backup',
-    backupSchedule: 'daily',
-    
-    // Monitoring
-    telemetryEnabled: false,
-    logLevel: 'info',
-    logRetention: 30,
-    
-    // Performance
-    npuEnabled: true,
-    npuPowerMode: 'balanced', // low, balanced, performance
-    cpuThreads: 4,
-    memoryLimit: 8192, // MB
-  };
-  };
-  
-  const [settings, setSettings] = useState(loadSettings());
-
-  // Vocabulary state
-  const [vocabTerms, setVocabTerms] = useState<Array<{id: string; term: string; expansion: string; category: string | null; is_active: boolean}>>([]);
-  const [vocabLoading, setVocabLoading] = useState(false);
-  const [newTerm, setNewTerm] = useState('');
-  const [newExpansion, setNewExpansion] = useState('');
-  const [newCategory, setNewCategory] = useState('');
-
-  const fetchVocabTerms = async () => {
-    setVocabLoading(true);
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/vocabulary/terms?limit=100`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setVocabTerms(data.items || []);
-      }
-    } catch (e) {
-      console.error('Failed to fetch vocabulary terms:', e);
-    } finally {
-      setVocabLoading(false);
-    }
-  };
-
-  const addVocabTerm = async () => {
-    if (!newTerm.trim() || !newExpansion.trim()) return;
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/vocabulary/terms`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({
-          term: newTerm.trim(),
-          expansion: newExpansion.trim(),
-          category: newCategory.trim() || null,
-          priority: 0
-        })
-      });
-      if (res.ok) {
-        setNewTerm('');
-        setNewExpansion('');
-        setNewCategory('');
-        fetchVocabTerms();
-      }
-    } catch (e) {
-      console.error('Failed to add vocabulary term:', e);
-    }
-  };
-
-  const deleteVocabTerm = async (termId: string) => {
-    try {
-      const token = localStorage.getItem('access_token');
-      await fetch(`${config.apiUrl}/api/vocabulary/terms/${termId}`, {
-        method: 'DELETE',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      fetchVocabTerms();
-    } catch (e) {
-      console.error('Failed to delete vocabulary term:', e);
-    }
-  };
-
-  const fetchAvailableModels = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/settings/models/available`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAvailableModels(data.models || []);
-        // Set the active model in settings state
-        const activeModel = data.models?.find((m: any) => m.is_active);
-        if (activeModel) {
-          setSettings((prev: any) => ({ ...prev, llmModel: activeModel.model_id }));
-        }
-      }
-    } catch (e) {
-      console.log('Could not fetch available models:', e);
-    }
-  };
-
-  const switchModel = async (modelId: string) => {
-    setModelSwitching(true);
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/settings/models/active`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({ model_id: modelId })
-      });
-      if (res.ok) {
-        setSettings((prev: any) => ({ ...prev, llmModel: modelId }));
-        // Refresh the model list to update active indicators
-        await fetchAvailableModels();
-      }
-    } catch (e) {
-      console.error('Failed to switch model:', e);
-    } finally {
-      setModelSwitching(false);
-    }
-  };
-
-  // Fetch vocabulary terms when the vocabulary section is active
-  useEffect(() => {
-    if (activeSection === 'vocabulary') {
-      fetchVocabTerms();
-    }
-    if (activeSection === 'ai') {
-      fetchAvailableModels();
-    }
-  }, [activeSection]);
-
-  const allSections: SettingsSection[] = [
-    // App Settings
-    { id: 'audio', title: 'Audio & Recording', icon: Mic, description: 'Audio devices and recording configuration', category: 'app' },
-    { id: 'ai', title: 'AI & Transcription', icon: Cpu, description: 'Legacy NPU model picker — superseded by AI Providers', category: 'app' },
-    { id: 'vocabulary', title: 'Custom Vocabulary', icon: BookOpen, description: 'Industry terms and acronyms for transcription', category: 'app' },
-    { id: 'providers', title: 'AI Providers', icon: Network, description: 'Per-service AI provider configuration', category: 'app' },
-
-    // Admin Settings
-    { id: 'authentik', title: 'Authentication (Authentik)', icon: Lock, description: 'Authentik SSO configuration', category: 'admin' },
-
-    // System Settings (UC-1 appliance-only)
-    { id: 'network', title: 'Network Configuration', icon: Network, description: 'Ethernet, IP, DNS settings', category: 'system' },
-    { id: 'wifi', title: 'WiFi Settings', icon: Wifi, description: 'Wireless network configuration', category: 'system' },
-    { id: 'performance', title: 'Performance & NPU', icon: Monitor, description: 'Hardware acceleration and limits', category: 'system' },
-  ];
-
-  // Tabs that only make sense on the UC-1 appliance build (local mic /
-  // NPU / host-level network config). Hidden on the cloud SaaS build.
-  const APPLIANCE_ONLY_TABS = new Set(['audio', 'ai', 'network', 'wifi', 'performance']);
-  const sections = hostCaps.local_audio
-    ? allSections
-    : allSections.filter((s) => !APPLIANCE_ONLY_TABS.has(s.id));
 
   useEffect(() => {
-    // Fetch real audio devices
-    fetchAudioDevices();
-    // Fetch network info
-    fetchNetworkInfo();
-    // Try to load settings from backend
-    loadSettingsFromBackend();
-  }, []);
-  
-  // Auto-save to localStorage when settings change
-  useEffect(() => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }, [settings]);
 
-  const loadSettingsFromBackend = async () => {
-    try {
-      const response = await fetch(`${config.apiUrl}/api/simple/settings`);
-      if (response.ok) {
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch(`${config.apiUrl}/api/simple/settings`);
+        if (!response.ok) return;
         const backendSettings = await response.json();
-        
-        // Map backend field names to frontend field names
-        const mappedSettings = {
-          ...settings,
-          defaultDevice: backendSettings.defaultMicrophone || settings.defaultDevice,
-          sampleRate: settings.sampleRate, // Not in backend yet
-          transcriptionModel: backendSettings.transcriptionModel || settings.transcriptionModel,
-          liveTranscription: backendSettings.enableLiveAI !== false,
-          vadEnabled: backendSettings.enableVAD || settings.vadEnabled,
-          vadThreshold: (backendSettings.vadThreshold * 1000) || settings.vadThreshold,
-          enableAI: backendSettings.enableLiveAI || settings.enableAI,
-          summaryFormat: settings.summaryFormat, // Not directly in backend
-          autoGenerateActions: backendSettings.enableAutoSummary || settings.autoGenerateActions,
-          speakerDiarization: backendSettings.enableSpeakerDiarization || settings.speakerDiarization,
-          maxSpeakers: backendSettings.maxSpeakers || settings.maxSpeakers,
-          llmModel: backendSettings.aiModel || settings.llmModel,
-          llmProvider: backendSettings.aiProvider || settings.llmProvider,
-          hostname: backendSettings.hostname || settings.hostname,
-          ipMode: backendSettings.ipMode || settings.ipMode,
-          authentikUrl: backendSettings.authentikUrl || settings.authentikUrl,
-          npuEnabled: backendSettings.npuEnabled !== false,
-          npuPowerMode: backendSettings.npuPowerMode || settings.npuPowerMode,
-        };
-        
-        setSettings(mappedSettings);
-        setMicVolume(backendSettings.microphoneVolume || 75);
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(mappedSettings));
-      }
-    } catch (error) {
-      console.log('Backend settings not available, using local storage');
-    }
-  };
-
-  const fetchAudioDevices = async () => {
-    try {
-      const response = await fetch(`${config.apiUrl}/api/simple/audio-devices`);
-      if (response.ok) {
-        const data = await response.json();
-        const devices = data.devices || data; // Handle both {devices: [...]} and [...] formats
-        
-        // Map the devices to our format
-        const mappedDevices: AudioDevice[] = devices.map((device: any) => ({
-          id: device.deviceId || device.id || `hw:${device.index},0`,
-          name: device.name || device.label || 'Unknown Device',
-          sampleRates: device.sampleRates || device.sample_rates || [device.sample_rate] || [44100, 48000],
-          channels: device.channels || 1,
-          isDefault: device.is_default || device.isDefault || device.name?.includes('USB') || false,
-          isUSB: device.name?.includes('USB') || device.label?.includes('USB') || false
-        }));
-        
-        setAudioDevices(mappedDevices);
-        setAudioDeviceError(null);
-
-        // Set default device to first device or USB if found
-        const defaultDevice = mappedDevices.find(d => d.isDefault) || mappedDevices.find(d => d.isUSB) || mappedDevices[0];
-        if (defaultDevice && !settings.defaultDevice) {
-          setSettings((prev: any) => ({
+        setSettings((prev: SettingsState) => {
+          const mapped: SettingsState = {
             ...prev,
-            defaultDevice: defaultDevice.id,
-            sampleRate: '44100' // Default rate
-          }));
-        }
+            defaultDevice: backendSettings.defaultMicrophone || prev.defaultDevice,
+            sampleRate: prev.sampleRate,
+            transcriptionModel:
+              backendSettings.transcriptionModel || prev.transcriptionModel,
+            liveTranscription: backendSettings.enableLiveAI !== false,
+            vadEnabled: backendSettings.enableVAD || prev.vadEnabled,
+            vadThreshold:
+              backendSettings.vadThreshold * 1000 || prev.vadThreshold,
+            enableAI: backendSettings.enableLiveAI || prev.enableAI,
+            summaryFormat: prev.summaryFormat,
+            autoGenerateActions:
+              backendSettings.enableAutoSummary || prev.autoGenerateActions,
+            speakerDiarization:
+              backendSettings.enableSpeakerDiarization || prev.speakerDiarization,
+            maxSpeakers: backendSettings.maxSpeakers || prev.maxSpeakers,
+            llmModel: backendSettings.aiModel || prev.llmModel,
+            llmProvider: backendSettings.aiProvider || prev.llmProvider,
+            hostname: backendSettings.hostname || prev.hostname,
+            ipMode: backendSettings.ipMode || prev.ipMode,
+            authentikUrl: backendSettings.authentikUrl || prev.authentikUrl,
+            npuEnabled: backendSettings.npuEnabled !== false,
+            npuPowerMode: backendSettings.npuPowerMode || prev.npuPowerMode,
+          };
+          localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(mapped));
+          return mapped;
+        });
+        setMicVolume(backendSettings.microphoneVolume || 75);
+      } catch (error) {
+        console.log('Backend settings not available, using local storage');
       }
-    } catch (error) {
-      console.error('Failed to fetch audio devices:', error);
-      // Show empty list — the UI will display an error state
-      setAudioDevices([]);
-      setAudioDeviceError('Could not detect audio devices. Check that PipeWire is running and the backend is reachable.');
-    }
-  };
+    })();
+  }, []);
 
-  const fetchNetworkInfo = async () => {
-    try {
-      const response = await fetch(`${config.apiUrl}/api/simple/system/network`);
-      if (response.ok) {
-        const info = await response.json();
-        setNetworkInfo(info);
-        setSettings((prev: any) => ({
-          ...prev,
-          hostname: info.hostname || prev.hostname,
-          ipAddress: info.ipAddress || prev.ipAddress,
-          gateway: info.gateway || prev.gateway,
-        }));
-      }
-    } catch (error) {
-      console.error('Failed to fetch network info:', error);
-    }
-  };
-
-  const adjustMicVolume = async (volume: number) => {
-    try {
-      // Try to set via backend
-      const response = await fetch(`${config.apiUrl}/api/simple/audio/volume`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          device: settings.defaultDevice,
-          volume: volume 
-        })
-      });
-      if (response.ok) {
-        setMicVolume(volume);
-      }
-    } catch (error) {
-      console.log('Backend not available for volume control');
-      // Could still update UI optimistically
-      setMicVolume(volume);
-    }
-  };
+  const sections = hostCaps.local_audio
+    ? ALL_SECTIONS
+    : ALL_SECTIONS.filter((s) => !APPLIANCE_ONLY_SECTIONS.has(s.id));
 
   const handleSave = async () => {
     setSaving(true);
     setSaveStatus('idle');
-    
-    // Always save to localStorage
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    
-    // Map frontend settings to backend format
+
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+
     const backendSettings = {
       defaultMicrophone: settings.defaultDevice,
       microphoneVolume: micVolume,
@@ -476,14 +142,14 @@ export default function SettingsEnhanced() {
       includeTimestamps: settings.includeTimestamps,
       includeSpeakerLabels: settings.includeSpeakerLabels,
     };
-    
+
     try {
       const response = await fetch(`${config.apiUrl}/api/simple/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(backendSettings)
+        body: JSON.stringify(backendSettings),
       });
-      
+
       if (response.ok) {
         setSaveStatus('success');
         setTimeout(() => setSaveStatus('idle'), 3000);
@@ -491,7 +157,6 @@ export default function SettingsEnhanced() {
         throw new Error('Backend not available');
       }
     } catch (error) {
-      // Save to localStorage was successful, backend pending
       setSaveStatus('backend-pending');
       setTimeout(() => setSaveStatus('idle'), 5000);
     } finally {
@@ -499,937 +164,60 @@ export default function SettingsEnhanced() {
     }
   };
 
-  const renderSectionContent = () => {
+  const renderActive = () => {
     switch (activeSection) {
       case 'audio':
-        return (
-          <div className="space-y-6">
-            {/* Audio Device Error */}
-            {audioDeviceError && audioDevices.length === 0 && (
-              <div className="bg-red-900/20 border border-red-800 rounded-lg p-4">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-red-400 mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-sm text-red-200 font-medium">Audio Device Detection Failed</p>
-                    <p className="text-xs text-red-300 mt-1">{audioDeviceError}</p>
-                    <button
-                      onClick={() => { setAudioDeviceError(null); fetchAudioDevices(); }}
-                      className="mt-2 px-3 py-1 bg-red-800 hover:bg-red-700 text-red-100 rounded text-xs transition-colors"
-                    >
-                      Retry Detection
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Audio Device Selection */}
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Recording Device
-              </label>
-              <select 
-                value={settings.defaultDevice}
-                onChange={(e) => {
-                  const device = audioDevices.find(d => d.id === e.target.value);
-                  setSettings({
-                    ...settings, 
-                    defaultDevice: e.target.value,
-                    // Auto-adjust sample rate based on device capabilities
-                    sampleRate: device?.sampleRates.includes(44100) ? '44100' : '48000'
-                  });
-                }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              >
-                {audioDevices.map(device => (
-                  <option key={device.id} value={device.id}>
-                    {device.name} {device.isUSB && '(USB)'} {device.isDefault && '⭐'}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-zinc-500 mt-1">
-                {audioDevices.find(d => d.id === settings.defaultDevice)?.isUSB 
-                  ? '✅ USB microphone detected - optimal for recording'
-                  : 'Built-in microphone selected'}
-              </p>
-            </div>
-
-            {/* USB Mic Volume Control */}
-            {settings.defaultDevice === 'hw:0,0' && (
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  USB Microphone Volume
-                </label>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={micVolume}
-                    onChange={(e) => adjustMicVolume(parseInt(e.target.value))}
-                    className="flex-1 h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer"
-                  />
-                  <span className="text-sm text-zinc-200 w-12 text-right">{micVolume}%</span>
-                </div>
-                <p className="text-xs text-zinc-500 mt-1">
-                  Adjust microphone input sensitivity
-                </p>
-              </div>
-            )}
-
-            {/* Sample Rate */}
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Sample Rate
-              </label>
-              <select 
-                value={settings.sampleRate}
-                onChange={(e) => setSettings({...settings, sampleRate: e.target.value})}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              >
-                {audioDevices.find(d => d.id === settings.defaultDevice)?.sampleRates.map(rate => (
-                  <option key={rate} value={rate}>
-                    {rate / 1000} kHz {rate === 44100 && '(USB Mic Native)'}
-                  </option>
-                )) || [
-                  <option key="44100" value="44100">44.1 kHz</option>,
-                  <option key="48000" value="48000">48 kHz</option>
-                ]}
-              </select>
-              <p className="text-xs text-zinc-500 mt-1">
-                Recording at native rate avoids resampling and preserves quality
-              </p>
-            </div>
-
-            {/* Transcription Model */}
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Transcription Model
-              </label>
-              <select 
-                value={settings.transcriptionModel}
-                onChange={(e) => setSettings({...settings, transcriptionModel: e.target.value})}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              >
-                <option value="base">Whisper Base (Fastest, ~39MB)</option>
-                <option value="small">Whisper Small (~244MB)</option>
-                <option value="medium">Whisper Medium (~1.5GB)</option>
-                <option value="large">Whisper Large (~3GB)</option>
-                <option value="large-v2">Whisper Large-v2 (~3GB)</option>
-                <option value="large-v3">Whisper Large-v3 (Best, ~3GB) ⭐</option>
-              </select>
-              <p className="text-xs text-zinc-500 mt-1">
-                Large-v3 with NPU acceleration: 220x faster than CPU
-              </p>
-            </div>
-
-            {/* Advanced Audio Settings */}
-            <div className="space-y-3">
-              <label className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={settings.liveTranscription}
-                  onChange={(e) => setSettings({...settings, liveTranscription: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Enable live transcription during recording</span>
-              </label>
-
-              <label className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={settings.vadEnabled}
-                  onChange={(e) => setSettings({...settings, vadEnabled: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Voice Activity Detection (removes silence)</span>
-              </label>
-
-              {settings.vadEnabled && (
-                <div className="ml-7">
-                  <label className="block text-xs text-zinc-400 mb-1">
-                    VAD Threshold (ms)
-                  </label>
-                  <input
-                    type="number"
-                    value={settings.vadThreshold}
-                    onChange={(e) => setSettings({...settings, vadThreshold: parseInt(e.target.value)})}
-                    className="w-32 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
-                    min="100"
-                    max="2000"
-                    step="100"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'authentik':
-        return (
-          <div className="space-y-6">
-            <div className="bg-yellow-900/20 border border-yellow-800 rounded-lg p-4 mb-6">
-              <div className="flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-yellow-400 mt-0.5" />
-                <div>
-                  <p className="text-sm text-yellow-200 font-medium">Authentik SSO Configuration</p>
-                  <p className="text-xs text-yellow-300 mt-1">
-                    Configure Single Sign-On with your Authentik instance for centralized authentication
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <label className="flex items-center gap-3 mb-4">
-                <input
-                  type="checkbox"
-                  checked={settings.authentikEnabled}
-                  onChange={(e) => setSettings({...settings, authentikEnabled: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Enable Authentik Authentication</span>
-              </label>
-
-              {settings.authentikEnabled && (
-                <div className="space-y-4 ml-7">
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Authentik URL
-                    </label>
-                    <input
-                      type="url"
-                      value={settings.authentikUrl}
-                      onChange={(e) => setSettings({...settings, authentikUrl: e.target.value})}
-                      placeholder="https://auth.yourdomain.com"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 placeholder-zinc-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Client ID
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.authentikClientId}
-                      onChange={(e) => setSettings({...settings, authentikClientId: e.target.value})}
-                      placeholder="meeting-ops"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 placeholder-zinc-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Client Secret
-                    </label>
-                    <input
-                      type="password"
-                      value={settings.authentikClientSecret}
-                      onChange={(e) => setSettings({...settings, authentikClientSecret: e.target.value})}
-                      placeholder="••••••••••••••••"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 placeholder-zinc-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Redirect URI
-                    </label>
-                    <input
-                      type="url"
-                      value={settings.authentikRedirectUri}
-                      onChange={(e) => setSettings({...settings, authentikRedirectUri: e.target.value})}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-                    />
-                    <p className="text-xs text-zinc-500 mt-1">
-                      Add this URI to your Authentik application configuration
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={async () => {
-                      try {
-                        await fetch(settings.authentikUrl, { mode: 'no-cors' });
-                        alert('Connection test completed — request sent to ' + settings.authentikUrl);
-                      } catch (err) {
-                        alert('Connection failed: ' + (err as Error).message);
-                      }
-                    }}
-                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
-                  >
-                    Test Connection
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'network':
-        return (
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Hostname
-              </label>
-              <input
-                type="text"
-                value={settings.hostname}
-                onChange={(e) => setSettings({...settings, hostname: e.target.value})}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                IP Configuration
-              </label>
-              <div className="flex gap-2 mb-4">
-                <button
-                  onClick={() => setSettings({...settings, ipMode: 'dhcp'})}
-                  className={`px-4 py-2 rounded-lg text-sm ${
-                    settings.ipMode === 'dhcp' 
-                      ? 'bg-zinc-700 text-white' 
-                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  DHCP (Automatic)
-                </button>
-                <button
-                  onClick={() => setSettings({...settings, ipMode: 'static'})}
-                  className={`px-4 py-2 rounded-lg text-sm ${
-                    settings.ipMode === 'static' 
-                      ? 'bg-zinc-700 text-white' 
-                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Static IP
-                </button>
-              </div>
-
-              {settings.ipMode === 'static' && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs text-zinc-400 mb-1">IP Address</label>
-                    <input
-                      type="text"
-                      value={settings.ipAddress}
-                      onChange={(e) => setSettings({...settings, ipAddress: e.target.value})}
-                      placeholder="192.168.1.100"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-zinc-400 mb-1">Subnet Mask</label>
-                    <input
-                      type="text"
-                      value={settings.netmask}
-                      onChange={(e) => setSettings({...settings, netmask: e.target.value})}
-                      placeholder="255.255.255.0"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-zinc-400 mb-1">Gateway</label>
-                    <input
-                      type="text"
-                      value={settings.gateway}
-                      onChange={(e) => setSettings({...settings, gateway: e.target.value})}
-                      placeholder="192.168.1.1"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                DNS Servers
-              </label>
-              <div className="space-y-2">
-                <input
-                  type="text"
-                  value={settings.dns1}
-                  onChange={(e) => setSettings({...settings, dns1: e.target.value})}
-                  placeholder="Primary DNS (e.g., 1.1.1.1)"
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-                />
-                <input
-                  type="text"
-                  value={settings.dns2}
-                  onChange={(e) => setSettings({...settings, dns2: e.target.value})}
-                  placeholder="Secondary DNS (e.g., 8.8.8.8)"
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                VLAN ID (Optional)
-              </label>
-              <input
-                type="text"
-                value={settings.vlan}
-                onChange={(e) => setSettings({...settings, vlan: e.target.value})}
-                placeholder="Leave empty for no VLAN"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-              />
-            </div>
-
-            {/* Current Network Status */}
-            {networkInfo.ipAddress && (
-              <div className="bg-zinc-800/50 rounded-lg p-4 mt-6">
-                <h4 className="text-sm font-medium text-zinc-300 mb-3">Current Network Status</h4>
-                <div className="space-y-2 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Current IP:</span>
-                    <span className="text-zinc-200 font-mono">{networkInfo.ipAddress}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Gateway:</span>
-                    <span className="text-zinc-200 font-mono">{networkInfo.gateway}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Interface:</span>
-                    <span className="text-zinc-200">{networkInfo.interface || 'eth0'}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-
-      case 'wifi':
-        return (
-          <div className="space-y-6">
-            <div>
-              <label className="flex items-center gap-3 mb-4">
-                <input
-                  type="checkbox"
-                  checked={settings.wifiEnabled}
-                  onChange={(e) => setSettings({...settings, wifiEnabled: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Enable WiFi</span>
-              </label>
-
-              {settings.wifiEnabled && (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Network Name (SSID)
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.wifiSSID}
-                      onChange={(e) => setSettings({...settings, wifiSSID: e.target.value})}
-                      placeholder="Your WiFi network name"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={settings.wifiPassword}
-                      onChange={(e) => setSettings({...settings, wifiPassword: e.target.value})}
-                      placeholder="WiFi password"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      Security Type
-                    </label>
-                    <select 
-                      value={settings.wifiSecurity}
-                      onChange={(e) => setSettings({...settings, wifiSecurity: e.target.value})}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-                    >
-                      <option value="WPA2">WPA2 Personal</option>
-                      <option value="WPA3">WPA3 Personal</option>
-                      <option value="WPA2-Enterprise">WPA2 Enterprise</option>
-                      <option value="Open">Open (No Security)</option>
-                    </select>
-                  </div>
-
-                </div>
-              )}
-            </div>
-          </div>
-        );
-
-      case 'performance':
-        return (
-          <div className="space-y-6">
-            <div className="bg-green-900/20 border border-green-800 rounded-lg p-4 mb-6">
-              <div className="flex items-start gap-3">
-                <Cpu className="w-5 h-5 text-green-400 mt-0.5" />
-                <div>
-                  <p className="text-sm text-green-200 font-medium">NPU Acceleration Active</p>
-                  <p className="text-xs text-green-300 mt-1">
-                    AMD Phoenix NPU detected - 220x faster transcription enabled
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <label className="flex items-center gap-3 mb-4">
-                <input
-                  type="checkbox"
-                  checked={settings.npuEnabled}
-                  onChange={(e) => setSettings({...settings, npuEnabled: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Enable NPU Acceleration</span>
-              </label>
-
-              {settings.npuEnabled && (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-2">
-                      NPU Power Mode
-                    </label>
-                    <select 
-                      value={settings.npuPowerMode}
-                      onChange={(e) => setSettings({...settings, npuPowerMode: e.target.value})}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-                    >
-                      <option value="low">Low Power (Battery Saver)</option>
-                      <option value="balanced">Balanced (Recommended)</option>
-                      <option value="performance">Maximum Performance</option>
-                    </select>
-                    <p className="text-xs text-zinc-500 mt-1">
-                      Performance mode: 0.0045 RTF, 4,789 tokens/sec
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                CPU Threads
-              </label>
-              <input
-                type="number"
-                value={settings.cpuThreads}
-                onChange={(e) => setSettings({...settings, cpuThreads: parseInt(e.target.value)})}
-                min="1"
-                max="16"
-                className="w-32 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-              />
-              <p className="text-xs text-zinc-500 mt-1">
-                Number of CPU threads for background processing
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Memory Limit (MB)
-              </label>
-              <input
-                type="number"
-                value={settings.memoryLimit}
-                onChange={(e) => setSettings({...settings, memoryLimit: parseInt(e.target.value)})}
-                min="2048"
-                max="32768"
-                step="1024"
-                className="w-32 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200"
-              />
-              <p className="text-xs text-zinc-500 mt-1">
-                Maximum memory allocation for Meeting-Ops
-              </p>
-            </div>
-
-            {/* Hardware Info */}
-            <div className="bg-zinc-800/50 rounded-lg p-4 mt-6">
-              <h4 className="text-sm font-medium text-zinc-300 mb-3">Reference Hardware (Configured For)</h4>
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-zinc-400">CPU:</span>
-                  <span className="text-zinc-200">AMD Ryzen 7 8845HS</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-400">NPU:</span>
-                  <span className="text-zinc-200">AMD Hawk Point (16 TOPS)</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-400">RAM:</span>
-                  <span className="text-zinc-200">32 GB DDR5</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-400">Storage:</span>
-                  <span className="text-zinc-200">1 TB NVMe SSD</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-
+        return <AudioSettings />;
       case 'ai':
-        return (
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                LLM Provider
-              </label>
-              <select
-                value={settings.llmProvider}
-                onChange={(e) => setSettings({...settings, llmProvider: e.target.value})}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              >
-                <option value="llamacpp">llama.cpp Vulkan (Local)</option>
-                <option value="ollama">Ollama (Local)</option>
-                <option value="openai">OpenAI API</option>
-                <option value="anthropic">Anthropic Claude</option>
-                <option value="custom">Custom Endpoint</option>
-              </select>
-            </div>
-
-            {(settings.llmProvider === 'llamacpp' || settings.llmProvider === 'ollama' || settings.llmProvider === 'custom') && (
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  LLM Model
-                </label>
-                <select
-                  value={settings.llmModel}
-                  onChange={(e) => switchModel(e.target.value)}
-                  disabled={modelSwitching}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 disabled:opacity-50"
-                >
-                  {availableModels.length > 0 ? (
-                    availableModels.map(model => (
-                      <option key={model.model_id} value={model.model_id}>
-                        {model.display_name} {model.is_active ? '(Active)' : ''}
-                      </option>
-                    ))
-                  ) : (
-                    <option value={settings.llmModel}>{settings.llmModel}</option>
-                  )}
-                </select>
-                {(() => {
-                  const activeModel = availableModels.find(m => m.model_id === settings.llmModel);
-                  if (activeModel) {
-                    return (
-                      <div className="mt-2 space-y-1">
-                        <p className="text-xs text-zinc-500">
-                          Speed: {activeModel.speed_estimate} &middot; VRAM: {activeModel.vram_estimate}
-                        </p>
-                        <p className="text-xs text-zinc-400">
-                          {activeModel.best_for}
-                        </p>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-                {modelSwitching && (
-                  <p className="text-xs text-yellow-400 mt-1">Switching model...</p>
-                )}
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-2">
-                Default Summary Format
-              </label>
-              <select 
-                value={settings.summaryFormat}
-                onChange={(e) => setSettings({...settings, summaryFormat: e.target.value})}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-              >
-                <option value="executive">Executive Summary</option>
-                <option value="minutes">Meeting Minutes</option>
-                <option value="bullets">Bullet Points</option>
-                <option value="detailed">Detailed Report</option>
-                <option value="standup">Standup Format</option>
-                <option value="interview">Interview Notes</option>
-              </select>
-            </div>
-
-            <div className="space-y-3">
-              <label className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={settings.enableAI}
-                  onChange={(e) => setSettings({...settings, enableAI: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Enable AI processing</span>
-              </label>
-
-              <label className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={settings.autoGenerateActions}
-                  onChange={(e) => setSettings({...settings, autoGenerateActions: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Auto-generate action items</span>
-              </label>
-
-              <label className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={settings.speakerDiarization}
-                  onChange={(e) => setSettings({...settings, speakerDiarization: e.target.checked})}
-                  className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
-                />
-                <span className="text-sm text-zinc-300">Speaker diarization</span>
-              </label>
-
-              {settings.speakerDiarization && (
-                <div className="ml-7">
-                  <label className="block text-xs text-zinc-400 mb-1">
-                    Max Speakers
-                  </label>
-                  <input
-                    type="number"
-                    value={settings.maxSpeakers}
-                    onChange={(e) => setSettings({...settings, maxSpeakers: parseInt(e.target.value)})}
-                    className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
-                    min="2"
-                    max="10"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        );
-
+        return <AISettings />;
       case 'vocabulary':
-        return (
-          <div className="space-y-6">
-            <div className="bg-indigo-900/20 border border-indigo-800 rounded-lg p-4 mb-4">
-              <div className="flex items-start gap-3">
-                <BookOpen className="w-5 h-5 text-indigo-400 mt-0.5" />
-                <div>
-                  <p className="text-sm text-indigo-200 font-medium">Custom Vocabulary</p>
-                  <p className="text-xs text-indigo-300 mt-1">
-                    Define industry-specific terms, acronyms, and abbreviations. These are automatically applied to transcripts after recording.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Add new term */}
-            <div className="space-y-3">
-              <h3 className="text-sm font-medium text-zinc-300">Add New Term</h3>
-              <div className="grid grid-cols-3 gap-3">
-                <input
-                  type="text"
-                  value={newTerm}
-                  onChange={(e) => setNewTerm(e.target.value)}
-                  placeholder="Term (e.g. K8S)"
-                  className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500"
-                />
-                <input
-                  type="text"
-                  value={newExpansion}
-                  onChange={(e) => setNewExpansion(e.target.value)}
-                  placeholder="Expansion (e.g. Kubernetes)"
-                  className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500"
-                />
-                <input
-                  type="text"
-                  value={newCategory}
-                  onChange={(e) => setNewCategory(e.target.value)}
-                  placeholder="Category (optional)"
-                  className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500"
-                />
-              </div>
-              <button
-                onClick={addVocabTerm}
-                disabled={!newTerm.trim() || !newExpansion.trim()}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50 transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                Add Term
-              </button>
-            </div>
-
-            {/* Term list */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium text-zinc-300">
-                  Vocabulary Terms {vocabTerms.length > 0 && `(${vocabTerms.length})`}
-                </h3>
-                <button
-                  onClick={fetchVocabTerms}
-                  className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
-                >
-                  <RefreshCw className={`w-3 h-3 ${vocabLoading ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
-              </div>
-
-              {vocabLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <RefreshCw className="w-6 h-6 text-zinc-500 animate-spin" />
-                </div>
-              ) : vocabTerms.length === 0 ? (
-                <div className="text-center py-8 text-zinc-500 text-sm">
-                  No vocabulary terms defined yet. Add terms above to improve transcription accuracy.
-                </div>
-              ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {vocabTerms.map((term) => (
-                    <div key={term.id} className="flex items-center justify-between bg-zinc-800/50 border border-zinc-700 rounded-lg px-4 py-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm font-mono font-medium text-indigo-400">{term.term}</span>
-                          <span className="text-zinc-500 text-xs">&rarr;</span>
-                          <span className="text-sm text-zinc-200">{term.expansion}</span>
-                        </div>
-                        {term.category && (
-                          <span className="text-xs text-zinc-500 mt-1">{term.category}</span>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => deleteVocabTerm(term.id)}
-                        className="ml-3 p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
-                        title="Delete term"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        );
-
+        return <VocabularySettings />;
       case 'providers':
-        return <ProviderSettingsPanel />;
+        return <ProvidersSettings />;
+      case 'authentik':
+        return <AuthentikSettings />;
+      case 'network':
+        return <NetworkSettings />;
+      case 'wifi':
+        return <WifiSettings />;
+      case 'performance':
+        return <PerformanceSettings />;
       default:
-        return (
-          <div className="flex items-center justify-center h-64 text-zinc-500">
-            <div className="text-center">
-              <SettingsIcon className="w-16 h-16 mx-auto mb-4 text-zinc-700" />
-              <p>Select a setting category</p>
-            </div>
-          </div>
-        );
+        return null;
     }
-  };
-
-  const groupedSections = {
-    'App Settings': sections.filter(s => s.category === 'app'),
-    'Admin Settings': sections.filter(s => s.category === 'admin'),
-    'System Settings': sections.filter(s => s.category === 'system'),
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-6">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Settings</h1>
-          <p className="text-zinc-400">Configure Meeting-Ops hardware and software</p>
+          <p className="text-zinc-400">
+            Configure Meeting-Ops hardware and software
+          </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Settings Navigation */}
-          <div className="lg:col-span-1">
-            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-2">
-              {Object.entries(groupedSections).map(([category, items]) => (
-                <div key={category} className="mb-4">
-                  <div className="text-xs font-semibold text-zinc-500 uppercase tracking-wider px-3 py-2">
-                    {category}
-                  </div>
-                  {items.map(section => {
-                    const Icon = section.icon;
-                    return (
-                      <button
-                        key={section.id}
-                        onClick={() => setActiveSection(section.id)}
-                        className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-colors ${
-                          activeSection === section.id
-                            ? 'bg-zinc-800 text-white'
-                            : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
-                        }`}
-                      >
-                        <Icon className="w-5 h-5 shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium">{section.title}</div>
-                          <div className="text-xs text-zinc-500 truncate">{section.description}</div>
-                        </div>
-                        <ChevronRight className="w-4 h-4 shrink-0" />
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          </div>
+        <SettingsProvider
+          value={{
+            settings,
+            setSettings,
+            micVolume,
+            setMicVolume,
+            hostCaps,
+          }}
+        >
+          <SettingsLayout
+            sections={sections}
+            activeSection={activeSection}
+            onSectionChange={setActiveSection}
+            saving={saving}
+            saveStatus={saveStatus}
+            onSave={handleSave}
+          >
+            {renderActive()}
+          </SettingsLayout>
+        </SettingsProvider>
 
-          {/* Settings Content */}
-          <div className="lg:col-span-3">
-            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
-              <h2 className="text-xl font-semibold text-white mb-6">
-                {sections.find(s => s.id === activeSection)?.title}
-              </h2>
-              
-              {renderSectionContent()}
-
-              {/* Save Button */}
-              <div className="mt-8 pt-6 border-t border-zinc-800">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="px-6 py-3 bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 text-white rounded-xl font-medium flex items-center gap-2 transition-colors disabled:opacity-50"
-                  >
-                    {saving ? (
-                      <>
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                        Saving...
-                      </>
-                    ) : (
-                      <>
-                        <Save className="w-5 h-5" />
-                        Save Changes
-                      </>
-                    )}
-                  </button>
-                  
-                  {saveStatus === 'success' && (
-                    <div className="flex items-center gap-2 text-green-400">
-                      <CheckCircle className="w-5 h-5" />
-                      <span className="text-sm">Settings saved successfully</span>
-                    </div>
-                  )}
-                  
-                  {saveStatus === 'error' && (
-                    <div className="flex items-center gap-2 text-red-400">
-                      <AlertCircle className="w-5 h-5" />
-                      <span className="text-sm">Failed to save settings</span>
-                    </div>
-                  )}
-                  
-                  {saveStatus === 'backend-pending' && (
-                    <div className="flex items-center gap-2 text-yellow-400">
-                      <AlertCircle className="w-5 h-5" />
-                      <span className="text-sm">Settings saved locally (backend integration pending)</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Agent Settings link */}
         <div className="mt-4 text-sm text-zinc-500">
           Local agent templates and model configuration:
           <a
