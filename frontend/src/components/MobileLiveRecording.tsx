@@ -14,6 +14,15 @@ type RecorderState = 'idle' | 'preparing' | 'recording' | 'finalizing' | 'upload
 
 const TITLE_STORAGE_KEY = 'meetingops.mobile.title.v1';
 const ACTIVE_RECORDING_KEY = 'meetingops.mobile.activeRecording.v1';
+const AUDIO_SOURCE_KEY = 'meetingops.mobile.audioSource.v1';
+
+type AudioSource = 'mic' | 'tab' | 'mic+tab';
+
+function supportsTabCapture(): boolean {
+  return typeof navigator !== 'undefined'
+    && !!navigator.mediaDevices
+    && typeof (navigator.mediaDevices as any).getDisplayMedia === 'function';
+}
 
 function formatDuration(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
@@ -39,8 +48,19 @@ export default function MobileLiveRecording() {
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [recorderTarget, setRecorderTarget] = useState<MediaRecorderTarget | null>(null);
   const [lastUploadLocalId, setLastUploadLocalId] = useState<string | null>(null);
+  const [audioSource, setAudioSource] = useState<AudioSource>(() => {
+    const v = localStorage.getItem(AUDIO_SOURCE_KEY);
+    return (v === 'tab' || v === 'mic+tab') ? v : 'mic';
+  });
+  const tabCaptureAvailable = supportsTabCapture();
+
+  useEffect(() => {
+    localStorage.setItem(AUDIO_SOURCE_KEY, audioSource);
+  }, [audioSource]);
 
   const streamRef = useRef<MediaStream | null>(null);
+  const auxStreamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef<number | null>(null);
@@ -78,9 +98,14 @@ export default function MobileLiveRecording() {
       try { recorderRef.current.stop(); } catch { /* noop */ }
     }
     recorderRef.current = null;
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+    [streamRef.current, auxStreamRef.current].forEach((s) => {
+      if (s) s.getTracks().forEach((track) => track.stop());
+    });
+    streamRef.current = null;
+    auxStreamRef.current = null;
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => undefined);
+      audioCtxRef.current = null;
     }
     if (levelTapRef.current) {
       levelTapRef.current.stop();
@@ -108,22 +133,68 @@ export default function MobileLiveRecording() {
       return;
     }
 
-    let stream: MediaStream;
+    let micStream: MediaStream | null = null;
+    let tabStream: MediaStream | null = null;
+    const wantsMic = audioSource === 'mic' || audioSource === 'mic+tab';
+    const wantsTab = audioSource === 'tab' || audioSource === 'mic+tab';
+
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
+      if (wantsMic) {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
+      }
+      if (wantsTab) {
+        if (!tabCaptureAvailable) {
+          throw new Error('Tab audio capture requires a Chromium-based desktop browser');
+        }
+        const display = await (navigator.mediaDevices as any).getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+        const audioTracks = display.getAudioTracks();
+        if (audioTracks.length === 0) {
+          display.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+          throw new Error('No tab audio captured. Check "Share tab audio" in the picker dialog.');
+        }
+        display.getVideoTracks().forEach((t: MediaStreamTrack) => t.stop());
+        tabStream = new MediaStream(audioTracks);
+      }
     } catch (err: any) {
       const denied = err?.name === 'NotAllowedError' || err?.name === 'SecurityError';
       setPermissionDenied(denied);
+      micStream?.getTracks().forEach((t) => t.stop());
+      tabStream?.getTracks().forEach((t) => t.stop());
       setError(denied
-        ? 'Microphone access was blocked. Open Safari Settings → Microphone and allow this site.'
-        : `Could not start the microphone: ${err?.message ?? err}`);
+        ? 'Audio access was blocked. Allow microphone/tab capture and retry.'
+        : `Could not start audio capture: ${err?.message ?? err}`);
+      setState('idle');
+      return;
+    }
+
+    let stream: MediaStream;
+    if (micStream && tabStream) {
+      const ctx = new AudioContext();
+      const dest = ctx.createMediaStreamDestination();
+      ctx.createMediaStreamSource(micStream).connect(dest);
+      ctx.createMediaStreamSource(tabStream).connect(dest);
+      stream = dest.stream;
+      audioCtxRef.current = ctx;
+      auxStreamRef.current = tabStream;
+      streamRef.current = micStream;
+    } else if (tabStream) {
+      stream = tabStream;
+      streamRef.current = tabStream;
+    } else if (micStream) {
+      stream = micStream;
+      streamRef.current = micStream;
+    } else {
+      setError('No audio source selected.');
       setState('idle');
       return;
     }
@@ -156,7 +227,7 @@ export default function MobileLiveRecording() {
       setState('idle');
     };
 
-    streamRef.current = stream;
+    // streamRef/auxStreamRef were set above per source; don't clobber here.
     recorderRef.current = recorder;
     levelTapRef.current = tapAudioLevel(stream, setAudioLevel);
 
@@ -392,6 +463,36 @@ export default function MobileLiveRecording() {
               </button>
             </div>
             <div className="space-y-4 text-sm text-zinc-300">
+              <div>
+                <div className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Audio source</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['mic', 'tab', 'mic+tab'] as AudioSource[]).map((opt) => {
+                    const disabled = (opt !== 'mic' && !tabCaptureAvailable) || state === 'recording';
+                    const active = audioSource === opt;
+                    const label = opt === 'mic' ? 'Mic' : opt === 'tab' ? 'Tab' : 'Mic + Tab';
+                    return (
+                      <button
+                        key={opt}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setAudioSource(opt)}
+                        className={`rounded-lg border px-2 py-2 text-xs transition-colors ${
+                          active
+                            ? 'bg-fuchsia-600 border-fuchsia-500 text-white'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-200 active:bg-zinc-800'
+                        } ${disabled ? 'opacity-40' : ''}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="text-xs text-zinc-500 mt-1">
+                  {tabCaptureAvailable
+                    ? 'Tab capture (Zoom Web / Meet / etc.) needs you to pick a browser tab and tick "Share tab audio" in the picker.'
+                    : 'Tab capture is desktop-Chromium only. iOS Safari only supports mic.'}
+                </div>
+              </div>
               <div>
                 <div className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Audio format</div>
                 <div className="text-zinc-200">
