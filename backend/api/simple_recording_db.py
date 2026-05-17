@@ -120,6 +120,7 @@ class SessionResponse(BaseModel):
     audio_file: Optional[str] = None
     transcription: Optional[dict] = None
     participants: List[ParticipantSummary] = []
+    tags: List[str] = []
 
 
 def _scoped_session_query(db: Session, organization_id: int):
@@ -145,6 +146,14 @@ def _participants_payload(session: DBRecordingSession) -> List[dict]:
             "role": p.get("role") or None,
         })
     return out
+
+
+def _tags_payload(session: DBRecordingSession) -> List[str]:
+    """Coerce the TEXT[] column into a clean list of strings."""
+    raw = session.tags
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, str) and t]
 
 
 def _get_session_for_org(
@@ -222,14 +231,22 @@ async def list_sessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
-    limit: int = 100
+    limit: int = 100,
+    tags: Optional[str] = Query(None, description="Comma-separated tags; AND filter"),
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
-    
-    sessions = _scoped_session_query(db, active_org.organization.id)\
-        .order_by(desc(DBRecordingSession.created_at))\
-        .limit(limit)\
+
+    query = _scoped_session_query(db, active_org.organization.id)
+    if tags:
+        wanted = [t.strip() for t in tags.split(",") if t.strip()]
+        if wanted:
+            query = query.filter(DBRecordingSession.tags.contains(wanted))
+    sessions = (
+        query
+        .order_by(desc(DBRecordingSession.created_at))
+        .limit(limit)
         .all()
+    )
     
     result = []
     for session in sessions:
@@ -252,6 +269,7 @@ async def list_sessions(
             audio_file=session.audio_file,
             transcription=transcription_data,
             participants=_participants_payload(session),
+            tags=_tags_payload(session),
         ))
     
     return result
@@ -539,6 +557,8 @@ async def get_session(
             # Per-session participants (attendees). Editable from the
             # session detail sidebar; feeds the email-attendees default.
             "participants": _participants_payload(session),
+            # Free-form per-session tags. Editable from the header chips.
+            "tags": _tags_payload(session),
         }
         
     except HTTPException:

@@ -149,6 +149,9 @@ app.add_middleware(
 
 # === REQUIRED ROUTERS (fail fast if missing) ===
 _load_router(app, "auth", "auth.routes", required=True)
+# session_tags must precede recording so /recording-sessions/tags wins
+# routing over /recording-sessions/{session_id} (the wildcard would swallow it).
+_load_router(app, "session_tags", "api.sessions_tags")
 _load_router(app, "recording", "api.simple_recording_db", required=True)
 _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
 # Per-meeting permissions (collaborators + magic-link share). Two

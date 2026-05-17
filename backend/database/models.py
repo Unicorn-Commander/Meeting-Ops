@@ -1,7 +1,7 @@
 """Database models for Meeting-Ops"""
 from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT
+from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
 import uuid
 
@@ -64,6 +64,9 @@ class RecordingSession(Base):
     # later if attendance reporting needs it; for now it's a plain list scanned
     # in application code.
     participants = Column(JSONB, nullable=False, server_default="[]")
+    # Free-form per-session tags. Postgres native TEXT[] so we can use
+    # array containment (@>) to filter sessions by tag set without scanning.
+    tags = Column(ARRAY(String), nullable=False, server_default="{}")
 
     def to_dict(self):
         return {

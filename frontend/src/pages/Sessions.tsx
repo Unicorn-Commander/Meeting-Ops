@@ -16,6 +16,8 @@ import {
   type TranscriptionOptions,
 } from '../components/TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
+import { useOrg } from '../contexts/OrgContext';
+import { TagChip } from '../components/TagChip';
 
 interface Participant {
   id: string;
@@ -53,8 +55,14 @@ interface RagMessage {
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const { startUploads } = useUploads();
+  const { activeOrganization } = useOrg();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
+  // Active tag filter chips (AND). Server applies the filter via ?tags=
+  // so the UI never has to reason about which sessions to hide locally.
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  // All tags used across the org's sessions; powers the filter chip bar.
+  const [orgTags, setOrgTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreator, setShowCreator] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -268,11 +276,27 @@ export const Sessions: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    const loadOrgTags = async () => {
+      try {
+        const headers: any = {};
+        const token = localStorage.getItem('access_token');
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+        const res = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/tags`, { headers });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (Array.isArray(data?.tags)) setOrgTags(data.tags);
+      } catch { /* non-fatal */ }
+    };
+    loadOrgTags();
+  }, [activeOrganization?.slug, sessions]);
+
+  useEffect(() => {
     fetchSessions();
-    // Refresh sessions every 10 seconds
     const interval = setInterval(fetchSessions, 10000);
     return () => clearInterval(interval);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTags.join(','), activeOrganization?.slug]);
 
   useEffect(() => {
     filterSessions();
@@ -281,14 +305,13 @@ export const Sessions: React.FC = () => {
   const fetchSessions = async () => {
     setLoading(true);
     try {
-      // Remove auth header if not present - backend may not require it
       const headers: any = {};
       const token = localStorage.getItem('access_token');
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-      
-      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions`, {
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+      const tagsParam = selectedTags.length > 0 ? `?tags=${selectedTags.map(encodeURIComponent).join(',')}` : '';
+      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions${tagsParam}`, {
         headers
       });
 
@@ -761,6 +784,37 @@ export const Sessions: React.FC = () => {
           )}
         </div>
 
+        {/* Tag filter chip palette — multi-select AND. */}
+        {orgTags.length > 0 && (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-6 flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-500 uppercase tracking-wide mr-1">Tags:</span>
+            {orgTags.map((tag) => {
+              const selected = selectedTags.includes(tag);
+              return (
+                <TagChip
+                  key={tag}
+                  tag={tag}
+                  variant="filter"
+                  selected={selected}
+                  onClick={() => {
+                    setSelectedTags((prev) =>
+                      selected ? prev.filter((t) => t !== tag) : [...prev, tag]
+                    );
+                  }}
+                />
+              );
+            })}
+            {selectedTags.length > 0 && (
+              <button
+                onClick={() => setSelectedTags([])}
+                className="ml-2 text-xs text-gray-400 hover:text-white underline-offset-2 hover:underline"
+              >
+                Clear ({selectedTags.length})
+              </button>
+            )}
+          </div>
+        )}
+
         {/* RAG Chat Panel (multi-turn) */}
         {showRagPanel && (
           <div className="bg-gray-900 rounded-lg border border-fuchsia-800/50 p-4 mb-6">
@@ -1002,14 +1056,12 @@ export const Sessions: React.FC = () => {
                     {/* Tags */}
                     {session.tags && session.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {session.tags.slice(0, 3).map((tag, index) => (
-                          <span key={index} className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded">
-                            {tag}
-                          </span>
+                        {[...session.tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 4).map((tag) => (
+                          <TagChip key={tag} tag={tag} />
                         ))}
-                        {session.tags.length > 3 && (
-                          <span className="px-2 py-1 bg-gray-600 text-gray-300 text-xs rounded">
-                            +{session.tags.length - 3}
+                        {session.tags.length > 4 && (
+                          <span className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400">
+                            +{session.tags.length - 4}
                           </span>
                         )}
                       </div>
@@ -1072,6 +1124,18 @@ export const Sessions: React.FC = () => {
                         <h3 className="font-semibold text-white text-lg">
                           {session.title || session.name}
                         </h3>
+                        {session.tags && session.tags.length > 0 && (
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {[...session.tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 4).map((tag) => (
+                              <TagChip key={tag} tag={tag} />
+                            ))}
+                            {session.tags.length > 4 && (
+                              <span className="px-2 py-0.5 text-xs rounded-full border border-gray-700 bg-gray-800 text-gray-400">
+                                +{session.tags.length - 4}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
                           {getStatusLabel(session.status)}
                         </span>

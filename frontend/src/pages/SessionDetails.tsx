@@ -25,6 +25,7 @@ import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
 import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
 import { SpeakerTimeline } from '../components/SpeakerTimeline';
 import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
+import { TagChip } from '../components/TagChip';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
@@ -151,6 +152,7 @@ interface Session {
   project_id?: string | null;
   project_slug?: string | null;
   participants?: Participant[];
+  tags?: string[];
 }
 
 interface Participant {
@@ -217,6 +219,13 @@ export const SessionDetails: React.FC = () => {
   const [editParticipantName, setEditParticipantName] = useState('');
   const [editParticipantEmail, setEditParticipantEmail] = useState('');
   const [editParticipantRole, setEditParticipantRole] = useState('');
+
+  // Per-session free-form tags. Source of truth is each POST/DELETE
+  // response; we render the local state for snappy add/remove.
+  const [tags, setTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState('');
+  const [tagBusy, setTagBusy] = useState(false);
+  const [tagError, setTagError] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -578,6 +587,7 @@ export const SessionDetails: React.FC = () => {
 
         setSession(data);
         setParticipants(Array.isArray(data.participants) ? data.participants : []);
+        setTags(Array.isArray(data.tags) ? data.tags : []);
       } else {
         const errorText = await response.text();
         console.error('❌ Failed to fetch session:', response.status, errorText);
@@ -703,6 +713,63 @@ export const SessionDetails: React.FC = () => {
       setParticipantError(e instanceof Error ? e.message : 'Failed to remove participant');
     } finally {
       setParticipantBusy(false);
+    }
+  };
+
+  const tagsBase = () =>
+    `${config.apiUrl}/api/simple/recording-sessions/${session?.id || sessionId}/tags`;
+
+  const addTag = async () => {
+    const value = newTag.trim();
+    if (!value) return;
+    if (value.length > 40) {
+      setTagError('Tag must be 40 characters or fewer');
+      return;
+    }
+    setTagBusy(true);
+    setTagError(null);
+    try {
+      const res = await fetch(tagsBase(), {
+        method: 'POST',
+        headers: participantHeaders(),
+        body: JSON.stringify({ tag: value }),
+      });
+      if (!res.ok) {
+        let body: any = null;
+        try { body = await res.json(); } catch { /* not JSON */ }
+        setTagError(formatBackendError(body, res.status, 'Failed to add tag'));
+        return;
+      }
+      const data: { tags: string[] } = await res.json();
+      setTags(Array.isArray(data.tags) ? data.tags : []);
+      setNewTag('');
+    } catch (e) {
+      setTagError(e instanceof Error ? e.message : 'Failed to add tag');
+    } finally {
+      setTagBusy(false);
+    }
+  };
+
+  const removeTag = async (tag: string) => {
+    setTagBusy(true);
+    setTagError(null);
+    try {
+      const res = await fetch(`${tagsBase()}/${encodeURIComponent(tag)}`, {
+        method: 'DELETE',
+        headers: participantHeaders(),
+      });
+      if (!res.ok) {
+        let body: any = null;
+        try { body = await res.json(); } catch { /* not JSON */ }
+        setTagError(formatBackendError(body, res.status, 'Failed to remove tag'));
+        return;
+      }
+      const data: { tags: string[] } = await res.json();
+      setTags(Array.isArray(data.tags) ? data.tags : []);
+    } catch (e) {
+      setTagError(e instanceof Error ? e.message : 'Failed to remove tag');
+    } finally {
+      setTagBusy(false);
     }
   };
 
@@ -1249,6 +1316,32 @@ export const SessionDetails: React.FC = () => {
                 {!editingTitle && session.title && session.name && session.name !== session.title && (
                   <p className="text-sm text-gray-500 mt-1">Original: {session.name}</p>
                 )}
+                {/* Per-session tags. Removable chips + inline add. */}
+                <div className="flex items-center flex-wrap gap-1.5 mt-2">
+                  {[...tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).map((tag) => (
+                    <TagChip
+                      key={tag}
+                      tag={tag}
+                      onRemove={() => removeTag(tag)}
+                    />
+                  ))}
+                  <input
+                    type="text"
+                    value={newTag}
+                    onChange={(e) => setNewTag(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); addTag(); }
+                      if (e.key === 'Escape') { setNewTag(''); setTagError(null); }
+                    }}
+                    placeholder="+ add tag"
+                    maxLength={40}
+                    disabled={tagBusy}
+                    className="text-xs px-2 py-0.5 bg-gray-100 border border-gray-200 rounded-full text-gray-700 placeholder-gray-400 focus:outline-none focus:border-purple-400 focus:bg-white max-w-[140px]"
+                  />
+                  {tagError && (
+                    <span className="text-xs text-red-600 ml-1">{tagError}</span>
+                  )}
+                </div>
                 <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
                   <span className="flex items-center gap-1">
                     <Calendar className="w-4 h-4" />
