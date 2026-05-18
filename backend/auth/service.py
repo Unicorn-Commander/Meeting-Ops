@@ -343,6 +343,7 @@ class AuthService:
         """
         from auth.utils import get_password_hash
         import secrets as _secrets
+        import re as _re
 
         email = sanitize_email(email)
         groups = groups or []
@@ -367,8 +368,16 @@ class AuthService:
             sync_user_organizations(db, user, groups)
             return user
 
-        # Auto-provision
-        candidate = sanitize_username((username or email.split('@')[0])[:30])
+        # Auto-provision. Keycloak's preferred_username is often the full
+        # email (e.g. shafenkhan@users.noreply.github.com) which sanitize_username rejects
+        # because of '@' and '.'. Strip non-alphanumeric chars from the
+        # email local-part and require >=3 chars before sanitizing; back-fill
+        # with a random token if the result is too short.
+        raw = (username or email).split('@')[0]
+        raw = _re.sub(r"[^a-zA-Z0-9_]", "_", raw).strip("_")[:30]
+        if len(raw) < 3:
+            raw = f"user_{_secrets.token_hex(4)}"
+        candidate = sanitize_username(raw)
         if db.query(User).filter(User.username == candidate).first():
             candidate = f"{candidate}_{_secrets.token_hex(2)}"
 

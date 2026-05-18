@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
@@ -9,6 +10,8 @@ from auth.models import User
 from auth.organization import ActiveOrganization, is_global_admin, parse_group_list, resolve_active_organization
 from auth.service import AuthService
 from auth.utils import decode_token, check_permission
+
+logger = logging.getLogger(__name__)
 
 # OAuth2 scheme for JWT tokens
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
@@ -79,6 +82,10 @@ async def get_current_user_optional(
                 groups=sso_groups,
             )
         except Exception:
+            # Don't swallow silently — auth-loop debugging is impossible
+            # when this is invisible (see Shafen 2026-05-18: full-email
+            # username + a sanitize regex that rejects '@'/'.').
+            logger.exception("SSO auto-provision failed for email=%s username=%s", sso_email, sso_username)
             user = None
 
     # Try JWT token
