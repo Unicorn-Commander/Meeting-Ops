@@ -10,6 +10,8 @@ import {
   Loader2,
   RefreshCw,
   X,
+  Briefcase,
+  AlertTriangle,
 } from 'lucide-react';
 import { TagChip } from './TagChip';
 
@@ -33,6 +35,8 @@ interface MobileSession {
   transcription?: { segments?: Array<{ speaker?: string }> } | null;
   summary_preview?: string;
   speaker_count?: number;
+  project_app?: string | null;
+  project_slug?: string | null;
 }
 
 interface Props {
@@ -277,6 +281,21 @@ const MobileSessionsList: React.FC<Props> = ({
                         {pill.label}
                       </span>
                     </div>
+
+                    {session.project_app && session.project_slug && (
+                      <span
+                        className={`inline-flex w-fit items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] ${
+                          session.project_app === 'crisis-ops'
+                            ? 'border-red-800/60 bg-red-900/20 text-red-300'
+                            : 'border-purple-800/60 bg-purple-900/20 text-purple-300'
+                        }`}
+                      >
+                        {session.project_app === 'crisis-ops'
+                          ? <AlertTriangle className="w-2.5 h-2.5" />
+                          : <Briefcase className="w-2.5 h-2.5" />}
+                        {session.project_slug}
+                      </span>
+                    )}
 
                     {session.summary_preview && (
                       <p className="text-xs text-gray-400 leading-relaxed line-clamp-2">

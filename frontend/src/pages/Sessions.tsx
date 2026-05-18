@@ -4,7 +4,7 @@ import {
   FileText, Download, Trash2, Play, Eye, Tag,
   ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
   Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
-  ArrowUp, ArrowDown, ArrowUpDown
+  ArrowUp, ArrowDown, ArrowUpDown, Briefcase, AlertTriangle,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
@@ -44,6 +44,9 @@ interface Session {
   summary?: any;               // AI-generated summary
   summary_preview?: string;    // Plain-text snippet for list views
   speaker_count?: number;      // Distinct speakers, server-computed
+  project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
+  project_id?: number | null;
+  project_slug?: string | null;
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
@@ -307,6 +310,21 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                       >
                         {truncated}
                       </button>
+                      {session.project_app && session.project_slug && (
+                        <span
+                          className={`mt-1 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] ${
+                            session.project_app === 'crisis-ops'
+                              ? 'border-red-800/60 bg-red-900/20 text-red-300'
+                              : 'border-purple-800/60 bg-purple-900/20 text-purple-300'
+                          }`}
+                          title={`Linked to ${session.project_app} / ${session.project_slug}`}
+                        >
+                          {session.project_app === 'crisis-ops'
+                            ? <AlertTriangle className="w-2.5 h-2.5" />
+                            : <Briefcase className="w-2.5 h-2.5" />}
+                          {session.project_slug}
+                        </span>
+                      )}
                       {session.summary_preview && (
                         <div
                           className="mt-1 text-xs text-gray-400 max-w-[44ch] line-clamp-2"

@@ -124,6 +124,9 @@ class SessionResponse(BaseModel):
     tags: List[str] = []
     summary_preview: Optional[str] = None
     speaker_count: int = 0
+    project_app: Optional[str] = None
+    project_id: Optional[int] = None
+    project_slug: Optional[str] = None
 
 
 def _summary_preview(session: DBRecordingSession, max_chars: int = 220) -> Optional[str]:
@@ -326,6 +329,9 @@ async def list_sessions(
             tags=_tags_payload(session),
             summary_preview=_summary_preview(session),
             speaker_count=_speaker_count(session),
+            project_app=session.project_app,
+            project_id=session.project_id,
+            project_slug=session.project_slug,
         ))
     
     return result

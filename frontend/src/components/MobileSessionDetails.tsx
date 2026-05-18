@@ -10,6 +10,7 @@ import AudioPlayer from './AudioPlayer';
 import { SpeakerLabelEditor } from './SpeakerLabelEditor';
 import { SpeakerTimeline } from './SpeakerTimeline';
 import { TagChip } from './TagChip';
+import { Briefcase, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
 
 type TabKey = 'summary' | 'transcript' | 'speakers' | 'insights' | 'people';
@@ -304,6 +305,21 @@ export default function MobileSessionDetails(props: Props) {
                 <span className="flex items-center gap-1">
                   <Users className="w-3 h-3" />
                   {speakers.length}
+                </span>
+              )}
+              {session?.project_app && session?.project_slug && (
+                <span
+                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border ${
+                    session.project_app === 'crisis-ops'
+                      ? 'border-red-800/60 bg-red-900/20 text-red-300'
+                      : 'border-purple-800/60 bg-purple-900/20 text-purple-300'
+                  }`}
+                  title={`Linked to ${session.project_app} / ${session.project_slug}`}
+                >
+                  {session.project_app === 'crisis-ops'
+                    ? <AlertTriangle className="w-3 h-3" />
+                    : <Briefcase className="w-3 h-3" />}
+                  <span className="truncate max-w-[12ch]">{session.project_slug}</span>
                 </span>
               )}
             </div>
