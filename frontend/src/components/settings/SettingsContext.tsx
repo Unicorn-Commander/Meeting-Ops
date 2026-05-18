@@ -2,7 +2,6 @@ import React, { createContext, useContext } from 'react';
 import {
   BookOpen,
   Cpu,
-  Lock,
   Mic,
   Monitor,
   Network,
@@ -38,13 +37,6 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     icon: Network,
     description: 'Per-service AI provider configuration',
     category: 'app',
-  },
-  {
-    id: 'authentik',
-    title: 'Authentication (Authentik)',
-    icon: Lock,
-    description: 'Authentik SSO configuration',
-    category: 'admin',
   },
   {
     id: 'network',
@@ -111,15 +103,6 @@ export const DEFAULT_SETTINGS: SettingsState = {
   includeSpeakerLabels: true,
   autoExport: false,
   exportPath: '/home/ucadmin/Meeting-Ops/exports',
-
-  authentikEnabled: true,
-  authentikUrl: 'https://authentik.local',
-  authentikClientId: 'meeting-ops',
-  authentikClientSecret: '',
-  authentikRedirectUri:
-    typeof window !== 'undefined'
-      ? `${window.location.origin}/auth/callback`
-      : '/auth/callback',
 
   hostname: 'meeting-ops',
   ipMode: 'dhcp',

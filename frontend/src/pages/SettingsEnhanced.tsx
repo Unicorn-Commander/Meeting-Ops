@@ -22,9 +22,6 @@ const VocabularySettings = lazy(
 const ProvidersSettings = lazy(
   () => import('../components/settings/ProvidersSettings')
 );
-const AuthentikSettings = lazy(
-  () => import('../components/settings/AuthentikSettings')
-);
 const NetworkSettings = lazy(
   () => import('../components/settings/NetworkSettings')
 );
@@ -88,7 +85,6 @@ export default function SettingsEnhanced() {
             llmProvider: backendSettings.aiProvider || prev.llmProvider,
             hostname: backendSettings.hostname || prev.hostname,
             ipMode: backendSettings.ipMode || prev.ipMode,
-            authentikUrl: backendSettings.authentikUrl || prev.authentikUrl,
             npuEnabled: backendSettings.npuEnabled !== false,
             npuPowerMode: backendSettings.npuPowerMode || prev.npuPowerMode,
           };
@@ -135,9 +131,6 @@ export default function SettingsEnhanced() {
       wifiPassword: settings.wifiPassword,
       npuEnabled: settings.npuEnabled,
       npuPowerMode: settings.npuPowerMode,
-      authentikUrl: settings.authentikUrl,
-      authentikClientId: settings.authentikClientId,
-      authentikClientSecret: settings.authentikClientSecret,
       defaultExportFormat: settings.defaultExportFormat,
       includeTimestamps: settings.includeTimestamps,
       includeSpeakerLabels: settings.includeSpeakerLabels,
@@ -174,8 +167,6 @@ export default function SettingsEnhanced() {
         return <VocabularySettings />;
       case 'providers':
         return <ProvidersSettings />;
-      case 'authentik':
-        return <AuthentikSettings />;
       case 'network':
         return <NetworkSettings />;
       case 'wifi':
