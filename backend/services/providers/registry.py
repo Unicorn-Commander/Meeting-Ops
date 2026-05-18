@@ -17,6 +17,21 @@ DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
 # deploys that historically only set OPENAI_API_KEY.
 DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 DEFAULT_INFINITY_ENDPOINT = os.getenv("INFINITY_ENDPOINT") or "http://unicorn-infinity-proxy:8086/v1"
+# midboy2 runs embed (8082) and rerank (8083) as separate containers; the
+# old single-proxy "INFINITY_ENDPOINT" can't address both, so allow per-service
+# overrides. Falls back to INFINITY_ENDPOINT for legacy single-proxy deploys.
+DEFAULT_INFINITY_EMBEDDING_ENDPOINT = (
+    os.getenv("INFINITY_EMBEDDING_ENDPOINT")
+    or os.getenv("INFINITY_ENDPOINT")
+    or "http://unicorn-infinity-proxy:8086/v1"
+)
+DEFAULT_INFINITY_RERANKER_ENDPOINT = (
+    os.getenv("INFINITY_RERANKER_ENDPOINT")
+    or os.getenv("INFINITY_ENDPOINT")
+    or "http://unicorn-infinity-proxy:8086/v1"
+)
+DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "BAAI/bge-m3"
+DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL") or "BAAI/bge-reranker-v2-m3"
 
 
 class ProviderRegistry:
@@ -188,9 +203,9 @@ class ProviderRegistry:
     def get_embeddings(self, org_id: int) -> Any:
         settings = self._get_settings(org_id, "embeddings")
         provider_name = settings.get("provider_name") or "infinity"
-        endpoint = settings.get("endpoint_url") or DEFAULT_INFINITY_ENDPOINT
+        endpoint = settings.get("endpoint_url") or DEFAULT_INFINITY_EMBEDDING_ENDPOINT
         api_key = self.get_api_key(org_id, "embeddings")
-        model = settings.get("model_name") or "BAAI/bge-large-en-v1.5"
+        model = settings.get("model_name") or DEFAULT_EMBEDDING_MODEL
 
         if provider_name in ("infinity", "openai"):
             from .impl_embeddings import InfinityProvider
@@ -208,9 +223,9 @@ class ProviderRegistry:
     def get_reranking(self, org_id: int) -> Any:
         settings = self._get_settings(org_id, "reranking")
         provider_name = settings.get("provider_name") or "infinity"
-        endpoint = settings.get("endpoint_url") or DEFAULT_INFINITY_ENDPOINT
+        endpoint = settings.get("endpoint_url") or DEFAULT_INFINITY_RERANKER_ENDPOINT
         api_key = self.get_api_key(org_id, "reranking")
-        model = settings.get("model_name") or "BAAI/bge-reranker-v2-m3"
+        model = settings.get("model_name") or DEFAULT_RERANKER_MODEL
 
         from .impl_reranking import InfinityRerankingProvider
         return InfinityRerankingProvider(api_key=api_key, endpoint=endpoint, model=model)
