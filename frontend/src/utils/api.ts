@@ -10,6 +10,7 @@
  */
 import { setReconnectingState } from '../components/ReconnectingOverlay';
 import { config } from '../config';
+import { redirectToLogin } from './loginRedirect';
 
 const OAUTH2_PROXY_LOGIN_PATTERN = /\/oauth2\/(start|sign_out)/i;
 const KEYCLOAK_PATTERN = /\/realms\/uchub/i;
@@ -65,9 +66,7 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
       KEYCLOAK_PATTERN.test(redirectTarget);
 
     if (isAuthRedirect) {
-      // Force a full reload through oauth2-proxy to get a fresh session.
-      // The SPA's hash route will be preserved via the /oauth2/start?rd= mechanism.
-      window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+      redirectToLogin();
     }
     // Return a dummy response so callers don't crash
     return new Response(null, { status: response.status });
@@ -76,7 +75,7 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   // Check for HTML content-type when JSON was expected
   if (response.headers.get('content-type')?.startsWith('text/html')) {
     setReconnectingState(true);
-    window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+    redirectToLogin();
     return new Response(null, { status: 401 });
   }
 

@@ -1026,7 +1026,15 @@ export default function LiveRecording() {
               pipeline as the mobile shell. */}
           <DesktopBrowserRecorder />
 
-          {/* Recording Control */}
+          {/* Legacy server-side Recording Control. This card drives the
+              backend ffmpeg/arecord pipeline which requires a microphone
+              physically attached to the server. bigboy has no audio
+              hardware, so it always errors. The browser-side cards above
+              (AlwaysOnControl + DesktopBrowserRecorder) replace it for
+              cloud deploys. Set SHOW_LEGACY_SERVER_RECORDING=true if we
+              ever bring back an appliance/satellite build that has a
+              local mic. */}
+          {false && (
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-8">
             <div className="flex flex-col items-center">
               {/* Audio Device Selector */}
@@ -1244,7 +1252,7 @@ export default function LiveRecording() {
               {/* Audio Level Meter - Removed due to monitoring issues */}
             </div>
           </div>
-
+          )}
 
           {/* Live Meeting Summary */}
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">

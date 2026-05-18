@@ -11,6 +11,7 @@
  * on the same hash route.
  */
 import { setReconnectingState } from '../components/ReconnectingOverlay';
+import { redirectToLogin } from './loginRedirect';
 
 const OAUTH2_PROXY_LOGIN_PATTERN = /\/oauth2\/(start|sign_out|callback)/i;
 const KEYCLOAK_PATTERN = /\/realms\/[^/]+\/protocol\/openid-connect/i;
@@ -31,12 +32,8 @@ function isApiUrl(urlStr: string): boolean {
 
 function triggerReconnect() {
   try { setReconnectingState(true); } catch { /* component may not be mounted yet */ }
-  // Preserve current hash route so user lands back where they were
-  const rd = encodeURIComponent(window.location.pathname + window.location.hash);
   // Use a small delay so React has a frame to render the overlay
-  setTimeout(() => {
-    window.location.href = `/oauth2/start?rd=${rd}`;
-  }, 50);
+  setTimeout(() => { redirectToLogin(); }, 50);
 }
 
 const interceptedFetch: typeof fetch = async (input, init) => {

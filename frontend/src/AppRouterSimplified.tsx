@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useOrg } from './contexts/OrgContext';
 import { useRecording } from './contexts/RecordingContext';
+import { redirectToLogin } from './utils/loginRedirect';
 import { Login } from './components/Login';
 import LiveRecording from './pages/LiveRecording';
 import RAGChat from './pages/RAGChat';
@@ -172,8 +173,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
 
 function SsoLoginRedirect({ isAuthenticated }: { isAuthenticated: boolean }) {
   if (isAuthenticated) return <Navigate to="/record" replace />;
-  // Kick to Keycloak via oauth2-proxy
-  window.location.href = `/oauth2/start?rd=${encodeURIComponent('/')}`;
+  redirectToLogin('/');
   return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
 }
 
@@ -189,8 +189,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   // Not authed → kick to oauth2-proxy SSO sign-in (Keycloak)
   if (!isAuthenticated) {
-    const target = encodeURIComponent(window.location.pathname + window.location.hash);
-    window.location.href = `/oauth2/start?rd=${target}`;
+    redirectToLogin();
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
   }
 

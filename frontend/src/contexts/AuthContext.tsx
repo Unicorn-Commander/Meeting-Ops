@@ -1,6 +1,7 @@
 import React, { createContext, useState, useContext, useEffect, type ReactNode } from 'react';
 import { config } from '../config';
 import { setReconnectingState } from '../components/ReconnectingOverlay';
+import { redirectToLogin } from '../utils/loginRedirect';
 import {
   buildOrgHeaders,
   clearStoredOrgSlug,
@@ -303,13 +304,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         const loc = response.headers.get('location') || '';
         if (/\/oauth2\/(start|sign_out)|\/realms\/uchub/i.test(loc)) {
           setReconnectingState(true);
-          window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+          redirectToLogin();
           return new Response(null, { status: 302 });
         }
       }
       if (isApiCall && wantsJson && response.headers.get('content-type')?.startsWith('text/html')) {
         setReconnectingState(true);
-        window.location.href = `/oauth2/start?rd=${encodeURIComponent(window.location.pathname + window.location.hash)}`;
+        redirectToLogin();
         return new Response(null, { status: 401 });
       }
 
