@@ -1589,7 +1589,7 @@ export const SessionDetails: React.FC = () => {
                   <ChevronRight className="w-4 h-4 transform group-hover:rotate-90 transition-transform" />
                 </button>
                 
-                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
+                <div className="absolute right-0 mt-2 w-56 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
                   <div className="py-2">
                     <button
                       onClick={downloadAudio}

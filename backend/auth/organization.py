@@ -120,19 +120,33 @@ def sync_user_organizations(
     groups: Iterable[str],
 ) -> list[UserOrganization]:
     org_roles = extract_org_roles(groups)
+
+    # If we have NO group claims to act on, treat this as a "passive" sync —
+    # do not touch the user's existing memberships. The empty-groups case
+    # happens both for genuinely-new users AND for any code path that calls
+    # this without forwarding the Keycloak groups header (api/auth/me through
+    # forward-auth, internal helpers, tests). Wiping existing memberships in
+    # the latter case is destructive.
+    existing_memberships = (
+        db.query(UserOrganization)
+        .filter(UserOrganization.user_id == user.id)
+        .all()
+    )
+
     if not org_roles:
-        # No Keycloak app:meetingops:* group claims → don't dump this user
-        # into the platform default workspace where they'd see another
-        # tenant's sessions. Auto-create a private personal org keyed off
-        # the username and make them admin of it. Admins can add them to
-        # shared orgs later via group claims.
+        if existing_memberships:
+            # Already a member of at least one org. Leave them alone.
+            return existing_memberships
+        # Brand-new user, no group claims. Provision a private personal org
+        # instead of dumping them into the platform default workspace where
+        # they would see another tenant's sessions.
         personal_slug = f"{user.username}-personal"
-        existing = (
+        existing_org = (
             db.query(Organization)
             .filter(Organization.slug == personal_slug)
             .first()
         )
-        if not existing:
+        if not existing_org:
             display = user.full_name or user.email or user.username
             ensure_organization(
                 db,
@@ -146,11 +160,6 @@ def sync_user_organizations(
         organization = ensure_organization(db, slug)
         desired_roles[organization.id] = role
 
-    existing_memberships = (
-        db.query(UserOrganization)
-        .filter(UserOrganization.user_id == user.id)
-        .all()
-    )
     existing_by_org_id = {
         membership.organization_id: membership
         for membership in existing_memberships
@@ -158,11 +167,11 @@ def sync_user_organizations(
 
     changed = False
 
-    for membership in existing_memberships:
-        if membership.organization_id not in desired_roles:
-            db.delete(membership)
-            changed = True
-
+    # Sync is additive: Keycloak group claims grant + refresh memberships,
+    # they do NOT prune. Manual DB-level grants (set by admins outside the
+    # group-claim flow) survive subsequent logins. To remove a membership,
+    # delete the row directly or build an explicit admin endpoint — don't
+    # rely on "absent claim" as the deletion signal.
     for organization_id, role in desired_roles.items():
         membership = existing_by_org_id.get(organization_id)
         if membership:
