@@ -27,6 +27,7 @@ import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import MobileLiveRecording from '../components/MobileLiveRecording';
+import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
 
 interface SummaryFormats {
   executive: boolean;
@@ -1015,6 +1016,13 @@ export default function LiveRecording() {
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
         {/* Left: Recording Control & Summaries */}
         <div className="lg:col-span-2 space-y-4 md:space-y-6">
+          {/* Browser-side mic recording — the always-on / satellite controls
+              below this stay as a power-user option, but Record from this
+              browser is the obvious-default path for someone sitting at the
+              laptop. Pushes the final blob through the same chunked-upload
+              pipeline as the mobile shell. */}
+          <DesktopBrowserRecorder />
+
           {/* Recording Control */}
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-8">
             <div className="flex flex-col items-center">
