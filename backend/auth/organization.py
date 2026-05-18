@@ -103,6 +103,7 @@ def ensure_organization(
     organization = Organization(
         name=name or display_name_from_slug(normalized_slug),
         slug=normalized_slug,
+        is_active=True,
     )
     db.add(organization)
     db.commit()
