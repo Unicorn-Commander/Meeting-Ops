@@ -121,9 +121,25 @@ def sync_user_organizations(
 ) -> list[UserOrganization]:
     org_roles = extract_org_roles(groups)
     if not org_roles:
-        org_roles = {
-            DEFAULT_ORG_SLUG: "admin" if user.is_superuser else "user",
-        }
+        # No Keycloak app:meetingops:* group claims → don't dump this user
+        # into the platform default workspace where they'd see another
+        # tenant's sessions. Auto-create a private personal org keyed off
+        # the username and make them admin of it. Admins can add them to
+        # shared orgs later via group claims.
+        personal_slug = f"{user.username}-personal"
+        existing = (
+            db.query(Organization)
+            .filter(Organization.slug == personal_slug)
+            .first()
+        )
+        if not existing:
+            display = user.full_name or user.email or user.username
+            ensure_organization(
+                db,
+                personal_slug,
+                name=f"{display} (personal)",
+            )
+        org_roles = {personal_slug: "admin"}
 
     desired_roles: dict[int, str] = {}
     for slug, role in org_roles.items():
