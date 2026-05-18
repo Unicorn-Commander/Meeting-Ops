@@ -22,6 +22,9 @@ const VocabularySettings = lazy(
 const ProvidersSettings = lazy(
   () => import('../components/settings/ProvidersSettings')
 );
+const InBrowserAISettings = lazy(
+  () => import('../components/settings/InBrowserAISettings')
+);
 const NetworkSettings = lazy(
   () => import('../components/settings/NetworkSettings')
 );
@@ -167,6 +170,8 @@ export default function SettingsEnhanced() {
         return <VocabularySettings />;
       case 'providers':
         return <ProvidersSettings />;
+      case 'in-browser-ai':
+        return <InBrowserAISettings />;
       case 'network':
         return <NetworkSettings />;
       case 'wifi':

@@ -28,6 +28,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import MobileLiveRecording from '../components/MobileLiveRecording';
 import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
+import AlwaysOnControl from '../components/AlwaysOnControl';
 
 interface SummaryFormats {
   executive: boolean;
@@ -1016,6 +1017,8 @@ export default function LiveRecording() {
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
         {/* Left: Recording Control & Summaries */}
         <div className="lg:col-span-2 space-y-4 md:space-y-6">
+          <AlwaysOnControl />
+
           {/* Browser-side mic recording — the always-on / satellite controls
               below this stay as a power-user option, but Record from this
               browser is the obvious-default path for someone sitting at the
@@ -1043,53 +1046,16 @@ export default function LiveRecording() {
                   </select>
                 </div>
               )}
-              {/* Always-On Mode Toggle */}
-              {!isRecording && (
-                <div className="flex items-center gap-3 mb-6">
-                  <button
-                    onClick={toggleAlwaysOn}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      alwaysOnEnabled ? 'bg-green-600' : 'bg-zinc-700'
-                    }`}
-                    title={alwaysOnEnabled ? 'Click to disable always-on mode' : 'Click to enable always-on mode'}
-                  >
-                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      alwaysOnEnabled ? 'translate-x-6' : 'translate-x-1'
-                    }`} />
-                  </button>
-                  <span className="text-sm text-zinc-400">
-                    Always-On Mode
-                    {alwaysOnEnabled && alwaysOnState === 'IDLE' && (
-                      <span className="ml-2 text-green-400 inline-flex items-center gap-1">
-                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse inline-block" />
-                        Listening...
-                      </span>
-                    )}
-                    {alwaysOnEnabled && alwaysOnState === 'RECORDING' && (
-                      <span className="ml-2 text-red-400 inline-flex items-center gap-1">
-                        <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse inline-block" />
-                        Auto-recording
-                      </span>
-                    )}
-                  </span>
-                  {alwaysOnMeetings > 0 && (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
-                      {alwaysOnMeetings} meeting{alwaysOnMeetings !== 1 ? 's' : ''} captured
-                    </span>
-                  )}
-                </div>
-              )}
-
               {/* Big Record Button */}
               <button
                 onClick={isRecording ? stopRecording : startRecording}
-                disabled={audioDevices.length === 0 || isProcessing || alwaysOnEnabled}
+                disabled={audioDevices.length === 0 || isProcessing}
                 className={`relative w-32 h-32 rounded-full transition-all transform hover:scale-105 ${
                   isRecording
                     ? 'bg-red-600 hover:bg-red-500 animate-pulse'
                     : 'bg-gradient-to-br from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500'
-                } ${(audioDevices.length === 0 || isProcessing || alwaysOnEnabled) ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={alwaysOnEnabled ? 'Disable always-on mode first' : (isProcessing ? 'Processing...' : (isRecording ? 'Click to stop recording' : 'Click to start recording'))}
+                } ${(audioDevices.length === 0 || isProcessing) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={isProcessing ? 'Processing...' : (isRecording ? 'Click to stop recording' : 'Click to start recording')}
               >
                 <div className="absolute inset-0 flex items-center justify-center">
                   {isProcessing ? (

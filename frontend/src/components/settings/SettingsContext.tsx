@@ -1,5 +1,6 @@
 import React, { createContext, useContext } from 'react';
 import {
+  Brain,
   BookOpen,
   Cpu,
   Mic,
@@ -36,6 +37,13 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     title: 'AI Providers',
     icon: Network,
     description: 'Per-service AI provider configuration',
+    category: 'app',
+  },
+  {
+    id: 'in-browser-ai',
+    title: 'In-browser AI',
+    icon: Brain,
+    description: 'WebGPU model downloads and fallback mode',
     category: 'app',
   },
   {

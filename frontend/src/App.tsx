@@ -6,6 +6,7 @@ import { OrgProvider } from './contexts/OrgContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { RecordingProvider } from './contexts/RecordingContext';
 import { UploadsProvider } from './contexts/UploadsContext';
+import { AlwaysOnProvider } from './contexts/AlwaysOnContext';
 import { AppRouterSimplified } from './AppRouterSimplified';
 import { RecordingIndicator } from './components/RecordingIndicator';
 import { DragDropOverlay } from './components/DragDropOverlay';
@@ -31,28 +32,30 @@ function App() {
       <ThemeProvider>
         <AuthProvider>
           <OrgProvider>
-            <RecordingProvider>
-              <UploadsProvider>
-                <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
-                  <ReconnectingOverlay />
-                  <AppWithShortcuts />
-                  <DragDropOverlay />
-                  <UploadTray />
-                  <ToastContainer
-                    position="bottom-right"
-                    theme="dark"
-                    autoClose={3000}
-                    hideProgressBar={false}
-                    newestOnTop
-                    closeOnClick
-                    rtl={false}
-                    pauseOnFocusLoss
-                    draggable
-                    pauseOnHover
-                  />
-                </div>
-              </UploadsProvider>
-            </RecordingProvider>
+            <AlwaysOnProvider>
+              <RecordingProvider>
+                <UploadsProvider>
+                  <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
+                    <ReconnectingOverlay />
+                    <AppWithShortcuts />
+                    <DragDropOverlay />
+                    <UploadTray />
+                    <ToastContainer
+                      position="bottom-right"
+                      theme="dark"
+                      autoClose={3000}
+                      hideProgressBar={false}
+                      newestOnTop
+                      closeOnClick
+                      rtl={false}
+                      pauseOnFocusLoss
+                      draggable
+                      pauseOnHover
+                    />
+                  </div>
+                </UploadsProvider>
+              </RecordingProvider>
+            </AlwaysOnProvider>
           </OrgProvider>
         </AuthProvider>
       </ThemeProvider>

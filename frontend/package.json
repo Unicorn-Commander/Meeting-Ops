@@ -17,8 +17,10 @@
     "setup:magic-cert": "bash generate-magic-unicorn-cert.sh"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "0.2.83",
     "@radix-ui/react-separator": "^1.1.7",
     "@radix-ui/react-slot": "^1.2.3",
+    "@ricky0123/vad-web": "0.0.30",
     "@types/react-router-dom": "^5.3.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

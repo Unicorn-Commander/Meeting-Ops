@@ -32,6 +32,7 @@ class RecordingSession(Base):
     ended_at = Column(DateTime)    # Changed from end_time
     duration = Column(Float, default=0)
     status = Column(String(50), default="active")
+    mode = Column(String(20), default="upload", nullable=False, server_default="upload")
     extra_data = Column(JSON)
     user_id = Column(Integer)  # Foreign key to User
     audio_file = Column(String(500))  # Changed from audio_file_path
