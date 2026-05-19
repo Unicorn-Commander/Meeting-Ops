@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index, func
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
@@ -159,6 +159,69 @@ class SessionCollaborator(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class ActionItem(Base):
+    """First-class action item promoted out of `recording_sessions.final_summary`.
+
+    Backfilled by alembic 021_action_items from the legacy JSON columns and
+    re-derived on every summarize pass (see
+    `services.action_items_extractor.persist_action_items`). Manual entries
+    created from the UI use `source='manual'`.
+
+    Status transitions are validated by a CHECK constraint at the DB level;
+    when status flips to 'done' the API sets `completed_at`.
+    """
+    __tablename__ = "action_items"
+    __table_args__ = (
+        Index("ix_action_items_session", "session_id"),
+        Index("ix_action_items_organization", "organization_id"),
+        Index("ix_action_items_org_status", "organization_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    text = Column(Text, nullable=False)
+    # Free-text for now ("Aaron", "Sarah", "Mike at finance"). When we
+    # promote owners to real speaker/user IDs that becomes a side
+    # table, not a foreign-key bump here.
+    owner = Column(String(200), nullable=True)
+    # Best-effort parse from the LLM ("Friday", "next week" etc); the
+    # original phrasing is preserved in `raw_payload` so the UI can
+    # render the fallback string when this is NULL.
+    due_date = Column(DateTime(timezone=True), nullable=True)
+    # 'todo' | 'doing' | 'done' | 'cancelled' (CHECK constraint enforces)
+    status = Column(
+        String(20), nullable=False, default="todo", server_default="todo"
+    )
+    # Within-session ordering as the LLM produced them.
+    sort_order = Column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    # 'final_summary' | 'ai_insights' | 'manual' (CHECK constraint enforces)
+    source = Column(
+        String(50),
+        nullable=False,
+        default="final_summary",
+        server_default="final_summary",
+    )
+    raw_payload = Column(JSONB, nullable=True)
 
 
 class Transcription(Base):

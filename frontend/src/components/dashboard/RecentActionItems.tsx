@@ -1,6 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckSquare, User } from 'lucide-react';
+import { CheckSquare, Square, User, Loader2 } from 'lucide-react';
+import { config } from '../../config';
+import { useOrg } from '../../contexts/OrgContext';
 import type { DashboardSession } from '../../pages/Dashboard';
 import { extractActionItems, type NormalizedActionItem } from './actionItems';
 
@@ -10,26 +12,125 @@ interface RecentActionItemsProps {
   detailsLoading: boolean;
 }
 
+interface ActionItemRow {
+  id: number;
+  session_id: number;
+  session_key: string;
+  session_title: string | null;
+  session_created_at: string | null;
+  text: string;
+  owner: string | null;
+  due_date: string | null;
+  status: string;
+}
+
+const LIMIT = 10;
+
+/**
+ * Reads from the new /api/action-items endpoint (first-class table).
+ *
+ * Falls back to the legacy client-side parser when the API returns an
+ * empty list while we still see action-item-bearing JSON on recent
+ * sessions — that's the window between deploy and the backfill
+ * migration running, OR for sessions whose summary predates the
+ * persist_action_items wiring. Clicking the checkbox PATCHes the row
+ * to status='done' and optimistically drops it from the visible list.
+ */
 export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
   sessions,
   loading,
   detailsLoading,
 }) => {
-  const items = useMemo<NormalizedActionItem[]>(() => {
-    const all: NormalizedActionItem[] = [];
+  const { activeOrganization } = useOrg();
+  const [rows, setRows] = useState<ActionItemRow[]>([]);
+  const [fetchState, setFetchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [updatingIds, setUpdatingIds] = useState<Set<number>>(new Set());
+
+  const buildHeaders = useCallback((): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+    return headers;
+  }, [activeOrganization?.slug]);
+
+  const fetchRows = useCallback(async () => {
+    if (!activeOrganization?.slug) return;
+    setFetchState((prev) => (prev === 'ready' ? 'ready' : 'loading'));
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/action-items?status=todo&limit=${LIMIT}`,
+        { headers: buildHeaders() },
+      );
+      if (!res.ok) {
+        setFetchState('error');
+        return;
+      }
+      const data = await res.json();
+      setRows(Array.isArray(data) ? data : []);
+      setFetchState('ready');
+    } catch {
+      setFetchState('error');
+    }
+  }, [activeOrganization?.slug, buildHeaders]);
+
+  useEffect(() => {
+    void fetchRows();
+    const id = window.setInterval(fetchRows, 30000);
+    return () => window.clearInterval(id);
+  }, [fetchRows]);
+
+  // Legacy client-side fallback. Only consulted when the API returned no
+  // rows but we DO see action items embedded in the session JSON columns —
+  // that signals sessions that haven't been re-summarized since the new
+  // table landed. Drop this once the backfill has reached every tenant.
+  const fallbackItems = useMemo<NormalizedActionItem[]>(() => {
+    if (fetchState !== 'ready' || rows.length > 0) return [];
+    const out: NormalizedActionItem[] = [];
     for (const session of sessions) {
       const extracted = extractActionItems(session as any);
-      all.push(...extracted);
+      out.push(...extracted);
     }
-    all.sort((a, b) => {
+    out.sort((a, b) => {
       const ta = a.sessionCreatedAt ? new Date(a.sessionCreatedAt).getTime() : 0;
       const tb = b.sessionCreatedAt ? new Date(b.sessionCreatedAt).getTime() : 0;
       return tb - ta;
     });
-    return all.slice(0, 5);
-  }, [sessions]);
+    return out.slice(0, LIMIT);
+  }, [fetchState, rows.length, sessions]);
 
-  const isLoading = loading || detailsLoading;
+  const completeItem = useCallback(
+    async (id: number) => {
+      setUpdatingIds((prev) => new Set(prev).add(id));
+      setRows((prev) => prev.filter((r) => r.id !== id));
+      try {
+        const res = await fetch(`${config.apiBaseUrl}/api/action-items/${id}`, {
+          method: 'PATCH',
+          headers: buildHeaders(),
+          body: JSON.stringify({ status: 'done' }),
+        });
+        if (!res.ok) {
+          await fetchRows();
+        }
+      } catch {
+        await fetchRows();
+      } finally {
+        setUpdatingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [buildHeaders, fetchRows],
+  );
+
+  const apiLoading = fetchState === 'loading' || (fetchState === 'idle' && !!activeOrganization?.slug);
+  const fallbackLoading = loading || detailsLoading;
+  const showRows = rows.length > 0;
+  const showFallback = !showRows && fallbackItems.length > 0;
+  const isLoading = apiLoading && !showRows && !showFallback && fallbackLoading;
+  const isEmpty = !isLoading && !showRows && !showFallback;
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/50">
@@ -46,15 +147,69 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
       </header>
 
       <div className="divide-y divide-zinc-800/80">
-        {isLoading && items.length === 0 ? (
+        {isLoading && (
           <div className="px-4 py-8 text-center text-sm text-zinc-500">Loading action items…</div>
-        ) : items.length === 0 ? (
+        )}
+
+        {isEmpty && (
           <div className="px-4 py-8 text-center text-sm text-zinc-500">
             No action items captured yet. They appear here once a meeting summary completes.
           </div>
-        ) : (
-          items.map((item, idx) => (
-            <div key={`${item.sessionId}-${idx}`} className="px-4 py-3">
+        )}
+
+        {showRows &&
+          rows.map((item) => {
+            const busy = updatingIds.has(item.id);
+            return (
+              <div key={item.id} className="px-4 py-3">
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    onClick={() => completeItem(item.id)}
+                    disabled={busy}
+                    className="mt-0.5 flex-shrink-0 text-amber-300 transition hover:text-emerald-400 disabled:opacity-40"
+                    title="Mark as done"
+                    aria-label="Mark action item as done"
+                  >
+                    {busy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Square className="h-4 w-4" />
+                    )}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm text-zinc-100">{item.text}</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
+                      {item.owner && (
+                        <span className="inline-flex items-center gap-1">
+                          <User className="h-3 w-3" />
+                          {item.owner}
+                        </span>
+                      )}
+                      {item.due_date && (
+                        <span className="text-zinc-400">
+                          Due {new Date(item.due_date).toLocaleDateString()}
+                        </span>
+                      )}
+                      {item.session_title && (
+                        <Link
+                          to={`/sessions/${item.session_key}`}
+                          className="inline-flex max-w-[18ch] items-center gap-1 truncate rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-300 transition hover:border-fuchsia-500/40 hover:text-fuchsia-200"
+                          title={item.session_title}
+                        >
+                          {item.session_title}
+                        </Link>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+        {showFallback &&
+          fallbackItems.map((item, idx) => (
+            <div key={`fallback-${item.sessionId}-${idx}`} className="px-4 py-3 opacity-90">
               <div className="flex items-start gap-3">
                 <CheckSquare className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
                 <div className="min-w-0 flex-1">
@@ -66,9 +221,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                         {item.owner}
                       </span>
                     )}
-                    {item.dueDate && (
-                      <span className="text-zinc-400">Due {item.dueDate}</span>
-                    )}
+                    {item.dueDate && <span className="text-zinc-400">Due {item.dueDate}</span>}
                     <Link
                       to={`/sessions/${item.sessionId}`}
                       className="inline-flex max-w-[18ch] items-center gap-1 truncate rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-300 transition hover:border-fuchsia-500/40 hover:text-fuchsia-200"
@@ -80,8 +233,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                 </div>
               </div>
             </div>
-          ))
-        )}
+          ))}
       </div>
     </section>
   );

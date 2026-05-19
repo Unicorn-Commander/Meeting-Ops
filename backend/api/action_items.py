@@ -1,0 +1,364 @@
+"""Action-items CRUD scoped to the active organization.
+
+Action items live in their own table (see migration 021_action_items)
+and are derived from the post-meeting summarizer JSON columns (or
+created manually from the UI). This router is the only write path
+the frontend uses; the summarizer-driven path is in
+`services.action_items_extractor.persist_action_items` and called
+inline by the writers that update `recording_sessions.final_summary`.
+
+All endpoints enforce organization scoping via
+`get_current_organization`. The optional `session_id` filter on the
+list endpoint accepts both the legacy string session_id (UUID-ish)
+and the integer primary key, matching the rest of the API surface.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from auth.dependencies import get_current_organization, get_current_user
+from auth.models import User
+from auth.organization import ActiveOrganization
+from database.database import get_db
+from database.models import ActionItem, RecordingSession
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/action-items", tags=["action-items"])
+
+
+_ALLOWED_STATUSES = ("todo", "doing", "done", "cancelled")
+_ALLOWED_SOURCES = ("final_summary", "ai_insights", "manual")
+
+
+class ActionItemOut(BaseModel):
+    id: int
+    session_id: int
+    session_key: str
+    session_title: Optional[str] = None
+    session_created_at: Optional[str] = None
+    organization_id: int
+    text: str
+    owner: Optional[str] = None
+    due_date: Optional[str] = None
+    status: str
+    sort_order: int
+    source: str
+    created_at: str
+    completed_at: Optional[str] = None
+
+
+class ActionItemCreate(BaseModel):
+    # Accept either int pk or string session_id; resolved server-side.
+    session_id: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1, max_length=4000)
+    owner: Optional[str] = Field(default=None, max_length=200)
+    due_date: Optional[datetime] = None
+    sort_order: Optional[int] = None
+
+
+class ActionItemPatch(BaseModel):
+    text: Optional[str] = Field(default=None, min_length=1, max_length=4000)
+    owner: Optional[str] = Field(default=None, max_length=200)
+    due_date: Optional[datetime] = None
+    status: Optional[str] = None
+
+
+def _resolve_session(
+    db: Session, organization_id: int, session_id: str
+) -> RecordingSession:
+    """UUID-or-integer-pk lookup scoped to the active org. Same shape as
+    api.sessions_participants._resolve_session."""
+    rec = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.session_id == session_id,
+            RecordingSession.organization_id == organization_id,
+        )
+        .first()
+    )
+    if rec:
+        return rec
+    try:
+        pk = int(session_id)
+    except (TypeError, ValueError):
+        pk = None
+    if pk is not None:
+        rec = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.id == pk,
+                RecordingSession.organization_id == organization_id,
+            )
+            .first()
+        )
+    if not rec:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return rec
+
+
+def _can_edit_session(
+    session: RecordingSession,
+    user: User,
+    active_org: ActiveOrganization,
+) -> bool:
+    """Org admin/manager, session creator, or superuser may mutate the
+    session's action items. Matches the auth gate for participants."""
+    if getattr(user, "is_superuser", False):
+        return True
+    role = (active_org.role or "").lower() if getattr(active_org, "role", None) else ""
+    if role in {"admin", "manager", "owner"}:
+        return True
+    if session.user_id and session.user_id == user.id:
+        return True
+    return False
+
+
+def _to_out(item: ActionItem, session: Optional[RecordingSession]) -> ActionItemOut:
+    return ActionItemOut(
+        id=item.id,
+        session_id=item.session_id,
+        session_key=(
+            (session.session_id or str(session.id))
+            if session is not None
+            else str(item.session_id)
+        ),
+        session_title=(
+            (session.title or session.name) if session is not None else None
+        ),
+        session_created_at=(
+            session.created_at.isoformat()
+            if session is not None and session.created_at
+            else None
+        ),
+        organization_id=item.organization_id,
+        text=item.text,
+        owner=item.owner,
+        due_date=item.due_date.isoformat() if item.due_date else None,
+        status=item.status,
+        sort_order=item.sort_order,
+        source=item.source,
+        created_at=item.created_at.isoformat() if item.created_at else "",
+        completed_at=item.completed_at.isoformat() if item.completed_at else None,
+    )
+
+
+@router.get("", response_model=List[ActionItemOut])
+async def list_action_items(
+    status: Optional[str] = Query(default=None),
+    session_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """List action items for the active org.
+
+    Default ordering: most recent session first, then sort_order asc
+    within a session — matches how the LLM produced them so they
+    render the way the user saw them in the summary."""
+    org_id = active_org.organization.id
+
+    query = (
+        db.query(ActionItem, RecordingSession)
+        .join(RecordingSession, ActionItem.session_id == RecordingSession.id)
+        .filter(ActionItem.organization_id == org_id)
+    )
+
+    if status:
+        if status not in _ALLOWED_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of {_ALLOWED_STATUSES}",
+            )
+        query = query.filter(ActionItem.status == status)
+
+    if session_id:
+        target = _resolve_session(db, org_id, session_id)
+        query = query.filter(ActionItem.session_id == target.id)
+
+    rows = (
+        query.order_by(
+            desc(RecordingSession.created_at),
+            ActionItem.sort_order.asc(),
+            ActionItem.id.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    return [_to_out(item, sess) for item, sess in rows]
+
+
+@router.get("/{item_id}", response_model=ActionItemOut)
+async def get_action_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    org_id = active_org.organization.id
+    item = (
+        db.query(ActionItem)
+        .filter(ActionItem.id == item_id, ActionItem.organization_id == org_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not found")
+    sess = (
+        db.query(RecordingSession)
+        .filter(RecordingSession.id == item.session_id)
+        .first()
+    )
+    return _to_out(item, sess)
+
+
+@router.post("", response_model=ActionItemOut, status_code=201)
+async def create_action_item(
+    payload: ActionItemCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    org_id = active_org.organization.id
+    session = _resolve_session(db, org_id, payload.session_id)
+    if not _can_edit_session(session, current_user, active_org):
+        raise HTTPException(
+            status_code=403, detail="Not permitted to add action items to this session"
+        )
+
+    sort_order = payload.sort_order
+    if sort_order is None:
+        # Append after existing items for this session so manual adds
+        # land at the bottom of the list visually.
+        existing_max = (
+            db.query(ActionItem.sort_order)
+            .filter(ActionItem.session_id == session.id)
+            .order_by(ActionItem.sort_order.desc())
+            .first()
+        )
+        sort_order = (existing_max[0] + 1) if existing_max else 0
+
+    item = ActionItem(
+        session_id=session.id,
+        organization_id=org_id,
+        text=payload.text.strip(),
+        owner=(payload.owner.strip() if payload.owner else None) or None,
+        due_date=payload.due_date,
+        status="todo",
+        sort_order=sort_order,
+        source="manual",
+        raw_payload={"manual": True, "created_by_user_id": current_user.id},
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    logger.info(
+        "action_items: manual add session=%s user=%s id=%s",
+        session.id,
+        current_user.id,
+        item.id,
+    )
+    return _to_out(item, session)
+
+
+@router.patch("/{item_id}", response_model=ActionItemOut)
+async def update_action_item(
+    item_id: int,
+    payload: ActionItemPatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    org_id = active_org.organization.id
+    item = (
+        db.query(ActionItem)
+        .filter(ActionItem.id == item_id, ActionItem.organization_id == org_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not found")
+
+    session = (
+        db.query(RecordingSession)
+        .filter(RecordingSession.id == item.session_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Parent session not found")
+    if not _can_edit_session(session, current_user, active_org):
+        raise HTTPException(status_code=403, detail="Not permitted to edit this action item")
+
+    fields = payload.model_fields_set
+
+    if "status" in fields:
+        new_status = (payload.status or "").strip().lower()
+        if new_status not in _ALLOWED_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of {_ALLOWED_STATUSES}",
+            )
+        previous = item.status
+        item.status = new_status
+        if new_status == "done" and previous != "done":
+            item.completed_at = datetime.now(timezone.utc)
+        elif new_status != "done" and previous == "done":
+            # Re-opened. Clear completion stamp so analytics don't
+            # double-count the same item if it gets toggled back.
+            item.completed_at = None
+
+    if "text" in fields and payload.text is not None:
+        item.text = payload.text.strip()
+
+    if "owner" in fields:
+        item.owner = (payload.owner.strip() if payload.owner else None) or None
+
+    if "due_date" in fields:
+        item.due_date = payload.due_date
+
+    db.commit()
+    db.refresh(item)
+    logger.info(
+        "action_items: patch id=%s user=%s fields=%s",
+        item.id,
+        current_user.id,
+        sorted(fields),
+    )
+    return _to_out(item, session)
+
+
+@router.delete("/{item_id}", status_code=204)
+async def delete_action_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    org_id = active_org.organization.id
+    item = (
+        db.query(ActionItem)
+        .filter(ActionItem.id == item_id, ActionItem.organization_id == org_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not found")
+
+    session = (
+        db.query(RecordingSession)
+        .filter(RecordingSession.id == item.session_id)
+        .first()
+    )
+    if session and not _can_edit_session(session, current_user, active_org):
+        raise HTTPException(status_code=403, detail="Not permitted to delete this action item")
+
+    db.delete(item)
+    db.commit()
+    logger.info("action_items: delete id=%s user=%s", item_id, current_user.id)
+    return None

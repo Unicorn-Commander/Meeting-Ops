@@ -609,6 +609,14 @@ async def upload_transcript(
                     "segment_count": segment_count,
                 }
                 session.status = "completed"
+
+                # Promote action items into the first-class table. Best-effort.
+                try:
+                    from services.action_items_extractor import persist_action_items
+                    persist_action_items(local_db, session)
+                except Exception as exc:
+                    logger.warning(f"action_items promotion failed for satellite session {session.id}: {exc}")
+
                 local_db.commit()
             except Exception as e:
                 logger.error(f"Summarization pipeline error: {e}")

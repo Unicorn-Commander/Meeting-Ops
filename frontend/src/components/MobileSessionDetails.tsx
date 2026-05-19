@@ -30,6 +30,16 @@ interface Participant {
   role?: string | null;
 }
 
+interface ActionItem {
+  id: number;
+  text: string;
+  owner: string | null;
+  due_date: string | null;
+  status: string;
+  sort_order: number;
+  source: string;
+}
+
 interface SpeakerLinkRow {
   id: number;
   raw_label: string;
@@ -105,6 +115,19 @@ interface Props {
   addParticipant: () => void;
   deleteParticipant: (id: string) => void;
 
+  // Action items (first-class table, see api/action_items.py)
+  actionItems: ActionItem[];
+  actionUpdatingIds: Set<number>;
+  newActionText: string;
+  setNewActionText: (s: string) => void;
+  newActionOwner: string;
+  setNewActionOwner: (s: string) => void;
+  actionBusy: boolean;
+  actionError: string | null;
+  setActionStatus: (id: number, status: string) => Promise<void> | void;
+  addActionItem: () => void;
+  deleteActionItem: (id: number) => void;
+
   // Tags
   tags: string[];
   newTag: string;
@@ -161,6 +184,14 @@ export default function MobileSessionDetails(props: Props) {
     editParticipantRole, setEditParticipantRole,
     startEditParticipant, cancelEditParticipant, saveEditParticipant,
     addParticipant, deleteParticipant,
+    actionItems,
+    actionUpdatingIds,
+    newActionText, setNewActionText,
+    newActionOwner, setNewActionOwner,
+    actionBusy, actionError,
+    setActionStatus,
+    addActionItem,
+    deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
     onBack, onOpenShare, onOpenEmail, onOpenReprocess, onUploadAudio, uploading,
     formatTime, formatDate,
@@ -372,6 +403,17 @@ export default function MobileSessionDetails(props: Props) {
             summaryDecisions={summaryDecisions}
             hasAnySummary={hasAnySummary}
             status={session?.status}
+            actionItems={actionItems}
+            actionUpdatingIds={actionUpdatingIds}
+            newActionText={newActionText}
+            setNewActionText={setNewActionText}
+            newActionOwner={newActionOwner}
+            setNewActionOwner={setNewActionOwner}
+            actionBusy={actionBusy}
+            actionError={actionError}
+            setActionStatus={setActionStatus}
+            addActionItem={addActionItem}
+            deleteActionItem={deleteActionItem}
           />
         )}
 
@@ -561,6 +603,14 @@ function SectionCard({ title, icon: Icon, children, className }: {
 
 function SummaryTab({
   insightsLoading, summaryExec, summaryBullets, summaryActions, summaryDecisions, hasAnySummary, status,
+  actionItems,
+  actionUpdatingIds,
+  newActionText, setNewActionText,
+  newActionOwner, setNewActionOwner,
+  actionBusy, actionError,
+  setActionStatus,
+  addActionItem,
+  deleteActionItem,
 }: {
   insightsLoading: boolean;
   summaryExec: string;
@@ -569,8 +619,24 @@ function SummaryTab({
   summaryDecisions: any[];
   hasAnySummary: boolean;
   status?: string;
+  actionItems: ActionItem[];
+  actionUpdatingIds: Set<number>;
+  newActionText: string;
+  setNewActionText: (s: string) => void;
+  newActionOwner: string;
+  setNewActionOwner: (s: string) => void;
+  actionBusy: boolean;
+  actionError: string | null;
+  setActionStatus: (id: number, status: string) => Promise<void> | void;
+  addActionItem: () => void;
+  deleteActionItem: (id: number) => void;
 }) {
-  if (!hasAnySummary && insightsLoading) {
+  const hasPersistedActions = Array.isArray(actionItems) && actionItems.length > 0;
+  // hasAnySummary includes the empty-state case for the LLM summary
+  // sections. Action items live in their own table so we want to show
+  // the panel even if the summary text hasn't generated yet (e.g. the
+  // user is manually adding items first).
+  if (!hasAnySummary && !hasPersistedActions && insightsLoading) {
     return (
       <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 flex items-center justify-center gap-3">
         <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
@@ -579,7 +645,7 @@ function SummaryTab({
     );
   }
 
-  if (!hasAnySummary) {
+  if (!hasAnySummary && !hasPersistedActions) {
     return (
       <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400">
         {status === 'processing'
@@ -612,33 +678,119 @@ function SummaryTab({
         </SectionCard>
       )}
 
-      {summaryActions.length > 0 && (
+      {(hasPersistedActions || true) && (
         <SectionCard title="Action items" icon={Zap}>
-          <div className="space-y-2">
-            {summaryActions.map((a: any, i: number) => {
-              const text = typeof a === 'string' ? a : (a.action || a.text || '');
-              const owner = typeof a === 'object' ? a.owner : null;
-              const priority = typeof a === 'object' ? a.priority : null;
-              return (
-                <div key={i} className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
-                  <p className="text-sm text-zinc-100 font-medium">{text}</p>
-                  {(owner || priority) && (
-                    <div className="flex items-center gap-2 mt-1 text-xs text-zinc-400">
-                      {owner && <span>Owner: {owner}</span>}
-                      {priority && (
-                        <span className={`px-1.5 py-0.5 rounded ${
-                          priority.toLowerCase() === 'high' ? 'bg-red-500/20 text-red-300' :
-                          priority.toLowerCase() === 'medium' ? 'bg-amber-500/20 text-amber-300' :
-                          'bg-emerald-500/20 text-emerald-300'
-                        }`}>
-                          {priority}
-                        </span>
+          {actionError && (
+            <div className="mb-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs text-red-200">
+              {actionError}
+            </div>
+          )}
+          {hasPersistedActions ? (
+            <div className="space-y-2">
+              {actionItems.map((item) => {
+                const busy = actionUpdatingIds.has(item.id);
+                const done = item.status === 'done';
+                const cancelled = item.status === 'cancelled';
+                return (
+                  <div
+                    key={item.id}
+                    className={`rounded-lg border px-3 py-2 ${done ? 'border-emerald-500/30 bg-emerald-500/10' : cancelled ? 'border-zinc-700 bg-zinc-800/40' : 'border-amber-500/30 bg-amber-500/10'}`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setActionStatus(item.id, done ? 'todo' : 'done')}
+                        disabled={busy}
+                        className="mt-0.5 shrink-0 disabled:opacity-50"
+                        aria-label={done ? 'Mark not done' : 'Mark done'}
+                      >
+                        {done ? (
+                          <Check className="h-4 w-4 text-emerald-400" />
+                        ) : (
+                          <span className="inline-block h-4 w-4 rounded border-2 border-amber-400" />
+                        )}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`text-sm font-medium ${done ? 'line-through text-zinc-400' : cancelled ? 'text-zinc-400' : 'text-zinc-100'}`}
+                        >
+                          {item.text}
+                        </p>
+                        {(item.owner || item.due_date || item.source === 'manual') && (
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                            {item.owner && <span>Owner: {item.owner}</span>}
+                            {item.due_date && (
+                              <span>Due {new Date(item.due_date).toLocaleDateString()}</span>
+                            )}
+                            {item.source === 'manual' && (
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300">manual</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteActionItem(item.id)}
+                        disabled={busy}
+                        className="shrink-0 rounded p-1 text-zinc-400 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+                        aria-label="Remove action item"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            // Legacy JSON-derived actions, kept as fallback for sessions
+            // that haven't been re-summarized since the new table landed.
+            summaryActions.length > 0 && (
+              <div className="space-y-2">
+                {summaryActions.map((a: any, i: number) => {
+                  const text = typeof a === 'string' ? a : (a.action || a.text || '');
+                  const owner = typeof a === 'object' ? a.owner : null;
+                  return (
+                    <div key={i} className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
+                      <p className="text-sm text-zinc-100 font-medium">{text}</p>
+                      {owner && (
+                        <div className="mt-1 text-xs text-zinc-400">Owner: {owner}</div>
                       )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            )
+          )}
+
+          <div className="mt-3 space-y-2 border-t border-zinc-800 pt-2">
+            <input
+              type="text"
+              value={newActionText}
+              onChange={(e) => setNewActionText(e.target.value)}
+              placeholder="Add an action item…"
+              className="w-full rounded bg-zinc-900 border border-zinc-700 px-2 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            />
+            <input
+              type="text"
+              value={newActionOwner}
+              onChange={(e) => setNewActionOwner(e.target.value)}
+              placeholder="Owner (optional)"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newActionText.trim() && !actionBusy) {
+                  addActionItem();
+                }
+              }}
+              className="w-full rounded bg-zinc-900 border border-zinc-700 px-2 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            />
+            <button
+              type="button"
+              onClick={addActionItem}
+              disabled={actionBusy || !newActionText.trim()}
+              className="w-full rounded bg-amber-500/80 hover:bg-amber-500 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              + Add action item
+            </button>
           </div>
         </SectionCard>
       )}

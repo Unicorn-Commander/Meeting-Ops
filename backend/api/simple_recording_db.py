@@ -213,6 +213,43 @@ def _tags_payload(session: DBRecordingSession) -> List[str]:
     return [t for t in raw if isinstance(t, str) and t]
 
 
+def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict]:
+    """Persisted action items for this session, ordered the way the LLM
+    produced them (sort_order asc, with created_at as a stable tiebreaker
+    for manual additions made after summarize).
+
+    Falls back to an empty list on lookup error so the session detail
+    response keeps working even if the action_items table is unavailable
+    (very early after migration). Frontend retains a JSON-column fallback
+    parser for that window."""
+    try:
+        from database.models import ActionItem
+        rows = (
+            db.query(ActionItem)
+            .filter(ActionItem.session_id == session.id)
+            .order_by(ActionItem.sort_order.asc(), ActionItem.created_at.asc(), ActionItem.id.asc())
+            .all()
+        )
+    except Exception as exc:
+        logger.warning(f"action_items lookup failed for session {session.id}: {exc}")
+        return []
+
+    out: List[dict] = []
+    for item in rows:
+        out.append({
+            "id": item.id,
+            "text": item.text,
+            "owner": item.owner,
+            "due_date": item.due_date.isoformat() if item.due_date else None,
+            "status": item.status,
+            "sort_order": item.sort_order,
+            "source": item.source,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+        })
+    return out
+
+
 def _get_session_for_org(
     db: Session,
     organization_id: int,
@@ -621,6 +658,10 @@ async def get_session(
             "participants": _participants_payload(session),
             # Free-form per-session tags. Editable from the header chips.
             "tags": _tags_payload(session),
+            # First-class action items derived from the summarizer JSON and
+            # promoted by services.action_items_extractor. Status-aware so
+            # the UI can flip done/doing/cancelled and have it stick.
+            "action_items": _action_items_payload(db, session),
         }
         
     except HTTPException:
@@ -1154,7 +1195,15 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
         # Step 4: ALWAYS mark as completed (never leave in processing)
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
-        
+
+        # Promote action items into the first-class table so the dashboard
+        # can render an interactive list. Best-effort; never block finalize.
+        try:
+            from services.action_items_extractor import persist_action_items
+            persist_action_items(db, session)
+        except Exception as exc:
+            logger.warning(f"action_items promotion failed for session {session_id}: {exc}")
+
         try:
             db.commit()
             logger.info(f"✅ Successfully completed processing for session {session_id}")

@@ -13,6 +13,7 @@ from database.models import (  # noqa: F401
     ChatHistory,
     SatelliteDevice,
     SessionCollaborator,
+    ActionItem,
 )
 from auth.models import Organization, User, UserOrganization, AuditLog  # noqa: F401
 from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary  # noqa: F401

@@ -1626,6 +1626,19 @@ async def _summarize_session(
         new_title = new_title.strip()
         if new_title and new_title.lower() not in {"untitled", "meeting", "recording"}:
             session.title = new_title[:200]
+
+    # Promote action items out of the JSON column into the first-class
+    # `action_items` table so the dashboard + PWA notifications can
+    # read them directly. Re-process = fresh slate (delete + insert).
+    try:
+        from services.action_items_extractor import persist_action_items
+        persist_action_items(db, session)
+    except Exception as exc:  # noqa: BLE001
+        # Action-item promotion is best-effort; never block the summary
+        # commit on it. Falls back to the old in-JSON path which the
+        # frontend parser still understands.
+        logger.warning("action_items promotion failed for session %s: %s", session.id, exc)
+
     db.commit()
     db.refresh(session)
 

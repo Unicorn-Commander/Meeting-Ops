@@ -163,6 +163,19 @@ interface Participant {
   role?: string | null;
 }
 
+interface ActionItem {
+  id: number;
+  session_id?: number;
+  text: string;
+  owner: string | null;
+  due_date: string | null;
+  status: string;
+  sort_order: number;
+  source: string;
+  created_at?: string | null;
+  completed_at?: string | null;
+}
+
 const PROJECT_APP_LABELS: Record<string, string> = {
   'project-ops': 'Project-Ops',
   'crisis-ops': 'Crisis-Ops',
@@ -227,6 +240,16 @@ export const SessionDetails: React.FC = () => {
   const [newTag, setNewTag] = useState('');
   const [tagBusy, setTagBusy] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
+
+  // Per-session action items (first-class table, see 021_action_items).
+  // Hydrated from session.action_items on the initial fetch, then
+  // updated in place by PATCH/POST/DELETE responses for snappy UI.
+  const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [newActionText, setNewActionText] = useState('');
+  const [newActionOwner, setNewActionOwner] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionUpdatingIds, setActionUpdatingIds] = useState<Set<number>>(new Set());
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -589,6 +612,7 @@ export const SessionDetails: React.FC = () => {
         setSession(data);
         setParticipants(Array.isArray(data.participants) ? data.participants : []);
         setTags(Array.isArray(data.tags) ? data.tags : []);
+        setActionItems(Array.isArray(data.action_items) ? data.action_items : []);
       } else {
         const errorText = await response.text();
         console.error('❌ Failed to fetch session:', response.status, errorText);
@@ -714,6 +738,120 @@ export const SessionDetails: React.FC = () => {
       setParticipantError(e instanceof Error ? e.message : 'Failed to remove participant');
     } finally {
       setParticipantBusy(false);
+    }
+  };
+
+  // ----- Action items CRUD -----
+  //
+  // Endpoints: /api/action-items (org-scoped, see api/action_items.py).
+  // Auth headers reuse participantHeaders(). All callsites are optimistic
+  // with server-confirm so toggling a checkbox feels instant. Failed
+  // mutations re-sync via a list fetch.
+
+  const setActionStatus = async (id: number, nextStatus: ActionItem['status']) => {
+    setActionUpdatingIds((prev) => new Set(prev).add(id));
+    const prevSnapshot = actionItems;
+    setActionItems((prev) =>
+      prev.map((row) => (row.id === id ? { ...row, status: nextStatus } : row)),
+    );
+    try {
+      const res = await fetch(`${config.apiUrl}/api/action-items/${id}`, {
+        method: 'PATCH',
+        headers: participantHeaders(),
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!res.ok) {
+        setActionItems(prevSnapshot);
+        const body = await res.text();
+        setActionError(`Update failed (${res.status}): ${body}`);
+        return;
+      }
+      const updated = await res.json();
+      setActionItems((prev) =>
+        prev.map((row) => (row.id === id ? { ...row, ...updated } : row)),
+      );
+      setActionError(null);
+    } catch (e) {
+      setActionItems(prevSnapshot);
+      setActionError(e instanceof Error ? e.message : 'Update failed');
+    } finally {
+      setActionUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const addActionItem = async () => {
+    const text = newActionText.trim();
+    if (!text) return;
+    if (!session?.id && !sessionId) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`${config.apiUrl}/api/action-items`, {
+        method: 'POST',
+        headers: participantHeaders(),
+        body: JSON.stringify({
+          session_id: session?.id || sessionId,
+          text,
+          owner: newActionOwner.trim() || null,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        setActionError(`Add failed (${res.status}): ${body}`);
+        return;
+      }
+      const created = await res.json();
+      setActionItems((prev) => [
+        ...prev,
+        {
+          id: created.id,
+          session_id: created.session_id,
+          text: created.text,
+          owner: created.owner ?? null,
+          due_date: created.due_date ?? null,
+          status: created.status,
+          sort_order: created.sort_order ?? 0,
+          source: created.source,
+          created_at: created.created_at ?? null,
+          completed_at: created.completed_at ?? null,
+        },
+      ]);
+      setNewActionText('');
+      setNewActionOwner('');
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Add failed');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const deleteActionItem = async (id: number) => {
+    if (!confirm('Remove this action item?')) return;
+    setActionUpdatingIds((prev) => new Set(prev).add(id));
+    const prevSnapshot = actionItems;
+    setActionItems((prev) => prev.filter((row) => row.id !== id));
+    try {
+      const res = await fetch(`${config.apiUrl}/api/action-items/${id}`, {
+        method: 'DELETE',
+        headers: participantHeaders(),
+      });
+      if (!res.ok && res.status !== 204) {
+        setActionItems(prevSnapshot);
+        setActionError(`Delete failed (${res.status})`);
+      }
+    } catch (e) {
+      setActionItems(prevSnapshot);
+      setActionError(e instanceof Error ? e.message : 'Delete failed');
+    } finally {
+      setActionUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -1296,6 +1434,14 @@ export const SessionDetails: React.FC = () => {
     editParticipantRole, setEditParticipantRole,
     startEditParticipant, cancelEditParticipant, saveEditParticipant,
     addParticipant, deleteParticipant,
+    actionItems,
+    actionUpdatingIds,
+    newActionText, setNewActionText,
+    newActionOwner, setNewActionOwner,
+    actionBusy, actionError,
+    setActionStatus,
+    addActionItem,
+    deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
     onBack: () => navigate('/sessions'),
     onOpenShare: () => setShowShareModal(true),
@@ -2532,6 +2678,119 @@ export const SessionDetails: React.FC = () => {
                   className="w-full rounded bg-purple-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
                 >
                   Add
+                </button>
+              </div>
+            </div>
+
+            {/* Action items */}
+            <div className="bg-white rounded-lg shadow-sm p-6">
+              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <Zap className="w-5 h-5 text-amber-500" />
+                Action items
+                {actionItems.length > 0 && (
+                  <span className="text-sm font-normal text-gray-500">
+                    ({actionItems.filter((a) => a.status !== 'done' && a.status !== 'cancelled').length}/{actionItems.length})
+                  </span>
+                )}
+              </h3>
+
+              {actionError && (
+                <div className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {actionError}
+                </div>
+              )}
+
+              {actionItems.length === 0 && (
+                <p className="mb-3 text-sm text-gray-500">
+                  No action items yet. The summarizer adds them automatically; you can also add one below.
+                </p>
+              )}
+
+              <ul className="mb-4 space-y-2">
+                {actionItems.map((item) => {
+                  const busy = actionUpdatingIds.has(item.id);
+                  const done = item.status === 'done';
+                  const cancelled = item.status === 'cancelled';
+                  return (
+                    <li
+                      key={item.id}
+                      className={`rounded border px-3 py-2 ${done ? 'border-emerald-200 bg-emerald-50' : cancelled ? 'border-gray-200 bg-gray-50' : 'border-amber-200 bg-amber-50/50'}`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setActionStatus(item.id, done ? 'todo' : 'done')
+                          }
+                          disabled={busy}
+                          className="mt-0.5 shrink-0 disabled:opacity-50"
+                          aria-label={done ? 'Mark not done' : 'Mark done'}
+                          title={done ? 'Mark not done' : 'Mark done'}
+                        >
+                          {done ? (
+                            <Check className="h-4 w-4 text-emerald-600" />
+                          ) : (
+                            <span className="inline-block h-4 w-4 rounded border-2 border-amber-500 bg-white" />
+                          )}
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={`text-sm ${done ? 'line-through text-gray-500' : cancelled ? 'text-gray-500' : 'text-gray-900'}`}
+                          >
+                            {item.text}
+                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
+                            {item.owner && <span>Owner: {item.owner}</span>}
+                            {item.due_date && (
+                              <span>Due {new Date(item.due_date).toLocaleDateString()}</span>
+                            )}
+                            {item.source === 'manual' && (
+                              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600">manual</span>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => deleteActionItem(item.id)}
+                          disabled={busy}
+                          className="shrink-0 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                          title="Remove action item"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              <div className="space-y-2 border-t border-gray-200 pt-3">
+                <p className="text-xs font-medium text-gray-600">Add action item</p>
+                <input
+                  type="text"
+                  value={newActionText}
+                  onChange={(e) => setNewActionText(e.target.value)}
+                  placeholder="What needs to happen?"
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <input
+                  type="text"
+                  value={newActionOwner}
+                  onChange={(e) => setNewActionOwner(e.target.value)}
+                  placeholder="Owner (optional)"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newActionText.trim() && !actionBusy) {
+                      addActionItem();
+                    }
+                  }}
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <button
+                  onClick={addActionItem}
+                  disabled={actionBusy || !newActionText.trim()}
+                  className="w-full rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  Add action item
                 </button>
               </div>
             </div>
