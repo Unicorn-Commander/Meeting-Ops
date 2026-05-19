@@ -69,8 +69,12 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
   },
 ];
 
+// Note: 'audio' was historically appliance-only because the panel
+// configured PipeWire devices on the box. As of the browser-device-picker
+// feature, the panel ALSO handles in-browser mic selection (which the
+// cloud build needs), so we let it render in cloud mode. The PipeWire
+// sub-section inside the panel guards itself on `hostCaps.local_audio`.
 export const APPLIANCE_ONLY_SECTIONS = new Set([
-  'audio',
   'ai',
   'network',
   'wifi',

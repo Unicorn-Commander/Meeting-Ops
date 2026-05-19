@@ -15,6 +15,8 @@ import {
 import { useAlwaysOn, type AlwaysOnSummarySlice } from '../contexts/AlwaysOnContext';
 import AlwaysOnPopout, { isDocumentPictureInPictureSupported } from './AlwaysOnPopout';
 import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
+import AudioMeter from './AudioMeter';
+import SessionMicChip from './SessionMicChip';
 
 function relativeTime(iso: string): string {
   const created = new Date(iso).getTime();
@@ -162,6 +164,20 @@ export default function AlwaysOnControl() {
               {alwaysOn.error}
             </div>
           )}
+          {/* Active mic indicator + per-session override. Only shown while
+              a session is live — the chip is meaningless when idle. */}
+          {isActive && (
+            <div className="mt-3 flex items-center gap-2">
+              <SessionMicChip
+                activeDeviceId={alwaysOn.activeMicDeviceId}
+                onSelect={(id) => void alwaysOn.switchMicDevice(id)}
+                disabled={alwaysOn.switchingDevice}
+              />
+              {alwaysOn.switchingDevice && (
+                <span className="text-xs text-zinc-400">Switching…</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -228,6 +244,26 @@ export default function AlwaysOnControl() {
           </button>
         </div>
       </div>
+
+      {/* Live VU meter — gives the user confidence the mic is hearing them
+          even between speech chunks (the VAD indicator only flips during
+          actual speech). Connected to the engine's live stream so we
+          don't double-open getUserMedia. */}
+      {isActive && alwaysOn.activeMicStream && (
+        <div className="mt-5 rounded-lg border border-zinc-800 bg-black/30 px-3 py-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs uppercase tracking-wide text-zinc-500">
+              Mic level
+            </span>
+          </div>
+          <AudioMeter
+            stream={alwaysOn.activeMicStream}
+            compact
+            showNumeric
+            ariaLabel="Live microphone level"
+          />
+        </div>
+      )}
 
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">

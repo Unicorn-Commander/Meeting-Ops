@@ -8,6 +8,10 @@ import {
   unlockAudioContext,
   type MediaRecorderTarget,
 } from '../utils/mobileRecording';
+import {
+  getPreferredDeviceId,
+  openMicrophoneStream,
+} from '../utils/audioDevicePreference';
 
 type State = 'idle' | 'preparing' | 'recording' | 'finalizing' | 'uploading';
 type AudioSource = 'mic' | 'tab' | 'mic+tab';
@@ -114,14 +118,14 @@ export default function DesktopBrowserRecorder() {
 
     try {
       if (wantsMic) {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
+        // Honor the user's preferred mic from Settings. openMicrophoneStream
+        // falls back to system default if the saved device is unavailable.
+        const opened = await openMicrophoneStream(getPreferredDeviceId(), {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         });
+        micStream = opened.stream;
       }
       if (wantsTab) {
         if (!tabCaptureAvailable) {

@@ -9,6 +9,10 @@ import {
   unlockAudioContext,
   type MediaRecorderTarget,
 } from '../utils/mobileRecording';
+import {
+  getPreferredDeviceId,
+  openMicrophoneStream,
+} from '../utils/audioDevicePreference';
 
 type RecorderState = 'idle' | 'preparing' | 'recording' | 'finalizing' | 'uploading';
 
@@ -140,14 +144,15 @@ export default function MobileLiveRecording() {
 
     try {
       if (wantsMic) {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
+        // Honor the user's preferred mic from Settings. If the saved
+        // device is unplugged we fall back to system default silently —
+        // the user has no other place to keep the session alive.
+        const opened = await openMicrophoneStream(getPreferredDeviceId(), {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         });
+        micStream = opened.stream;
       }
       if (wantsTab) {
         if (!tabCaptureAvailable) {

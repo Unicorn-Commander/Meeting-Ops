@@ -12,6 +12,14 @@ import { config } from '../config';
 import { useOrg } from './OrgContext';
 import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk } from '../utils/vadEngine';
 import {
+  getAutoPreferUsb,
+  getPreferredDeviceId,
+  isUsbAudioDevice,
+  setPreferredDeviceId,
+} from '../utils/audioDevicePreference';
+import { showToast } from '../components/Toast';
+import { toast as toastify } from 'react-toastify';
+import {
   getLiveSummaryAutoConfig,
   getModelLabel,
   getStoredModelId,
@@ -122,6 +130,27 @@ export interface AlwaysOnContextValue {
   localOnly: boolean;
   /** True when WebGPU is missing and local-only would degrade to standard mode. */
   localOnlyForcedOff: boolean;
+  /**
+   * The deviceId we're actually capturing from right now. May differ from
+   * the persisted preference if a fallback fired (e.g. plug-out). `null`
+   * means "system default".
+   */
+  activeMicDeviceId: string | null;
+  /**
+   * The live `MediaStream` for the current capture. UI consumers can
+   * attach AnalyserNodes to it for VU meters without re-prompting the
+   * user for mic permission.
+   */
+  activeMicStream: MediaStream | null;
+  /** True while a device swap is in flight (engine is restarting). */
+  switchingDevice: boolean;
+  /**
+   * Switch to a different microphone mid-session. The persistent default
+   * in localStorage is NOT touched — this is a per-session override.
+   * To change the default, call setPreferredDeviceId() from
+   * `utils/audioDevicePreference` instead.
+   */
+  switchMicDevice: (deviceId: string | null) => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
@@ -202,6 +231,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     activeLocalOnlyRef.current = activeLocalOnly;
   }, [activeLocalOnly]);
   const localOnlyForcedOff = localOnlyPref && !localOnlyAvailable;
+
+  // Device-aware capture state. activeMicDeviceId is the deviceId we're
+  // RIGHT NOW capturing from (may differ from the saved preference if a
+  // fallback fired). activeMicStream is the live MediaStream so the UI
+  // can attach a VU meter without re-prompting permission.
+  const [activeMicDeviceId, setActiveMicDeviceId] = useState<string | null>(
+    () => getPreferredDeviceId(),
+  );
+  const [activeMicStream, setActiveMicStream] = useState<MediaStream | null>(
+    null,
+  );
+  const [switchingDevice, setSwitchingDevice] = useState<boolean>(false);
+  // Track the USB-swap toast so we don't pile up duplicates when the user
+  // wiggles a cable. Keyed by deviceId.
+  const usbToastShownRef = useRef<Set<string>>(new Set());
 
   const engineRef = useRef<AlwaysOnVadEngine | null>(null);
   const stateRef = useRef<AlwaysOnState>('idle');
@@ -709,6 +753,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       engineRef.current = createVadEngine({
         getElapsedSeconds: getElapsed,
         silenceThresholdMs: 30000,
+        // Read from localStorage at each start/swap so cross-tab Settings
+        // edits propagate without a page reload.
+        getPreferredDeviceId: () => getPreferredDeviceId(),
+        onDeviceChanged: (deviceId) => {
+          setActiveMicDeviceId(deviceId);
+        },
+        onStreamChanged: (stream) => {
+          setActiveMicStream(stream);
+        },
         onSpeechStart: () => {
           setVadActive(true);
           setStatusText('Speech detected');
@@ -727,6 +780,180 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     }
     return engineRef.current;
   }, [getElapsed, queueChunkUpload, splitSession]);
+
+  /**
+   * Hot-swap the active mic mid-session. Does NOT touch the persisted
+   * preference — that's by design, so a per-session override doesn't
+   * leak into the default. Pause-switch-resume is ~few-hundred-ms in
+   * practice; we set `switchingDevice` while it's happening so the UI
+   * can disable the picker.
+   */
+  const switchMicDevice = useCallback(
+    async (deviceId: string | null) => {
+      // If not in an active recording, this is a no-op. AlwaysOnControl
+      // disables the picker in that state, but be defensive.
+      if (stateRef.current !== 'recording' && stateRef.current !== 'paused') {
+        return;
+      }
+      const engine = engineRef.current;
+      if (!engine) return;
+      setSwitchingDevice(true);
+      const wasPaused = stateRef.current === 'paused';
+      try {
+        // Resume first if paused; switchDevice tears down + recreates the
+        // VAD instance, and it's simpler to do that from a running state.
+        if (wasPaused) {
+          await engine.resume();
+        }
+        const opened = await engine.switchDevice(deviceId);
+        // The engine fires onDeviceChanged already; this is just for the
+        // optimistic update in case the callback hasn't landed yet.
+        setActiveMicDeviceId(opened);
+        if (wasPaused) {
+          // Restore prior pause state — don't surprise the user.
+          await engine.pause();
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(`Mic swap failed: ${message}`);
+      } finally {
+        setSwitchingDevice(false);
+      }
+    },
+    [],
+  );
+
+  // devicechange listener — fires on USB plug/unplug. Three behaviors:
+  //   1. New USB device appears: if auto-prefer-USB is ON and we're
+  //      recording, surface a "Switch?" toast. If idle, just notify so
+  //      the user knows their picker has fresh options.
+  //   2. Currently-active device disappears (recording): auto-fall-back
+  //      to system default and toast a notification.
+  //   3. Otherwise: silent re-enumeration (Settings page will see it
+  //      through its own useAudioDevices hook).
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) return;
+
+    // Snapshot current input devices so we can diff. Initial fetch may be
+    // label-less if no permission has been granted yet; that's fine — we
+    // only care about presence/absence of deviceIds for diffing.
+    let prevDevices: MediaDeviceInfo[] = [];
+    const refreshDevices = async () => {
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        return all.filter((d) => d.kind === 'audioinput');
+      } catch {
+        return [];
+      }
+    };
+
+    let cancelled = false;
+    void (async () => {
+      prevDevices = await refreshDevices();
+      if (cancelled) return;
+    })();
+
+    const onDeviceChange = async () => {
+      const fresh = await refreshDevices();
+      const prev = prevDevices;
+      prevDevices = fresh;
+
+      const prevIds = new Set(prev.map((d) => d.deviceId));
+      const freshIds = new Set(fresh.map((d) => d.deviceId));
+
+      // (1) New USB device(s) appeared
+      const newUsb = fresh.filter(
+        (d) => !prevIds.has(d.deviceId) && isUsbAudioDevice(d),
+      );
+      // (2) Active device disappeared
+      const activeId =
+        engineRef.current?.getActiveDeviceId() ?? getPreferredDeviceId();
+      const activeLost =
+        activeId && prevIds.has(activeId) && !freshIds.has(activeId);
+
+      if (
+        activeLost &&
+        (stateRef.current === 'recording' || stateRef.current === 'paused')
+      ) {
+        // Engine fall-back: switch to system default and toast.
+        try {
+          await engineRef.current?.switchDevice(null);
+        } catch (err) {
+          // engine will surface via onError; nothing else to do.
+        }
+        showToast.warning(
+          'Selected microphone was disconnected. Switched to system default.',
+        );
+        // Clear the now-invalid saved preference so the next session
+        // doesn't try to use it again. (The user can pick a new one in
+        // Settings; we just stop pointing at a ghost.)
+        if (getPreferredDeviceId() === activeId) {
+          setPreferredDeviceId(null);
+        }
+      }
+
+      if (
+        newUsb.length > 0 &&
+        getAutoPreferUsb() &&
+        (stateRef.current === 'recording' || stateRef.current === 'paused')
+      ) {
+        // Only one toast per new device id per page-life. Wiggling a
+        // cable shouldn't spam.
+        for (const dev of newUsb) {
+          if (usbToastShownRef.current.has(dev.deviceId)) continue;
+          usbToastShownRef.current.add(dev.deviceId);
+          const label = dev.label?.trim() || 'New USB microphone';
+          const toastId = toastify.info(
+            (
+              <div className="flex items-center gap-3">
+                <div className="flex-1 text-sm">
+                  <div className="font-medium">USB mic detected</div>
+                  <div className="text-xs opacity-80">{label}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void switchMicDevice(dev.deviceId);
+                    // Update the saved default too — the user explicitly
+                    // chose this mic, persist for future sessions.
+                    setPreferredDeviceId(dev.deviceId);
+                    toastify.dismiss(toastId);
+                  }}
+                  className="rounded bg-emerald-500/30 px-2 py-1 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/50"
+                >
+                  Switch
+                </button>
+                <button
+                  type="button"
+                  onClick={() => toastify.dismiss(toastId)}
+                  className="rounded bg-zinc-700/50 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-600/60"
+                >
+                  Keep current
+                </button>
+              </div>
+            ),
+            {
+              autoClose: 15000,
+              closeOnClick: false,
+              draggable: false,
+            },
+          );
+        }
+      }
+    };
+
+    navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener(
+        'devicechange',
+        onDeviceChange,
+      );
+    };
+    // switchMicDevice is stable (refs); listing it as a dep would cause
+    // a churn on every render. We intentionally leave it out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const start = useCallback(async () => {
     if (stateRef.current !== 'idle') return;
@@ -1042,6 +1269,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sttBrowserFailed,
     localOnly: activeLocalOnly,
     localOnlyForcedOff,
+    activeMicDeviceId,
+    activeMicStream,
+    switchingDevice,
+    switchMicDevice,
     start,
     stop,
     pause,
@@ -1069,6 +1300,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sttBrowserFailed,
     activeLocalOnly,
     localOnlyForcedOff,
+    activeMicDeviceId,
+    activeMicStream,
+    switchingDevice,
+    switchMicDevice,
     start,
     stop,
     pause,

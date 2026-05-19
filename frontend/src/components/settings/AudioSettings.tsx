@@ -1,7 +1,15 @@
-import { useEffect, useState } from 'react';
-import { AlertCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, Lock, Mic, RefreshCw } from 'lucide-react';
 import { config } from '../../config';
 import { SectionProps, useSettingsContext } from './SettingsContext';
+import { useAudioDevices, deviceFriendlyName } from '../../hooks/useAudioDevices';
+import {
+  isUsbAudioDevice,
+  openMicrophoneStream,
+  setAutoPreferUsb,
+} from '../../utils/audioDevicePreference';
+import AudioMeter from '../AudioMeter';
+import MicTestButton from './MicTestButton';
 
 interface AudioDevice {
   id: string;
@@ -17,6 +25,71 @@ export default function AudioSettings(_props: SectionProps) {
     useSettingsContext();
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
+
+  // Browser-side device picker (the one the VAD engine + MediaRecorder
+  // paths actually use). Separate from the backend PipeWire list — these
+  // are two different ID spaces.
+  const {
+    devices: browserDevices,
+    activeDeviceId,
+    setActiveDevice,
+    autoPreferUsb,
+    permissionState,
+    primePermissions,
+    refresh: refreshBrowserDevices,
+    error: browserDevicesError,
+  } = useAudioDevices();
+
+  const labelsHidden = useMemo(
+    () => browserDevices.some((d) => !d.label),
+    [browserDevices],
+  );
+
+  // Hold a short-lived test stream for the VU meter, so the user can see
+  // levels while they're picking a device. We open this on demand only.
+  const [meterStream, setMeterStream] = useState<MediaStream | null>(null);
+  const [meterError, setMeterError] = useState<string | null>(null);
+  const [meterOpening, setMeterOpening] = useState<boolean>(false);
+
+  useEffect(
+    () => () => {
+      meterStream?.getTracks().forEach((t) => t.stop());
+    },
+    [meterStream],
+  );
+
+  const openMeter = async () => {
+    setMeterError(null);
+    setMeterOpening(true);
+    try {
+      // Use the active device (or system default). Best-effort: if it
+      // fails, surface the error inline.
+      const opened = await openMicrophoneStream(activeDeviceId);
+      meterStream?.getTracks().forEach((t) => t.stop());
+      setMeterStream(opened.stream);
+    } catch (e) {
+      setMeterError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMeterOpening(false);
+    }
+  };
+
+  const closeMeter = () => {
+    meterStream?.getTracks().forEach((t) => t.stop());
+    setMeterStream(null);
+  };
+
+  // Reopen the meter after a device-id change, so the user immediately
+  // hears (sees) the level for the new selection.
+  useEffect(() => {
+    if (meterStream) {
+      // Only refresh if the meter was already showing. Closing + reopening
+      // intentionally rebuilds the analyser graph in AudioMeter.
+      closeMeter();
+      void openMeter();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDeviceId]);
 
   const fetchAudioDevices = async () => {
     try {
@@ -88,120 +161,280 @@ export default function AudioSettings(_props: SectionProps) {
   };
 
   useEffect(() => {
-    fetchAudioDevices();
-  }, []);
+    if (hostCaps.local_audio) {
+      fetchAudioDevices();
+    }
+  }, [hostCaps.local_audio]);
 
-  if (!hostCaps.local_audio) return null;
+  // Browser device picker is always shown (it's the path the
+  // MediaRecorder + VAD engine actually use, regardless of host caps).
 
   return (
     <div className="space-y-6">
-      {audioDeviceError && audioDevices.length === 0 && (
-        <div className="bg-red-900/20 border border-red-800 rounded-lg p-4">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-400 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm text-red-200 font-medium">
-                Audio Device Detection Failed
+      {/* Browser device picker — primary, applies to all browser recording paths */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Mic className="h-4 w-4 text-zinc-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">
+              Browser microphone
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshBrowserDevices()}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-300 transition hover:bg-zinc-700"
+            title="Re-enumerate devices"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Refresh
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-zinc-500">
+          Used by the always-on VAD engine and in-browser recorders. Selecting a
+          device here persists across sessions on this device.
+        </p>
+
+        {labelsHidden && permissionState !== 'denied' && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+            <Lock className="mt-0.5 h-4 w-4 text-amber-300" />
+            <div className="flex-1 text-xs text-amber-100">
+              <p>
+                Device names are hidden until you grant microphone access. Click
+                below so we can show real names.
               </p>
-              <p className="text-xs text-red-300 mt-1">{audioDeviceError}</p>
               <button
-                onClick={() => {
-                  setAudioDeviceError(null);
-                  fetchAudioDevices();
-                }}
-                className="mt-2 px-3 py-1 bg-red-800 hover:bg-red-700 text-red-100 rounded text-xs transition-colors"
+                type="button"
+                onClick={() => primePermissions()}
+                className="mt-2 inline-flex items-center gap-1 rounded-md bg-amber-500/20 px-2 py-1 text-amber-100 transition hover:bg-amber-500/30"
               >
-                Retry Detection
+                Show device names
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">
-          Recording Device
-        </label>
-        <select
-          value={settings.defaultDevice}
-          onChange={(e) => {
-            const device = audioDevices.find((d) => d.id === e.target.value);
-            setSettings({
-              ...settings,
-              defaultDevice: e.target.value,
-              sampleRate: device?.sampleRates.includes(44100) ? '44100' : '48000',
-            });
-          }}
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-        >
-          {audioDevices.map((device) => (
-            <option key={device.id} value={device.id}>
-              {device.name} {device.isUSB && '(USB)'} {device.isDefault && '⭐'}
-            </option>
-          ))}
-        </select>
-        <p className="text-xs text-zinc-500 mt-1">
-          {audioDevices.find((d) => d.id === settings.defaultDevice)?.isUSB
-            ? '✅ USB microphone detected - optimal for recording'
-            : 'Built-in microphone selected'}
-        </p>
-      </div>
-
-      {settings.defaultDevice === 'hw:0,0' && (
-        <div>
-          <label className="block text-sm font-medium text-zinc-300 mb-2">
-            USB Microphone Volume
-          </label>
-          <div className="flex items-center gap-4">
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={micVolume}
-              onChange={(e) => adjustMicVolume(parseInt(e.target.value))}
-              className="flex-1 h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer"
-            />
-            <span className="text-sm text-zinc-200 w-12 text-right">
-              {micVolume}%
-            </span>
+        {permissionState === 'denied' && (
+          <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            Microphone access is blocked at the browser level. Update the site
+            permissions and refresh to pick a device.
           </div>
-          <p className="text-xs text-zinc-500 mt-1">
-            Adjust microphone input sensitivity
+        )}
+
+        {browserDevicesError && (
+          <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            {browserDevicesError}
+          </div>
+        )}
+
+        <div className="mt-4">
+          <label
+            htmlFor="browser-device"
+            className="mb-2 block text-xs font-medium text-zinc-300"
+          >
+            Preferred input device
+          </label>
+          <select
+            id="browser-device"
+            value={activeDeviceId ?? ''}
+            onChange={(e) => setActiveDevice(e.target.value || null)}
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
+          >
+            <option value="">System default (let the browser choose)</option>
+            {browserDevices.map((device, idx) => (
+              <option key={device.deviceId || `dev-${idx}`} value={device.deviceId}>
+                {deviceFriendlyName(device, idx)}
+                {isUsbAudioDevice(device) ? ' (USB)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <label className="mt-3 flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={autoPreferUsb}
+            onChange={(e) => setAutoPreferUsb(e.target.checked)}
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
+          />
+          <span className="text-xs text-zinc-300">
+            Auto-suggest switching when a USB microphone is plugged in
+          </span>
+        </label>
+
+        {/* Live VU meter for the selected device */}
+        <div className="mt-4 rounded-lg border border-zinc-800 bg-black/40 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs font-medium text-zinc-300">Live level</div>
+            {meterStream ? (
+              <button
+                type="button"
+                onClick={closeMeter}
+                className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-zinc-700"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={meterOpening}
+                onClick={openMeter}
+                className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-500/20 disabled:opacity-60"
+              >
+                {meterOpening ? 'Opening…' : 'Start'}
+              </button>
+            )}
+          </div>
+          <div className="mt-3">
+            <AudioMeter
+              stream={meterStream}
+              compact
+              showNumeric
+              ariaLabel="Microphone live level"
+            />
+          </div>
+          {meterError && (
+            <p className="mt-2 text-[11px] text-red-300">{meterError}</p>
+          )}
+          <p className="mt-2 text-[11px] text-zinc-500">
+            Tap "Start" to live-monitor the selected device. Stop closes the
+            stream — meeting recording uses a separate capture.
           </p>
         </div>
+
+        {/* Mic test (record + playback) */}
+        <div className="mt-3">
+          <MicTestButton deviceId={activeDeviceId} />
+        </div>
+      </div>
+
+      {/* Backend (PipeWire) device list — only relevant on the appliance
+          build, where local Whisper consumes the hw:X,Y device directly. */}
+      {hostCaps.local_audio && (
+        <>
+          {audioDeviceError && audioDevices.length === 0 && (
+            <div className="rounded-lg border border-red-800 bg-red-900/20 p-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="mt-0.5 h-5 w-5 text-red-400" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-red-200">
+                    Appliance Audio Device Detection Failed
+                  </p>
+                  <p className="mt-1 text-xs text-red-300">{audioDeviceError}</p>
+                  <button
+                    onClick={() => {
+                      setAudioDeviceError(null);
+                      fetchAudioDevices();
+                    }}
+                    className="mt-2 rounded bg-red-800 px-3 py-1 text-xs text-red-100 transition-colors hover:bg-red-700"
+                  >
+                    Retry Detection
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <h3 className="text-sm font-semibold text-zinc-100">
+              Appliance recording device (PipeWire)
+            </h3>
+            <p className="mt-1 text-xs text-zinc-500">
+              Used by the on-appliance Whisper pipeline. Browser recording
+              ignores this — pick the browser mic above.
+            </p>
+
+            <div className="mt-3">
+              <label className="mb-2 block text-sm font-medium text-zinc-300">
+                Recording Device
+              </label>
+              <select
+                value={settings.defaultDevice}
+                onChange={(e) => {
+                  const device = audioDevices.find((d) => d.id === e.target.value);
+                  setSettings({
+                    ...settings,
+                    defaultDevice: e.target.value,
+                    sampleRate: device?.sampleRates.includes(44100)
+                      ? '44100'
+                      : '48000',
+                  });
+                }}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
+              >
+                {audioDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name} {device.isUSB && '(USB)'} {device.isDefault && '⭐'}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-zinc-500">
+                {audioDevices.find((d) => d.id === settings.defaultDevice)?.isUSB
+                  ? '✅ USB microphone detected - optimal for recording'
+                  : 'Built-in microphone selected'}
+              </p>
+            </div>
+
+            {settings.defaultDevice === 'hw:0,0' && (
+              <div className="mt-4">
+                <label className="mb-2 block text-sm font-medium text-zinc-300">
+                  USB Microphone Volume
+                </label>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={micVolume}
+                    onChange={(e) => adjustMicVolume(parseInt(e.target.value))}
+                    className="h-2 flex-1 cursor-pointer appearance-none rounded-lg bg-zinc-700"
+                  />
+                  <span className="w-12 text-right text-sm text-zinc-200">
+                    {micVolume}%
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Adjust microphone input sensitivity
+                </p>
+              </div>
+            )}
+
+            <div className="mt-4">
+              <label className="mb-2 block text-sm font-medium text-zinc-300">
+                Sample Rate
+              </label>
+              <select
+                value={settings.sampleRate}
+                onChange={(e) =>
+                  setSettings({ ...settings, sampleRate: e.target.value })
+                }
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
+              >
+                {audioDevices
+                  .find((d) => d.id === settings.defaultDevice)
+                  ?.sampleRates.map((rate) => (
+                    <option key={rate} value={rate}>
+                      {rate / 1000} kHz {rate === 44100 && '(USB Mic Native)'}
+                    </option>
+                  )) || [
+                  <option key="44100" value="44100">
+                    44.1 kHz
+                  </option>,
+                  <option key="48000" value="48000">
+                    48 kHz
+                  </option>,
+                ]}
+              </select>
+              <p className="mt-1 text-xs text-zinc-500">
+                Recording at native rate avoids resampling and preserves quality
+              </p>
+            </div>
+          </div>
+        </>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">
-          Sample Rate
-        </label>
-        <select
-          value={settings.sampleRate}
-          onChange={(e) => setSettings({ ...settings, sampleRate: e.target.value })}
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-        >
-          {audioDevices
-            .find((d) => d.id === settings.defaultDevice)
-            ?.sampleRates.map((rate) => (
-              <option key={rate} value={rate}>
-                {rate / 1000} kHz {rate === 44100 && '(USB Mic Native)'}
-              </option>
-            )) || [
-            <option key="44100" value="44100">
-              44.1 kHz
-            </option>,
-            <option key="48000" value="48000">
-              48 kHz
-            </option>,
-          ]}
-        </select>
-        <p className="text-xs text-zinc-500 mt-1">
-          Recording at native rate avoids resampling and preserves quality
-        </p>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">
+        <label className="mb-2 block text-sm font-medium text-zinc-300">
           Transcription Model
         </label>
         <select
@@ -209,7 +442,7 @@ export default function AudioSettings(_props: SectionProps) {
           onChange={(e) =>
             setSettings({ ...settings, transcriptionModel: e.target.value })
           }
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
         >
           <option value="base">Whisper Base (Fastest, ~39MB)</option>
           <option value="small">Whisper Small (~244MB)</option>
@@ -218,7 +451,7 @@ export default function AudioSettings(_props: SectionProps) {
           <option value="large-v2">Whisper Large-v2 (~3GB)</option>
           <option value="large-v3">Whisper Large-v3 (Best, ~3GB) ⭐</option>
         </select>
-        <p className="text-xs text-zinc-500 mt-1">
+        <p className="mt-1 text-xs text-zinc-500">
           Large-v3 with NPU acceleration: 220x faster than CPU
         </p>
       </div>
@@ -231,7 +464,7 @@ export default function AudioSettings(_props: SectionProps) {
             onChange={(e) =>
               setSettings({ ...settings, liveTranscription: e.target.checked })
             }
-            className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
           />
           <span className="text-sm text-zinc-300">
             Enable live transcription during recording
@@ -245,7 +478,7 @@ export default function AudioSettings(_props: SectionProps) {
             onChange={(e) =>
               setSettings({ ...settings, vadEnabled: e.target.checked })
             }
-            className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
           />
           <span className="text-sm text-zinc-300">
             Voice Activity Detection (removes silence)
@@ -254,16 +487,19 @@ export default function AudioSettings(_props: SectionProps) {
 
         {settings.vadEnabled && (
           <div className="ml-7">
-            <label className="block text-xs text-zinc-400 mb-1">
+            <label className="mb-1 block text-xs text-zinc-400">
               VAD Threshold (0.0 - 1.0)
             </label>
             <input
               type="number"
               value={settings.vadThreshold}
               onChange={(e) =>
-                setSettings({ ...settings, vadThreshold: parseFloat(e.target.value) })
+                setSettings({
+                  ...settings,
+                  vadThreshold: parseFloat(e.target.value),
+                })
               }
-              className="w-32 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
+              className="w-32 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-200"
               min="0"
               max="1"
               step="0.05"

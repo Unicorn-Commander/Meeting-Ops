@@ -1,4 +1,9 @@
 import { MicVAD } from '@ricky0123/vad-web';
+import {
+  buildAudioConstraints,
+  getPreferredDeviceId,
+  openMicrophoneStream,
+} from './audioDevicePreference';
 
 type WakeLockSentinelLike = {
   release: () => Promise<void>;
@@ -18,6 +23,28 @@ export interface VadAudioChunk {
 export interface AlwaysOnVadEngineOptions {
   silenceThresholdMs?: number;
   getElapsedSeconds: () => number;
+  /**
+   * Returns the deviceId to use for the next `getUserMedia` call. The
+   * engine reads this at start time and every time a device hot-swap is
+   * requested. Returning `null` means "system default".
+   *
+   * If omitted, falls back to the persisted preference in localStorage.
+   */
+  getPreferredDeviceId?: () => string | null;
+  /**
+   * Called after a successful hot-swap so the parent UI can sync its
+   * "active device" indicator. Argument is the deviceId actually opened
+   * (may be `null` if the requested device was unavailable and the
+   * engine fell back to the system default).
+   */
+  onDeviceChanged?: (deviceId: string | null) => void;
+  /**
+   * Called whenever the engine opens (or re-opens) a mic stream. Useful
+   * for live VU meters etc. — gets the raw `MediaStream` so the parent
+   * can attach its own AnalyserNode without re-prompting permission.
+   * Parent must NOT stop the tracks; the engine owns the lifecycle.
+   */
+  onStreamChanged?: (stream: MediaStream | null) => void;
   onSpeechStart?: () => void;
   onSpeechEnd?: (chunk: VadAudioChunk) => Promise<void> | void;
   onMisfire?: () => void;
@@ -108,9 +135,93 @@ export class AlwaysOnVadEngine {
   private silenceTimer: number | null = null;
   private running = false;
   private thresholdMs: number;
+  // Track the current stream so hot-swap can stop the old tracks and the
+  // VU meter consumer can attach to the live one.
+  private currentStream: MediaStream | null = null;
+  private currentDeviceId: string | null = null;
 
   constructor(private readonly options: AlwaysOnVadEngineOptions) {
     this.thresholdMs = options.silenceThresholdMs ?? DEFAULT_SILENCE_THRESHOLD_MS;
+  }
+
+  /** The deviceId we're capturing from RIGHT NOW (may be null = default). */
+  getActiveDeviceId(): string | null {
+    return this.currentDeviceId;
+  }
+
+  /** The live MediaStream — for VU meters, etc. Null when not recording. */
+  getActiveStream(): MediaStream | null {
+    return this.currentStream;
+  }
+
+  /**
+   * Try to switch the active capture device mid-session. Returns the
+   * deviceId actually opened (may differ from the request if a fallback
+   * fired). If the engine isn't running, this is a no-op — the next
+   * start() will pick up the new preference via getPreferredDeviceId.
+   *
+   * The flow is "pause → stop old stream → reinit VAD with new stream →
+   * resume". MicVAD doesn't expose a public stream-swap API, so we
+   * destroy and rebuild. Expected gap: a few hundred ms during which
+   * speech is dropped. We surface the gap via the running flag.
+   */
+  async switchDevice(deviceId: string | null): Promise<string | null> {
+    if (!this.running || !this.vad) {
+      // Engine not active — just persist nothing here, the caller has
+      // already updated their preference. Next start() will read it.
+      return deviceId;
+    }
+
+    // Pause and tear down the existing VAD instance entirely. MicVAD
+    // captures the stream via its `getStream` callback at .new() time;
+    // there's no public switch-stream method, so we recreate.
+    try {
+      await this.vad.pause();
+    } catch {
+      // ignore
+    }
+    try {
+      await this.vad.destroy();
+    } catch {
+      // ignore
+    }
+    this.vad = null;
+    this.stopCurrentStream();
+
+    // Open the new stream. Build options snapshot the new deviceId.
+    let opened: { stream: MediaStream; deviceId: string | null };
+    try {
+      opened = await openMicrophoneStream(deviceId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.options.onError?.(`Failed to switch microphone: ${message}`);
+      // We've blown away the old engine. Try to recover by falling back
+      // to system default.
+      try {
+        opened = await openMicrophoneStream(null);
+      } catch (fallbackErr) {
+        const fmsg =
+          fallbackErr instanceof Error
+            ? fallbackErr.message
+            : String(fallbackErr);
+        this.options.onError?.(
+          `No microphone available after fallback: ${fmsg}`,
+        );
+        this.running = false;
+        return null;
+      }
+    }
+
+    this.currentStream = opened.stream;
+    this.currentDeviceId = opened.deviceId;
+    this.options.onStreamChanged?.(opened.stream);
+    this.options.onDeviceChanged?.(opened.deviceId);
+
+    const newVad = await this.initVadFromStream(opened.stream);
+    if (newVad) {
+      await newVad.start();
+    }
+    return opened.deviceId;
   }
 
   async start(): Promise<void> {
@@ -120,50 +231,92 @@ export class AlwaysOnVadEngine {
     await acquireWakeLock();
 
     if (!this.vad) {
-      this.vad = await MicVAD.new({
-        model: 'v5',
-        startOnLoad: false,
-        baseAssetPath: VAD_ASSET_BASE,
-        onnxWASMBasePath: ONNX_WASM_BASE,
-        getStream: async () => navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
-        }),
-        onSpeechStart: () => {
-          this.clearSilenceTimer();
-          this.options.onSpeechStart?.();
-        },
-        onSpeechEnd: async (audio: Float32Array) => {
-          const durationSeconds = audio.length / SAMPLE_RATE;
-          const elapsedSeconds = Math.max(
-            0,
-            this.options.getElapsedSeconds() - durationSeconds,
+      // Open the stream ourselves so we control its lifecycle. The
+      // MicVAD `getStream` callback returns the stream we already
+      // opened — preventing it from invoking getUserMedia twice (once
+      // for our analyser, once for the model).
+      const preferredId =
+        this.options.getPreferredDeviceId?.() ?? getPreferredDeviceId();
+      try {
+        const opened = await openMicrophoneStream(preferredId);
+        this.currentStream = opened.stream;
+        this.currentDeviceId = opened.deviceId;
+        if (opened.fellBack) {
+          this.options.onError?.(
+            'Preferred microphone unavailable. Recording with system default.',
           );
-          try {
-            await this.options.onSpeechEnd?.({
-              blob: encodeWav(audio),
-              durationSeconds,
-              elapsedSeconds,
-            });
-          } catch (err) {
-            this.options.onError?.(err instanceof Error ? err.message : String(err));
-          }
-          this.scheduleSilenceTimer();
-        },
-        onVADMisfire: () => {
-          this.options.onMisfire?.();
-          this.scheduleSilenceTimer();
-        },
-        onSpeechRealStart: () => undefined,
-        onFrameProcessed: () => undefined,
-      });
+        }
+        this.options.onStreamChanged?.(opened.stream);
+        this.options.onDeviceChanged?.(opened.deviceId);
+      } catch (err) {
+        this.running = false;
+        wakeLockRecording = false;
+        releaseWakeLock();
+        throw err;
+      }
+      await this.initVadFromStream(this.currentStream);
     }
 
-    await this.vad.start();
+    await this.vad?.start();
+  }
+
+  private async initVadFromStream(
+    stream: MediaStream | null,
+  ): Promise<MicVAD | null> {
+    if (!stream) return null;
+    this.vad = await MicVAD.new({
+      model: 'v5',
+      startOnLoad: false,
+      baseAssetPath: VAD_ASSET_BASE,
+      onnxWASMBasePath: ONNX_WASM_BASE,
+      // Hand back the stream we already opened. MicVAD will attach its
+      // own analyser/worklet onto it; we keep the reference so the parent
+      // UI can attach a VU meter to the same stream without prompting
+      // for permission a second time.
+      getStream: async () => stream,
+      onSpeechStart: () => {
+        this.clearSilenceTimer();
+        this.options.onSpeechStart?.();
+      },
+      onSpeechEnd: async (audio: Float32Array) => {
+        const durationSeconds = audio.length / SAMPLE_RATE;
+        const elapsedSeconds = Math.max(
+          0,
+          this.options.getElapsedSeconds() - durationSeconds,
+        );
+        try {
+          await this.options.onSpeechEnd?.({
+            blob: encodeWav(audio),
+            durationSeconds,
+            elapsedSeconds,
+          });
+        } catch (err) {
+          this.options.onError?.(err instanceof Error ? err.message : String(err));
+        }
+        this.scheduleSilenceTimer();
+      },
+      onVADMisfire: () => {
+        this.options.onMisfire?.();
+        this.scheduleSilenceTimer();
+      },
+      onSpeechRealStart: () => undefined,
+      onFrameProcessed: () => undefined,
+    });
+    return this.vad;
+  }
+
+  private stopCurrentStream(): void {
+    const s = this.currentStream;
+    this.currentStream = null;
+    this.currentDeviceId = null;
+    if (s) {
+      try {
+        s.getTracks().forEach((t) => t.stop());
+      } catch {
+        // ignore
+      }
+    }
+    this.options.onStreamChanged?.(null);
   }
 
   async pause(): Promise<void> {
@@ -186,6 +339,7 @@ export class AlwaysOnVadEngine {
     wakeLockRecording = false;
     await this.vad?.destroy();
     this.vad = null;
+    this.stopCurrentStream();
     releaseWakeLock();
   }
 
@@ -205,6 +359,10 @@ export class AlwaysOnVadEngine {
     }
   }
 }
+
+// Re-export for callers that want to build constraints without importing
+// the helper module directly.
+export { buildAudioConstraints };
 
 export function createVadEngine(options: AlwaysOnVadEngineOptions): AlwaysOnVadEngine {
   return new AlwaysOnVadEngine(options);
