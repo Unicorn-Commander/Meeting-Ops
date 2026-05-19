@@ -74,15 +74,15 @@ export default function SettingsEnhanced() {
             transcriptionModel:
               backendSettings.transcriptionModel || prev.transcriptionModel,
             liveTranscription: backendSettings.enableLiveAI !== false,
-            vadEnabled: backendSettings.enableVAD || prev.vadEnabled,
-            vadThreshold:
-              backendSettings.vadThreshold * 1000 || prev.vadThreshold,
-            enableAI: backendSettings.enableLiveAI || prev.enableAI,
+            vadEnabled: backendSettings.enableVAD ?? prev.vadEnabled,
+            // vadThreshold is a 0.0-1.0 sensitivity float (matches backend storage)
+            vadThreshold: backendSettings.vadThreshold ?? prev.vadThreshold,
+            enableAI: backendSettings.enableLiveAI ?? prev.enableAI,
             summaryFormat: prev.summaryFormat,
             autoGenerateActions:
-              backendSettings.enableAutoSummary || prev.autoGenerateActions,
+              backendSettings.enableAutoSummary ?? prev.autoGenerateActions,
             speakerDiarization:
-              backendSettings.enableSpeakerDiarization || prev.speakerDiarization,
+              backendSettings.enableSpeakerDiarization ?? prev.speakerDiarization,
             maxSpeakers: backendSettings.maxSpeakers || prev.maxSpeakers,
             llmModel: backendSettings.aiModel || prev.llmModel,
             llmProvider: backendSettings.aiProvider || prev.llmProvider,
@@ -94,7 +94,7 @@ export default function SettingsEnhanced() {
           localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(mapped));
           return mapped;
         });
-        setMicVolume(backendSettings.microphoneVolume || 75);
+        setMicVolume(backendSettings.microphoneVolume ?? 75);
       } catch (error) {
         console.log('Backend settings not available, using local storage');
       }
@@ -117,7 +117,7 @@ export default function SettingsEnhanced() {
       transcriptionModel: settings.transcriptionModel,
       enableLiveAI: settings.liveTranscription,
       enableVAD: settings.vadEnabled,
-      vadThreshold: settings.vadThreshold / 1000,
+      vadThreshold: settings.vadThreshold,
       enableSpeakerDiarization: settings.speakerDiarization,
       maxSpeakers: settings.maxSpeakers,
       aiModel: settings.llmModel,

@@ -255,18 +255,18 @@ export default function AudioSettings(_props: SectionProps) {
         {settings.vadEnabled && (
           <div className="ml-7">
             <label className="block text-xs text-zinc-400 mb-1">
-              VAD Threshold (ms)
+              VAD Threshold (0.0 - 1.0)
             </label>
             <input
               type="number"
               value={settings.vadThreshold}
               onChange={(e) =>
-                setSettings({ ...settings, vadThreshold: parseInt(e.target.value) })
+                setSettings({ ...settings, vadThreshold: parseFloat(e.target.value) })
               }
               className="w-32 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
-              min="100"
-              max="2000"
-              step="100"
+              min="0"
+              max="1"
+              step="0.05"
             />
           </div>
         )}

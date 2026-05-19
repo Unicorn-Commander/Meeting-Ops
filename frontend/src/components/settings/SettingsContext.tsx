@@ -95,7 +95,7 @@ export const DEFAULT_SETTINGS: SettingsState = {
   transcriptionModel: 'large-v3',
   liveTranscription: true,
   vadEnabled: true,
-  vadThreshold: 500,
+  vadThreshold: 0.5,
   chunkDuration: 10,
 
   enableAI: true,
@@ -149,7 +149,12 @@ export function loadStoredSettings(): SettingsState {
   const saved = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
   if (saved) {
     try {
-      return JSON.parse(saved);
+      const parsed = JSON.parse(saved);
+      // Migrate legacy ms-scaled vadThreshold (>1) to backend 0.0-1.0 unit.
+      if (typeof parsed.vadThreshold === 'number' && parsed.vadThreshold > 1) {
+        parsed.vadThreshold = parsed.vadThreshold / 1000;
+      }
+      return parsed;
     } catch (e) {
       console.error('Failed to parse saved settings:', e);
     }
