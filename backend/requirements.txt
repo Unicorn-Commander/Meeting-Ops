@@ -68,6 +68,10 @@ pytz==2024.2
 
 # Vector Database (for semantic search)
 qdrant-client==1.12.1
+# Local CPU embedding + BM25 for SemanticSearchService — BAAI/bge-small-en-v1.5
+# (384-dim) and Qdrant/bm25. Needed for the dashboard ask bar's search_meetings
+# tool to use real semantic ranking instead of SQL ILIKE fallback.
+fastembed==0.8.0
 
 # Monitoring & Logging
 prometheus-client==0.21.0

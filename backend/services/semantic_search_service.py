@@ -17,9 +17,18 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Qdrant connection
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6335"))
+# Qdrant connection. Production deploys set QDRANT_URL=http://host:port; older
+# code paths set QDRANT_HOST + QDRANT_PORT separately. Honor both, prefer
+# QDRANT_URL since it's what the platform-wide compose env uses.
+def _resolve_qdrant():
+    url = os.getenv("QDRANT_URL")
+    if url:
+        from urllib.parse import urlparse
+        u = urlparse(url)
+        return (u.hostname or "localhost"), (u.port or 6333)
+    return os.getenv("QDRANT_HOST", "localhost"), int(os.getenv("QDRANT_PORT", "6333"))
+
+QDRANT_HOST, QDRANT_PORT = _resolve_qdrant()
 COLLECTION_NAME = "meeting_transcripts"
 
 # Embedding models
@@ -58,14 +67,18 @@ class SemanticSearchService:
         self._initialized = False
 
     def _get_client(self):
-        """Lazy-init Qdrant client."""
+        """Lazy-init Qdrant client. check_compatibility is a 1.13+ kwarg;
+        the running image has 1.12.x so we pass it conditionally."""
         if self._client is None:
             from qdrant_client import QdrantClient
-            self._client = QdrantClient(
-                host=QDRANT_HOST,
-                port=QDRANT_PORT,
-                check_compatibility=False,
-            )
+            try:
+                self._client = QdrantClient(
+                    host=QDRANT_HOST,
+                    port=QDRANT_PORT,
+                    check_compatibility=False,
+                )
+            except TypeError:
+                self._client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
         return self._client
 
     def _get_dense_embedder(self):
