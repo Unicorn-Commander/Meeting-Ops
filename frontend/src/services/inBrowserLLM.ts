@@ -9,6 +9,64 @@ import { config } from '../config';
 export const IN_BROWSER_LLM_MODEL_KEY = 'meetingops.inBrowserLLM.model.v1';
 export const DEFAULT_MODEL_ID = 'qwen2.5-1.5b-instruct';
 
+export const LIVE_SUMMARY_AUTO_KEY = 'meetingops.liveSummary.autoConfig.v1';
+
+export type LiveSummaryThreshold =
+  | 'words_200'
+  | 'words_500'
+  | 'minute_1'
+  | 'minutes_5';
+
+export interface LiveSummaryAutoConfig {
+  enabled: boolean;
+  threshold: LiveSummaryThreshold;
+}
+
+export const DEFAULT_AUTO_CONFIG: LiveSummaryAutoConfig = {
+  enabled: true,
+  threshold: 'words_500',
+};
+
+export const LIVE_SUMMARY_THRESHOLDS: Array<{
+  id: LiveSummaryThreshold;
+  label: string;
+  kind: 'words' | 'time';
+  value: number;
+}> = [
+  { id: 'words_200', label: 'Every 200 words', kind: 'words', value: 200 },
+  { id: 'words_500', label: 'Every 500 words', kind: 'words', value: 500 },
+  { id: 'minute_1', label: 'Every 1 minute', kind: 'time', value: 60_000 },
+  { id: 'minutes_5', label: 'Every 5 minutes', kind: 'time', value: 300_000 },
+];
+
+export function getLiveSummaryAutoConfig(): LiveSummaryAutoConfig {
+  if (typeof window === 'undefined') return DEFAULT_AUTO_CONFIG;
+  const raw = window.localStorage.getItem(LIVE_SUMMARY_AUTO_KEY);
+  if (!raw) return DEFAULT_AUTO_CONFIG;
+  try {
+    const parsed = JSON.parse(raw) as Partial<LiveSummaryAutoConfig>;
+    const valid = LIVE_SUMMARY_THRESHOLDS.some((t) => t.id === parsed.threshold);
+    return {
+      enabled: parsed.enabled ?? DEFAULT_AUTO_CONFIG.enabled,
+      threshold: valid ? (parsed.threshold as LiveSummaryThreshold) : DEFAULT_AUTO_CONFIG.threshold,
+    };
+  } catch {
+    return DEFAULT_AUTO_CONFIG;
+  }
+}
+
+export function setLiveSummaryAutoConfig(config: LiveSummaryAutoConfig): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(LIVE_SUMMARY_AUTO_KEY, JSON.stringify(config));
+  try {
+    window.dispatchEvent(
+      new CustomEvent<LiveSummaryAutoConfig>('meetingops:live-summary-auto-config', {
+        detail: config,
+      }),
+    );
+  } catch { /* noop */ }
+}
+
 export interface SummaryParagraph {
   text: string;
   timestamp: string;
@@ -39,6 +97,8 @@ export interface SummarizeOptions {
   signal?: AbortSignal;
   onToken?: (token: string) => void;
   onProgress?: (report: InitProgressReport) => void;
+  previousSummary?: string;
+  sessionId?: string;
 }
 
 export interface PreloadOptions {
@@ -60,50 +120,19 @@ const CURATED_MODELS: Array<{
   actualModelId: string;
   label: string;
 }> = [
-  // Order by quality/size, biggest-newest first. Entries whose actualModelId
-  // isn't published by web-llm are silently filtered out at runtime (see
-  // records.find check below), so we stage future variants here optimistically —
-  // they appear in the picker the moment web-llm ships them.
-  //
-  // Verified against mlc-ai/web-llm prebuiltAppConfig 2026-05-19:
-  // — Qwen3.6 + Gemma4 are NOT yet compiled for web-llm (open feature requests).
-  //   Left in the list so they auto-appear when MLC publishes.
-  // — Qwen 3.5 family IS available (0.8B/2B/4B/9B), newest series in browser today.
-  // — Phi-4-mini IS available, very strong reasoning for its size.
+  // Newest first. Entries whose actualModelId isn't published by web-llm
+  // are silently filtered out at runtime (see records.find check below),
+  // so we can stage future variants here optimistically — they appear in
+  // the picker the moment web-llm ships them.
   {
     id: 'gemma-4-e2b-it',
     actualModelId: 'gemma4-E2B-it-q4f16_1-MLC',
-    label: 'Gemma 4 E2B (when published)',
+    label: 'Gemma 4 E2B (text mode)',
   },
   {
     id: 'qwen3.6-1.7b',
     actualModelId: 'Qwen3.6-1.7B-q4f16_1-MLC',
-    label: 'Qwen 3.6 1.7B (when published)',
-  },
-  {
-    id: 'qwen3.5-9b',
-    actualModelId: 'Qwen3.5-9B-q4f16_1-MLC',
-    label: 'Qwen 3.5 9B (best quality, ~6GB)',
-  },
-  {
-    id: 'phi-4-mini-instruct',
-    actualModelId: 'Phi-4-mini-instruct-q4f16_1-MLC',
-    label: 'Phi 4 Mini Instruct (strong reasoning)',
-  },
-  {
-    id: 'qwen3.5-4b',
-    actualModelId: 'Qwen3.5-4B-q4f16_1-MLC',
-    label: 'Qwen 3.5 4B (recommended)',
-  },
-  {
-    id: 'gemma-3-4b-it',
-    actualModelId: 'gemma-3-4b-it-q4f16_1-MLC',
-    label: 'Gemma 3 4B IT',
-  },
-  {
-    id: 'qwen3.5-2b',
-    actualModelId: 'Qwen3.5-2B-q4f16_1-MLC',
-    label: 'Qwen 3.5 2B',
+    label: 'Qwen 3.6 1.7B',
   },
   {
     id: 'qwen3-1.7b',
@@ -111,14 +140,9 @@ const CURATED_MODELS: Array<{
     label: 'Qwen 3 1.7B',
   },
   {
-    id: 'qwen3.5-0.8b',
-    actualModelId: 'Qwen3.5-0.8B-q4f16_1-MLC',
-    label: 'Qwen 3.5 0.8B (fast)',
-  },
-  {
     id: 'qwen3-0.6b',
     actualModelId: 'Qwen3-0.6B-q4f16_1-MLC',
-    label: 'Qwen 3 0.6B (smallest)',
+    label: 'Qwen 3 0.6B (smallest, fastest)',
   },
   {
     id: 'gemma-3-1b-it',
@@ -128,12 +152,12 @@ const CURATED_MODELS: Array<{
   {
     id: 'qwen2.5-1.5b-instruct',
     actualModelId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
-    label: 'Qwen 2.5 1.5B Instruct (default)',
+    label: 'Qwen 2.5 1.5B Instruct',
   },
   {
     id: 'phi-3.5-mini-instruct',
     actualModelId: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
-    label: 'Phi 3.5 Mini Instruct',
+    label: 'Phi 3.5 Mini Instruct (best quality)',
   },
 ];
 
@@ -270,6 +294,14 @@ export async function refreshAvailableModels(): Promise<InBrowserModelOption[]> 
   return getAvailableModels();
 }
 
+export function getModelLabel(modelId: string): string {
+  if (!modelId) return 'Unknown';
+  if (modelId === 'server') return 'Server Qwen 3.6';
+  const option = getAvailableModels().find((item) => item.id === modelId);
+  if (option) return option.label;
+  return displayName(modelId);
+}
+
 export function resolveActualModelId(modelId: string): string {
   if (modelId === 'server') return 'server';
   const option = getAvailableModels().find((item) => item.id === modelId);
@@ -329,23 +361,89 @@ async function* summarizeWithServer(
   transcript: string,
   opts?: SummarizeOptions,
 ): AsyncIterable<string> {
-  const response = await fetch(`${config.apiUrl}/api/recordings/summarize`, {
+  // The slice endpoint streams SSE tokens; reuse it for both fresh and
+  // continuing slices so the user sees tokens land in real time.
+  const response = await fetch(`${config.apiUrl}/api/recordings/summarize-slice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript, model_id: 'server' }),
+    body: JSON.stringify({
+      transcript,
+      previous_summary: opts?.previousSummary || undefined,
+      session_id: opts?.sessionId || undefined,
+    }),
     signal: opts?.signal,
   });
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(detail || 'Server-side summary failed.');
   }
-  const data = await response.json();
-  const text = String(data.summary || '').trim();
-  if (text) {
-    opts?.onToken?.(text);
-    yield text;
+  if (!response.body) {
+    throw new Error('Server stream returned an empty body.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      if (opts?.signal?.aborted) break;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+      for (const event of events) {
+        const line = event.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+        const payload = line.slice(6).trim();
+        if (!payload) continue;
+        try {
+          const parsed = JSON.parse(payload);
+          if (parsed.token) {
+            opts?.onToken?.(parsed.token);
+            yield parsed.token as string;
+          }
+          if (parsed.error) {
+            throw new Error(String(parsed.error));
+          }
+          if (parsed.done) {
+            return;
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message) throw err;
+        }
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* noop */ }
   }
 }
+
+function buildUserPrompt(transcript: string, previousSummary?: string): string {
+  const tail = transcript.slice(-50000);
+  if (previousSummary && previousSummary.trim()) {
+    return [
+      'Previous running summary:',
+      previousSummary.trim(),
+      '',
+      'New transcript since that summary (most recent at the bottom):',
+      tail,
+    ].join('\n');
+  }
+  return [
+    'Transcript so far (most recent at the bottom):',
+    tail,
+  ].join('\n');
+}
+
+const SLICE_SYSTEM_PROMPT =
+  'You are a live meeting summarizer. The user is currently in a meeting and wants a running summary that updates as new conversation happens. Given the transcript so far and the previous summary, produce an updated summary that:\n' +
+  '- Leads with what is NEW since the previous summary\n' +
+  '- Preserves key context, decisions, and action items from before\n' +
+  '- Stays under 200 words\n' +
+  '- Reads naturally, like notes a thoughtful attendee would take\n\n' +
+  'Do not list speakers verbatim. Do not repeat the previous summary word-for-word.';
 
 export class WebLLMSummarizer implements Summarizer {
   async *summarize(
@@ -375,19 +473,10 @@ export class WebLLMSummarizer implements Summarizer {
         model: actualModelId,
         stream: true,
         temperature: 0.25,
-        max_tokens: 900,
+        max_tokens: 600,
         messages: [
-          {
-            role: 'system',
-            content:
-              'You summarize live meeting transcripts. Use only the transcript. Keep the answer concise and update-friendly.',
-          },
-          {
-            role: 'user',
-            content:
-              'Write a rolling summary with current gist, decisions, action items, and open questions.\n\nTranscript:\n' +
-              transcript.slice(-50000),
-          },
+          { role: 'system', content: SLICE_SYSTEM_PROMPT },
+          { role: 'user', content: buildUserPrompt(transcript, opts?.previousSummary) },
         ],
       } as any);
 

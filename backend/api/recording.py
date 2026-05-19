@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -42,6 +43,39 @@ class ServerSummaryRequest(BaseModel):
     transcript: str = Field(min_length=1, max_length=250000)
     model_id: Optional[str] = None
     session_id: Optional[str] = None
+
+
+class SummarizeSliceRequest(BaseModel):
+    transcript: str = Field(min_length=1, max_length=250000)
+    previous_summary: Optional[str] = Field(default=None, max_length=20000)
+    session_id: Optional[str] = None
+
+
+SLICE_SYSTEM_PROMPT = (
+    "You are a live meeting summarizer. The user is currently in a meeting and "
+    "wants a running summary that updates as new conversation happens. Given the "
+    "transcript so far and the previous summary, produce an updated summary that:\n"
+    "- Leads with what is NEW since the previous summary\n"
+    "- Preserves key context, decisions, and action items from before\n"
+    "- Stays under 200 words\n"
+    "- Reads naturally, like notes a thoughtful attendee would take\n\n"
+    "Do not list speakers verbatim. Do not repeat the previous summary word-for-word."
+)
+
+
+def _slice_user_prompt(transcript: str, previous_summary: Optional[str]) -> str:
+    tail = transcript[-60000:]
+    if previous_summary and previous_summary.strip():
+        return (
+            "Previous running summary:\n"
+            f"{previous_summary.strip()}\n\n"
+            "New transcript since that summary (most recent at the bottom):\n"
+            f"{tail}"
+        )
+    return (
+        "Transcript so far (most recent at the bottom):\n"
+        f"{tail}"
+    )
 
 
 def _now() -> datetime:
@@ -540,3 +574,69 @@ async def summarize_with_server_llm(
         "model": getattr(llm, "model", None),
         "provider": llm.__class__.__name__,
     }
+
+
+@router.post("/summarize-slice")
+async def summarize_slice(
+    request: SummarizeSliceRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Stream a single Granola-style live summary slice via SSE.
+
+    Used by the always-on live summary feature when the user has picked
+    'Server' as their in-browser AI model (or when WebGPU is unavailable).
+    """
+    transcript = request.transcript.strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Transcript is required.")
+
+    try:
+        from services.providers.registry import get_provider_registry
+
+        registry = get_provider_registry(db)
+        llm = registry.get_llm(active_org.organization.id, task="quality")
+    except Exception as exc:
+        logger.exception("Failed to resolve LLM provider for live slice summary")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    user_prompt = _slice_user_prompt(transcript, request.previous_summary)
+    session_id = request.session_id or ""
+
+    async def event_stream():
+        full = ""
+        chunks = 0
+        try:
+            async for token in llm.chat_stream(
+                system_prompt=SLICE_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                max_tokens=600,
+                temperature=0.3,
+            ):
+                if not token:
+                    continue
+                full += token
+                chunks += 1
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Live slice summary stream failed (session=%s)", session_id)
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            return
+
+        yield (
+            "data: "
+            + json.dumps({
+                "done": True,
+                "summary": full,
+                "chunks": chunks,
+                "model": getattr(llm, "model", None),
+                "provider": llm.__class__.__name__,
+                "session_id": session_id or None,
+            })
+            + "\n\n"
+        )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

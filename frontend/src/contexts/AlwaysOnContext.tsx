@@ -12,8 +12,12 @@ import { config } from '../config';
 import { useOrg } from './OrgContext';
 import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk } from '../utils/vadEngine';
 import {
+  getLiveSummaryAutoConfig,
+  getModelLabel,
   getStoredModelId,
   inBrowserLLM,
+  LIVE_SUMMARY_THRESHOLDS,
+  type LiveSummaryAutoConfig,
   type SummaryParagraph,
 } from '../services/inBrowserLLM';
 
@@ -29,10 +33,50 @@ export interface LiveTranscriptSegment {
   timestamp: string;
 }
 
+export interface AlwaysOnSummarySlice {
+  id: string;
+  text: string;
+  createdAt: string;
+  transcriptStart: number;
+  transcriptEnd: number;
+  model: string;
+  modelLabel: string;
+  durationMs: number;
+}
+
 export interface AlwaysOnSummary {
+  slices: AlwaysOnSummarySlice[];
+  currentDraft: string;
+  lastWordCountAtSummary: number;
+  /** Latest slice text, kept for backward compatibility with older callers. */
   text: string;
   paragraphs: SummaryParagraph[];
   updatedAt?: string;
+}
+
+const EMPTY_SUMMARY: AlwaysOnSummary = {
+  slices: [],
+  currentDraft: '',
+  lastWordCountAtSummary: 0,
+  text: '',
+  paragraphs: [],
+};
+
+function uuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `slice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function countWords(text: string): number {
+  if (!text) return 0;
+  const matches = text.trim().match(/\S+/g);
+  return matches ? matches.length : 0;
+}
+
+function thresholdSpec(threshold: LiveSummaryAutoConfig['threshold']) {
+  return LIVE_SUMMARY_THRESHOLDS.find((t) => t.id === threshold) ?? LIVE_SUMMARY_THRESHOLDS[1];
 }
 
 export interface AlwaysOnContextValue {
@@ -48,6 +92,8 @@ export interface AlwaysOnContextValue {
   sessionsCompleted: number;
   summarizing: boolean;
   modelLoadProgress: number | null;
+  autoConfig: LiveSummaryAutoConfig;
+  transcriptWordCount: number;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
@@ -92,8 +138,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [chunksUploaded, setChunksUploaded] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [summary, setSummary] = useState<AlwaysOnSummary>({ text: '', paragraphs: [] });
+  const [summary, setSummary] = useState<AlwaysOnSummary>(EMPTY_SUMMARY);
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptSegment[]>([]);
+  const [autoConfig, setAutoConfig] = useState<LiveSummaryAutoConfig>(() => getLiveSummaryAutoConfig());
   const [error, setError] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Idle');
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
@@ -108,10 +155,31 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const splitInFlightRef = useRef(false);
   const summarizeAbortRef = useRef<AbortController | null>(null);
   const transcriptSocketRef = useRef<WebSocket | null>(null);
+  const autoDebounceRef = useRef<number | null>(null);
+  const lastAutoFireRef = useRef<number>(Date.now());
+  const summarizingRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<LiveSummaryAutoConfig>).detail;
+      if (detail) setAutoConfig(detail);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'meetingops.liveSummary.autoConfig.v1') {
+        setAutoConfig(getLiveSummaryAutoConfig());
+      }
+    };
+    window.addEventListener('meetingops:live-summary-auto-config', handler as EventListener);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('meetingops:live-summary-auto-config', handler as EventListener);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   useEffect(() => {
     sessionRef.current = currentSessionId;
@@ -340,7 +408,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setState('starting');
     setError(null);
     setStatusText('Starting microphone and VAD');
-    setSummary({ text: '', paragraphs: [] });
+    setSummary(EMPTY_SUMMARY);
+    lastAutoFireRef.current = Date.now();
     setLiveTranscript([]);
     setChunksUploaded(0);
     setSessionsCompleted(0);
@@ -408,50 +477,163 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     }
   }, [finalizeSession]);
 
-  const triggerSummarize = useCallback(async () => {
-    const transcript = liveTranscript
+  const transcriptText = useMemo(
+    () => liveTranscript
       .map((segment) => `${segment.speaker ? `${segment.speaker}: ` : ''}${segment.text}`)
       .join('\n')
-      .trim();
-    if (!transcript || summarizing) return;
+      .trim(),
+    [liveTranscript],
+  );
+
+  const transcriptWordCount = useMemo(() => countWords(transcriptText), [transcriptText]);
+
+  const triggerSummarize = useCallback(async () => {
+    if (!transcriptText || summarizingRef.current) return;
+    const wordCountAtStart = transcriptWordCount;
 
     summarizeAbortRef.current?.abort();
     const controller = new AbortController();
     summarizeAbortRef.current = controller;
+    summarizingRef.current = true;
     setSummarizing(true);
     setModelLoadProgress(0);
 
-    let text = '';
+    const startedAt = Date.now();
+    const modelId = getStoredModelId();
+    const previousSlice = summary.slices[summary.slices.length - 1];
+    const sliceText = ''; // accumulates tokens
+    let text = sliceText;
+
+    setSummary((prev) => ({ ...prev, currentDraft: '' }));
+
     try {
-      for await (const token of inBrowserLLM.summarize(transcript, getStoredModelId(), {
+      for await (const token of inBrowserLLM.summarize(transcriptText, modelId, {
         signal: controller.signal,
+        previousSummary: previousSlice?.text,
+        sessionId: sessionRef.current ?? undefined,
         onProgress: (report) => {
           setModelLoadProgress(Math.max(0, Math.min(1, report.progress || 0)));
         },
-        onToken: () => undefined,
       })) {
+        if (controller.signal.aborted) break;
         text += token;
-        setSummary({
-          text,
-          paragraphs: paragraphsFromText(text),
-          updatedAt: new Date().toISOString(),
-        });
+        setSummary((prev) => ({ ...prev, currentDraft: text }));
       }
+
+      if (controller.signal.aborted) {
+        setSummary((prev) => ({ ...prev, currentDraft: '' }));
+        return;
+      }
+
+      const finalText = text.trim();
+      if (!finalText) {
+        setSummary((prev) => ({ ...prev, currentDraft: '' }));
+        return;
+      }
+
+      const slice: AlwaysOnSummarySlice = {
+        id: uuid(),
+        text: finalText,
+        createdAt: new Date().toISOString(),
+        transcriptStart: previousSlice ? previousSlice.transcriptEnd : 0,
+        transcriptEnd: wordCountAtStart,
+        model: modelId,
+        modelLabel: getModelLabel(modelId),
+        durationMs: Date.now() - startedAt,
+      };
+
+      setSummary((prev) => {
+        const slices = [...prev.slices, slice];
+        return {
+          slices,
+          currentDraft: '',
+          lastWordCountAtSummary: wordCountAtStart,
+          text: slice.text,
+          paragraphs: paragraphsFromText(slice.text),
+          updatedAt: slice.createdAt,
+        };
+      });
+      lastAutoFireRef.current = Date.now();
     } catch (err) {
       if (!controller.signal.aborted) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
       }
+      setSummary((prev) => ({ ...prev, currentDraft: '' }));
     } finally {
+      summarizingRef.current = false;
       setSummarizing(false);
       setModelLoadProgress(null);
     }
-  }, [liveTranscript, summarizing]);
+  }, [summary.slices, transcriptText, transcriptWordCount]);
+
+  useEffect(() => {
+    if (state !== 'recording') return;
+    if (!autoConfig.enabled) return;
+
+    const spec = thresholdSpec(autoConfig.threshold);
+    if (spec.kind === 'words') {
+      const sinceLast = transcriptWordCount - summary.lastWordCountAtSummary;
+      if (sinceLast < spec.value) return;
+    } else {
+      const sinceLast = Date.now() - lastAutoFireRef.current;
+      if (sinceLast < spec.value) return;
+      if (transcriptWordCount === 0) return;
+    }
+    if (summarizingRef.current) return;
+    if (autoDebounceRef.current) return;
+
+    autoDebounceRef.current = window.setTimeout(() => {
+      autoDebounceRef.current = null;
+      if (stateRef.current !== 'recording') return;
+      if (summarizingRef.current) return;
+      void triggerSummarize();
+    }, 500);
+
+    return () => {
+      if (autoDebounceRef.current) {
+        window.clearTimeout(autoDebounceRef.current);
+        autoDebounceRef.current = null;
+      }
+    };
+  }, [
+    autoConfig.enabled,
+    autoConfig.threshold,
+    state,
+    summary.lastWordCountAtSummary,
+    transcriptWordCount,
+    triggerSummarize,
+  ]);
+
+  useEffect(() => {
+    if (state !== 'recording') return;
+    const spec = thresholdSpec(autoConfig.threshold);
+    if (spec.kind !== 'time') return;
+    if (!autoConfig.enabled) return;
+    const tick = window.setInterval(() => {
+      const sinceLast = Date.now() - lastAutoFireRef.current;
+      if (sinceLast < spec.value) return;
+      if (summarizingRef.current) return;
+      if (autoDebounceRef.current) return;
+      autoDebounceRef.current = window.setTimeout(() => {
+        autoDebounceRef.current = null;
+        if (stateRef.current !== 'recording') return;
+        if (summarizingRef.current) return;
+        if (transcriptWordCount === 0) return;
+        void triggerSummarize();
+      }, 500);
+    }, 5_000);
+    return () => window.clearInterval(tick);
+  }, [autoConfig.enabled, autoConfig.threshold, state, transcriptWordCount, triggerSummarize]);
 
   useEffect(() => () => {
     summarizeAbortRef.current?.abort();
     transcriptSocketRef.current?.close();
     engineRef.current?.stop().catch(() => undefined);
+    if (autoDebounceRef.current) {
+      window.clearTimeout(autoDebounceRef.current);
+      autoDebounceRef.current = null;
+    }
   }, []);
 
   const value = useMemo<AlwaysOnContextValue>(() => ({
@@ -467,6 +649,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sessionsCompleted,
     summarizing,
     modelLoadProgress,
+    autoConfig,
+    transcriptWordCount,
     start,
     stop,
     pause,
@@ -485,6 +669,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sessionsCompleted,
     summarizing,
     modelLoadProgress,
+    autoConfig,
+    transcriptWordCount,
     start,
     stop,
     pause,

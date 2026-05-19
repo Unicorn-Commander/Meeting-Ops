@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, RefreshCw } from 'lucide-react';
 import {
+  DEFAULT_AUTO_CONFIG,
+  LIVE_SUMMARY_THRESHOLDS,
   getAvailableModels,
+  getLiveSummaryAutoConfig,
   getStoredModelId,
   getWebGPUStatus,
   inBrowserLLM,
   refreshAvailableModels,
+  setLiveSummaryAutoConfig,
   setStoredModelId,
   type InBrowserModelOption,
+  type LiveSummaryThreshold,
 } from '../../services/inBrowserLLM';
 import type { SectionProps } from './SettingsContext';
 
@@ -37,6 +42,7 @@ export default function InBrowserAISettings(_props: SectionProps) {
   const [serverMode, setServerMode] = useState(() => getStoredModelId() === 'server');
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+  const [autoConfig, setAutoConfig] = useState(() => getLiveSummaryAutoConfig());
 
   const webGPUStatus = useMemo(() => getWebGPUStatus(), []);
   const selectedOption = models.find((model) => model.id === selectedModel);
@@ -77,6 +83,18 @@ export default function InBrowserAISettings(_props: SectionProps) {
     }
     const fallback = models.find((model) => model.id !== 'server')?.id || 'server';
     updateModel(fallback);
+  };
+
+  const updateAutoEnabled = (enabled: boolean) => {
+    const next = { ...autoConfig, enabled };
+    setAutoConfig(next);
+    setLiveSummaryAutoConfig(next);
+  };
+
+  const updateAutoThreshold = (threshold: LiveSummaryThreshold) => {
+    const next = { ...autoConfig, threshold };
+    setAutoConfig(next);
+    setLiveSummaryAutoConfig(next);
   };
 
   const downloadModel = async () => {
@@ -144,6 +162,46 @@ export default function InBrowserAISettings(_props: SectionProps) {
           className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
         />
       </label>
+
+      <div className="rounded-lg border border-zinc-800 bg-black/20 p-4 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="text-sm font-medium text-zinc-200">Auto-summarize during always-on</h4>
+            <p className="mt-1 text-xs text-zinc-500">
+              Granola-style live notes — a new summary slice appears each time the threshold is reached.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={autoConfig.enabled}
+            onChange={(event) => updateAutoEnabled(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500" htmlFor="auto-summary-threshold">
+            Threshold
+          </label>
+          <select
+            id="auto-summary-threshold"
+            value={autoConfig.threshold}
+            onChange={(event) => updateAutoThreshold(event.target.value as LiveSummaryThreshold)}
+            disabled={!autoConfig.enabled}
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {LIVE_SUMMARY_THRESHOLDS.map((threshold) => (
+              <option key={threshold.id} value={threshold.id}>
+                {threshold.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-2 text-xs text-zinc-500">
+            {autoConfig.enabled
+              ? 'Manual “Summarize now” also still works and appends to the slice stack.'
+              : `Disabled. Default is ${DEFAULT_AUTO_CONFIG.threshold.replace('_', ' ')}.`}
+          </p>
+        </div>
+      </div>
 
       <div>
         <button

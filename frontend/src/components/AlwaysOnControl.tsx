@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import {
   Activity,
+  ChevronDown,
+  ChevronUp,
   Clock,
   PanelTopOpen,
   Pause,
@@ -10,8 +12,81 @@ import {
   Square,
   UploadCloud,
 } from 'lucide-react';
-import { useAlwaysOn } from '../contexts/AlwaysOnContext';
+import { useAlwaysOn, type AlwaysOnSummarySlice } from '../contexts/AlwaysOnContext';
 import AlwaysOnPopout, { isDocumentPictureInPictureSupported } from './AlwaysOnPopout';
+import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
+
+function relativeTime(iso: string): string {
+  const created = new Date(iso).getTime();
+  const diffMs = Date.now() - created;
+  const sec = Math.max(0, Math.floor(diffMs / 1000));
+  if (sec < 5) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function clockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const min = Math.floor(sec / 60);
+  const rem = Math.round(sec % 60);
+  return `${min}m ${rem}s`;
+}
+
+interface SliceCardProps {
+  slice: AlwaysOnSummarySlice;
+  expanded: boolean;
+  onToggle: () => void;
+  highlight?: boolean;
+}
+
+function SliceCard({ slice, expanded, onToggle, highlight }: SliceCardProps) {
+  const range = `words ${slice.transcriptStart}-${slice.transcriptEnd}`;
+  return (
+    <div
+      className={`rounded-lg border ${highlight ? 'border-sky-500/40 bg-sky-500/5' : 'border-zinc-800 bg-black/30'} transition-colors`}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-zinc-100 hover:bg-zinc-800/40 rounded-t-lg"
+      >
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+            <span title={slice.createdAt} className="text-zinc-300">{relativeTime(slice.createdAt)}</span>
+            <span className="text-zinc-600">·</span>
+            <span>{clockTime(slice.createdAt)}</span>
+            <span className="text-zinc-600">·</span>
+            <span>{range}</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-medium text-sky-200">
+              {slice.modelLabel}
+            </span>
+            <span className="rounded-full border border-zinc-700 bg-zinc-800/70 px-2 py-0.5 text-zinc-300">
+              {formatDurationMs(slice.durationMs)}
+            </span>
+          </div>
+        </div>
+        {expanded ? <ChevronUp className="h-4 w-4 text-zinc-500" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
+      </button>
+      {expanded && (
+        <div className="border-t border-zinc-800/80 px-4 py-3 text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
+          {slice.text}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function formatDuration(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
@@ -23,6 +98,7 @@ function formatDuration(seconds: number): string {
 export default function AlwaysOnControl() {
   const alwaysOn = useAlwaysOn();
   const [popoutRequestKey, setPopoutRequestKey] = useState(0);
+  const [expandedSliceIds, setExpandedSliceIds] = useState<Set<string>>(new Set());
   const pipSupported = isDocumentPictureInPictureSupported();
   const isActive = alwaysOn.state === 'recording' || alwaysOn.state === 'paused' || alwaysOn.state === 'stopping';
   const transcriptText = useMemo(
@@ -32,6 +108,25 @@ export default function AlwaysOnControl() {
     }).join('\n'),
     [alwaysOn.liveTranscript],
   );
+
+  const orderedSlices = useMemo(
+    () => [...alwaysOn.summary.slices].reverse(),
+    [alwaysOn.summary.slices],
+  );
+  const latestSliceId = orderedSlices[0]?.id;
+  const thresholdLabel = useMemo(() => {
+    const match = LIVE_SUMMARY_THRESHOLDS.find((t) => t.id === alwaysOn.autoConfig.threshold);
+    return match?.label ?? '';
+  }, [alwaysOn.autoConfig.threshold]);
+
+  const toggleSlice = (id: string) => {
+    setExpandedSliceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-5 shadow-xl shadow-black/20">
@@ -169,16 +264,48 @@ export default function AlwaysOnControl() {
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <div>
-          <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-summary">
-            Live summary
-          </label>
-          <textarea
-            id="always-on-summary"
-            readOnly
-            value={alwaysOn.summary.text}
-            placeholder="No summary yet."
-            className="h-52 w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
-          />
+          <div className="mb-2 flex items-center justify-between">
+            <label className="block text-sm font-medium text-zinc-300">Live summary</label>
+            <span className="text-xs text-zinc-500">
+              {alwaysOn.autoConfig.enabled
+                ? `Auto-updates ${thresholdLabel.toLowerCase()}`
+                : 'Manual mode'}
+              {' · '}
+              {alwaysOn.transcriptWordCount} words
+            </span>
+          </div>
+
+          <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
+            {alwaysOn.summary.currentDraft && (
+              <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
+                <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-sky-300">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  Generating next slice
+                </div>
+                <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
+                  {alwaysOn.summary.currentDraft}
+                </div>
+              </div>
+            )}
+
+            {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
+              <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
+                {alwaysOn.autoConfig.enabled
+                  ? 'Live summary will appear once enough conversation has been captured.'
+                  : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
+              </div>
+            )}
+
+            {orderedSlices.map((slice) => (
+              <SliceCard
+                key={slice.id}
+                slice={slice}
+                expanded={slice.id === latestSliceId ? !expandedSliceIds.has(slice.id) : expandedSliceIds.has(slice.id)}
+                onToggle={() => toggleSlice(slice.id)}
+                highlight={slice.id === latestSliceId}
+              />
+            ))}
+          </div>
         </div>
         <div>
           <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-transcript">
@@ -189,7 +316,7 @@ export default function AlwaysOnControl() {
             readOnly
             value={transcriptText}
             placeholder="No transcript yet."
-            className="h-52 w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+            className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
           />
         </div>
       </div>

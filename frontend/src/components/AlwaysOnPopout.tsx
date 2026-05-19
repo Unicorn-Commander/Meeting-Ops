@@ -1,7 +1,16 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Circle, Square } from 'lucide-react';
+import { ChevronDown, ChevronUp, Circle, RefreshCw, Square } from 'lucide-react';
 import { useAlwaysOn } from '../contexts/AlwaysOnContext';
+
+function relTime(iso: string): string {
+  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (diffSec < 5) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const min = Math.floor(diffSec / 60);
+  if (min < 60) return `${min} min ago`;
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
 
 type DocumentPictureInPictureWindow = Window & typeof globalThis;
 
@@ -67,6 +76,13 @@ function PopoutContent() {
   } = useAlwaysOn();
   const active = state === 'recording' || state === 'paused' || state === 'stopping';
   const lastLines = liveTranscript.slice(-3);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const latestSlice = summary.slices[summary.slices.length - 1];
+  const older = useMemo(
+    () => summary.slices.slice(0, -1).reverse(),
+    [summary.slices],
+  );
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-4">
@@ -91,10 +107,51 @@ function PopoutContent() {
       )}
 
       <div className="mt-4">
-        <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Summary</div>
-        <div className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap text-sm leading-6 text-zinc-200">
-          {summary.text || (summarizing ? 'Preparing summary...' : 'No summary yet.')}
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Latest summary</div>
+          {latestSlice && (
+            <div className="text-[10px] text-zinc-500">{relTime(latestSlice.createdAt)} · {latestSlice.modelLabel}</div>
+          )}
         </div>
+
+        {summary.currentDraft ? (
+          <div className="mt-2 rounded-md border border-sky-500/40 bg-sky-500/5 p-2">
+            <div className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wide text-sky-300">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              Generating
+            </div>
+            <div className="max-h-40 overflow-y-auto whitespace-pre-wrap text-sm leading-5 text-zinc-100">
+              {summary.currentDraft}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap text-sm leading-6 text-zinc-200">
+            {latestSlice?.text || (summarizing ? 'Preparing summary...' : 'No summary yet.')}
+          </div>
+        )}
+
+        {older.length > 0 && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setHistoryOpen((v) => !v)}
+              className="flex items-center gap-1 text-[11px] font-medium text-zinc-400 hover:text-zinc-200"
+            >
+              {historyOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              {historyOpen ? 'Hide' : 'Show'} earlier slices ({older.length})
+            </button>
+            {historyOpen && (
+              <div className="mt-2 max-h-40 space-y-2 overflow-y-auto pr-1">
+                {older.map((slice) => (
+                  <div key={slice.id} className="rounded border border-zinc-800 bg-black/30 p-2">
+                    <div className="text-[10px] text-zinc-500">{relTime(slice.createdAt)} · {slice.modelLabel}</div>
+                    <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-200">{slice.text}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="mt-4">
