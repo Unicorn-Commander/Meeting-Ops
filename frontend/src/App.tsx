@@ -12,6 +12,7 @@ import { RecordingIndicator } from './components/RecordingIndicator';
 import { DragDropOverlay } from './components/DragDropOverlay';
 import { UploadTray } from './components/UploadTray';
 import { ReconnectingOverlay } from './components/ReconnectingOverlay';
+import { PWAUpdate } from './components/PWAUpdate';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import 'react-toastify/dist/ReactToastify.css';
 import './index.css';
@@ -37,6 +38,7 @@ function App() {
                 <UploadsProvider>
                   <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
                     <ReconnectingOverlay />
+                    <PWAUpdate />
                     <AppWithShortcuts />
                     <DragDropOverlay />
                     <UploadTray />

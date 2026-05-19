@@ -335,6 +335,18 @@ async def list_sessions(
         wanted = [t.strip() for t in tags.split(",") if t.strip()]
         if wanted:
             query = query.filter(DBRecordingSession.tags.contains(wanted))
+    # Hide empty always-on sessions: when the user clicks Start always-on
+    # but never produces audio (mic blocked, browser bug, accidental click),
+    # the start endpoint still creates a session row. Without filtering, the
+    # dashboard fills up with "Always-on YYYY-MM-DD HH:MM" rows that have
+    # no transcript and no audio. Filter them out here.
+    query = query.filter(
+        ~(
+            (DBRecordingSession.mode == "always_on")
+            & ((DBRecordingSession.transcript.is_(None)) | (DBRecordingSession.transcript == ""))
+            & ((DBRecordingSession.audio_file.is_(None)) | (DBRecordingSession.audio_file == ""))
+        )
+    )
     sessions = (
         query
         .order_by(desc(DBRecordingSession.created_at))

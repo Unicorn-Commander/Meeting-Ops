@@ -1499,15 +1499,15 @@ export default function LiveRecording() {
                 <Bot className="w-5 h-5 text-purple-400" />
                 <div>
                   <div className="text-sm font-medium text-white">
-                    {activeAgent ? activeAgent.name : 'Note-Taker'}
+                    {activeAgent?.name ?? 'Meeting Assistant'}
                   </div>
                   <div className="text-xs text-purple-300">
-                    {activeAgent ? activeAgent.model_name : 'AI Assistant'}
+                    {activeAgent?.model_name ?? pipelineStatus?.llm?.label ?? 'AI Assistant'}
                   </div>
                 </div>
               </div>
               <div className="text-xs text-zinc-400">
-                {activeAgent ? activeAgent.description : 'Configurable model for meeting analysis'}
+                {activeAgent?.description ?? 'Live + post-meeting summarization, action items, and Q&A.'}
               </div>
             </div>
             
