@@ -1249,13 +1249,6 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             except Exception as e:
                 logger.warning(f"Speaker identification failed (non-fatal): {e}")
 
-            # Step 6b: Phase 2 meeting embeddings pipeline (chunks -> Qdrant)
-            try:
-                from services.meeting_embeddings import embed_meeting
-                embed_meeting(session, db)
-                logger.info(f"   Phase 2 embeddings indexed")
-            except Exception as e:
-                logger.warning(f"Phase 2 embeddings failed (non-fatal): {e}")
         except Exception as e:
             logger.error(f"Failed to commit session updates: {e}")
             db.rollback()

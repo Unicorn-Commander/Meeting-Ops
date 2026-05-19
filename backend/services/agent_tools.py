@@ -878,7 +878,7 @@ def persist_turn(
     metadata: Optional[dict[str, Any]] = None,
 ) -> None:
     """Append a turn to the chat_history table so the agent has memory across
-    Dashboard ask-bar invocations. Mirrors ``api/rag_chat.py`` behaviour."""
+    Dashboard ask-bar invocations."""
     try:
         db.add(ChatHistory(
             session_key=MEETING_RAG_SESSION_KEY,

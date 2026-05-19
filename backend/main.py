@@ -199,7 +199,6 @@ _load_router(app, "websocket_remote_audio", "api.websocket_remote_audio")
 _load_router(app, "provider_settings", "api.provider_settings")
 _load_router(app, "integrations", "api.integrations")
 _load_router(app, "digests", "api.digests")
-_load_router(app, "rag_chat", "api.rag_chat")
 
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")

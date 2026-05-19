@@ -849,13 +849,6 @@ async def run_upload_pipeline(upload_id: str) -> None:
             logger.warning("Pre-warm of ai_insights failed for session %s: %s", session.id, exc)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="summarizing")
 
-        await _set_job_state(db, job, stage="embedding", progress_pct=10)
-        try:
-            from services.meeting_embeddings import embed_meeting
-            await asyncio.to_thread(embed_meeting, session, db)
-        except Exception as exc:
-            logger.warning("Meeting embedding failed for upload %s: %s", upload_id, exc)
-
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
         job.stage = "done"

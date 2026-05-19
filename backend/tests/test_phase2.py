@@ -198,68 +198,6 @@ class TestProviderSettingsOrgIsolation:
             db.close()
 
 
-class TestRAGChatEndpoint:
-    """RAG chat endpoint basic availability."""
-
-    def test_rag_chat_returns_stream(self, client):
-        _, _, _, SessionLocal, _, _, _ = _current_models()
-        db = SessionLocal()
-        try:
-            user = _seed_user(db, "rag_user", "test123", "rag@test.com", is_superuser=True)
-            org = _seed_org(db, "RAG Org", "rag-org")
-            _seed_membership(db, user.id, org.id, "user")
-            headers = _login_headers(client, "rag_user", "test123", "rag-org")
-
-            resp = client.post(
-                "/api/rag/chat",
-                json={"question": "test", "scope": {}},
-                headers=headers,
-            )
-            # 503 is acceptable when embedding service is down; 200 when available
-            assert resp.status_code in (200, 503)
-            if resp.status_code == 200:
-                assert "text/event-stream" in resp.headers.get("content-type", "")
-        finally:
-            db.rollback()
-            db.close()
-
-    def test_rag_history_org_isolation(self, client):
-        _, _, _, SessionLocal, _, _, _ = _current_models()
-        db = SessionLocal()
-        try:
-            from database.models import ChatHistory
-            db.query(ChatHistory).delete()
-            db.commit()
-
-            user = _seed_user(db, "rag_iso", "test123", "rag_iso@test.com", is_superuser=True)
-            org_a = _seed_org(db, "RAG Org A", "rag-org-a")
-            org_b = _seed_org(db, "RAG Org B", "rag-org-b")
-            _seed_membership(db, user.id, org_a.id, "user")
-            _seed_membership(db, user.id, org_b.id, "user")
-
-            db.add(ChatHistory(session_key="__rag_v2__", role="user", content="org A msg", organization_id=org_a.id))
-            db.add(ChatHistory(session_key="__rag_v2__", role="user", content="org B msg", organization_id=org_b.id))
-            db.commit()
-
-            h_a = _login_headers(client, "rag_iso", "test123", "rag-org-a")
-            h_b = _login_headers(client, "rag_iso", "test123", "rag-org-b")
-
-            resp_a = client.get("/api/rag/chat/history", headers=h_a)
-            assert resp_a.status_code == 200
-            content_a = [h["content"] for h in resp_a.json()]
-            assert "org A msg" in content_a
-            assert "org B msg" not in content_a
-
-            resp_b = client.get("/api/rag/chat/history", headers=h_b)
-            assert resp_b.status_code == 200
-            content_b = [h["content"] for h in resp_b.json()]
-            assert "org B msg" in content_b
-            assert "org A msg" not in content_b
-        finally:
-            db.rollback()
-            db.close()
-
-
 class TestDigestsEndpoint:
     """Time-window digests endpoint."""
 

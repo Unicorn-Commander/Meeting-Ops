@@ -123,7 +123,7 @@ class ProviderRegistry:
             5. hardcoded gemma-4-26b-moe fallback
 
         Layer 3 is intentional: without it, every meeting-ops LLM call
-        path (ai_insights / ai_chat / digests / rag_chat / summary)
+        path (ai_insights / ai_chat / digests / summary)
         defaults back to ProviderRegistry's LiteLLM endpoint regardless
         of what the upload pipeline's _direct_summarizer_provider does.
         Adding the override here means flipping the env once routes ALL

@@ -602,12 +602,6 @@ async def finalize_always_on_session(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Always-on ai_insights generation failed for %s: %s", session.id, exc)
 
-        try:
-            from services.meeting_embeddings import embed_meeting
-            await asyncio.to_thread(embed_meeting, session, db)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Always-on embedding failed for %s: %s", session.id, exc)
-
         session.status = "completed"
         session.updated_at = _now()
         db.commit()
