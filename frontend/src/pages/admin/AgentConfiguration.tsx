@@ -40,14 +40,21 @@ interface ModelInfo {
 }
 
 const MODEL_PERFORMANCE: Record<string, ModelInfo> = {
-  'granite-3.3-2b-instruct': {
-    name: 'Granite 3.3 2B Instruct',
-    speed: '~850 t/s',
-    best_for: 'Summaries, chat, insights',
-    memory: '~1.5GB',
-    port: 11437,
-    status: 'ready'
-  }
+  'Qwen3.6-35B-A3B-Vision': {
+    name: 'Qwen 3.6 35B-A3B Vision',
+    speed: '~80 t/s @ C=4',
+    best_for: 'Summaries, action items, vision-aware analysis',
+    memory: '~22GB VRAM (Q4_K_M)',
+    port: 8088,
+    status: 'ready',
+  },
+  'gemma-4-26b-moe': {
+    name: 'Gemma 4 26B MoE',
+    speed: '~40 t/s',
+    best_for: 'High-quality summaries when Qwen is busy',
+    memory: '~16GB VRAM (Q4)',
+    status: 'ready',
+  },
 };
 
 const AGENT_TEMPLATES = {
@@ -64,7 +71,7 @@ Focus on:
 - Update incrementally
 
 Be immediate and actionable in your responses.`,
-    model_name: 'granite-3.3-2b-instruct',
+    model_name: 'Qwen3.6-35B-A3B-Vision',
     use_case: 'live' as const,
     model_settings: { temperature: 0.3, max_tokens: 512, context_length: '8K' }
   },
@@ -81,7 +88,7 @@ Provide:
 - Meeting effectiveness assessment
 
 Be thorough and professional in your analysis.`,
-    model_name: 'granite-3.3-2b-instruct',
+    model_name: 'Qwen3.6-35B-A3B-Vision',
     use_case: 'final' as const,
     model_settings: { temperature: 0.7, max_tokens: 2048, context_length: '8K' }
   },
@@ -98,7 +105,7 @@ For each action item, provide:
 - Dependencies on other tasks
 
 Format as structured lists for easy tracking.`,
-    model_name: 'granite-3.3-2b-instruct',
+    model_name: 'Qwen3.6-35B-A3B-Vision',
     use_case: 'custom' as const,
     model_settings: { temperature: 0.4, max_tokens: 1024, context_length: '16K' }
   },
@@ -116,7 +123,7 @@ For each decision, capture:
 - Implementation requirements
 
 Focus on decisions that will affect future work or strategy.`,
-    model_name: 'granite-3.3-2b-instruct',
+    model_name: 'Qwen3.6-35B-A3B-Vision',
     use_case: 'custom' as const,
     model_settings: { temperature: 0.5, max_tokens: 1024, context_length: '16K' }
   }
@@ -156,16 +163,37 @@ export const AgentConfiguration: React.FC = () => {
   };
 
   const loadAvailableModels = async () => {
+    // Source models from the live pipeline status endpoint. That's the
+    // truthful list of what the backend can actually route to right now
+    // (Qwen 3.6 35B-A3B, Gemma 4 26B, etc.). /api/unified-agent/models
+    // historically returned a stale granite-3.3 hardcode; we now use it
+    // as a secondary source.
+    try {
+      const pipeRes = await fetch(`${config.apiUrl}/api/system/pipeline`);
+      if (pipeRes.ok) {
+        const pipe = await pipeRes.json();
+        const available = (pipe.available_llm_models || []).map((m: any) => m.id);
+        if (available.length > 0) {
+          setModels(available);
+          return;
+        }
+      }
+    } catch {
+      /* fall through to legacy endpoint */
+    }
     try {
       const response = await fetch(`${config.apiUrl}/api/unified-agent/models`);
       if (response.ok) {
         const data = await response.json();
-        setModels(data.models || []);
+        if ((data.models || []).length > 0) {
+          setModels(data.models);
+          return;
+        }
       }
     } catch (error) {
       console.error('Error loading models:', error);
-      setModels(['granite-3.3-2b-instruct']);
     }
+    setModels(['Qwen3.6-35B-A3B-Vision']);
   };
 
   const createDefaultAgents = () => {
@@ -210,7 +238,7 @@ export const AgentConfiguration: React.FC = () => {
       name: 'New Agent',
       description: 'Custom meeting analysis agent',
       system_prompt: 'You are a helpful meeting assistant.',
-      model_name: 'granite-3.3-2b-instruct',
+      model_name: 'Qwen3.6-35B-A3B-Vision',
       use_case: 'general' as const,
       model_settings: { temperature: 0.7, max_tokens: 1024, context_length: '32K' }
     };

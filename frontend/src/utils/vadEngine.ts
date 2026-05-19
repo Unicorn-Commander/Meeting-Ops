@@ -28,7 +28,11 @@ export interface AlwaysOnVadEngineOptions {
 const SAMPLE_RATE = 16000;
 const DEFAULT_SILENCE_THRESHOLD_MS = 30000;
 const VAD_ASSET_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/';
-const ONNX_WASM_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/';
+// 1.17.0 doesn't expose ort-wasm-simd-threaded.mjs — vad-web 0.0.30 expects
+// the ESM layout introduced in 1.19.0. 1.20.1 is the latest known-good
+// (verified file present 2026-05-18). If we ever self-host the wasm files
+// via vite-plugin-static-copy, swap this for '/onnx/' and bundle.
+const ONNX_WASM_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 
 let wakeLock: WakeLockSentinelLike | null = null;
 let wakeLockRecording = false;

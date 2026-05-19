@@ -60,10 +60,29 @@ const CURATED_MODELS: Array<{
   actualModelId: string;
   label: string;
 }> = [
+  // Newest first. Entries whose actualModelId isn't published by web-llm
+  // are silently filtered out at runtime (see records.find check below),
+  // so we can stage future variants here optimistically — they appear in
+  // the picker the moment web-llm ships them.
   {
-    id: 'qwen2.5-1.5b-instruct',
-    actualModelId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
-    label: 'Qwen 2.5 1.5B Instruct',
+    id: 'gemma-4-e2b-it',
+    actualModelId: 'gemma4-E2B-it-q4f16_1-MLC',
+    label: 'Gemma 4 E2B (text mode)',
+  },
+  {
+    id: 'qwen3.6-1.7b',
+    actualModelId: 'Qwen3.6-1.7B-q4f16_1-MLC',
+    label: 'Qwen 3.6 1.7B',
+  },
+  {
+    id: 'qwen3-1.7b',
+    actualModelId: 'Qwen3-1.7B-q4f16_1-MLC',
+    label: 'Qwen 3 1.7B',
+  },
+  {
+    id: 'qwen3-0.6b',
+    actualModelId: 'Qwen3-0.6B-q4f16_1-MLC',
+    label: 'Qwen 3 0.6B (smallest, fastest)',
   },
   {
     id: 'gemma-3-1b-it',
@@ -71,14 +90,14 @@ const CURATED_MODELS: Array<{
     label: 'Gemma 3 1B IT',
   },
   {
-    id: 'qwen3-0.6b',
-    actualModelId: 'Qwen3-0.6B-q4f16_1-MLC',
-    label: 'Qwen 3 0.6B',
+    id: 'qwen2.5-1.5b-instruct',
+    actualModelId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
+    label: 'Qwen 2.5 1.5B Instruct',
   },
   {
     id: 'phi-3.5-mini-instruct',
     actualModelId: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
-    label: 'Phi 3.5 Mini Instruct',
+    label: 'Phi 3.5 Mini Instruct (best quality)',
   },
 ];
 
