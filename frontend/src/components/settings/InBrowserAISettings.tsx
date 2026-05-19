@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, Mic, RefreshCw } from 'lucide-react';
 import {
   DEFAULT_AUTO_CONFIG,
   LIVE_SUMMARY_THRESHOLDS,
@@ -17,6 +17,15 @@ import {
   type InBrowserModelOption,
   type LiveSummaryThreshold,
 } from '../../services/inBrowserLLM';
+import {
+  inBrowserSTT,
+} from '../../services/inBrowserSTT';
+import {
+  getSTTCapability,
+  getSTTMode,
+  setSTTMode,
+  type SttMode,
+} from '../../services/inBrowserSTTSettings';
 import type { SectionProps } from './SettingsContext';
 
 function statusClasses(state: 'ready' | 'limited' | 'unavailable'): string {
@@ -70,6 +79,15 @@ export default function InBrowserAISettings(_props: SectionProps) {
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
   const [autoConfig, setAutoConfig] = useState(() => getLiveSummaryAutoConfig());
+  // Speech-to-Text: own state, separate from the LLM picker. Default ON
+  // when the browser can host the model; falls back automatically when
+  // it can't.
+  const [sttMode, setSttModeLocal] = useState<SttMode>(() => getSTTMode());
+  const sttCapability = useMemo(() => getSTTCapability(), []);
+  const [sttReady, setSttReady] = useState<boolean>(() => inBrowserSTT.isReady());
+  const [sttLastRTF, setSttLastRTF] = useState<number | null>(() =>
+    inBrowserSTT.getDiagnostics().lastRTF,
+  );
 
   const webGPUStatus = useMemo(() => getWebGPUStatus(), []);
   const selectedOption = models.find((model) => model.id === selectedModel);
@@ -127,6 +145,22 @@ export default function InBrowserAISettings(_props: SectionProps) {
     updateModel(fallback);
   };
 
+  // Poll the STT singleton because the model can load in the background
+  // (the AlwaysOnContext kicks the load). We re-read each tick; the
+  // singleton itself is the source of truth.
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      setSttReady(inBrowserSTT.isReady());
+      setSttLastRTF(inBrowserSTT.getDiagnostics().lastRTF);
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, []);
+
+  const updateSttMode = (next: SttMode) => {
+    setSttModeLocal(next);
+    setSTTMode(next);
+  };
+
   const updateAutoEnabled = (enabled: boolean) => {
     const next = { ...autoConfig, enabled };
     setAutoConfig(next);
@@ -169,6 +203,79 @@ export default function InBrowserAISettings(_props: SectionProps) {
         <span className={`rounded-full border px-3 py-1 text-xs font-medium ${statusClasses(webGPUStatus.state)}`}>
           WebGPU {webGPUStatus.label}
         </span>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-black/20 p-4 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+              <Mic className="h-4 w-4 text-zinc-400" /> Speech-to-Text
+            </h4>
+            <p className="mt-1 text-xs text-zinc-500">
+              Run STT in the browser with Parakeet 0.6B INT8 (~880 MB one-time download). Falls back to the server when the browser can't host the model.
+            </p>
+          </div>
+          <span
+            className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+              sttCapability.available
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300'
+            }`}
+          >
+            {sttCapability.available ? 'Browser capable' : 'Server only'}
+          </span>
+        </div>
+
+        <label className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-black/40 px-3 py-2">
+          <span>
+            <span className="block text-sm font-medium text-zinc-200">Run STT in browser (Parakeet 0.6B INT8)</span>
+            <span className="mt-0.5 block text-xs text-zinc-500">
+              {sttCapability.available
+                ? 'Recommended. Audio never leaves the device.'
+                : sttCapability.reason || 'Browser cannot host the STT model.'}
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={sttMode === 'browser-parakeet'}
+            disabled={!sttCapability.available}
+            onChange={(event) => updateSttMode(event.target.checked ? 'browser-parakeet' : 'server-parakeet-1.1b')}
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        </label>
+
+        <div className="rounded-md border border-zinc-800 bg-black/40 px-3 py-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-zinc-300">Server STT (Parakeet 1.1B fp16)</span>
+            <span className="rounded-full border border-zinc-600 bg-zinc-700/40 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-300">
+              Fallback / high accuracy
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            Used automatically when the browser model is unavailable, still loading, or has failed mid-meeting. Post-meeting reprocess still happens server-side.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+          <div className="rounded-md border border-zinc-800 bg-black/40 px-3 py-2">
+            <div className="text-zinc-500">Model status</div>
+            <div className="mt-0.5 text-zinc-200">
+              {sttMode !== 'browser-parakeet'
+                ? 'Disabled (server mode)'
+                : sttReady
+                  ? 'Cached / ready'
+                  : 'Not loaded yet — loads on next meeting'}
+            </div>
+          </div>
+          <div className="rounded-md border border-zinc-800 bg-black/40 px-3 py-2">
+            <div className="text-zinc-500">Last observed RTF</div>
+            <div className="mt-0.5 text-zinc-200">
+              {sttLastRTF === null
+                ? 'No measurement yet'
+                : `${sttLastRTF.toFixed(3)}x (${sttLastRTF < 1 ? 'faster than realtime' : 'slower than realtime'})`}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div>

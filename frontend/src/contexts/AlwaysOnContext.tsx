@@ -20,6 +20,14 @@ import {
   type LiveSummaryAutoConfig,
   type SummaryParagraph,
 } from '../services/inBrowserLLM';
+import {
+  CLIENT_STT_PROVENANCE,
+  inBrowserSTT,
+} from '../services/inBrowserSTT';
+import {
+  getSTTMode,
+  type SttMode,
+} from '../services/inBrowserSTTSettings';
 
 export type AlwaysOnState = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping';
 
@@ -94,6 +102,11 @@ export interface AlwaysOnContextValue {
   modelLoadProgress: number | null;
   autoConfig: LiveSummaryAutoConfig;
   transcriptWordCount: number;
+  sttMode: SttMode;
+  sttReady: boolean;
+  sttLoadProgress: number | null;
+  sttLoadLabel: string | null;
+  sttBrowserFailed: boolean;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
@@ -146,6 +159,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
   const [summarizing, setSummarizing] = useState(false);
   const [modelLoadProgress, setModelLoadProgress] = useState<number | null>(null);
+  // Browser STT lifecycle. `sttBrowserFailed` is sticky for the *session*:
+  // once a transcribe() throws we route subsequent chunks to the server
+  // path until the user explicitly opts back in. This avoids the failure
+  // mode of "every chunk hits the broken model again and the user sees
+  // 30 toasts in a row."
+  const [sttMode, setSttMode] = useState<SttMode>(() => getSTTMode());
+  const [sttReady, setSttReady] = useState(false);
+  const [sttLoadProgress, setSttLoadProgress] = useState<number | null>(null);
+  const [sttLoadLabel, setSttLoadLabel] = useState<string | null>(null);
+  const [sttBrowserFailed, setSttBrowserFailed] = useState(false);
+
+  const sttModeRef = useRef<SttMode>(sttMode);
+  const sttReadyRef = useRef(false);
+  const sttBrowserFailedRef = useRef(false);
+  const sttLoadAbortRef = useRef<AbortController | null>(null);
 
   const engineRef = useRef<AlwaysOnVadEngine | null>(null);
   const stateRef = useRef<AlwaysOnState>('idle');
@@ -184,6 +212,103 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     sessionRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  // Keep refs in sync — VAD callbacks need to read the latest values
+  // without re-binding (the callbacks are created via createVadEngine
+  // once per provider mount).
+  useEffect(() => {
+    sttModeRef.current = sttMode;
+  }, [sttMode]);
+  useEffect(() => {
+    sttReadyRef.current = sttReady;
+  }, [sttReady]);
+  useEffect(() => {
+    sttBrowserFailedRef.current = sttBrowserFailed;
+  }, [sttBrowserFailed]);
+
+  // Settings UI writes via setSTTMode() + dispatches an event. Pick it up
+  // in any open tab so the picker stays in sync.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<SttMode>).detail;
+      if (detail) setSttMode(detail);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'meetingops.stt.mode.v1') {
+        setSttMode(getSTTMode());
+      }
+    };
+    window.addEventListener('meetingops:stt-mode', handler as EventListener);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('meetingops:stt-mode', handler as EventListener);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  // Kick off the browser STT load whenever the mode flips to
+  // 'browser-parakeet' (including first mount). Don't block the UI on it
+  // — the VAD `onSpeechEnd` handler routes through the server path until
+  // the model is ready, then auto-switches to browser. This is the same
+  // idea as inBrowserLLM's lazy load.
+  useEffect(() => {
+    if (sttMode !== 'browser-parakeet') {
+      // We can't actually unload the model from another tab; this just
+      // tells our local context to stop trying.
+      setSttReady(false);
+      setSttLoadProgress(null);
+      setSttLoadLabel(null);
+      sttLoadAbortRef.current?.abort();
+      sttLoadAbortRef.current = null;
+      return;
+    }
+    if (inBrowserSTT.isReady()) {
+      setSttReady(true);
+      setSttLoadProgress(1);
+      setSttLoadLabel('Ready');
+      return;
+    }
+
+    const controller = new AbortController();
+    sttLoadAbortRef.current = controller;
+    setSttLoadProgress(0);
+    setSttLoadLabel('Loading');
+    setSttBrowserFailed(false);
+
+    inBrowserSTT
+      .load({
+        signal: controller.signal,
+        onProgress: (pct, label) => {
+          setSttLoadProgress(pct);
+          if (label) setSttLoadLabel(label);
+        },
+      })
+      .then(() => {
+        if (controller.signal.aborted) return;
+        setSttReady(true);
+        setSttLoadProgress(1);
+        setSttLoadLabel('Ready');
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        const message = err instanceof Error ? err.message : String(err);
+        // We failed to even load. Mark failed and fall back to server.
+        // The picker will show this state and the user can retry.
+        setSttBrowserFailed(true);
+        setSttReady(false);
+        setSttLoadProgress(null);
+        setSttLoadLabel(`Load failed: ${message.slice(0, 80)}`);
+        // eslint-disable-next-line no-console
+        console.warn('[always-on] Browser STT load failed:', err);
+      });
+
+    return () => {
+      controller.abort();
+      if (sttLoadAbortRef.current === controller) {
+        sttLoadAbortRef.current = null;
+      }
+    };
+  }, [sttMode]);
 
   useEffect(() => {
     if (state !== 'recording' && state !== 'paused') return;
@@ -314,12 +439,13 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const uploadChunk = useCallback(async (chunk: VadAudioChunk): Promise<void> => {
-    let sessionId = sessionRef.current;
-    if (!sessionId) {
-      sessionId = await createSession();
-    }
-
+  // Audio-blob path: legacy + fallback when browser STT is not ready
+  // (model still downloading) or has failed mid-meeting. Posts the WAV to
+  // the same `/chunks` endpoint that pre-Parakeet-in-browser code uses.
+  const uploadAudioChunk = useCallback(async (
+    chunk: VadAudioChunk,
+    sessionId: string,
+  ): Promise<void> => {
     const form = new FormData();
     form.append('chunk', chunk.blob, `always-on-${Date.now()}.wav`);
     form.append('elapsed_seconds', String(Math.max(0, chunk.elapsedSeconds)));
@@ -335,8 +461,87 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const data = await response.json();
     const segments = Array.isArray(data.segments) ? data.segments : [];
     appendTranscriptSegments(segments, sessionId);
+  }, [appendTranscriptSegments]);
+
+  // Text path: browser already transcribed. We POST the text + provenance
+  // metadata, and *also* append the new segment to the local transcript
+  // immediately for the live view. The backend will broadcast the same
+  // segment via the websocket; the de-dup in appendTranscriptSegments
+  // (matching id) means we won't double-render.
+  const uploadTextChunk = useCallback(async (
+    chunk: VadAudioChunk,
+    text: string,
+    sessionId: string,
+  ): Promise<void> => {
+    const response = await fetch(
+      `${config.apiUrl}/api/recordings/sessions/${sessionId}/chunks-text`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          duration_seconds: chunk.durationSeconds,
+          elapsed_seconds: Math.max(0, chunk.elapsedSeconds),
+          provenance: CLIENT_STT_PROVENANCE,
+        }),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || 'Always-on text chunk upload failed.');
+    }
+    // Optimistic append for immediate feedback. If the websocket beats
+    // us, the segment id is stable enough that we'll dedupe.
+    const start = Math.max(0, chunk.elapsedSeconds);
+    appendTranscriptSegments(
+      [{
+        text,
+        start,
+        end: start + (chunk.durationSeconds || 0),
+        speaker: null,
+      }],
+      sessionId,
+    );
+  }, [appendTranscriptSegments]);
+
+  const uploadChunk = useCallback(async (chunk: VadAudioChunk): Promise<void> => {
+    let sessionId = sessionRef.current;
+    if (!sessionId) {
+      sessionId = await createSession();
+    }
+
+    const wantBrowser =
+      sttModeRef.current === 'browser-parakeet'
+      && sttReadyRef.current
+      && !sttBrowserFailedRef.current;
+
+    if (wantBrowser) {
+      try {
+        const text = await inBrowserSTT.transcribe(chunk.blob);
+        const trimmed = (text || '').trim();
+        if (!trimmed) {
+          // Browser model returned empty (likely a misfire or noise) —
+          // don't waste a server round-trip on it. The chunk is dropped.
+          setChunksUploaded((count) => count + 1);
+          return;
+        }
+        await uploadTextChunk(chunk, trimmed, sessionId);
+        setChunksUploaded((count) => count + 1);
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // eslint-disable-next-line no-console
+        console.warn('[always-on] Browser STT failed for chunk, falling back:', message);
+        setSttBrowserFailed(true);
+        setError(`Browser STT failed: ${message.slice(0, 120)}. Falling back to server.`);
+        // Intentional fallthrough to audio path so the user doesn't lose
+        // the chunk.
+      }
+    }
+
+    await uploadAudioChunk(chunk, sessionId);
     setChunksUploaded((count) => count + 1);
-  }, [appendTranscriptSegments, createSession]);
+  }, [createSession, uploadAudioChunk, uploadTextChunk]);
 
   const queueChunkUpload = useCallback((chunk: VadAudioChunk) => {
     uploadQueueRef.current = uploadQueueRef.current
@@ -651,6 +856,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     modelLoadProgress,
     autoConfig,
     transcriptWordCount,
+    sttMode,
+    sttReady,
+    sttLoadProgress,
+    sttLoadLabel,
+    sttBrowserFailed,
     start,
     stop,
     pause,
@@ -671,6 +881,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     modelLoadProgress,
     autoConfig,
     transcriptWordCount,
+    sttMode,
+    sttReady,
+    sttLoadProgress,
+    sttLoadLabel,
+    sttBrowserFailed,
     start,
     stop,
     pause,

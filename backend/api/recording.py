@@ -51,6 +51,20 @@ class SummarizeSliceRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class ClientTextChunkRequest(BaseModel):
+    """Transcript text produced by the browser-side Parakeet model.
+
+    The browser ran STT locally (zero server GPU cost), so we don't need
+    the audio bytes — we just persist the text in the same
+    transcript_diarized + processing_metadata shape the audio path produces,
+    and tag the provenance so analytics can attribute tier later.
+    """
+    text: str = Field(min_length=1, max_length=20000)
+    duration_seconds: float = Field(default=0.0, ge=0)
+    elapsed_seconds: float = Field(default=0.0, ge=0)
+    provenance: str = Field(default="client-parakeet-0.6b-int8", max_length=120)
+
+
 SLICE_SYSTEM_PROMPT = (
     "You are a live meeting summarizer. The user is currently in a meeting and "
     "wants a running summary that updates as new conversation happens. Given the "
@@ -449,6 +463,95 @@ async def upload_always_on_chunk(
         "segments": segments,
         "text": " ".join(seg["text"] for seg in segments),
         "chunk_id": chunk_id,
+    }
+
+
+@router.post("/sessions/{session_id}/chunks-text")
+async def append_client_text_chunk(
+    session_id: str,
+    payload: ClientTextChunkRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Persist a transcript chunk that was produced by the browser STT.
+
+    Mirrors the side-effects of `/chunks` minus the audio path:
+      - appends a single segment to `transcript_diarized.segments`
+      - updates `transcript_simple`, `duration`, `updated_at`
+      - bumps `processing_metadata.word_count`, `last_chunk_received_at`,
+        `transcription_model`, and `last_chunk_provenance`
+      - inserts a Transcription row so per-segment queries keep working
+      - broadcasts on the same websocket so the live transcript stream stays
+        single-channel for consumers
+
+    Provenance lives in JSONB; no schema migration required.
+    """
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty transcript text.")
+
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if getattr(session, "mode", "upload") != "always_on":
+        raise HTTPException(status_code=409, detail="Session is not an always-on session.")
+    if session.status not in {"recording", "processing", "paused"}:
+        raise HTTPException(status_code=409, detail=f"Session is {session.status}.")
+
+    offset = max(0.0, float(payload.elapsed_seconds or 0.0))
+    duration = max(0.0, float(payload.duration_seconds or 0.0))
+    end = offset + duration if duration > 0 else offset
+
+    segment = {
+        "text": text,
+        "speaker": None,
+        "start": float(offset),
+        "end": float(end),
+        "confidence": 0.93,  # placeholder; browser model is INT8 + no per-word probs
+        "provenance": payload.provenance,
+    }
+
+    result_stub: dict[str, Any] = {
+        "model": payload.provenance,
+        "language": "en",
+        "segments": [segment],
+        "words": [],
+    }
+
+    try:
+        _append_transcription(db, session, [segment], result_stub, offset_seconds=0.0)
+
+        # _append_transcription stamps transcription_model with the value
+        # it sees in result_stub, which is already the provenance string.
+        # We add an explicit provenance counter so analytics can show the
+        # split per session without re-deriving from transcription_model.
+        metadata = dict(session.processing_metadata or {})
+        prov_counts = dict(metadata.get("chunk_provenance_counts") or {})
+        prov_counts[payload.provenance] = int(prov_counts.get(payload.provenance, 0)) + 1
+        metadata["chunk_provenance_counts"] = prov_counts
+        metadata["last_chunk_provenance"] = payload.provenance
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+
+        session.status = "recording"
+        db.commit()
+        db.refresh(session)
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Always-on client-text chunk failed for session %s", session_id
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    await _broadcast_segments(session, [segment])
+
+    total_words = len((session.transcript_simple or "").split())
+    return {
+        "ok": True,
+        "session": _session_payload(session),
+        "segment": segment,
+        "total_words": total_words,
     }
 
 
