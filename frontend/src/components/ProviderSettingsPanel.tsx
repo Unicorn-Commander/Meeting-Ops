@@ -26,7 +26,7 @@ const SERVICE_LABELS: Record<string, string> = {
 // providers surface in the dropdown without a frontend redeploy.
 const VALID_PROVIDERS: Record<string, string[]> = {
   llm: ['litellm', 'openai', 'anthropic', 'openrouter', 'lambda', 'bedrock'],
-  stt: ['local_whisper', 'parakeet', 'deepgram', 'assemblyai', 'openai'],
+  stt: ['parakeet', 'local_whisper', 'deepgram', 'assemblyai', 'openai'],
   tts: ['kokoro', 'vibevoice', 'openai'],
   embeddings: ['infinity', 'openai', 'voyage', 'cohere'],
   reranking: ['infinity', 'cohere', 'voyage'],

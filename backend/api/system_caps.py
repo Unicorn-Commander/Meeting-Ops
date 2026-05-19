@@ -60,11 +60,18 @@ async def get_pipeline_status() -> dict[str, Any]:
     No auth required — status info only, no secrets in the response.
     """
     parakeet_url = os.getenv("PARAKEET_SERVER_URL", "http://meet-parakeet-svc:8881")
-    whisper_url = os.getenv("WHISPER_SERVER_URL", "http://meet-whisper:8178")
+    # WHISPER_SERVER_URL is empty by default since 2026-05-19 — only probe if
+    # an org / deploy explicitly set one so we don't burn 3s on every
+    # capability check waiting for a container that no longer exists.
+    whisper_url = os.getenv("WHISPER_SERVER_URL", "").strip()
     speaker_url = os.getenv("SPEAKER_SVC_URL", "http://meet-speaker-svc:8889")
 
     parakeet_health = await _probe_json(f"{parakeet_url.rstrip('/')}/health")
-    whisper_health = await _probe_json(f"{whisper_url.rstrip('/')}/health")
+    whisper_health = (
+        await _probe_json(f"{whisper_url.rstrip('/')}/health")
+        if whisper_url
+        else None
+    )
     speaker_health = await _probe_json(f"{speaker_url.rstrip('/')}/health")
 
     stt_default = os.getenv("STT_DEFAULT_PROVIDER", "parakeet").lower()
@@ -85,7 +92,7 @@ async def get_pipeline_status() -> dict[str, Any]:
         stt_block = {
             "engine": "whisper",
             "model": "whisper-large-v3-turbo",
-            "endpoint": whisper_url,
+            "endpoint": whisper_url or "(WHISPER_SERVER_URL unset)",
             "ready": bool(whisper_health),
             "gpu": None,
             "label": "whisper.cpp large-v3-turbo",

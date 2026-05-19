@@ -1006,7 +1006,11 @@ async def _transcribe_audio(
     # _persist_transcription expects audio_duration; the providers return
     # `duration` directly, so mirror it for back-compat.
     result.setdefault("audio_duration", result.get("duration", 0.0))
-    result.setdefault("model", "whisper.cpp-large-v3-turbo")
+    # Default-default reflects the current cluster STT (Parakeet 1.1B on
+    # midboy2). Both LocalParakeetProvider and LocalWhisperProvider already
+    # set "model" on success; this setdefault only matters if a provider
+    # returns an empty dict (timeout/error path).
+    result.setdefault("model", "parakeet-tdt-1.1b")
     return result
 
 

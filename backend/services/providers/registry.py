@@ -239,22 +239,26 @@ class ProviderRegistry:
     ) -> Any:
         """Resolve the org's configured STT provider.
 
-        Defaults to whisper.cpp at meet-whisper:8178; orgs that prefer
-        Parakeet flip provider_name="parakeet" in Provider Settings and we
-        route to meet-parakeet-svc instead. Endpoint env vars
-        (WHISPER_SERVER_URL, PARAKEET_SERVER_URL) override per deployment.
+        Defaults to Parakeet 1.1B at meet-parakeet-svc:8881 (or whatever
+        PARAKEET_SERVER_URL points at — midboy2 in cloud deploys). The
+        legacy LocalWhisperProvider implementation remains as a graceful
+        fallback for any org that explicitly stored provider_name=
+        'local_whisper' or 'whisper' in Provider Settings, but no
+        meet-whisper container is shipped any more — pointing back at
+        whisper requires bringing your own endpoint.
 
         Per-upload overrides win over org-level settings — the upload
         pipeline reads UploadJob.transcription_options and passes
         provider_override / model_override here so a single recording can
-        route through Parakeet while the org default stays Whisper (or
+        route through Whisper while the org default stays Parakeet (or
         vice versa).
         """
-        # Default to Parakeet on the cloud build: it runs ~3x faster than
-        # whisper-large-v3-turbo on the same hardware, returns word-level
-        # timestamps natively (whisper.cpp only does segment-level), and
-        # gives the upload pipeline a cleaner shape for the diarization
-        # merge. Orgs can flip back to whisper in Provider Settings.
+        # Default to Parakeet: it runs ~3x faster than whisper-large-v3-turbo
+        # on the same hardware, returns word-level timestamps natively
+        # (whisper.cpp only does segment-level), and gives the upload
+        # pipeline a cleaner shape for the diarization merge. The legacy
+        # meet-whisper container was retired 2026-05-19 once the cloud
+        # deploy moved STT off bigboy's RTX 6000.
         settings = self._get_settings(org_id, "stt")
         provider_name = (
             provider_override

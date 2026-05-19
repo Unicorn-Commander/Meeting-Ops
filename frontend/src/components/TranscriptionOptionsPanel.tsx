@@ -161,8 +161,8 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
             >
               <option value="">Use org default</option>
-              <option value="whisper">whisper.cpp large-v3-turbo (accurate, ~9× realtime)</option>
               <option value="parakeet">NeMo Parakeet-TDT 1.1B (fast, ~30× realtime, word timestamps)</option>
+              <option value="whisper">whisper.cpp large-v3-turbo (legacy, bring-your-own endpoint)</option>
             </select>
           </div>
 

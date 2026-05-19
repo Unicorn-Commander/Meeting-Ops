@@ -19,9 +19,13 @@ router = APIRouter(prefix="/api/providers", tags=["Provider Settings"])
 SERVICE_KINDS = ("llm", "stt", "tts", "embeddings", "reranking", "diarization")
 VALID_PROVIDERS = {
     "llm": ("litellm", "openai", "anthropic", "openrouter", "lambda", "bedrock"),
-    # local_whisper = whisper.cpp HTTP server on :8178
-    # parakeet      = NVIDIA NeMo Parakeet-TDT on :8881 (word-level timestamps)
-    "stt": ("local_whisper", "parakeet", "deepgram", "assemblyai", "openai"),
+    # parakeet      = NVIDIA NeMo Parakeet-TDT on :8881 (word-level timestamps).
+    #                 Default for new orgs as of 2026-05-19 when the legacy
+    #                 meet-whisper container was retired.
+    # local_whisper = whisper.cpp HTTP server (no longer shipped by default;
+    #                 kept as a valid choice so orgs that bring their own
+    #                 whisper endpoint can still select it).
+    "stt": ("parakeet", "local_whisper", "deepgram", "assemblyai", "openai"),
     "tts": ("kokoro", "vibevoice", "openai"),
     "embeddings": ("infinity", "openai", "voyage", "cohere"),
     "reranking": ("infinity", "cohere", "voyage"),
