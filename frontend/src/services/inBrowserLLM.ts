@@ -7,7 +7,11 @@ import type {
 import { config } from '../config';
 
 export const IN_BROWSER_LLM_MODEL_KEY = 'meetingops.inBrowserLLM.model.v1';
-export const DEFAULT_MODEL_ID = 'qwen2.5-1.5b-instruct';
+export const IN_BROWSER_LLM_DTYPE_KEY = 'meetingops.inBrowserLLM.dtype.v1';
+// Default model when fresh install / no choice persisted. Picks a
+// transformers.js entry so Aaron can validate the second runtime out of
+// the box; user can still pick any web-llm entry from the picker.
+export const DEFAULT_MODEL_ID = 'gemma-4-e2b-q4f16';
 
 export const LIVE_SUMMARY_AUTO_KEY = 'meetingops.liveSummary.autoConfig.v1';
 
@@ -77,10 +81,24 @@ export interface SummaryResult {
   paragraphs: SummaryParagraph[];
 }
 
+// Two parallel browser runtimes coexist behind the same singleton.
+// Picker chooses one; AlwaysOnContext is runtime-agnostic.
+export type ModelRuntime = 'web-llm' | 'transformers.js';
+
+// Quantization options exposed by transformers.js. web-llm pre-quantizes
+// each model record so dtype is fixed there.
+export type Dtype = 'q4' | 'q4f16' | 'q8' | 'fp16';
+
 export interface InBrowserModelOption {
   id: string;
   actualModelId: string | null;
   label: string;
+  runtime: ModelRuntime | 'server';
+  repoId?: string;
+  defaultDtype?: Dtype;
+  approxSizeMB?: number;
+  contextWindow?: number;
+  notes?: string;
   vramRequiredMB?: number;
   lowResourceRequired?: boolean;
   source: 'curated' | 'web-llm' | 'server';
@@ -104,6 +122,7 @@ export interface SummarizeOptions {
 export interface PreloadOptions {
   signal?: AbortSignal;
   onProgress?: (report: InitProgressReport) => void;
+  dtype?: Dtype;
 }
 
 export interface Summarizer {
@@ -115,54 +134,110 @@ export interface Summarizer {
   preloadModel(modelId: string, opts?: PreloadOptions): Promise<void>;
 }
 
-const CURATED_MODELS: Array<{
+// Curated catalog. Order = picker order (newest/best first). Entries with
+// runtime: 'transformers.js' load via @huggingface/transformers; web-llm
+// entries route through MLC. Server entry is a special sentinel handled by
+// the dispatcher.
+interface CuratedEntry {
   id: string;
-  actualModelId: string;
   label: string;
-}> = [
-  // Newest first. Entries whose actualModelId isn't published by web-llm
+  runtime: ModelRuntime;
+  // For web-llm: the prebuilt MLC model_id.
+  // For transformers.js: the HuggingFace repo id.
+  modelRef: string;
+  defaultDtype?: Dtype;
+  approxSizeMB?: number;
+  contextWindow?: number;
+  notes?: string;
+}
+
+const CURATED_MODELS: CuratedEntry[] = [
+  // ---- transformers.js (ONNX + WebGPU) ----
+  // Multimodal Gemma 4 used in text-only mode for summarization. The
+  // model has audio + vision encoders on disk but those sessions are
+  // skipped at load time when use_external_data_format is honored and we
+  // route through AutoModelForImageTextToText with text-only inputs.
+  // Total q4f16 download with encoders is ~3GB; pure text decoder path
+  // is ~1.5GB cached.
+  {
+    id: 'gemma-4-e2b-q4f16',
+    label: 'Gemma 4 E2B (q4f16 · ~3GB)',
+    runtime: 'transformers.js',
+    modelRef: 'onnx-community/gemma-4-E2B-it-ONNX',
+    defaultDtype: 'q4f16',
+    approxSizeMB: 3200,
+    contextWindow: 8192,
+    notes: 'Multimodal model used text-only for summaries. First load is the slowest.',
+  },
+  {
+    id: 'qwen3-0.6b-onnx-q4f16',
+    label: 'Qwen 3 0.6B ONNX (q4f16 · ~500MB)',
+    runtime: 'transformers.js',
+    modelRef: 'onnx-community/Qwen3-0.6B-ONNX',
+    defaultDtype: 'q4f16',
+    approxSizeMB: 540,
+    contextWindow: 32768,
+    notes: 'Tiny + fast. Great for short slices.',
+  },
+  {
+    id: 'smollm2-1.7b-onnx-q4f16',
+    label: 'SmolLM2 1.7B Instruct ONNX (q4f16 · ~1GB)',
+    runtime: 'transformers.js',
+    modelRef: 'HuggingFaceTB/SmolLM2-1.7B-Instruct',
+    defaultDtype: 'q4f16',
+    approxSizeMB: 1060,
+    contextWindow: 8192,
+    notes: 'HuggingFaceTB official ONNX build.',
+  },
+  // ---- web-llm (MLC prebuilt) ----
+  // Newest first. Entries whose modelRef isn't published by web-llm
   // are silently filtered out at runtime (see records.find check below),
   // so we can stage future variants here optimistically — they appear in
   // the picker the moment web-llm ships them.
   {
     id: 'gemma-4-e2b-it',
-    actualModelId: 'gemma4-E2B-it-q4f16_1-MLC',
-    label: 'Gemma 4 E2B (text mode)',
+    label: 'Gemma 4 E2B (web-llm)',
+    runtime: 'web-llm',
+    modelRef: 'gemma4-E2B-it-q4f16_1-MLC',
   },
   {
     id: 'qwen3.6-1.7b',
-    actualModelId: 'Qwen3.6-1.7B-q4f16_1-MLC',
-    label: 'Qwen 3.6 1.7B',
+    label: 'Qwen 3.6 1.7B (web-llm)',
+    runtime: 'web-llm',
+    modelRef: 'Qwen3.6-1.7B-q4f16_1-MLC',
   },
   {
     id: 'qwen3-1.7b',
-    actualModelId: 'Qwen3-1.7B-q4f16_1-MLC',
-    label: 'Qwen 3 1.7B',
+    label: 'Qwen 3 1.7B (web-llm)',
+    runtime: 'web-llm',
+    modelRef: 'Qwen3-1.7B-q4f16_1-MLC',
   },
   {
     id: 'qwen3-0.6b',
-    actualModelId: 'Qwen3-0.6B-q4f16_1-MLC',
-    label: 'Qwen 3 0.6B (smallest, fastest)',
+    label: 'Qwen 3 0.6B (web-llm, smallest)',
+    runtime: 'web-llm',
+    modelRef: 'Qwen3-0.6B-q4f16_1-MLC',
   },
   {
     id: 'gemma-3-1b-it',
-    actualModelId: 'gemma3-1b-it-q4f16_1-MLC',
-    label: 'Gemma 3 1B IT',
+    label: 'Gemma 3 1B IT (web-llm)',
+    runtime: 'web-llm',
+    modelRef: 'gemma3-1b-it-q4f16_1-MLC',
   },
   {
     id: 'qwen2.5-1.5b-instruct',
-    actualModelId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
-    label: 'Qwen 2.5 1.5B Instruct',
+    label: 'Qwen 2.5 1.5B Instruct (web-llm)',
+    runtime: 'web-llm',
+    modelRef: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
   },
   {
     id: 'phi-3.5-mini-instruct',
-    actualModelId: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
-    label: 'Phi 3.5 Mini Instruct (best quality)',
+    label: 'Phi 3.5 Mini Instruct (web-llm, best quality)',
+    runtime: 'web-llm',
+    modelRef: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
   },
 ];
 
-let enginePromise: Promise<MLCEngine> | null = null;
-let loadedActualModelId: string | null = null;
 let webLLMModulePromise: Promise<typeof import('@mlc-ai/web-llm')> | null = null;
 let cachedModelRecords: ModelRecord[] | null = null;
 
@@ -245,6 +320,36 @@ export function setStoredModelId(modelId: string): void {
   localStorage.setItem(IN_BROWSER_LLM_MODEL_KEY, modelId);
 }
 
+export function getStoredDtype(modelId: string): Dtype | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const raw = localStorage.getItem(IN_BROWSER_LLM_DTYPE_KEY);
+  if (!raw) {
+    // Fallback to entry's defaultDtype.
+    const curated = CURATED_MODELS.find((m) => m.id === modelId);
+    return curated?.defaultDtype;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, Dtype>;
+    const stored = parsed[modelId];
+    if (stored && ['q4', 'q4f16', 'q8', 'fp16'].includes(stored)) {
+      return stored;
+    }
+  } catch { /* noop */ }
+  const curated = CURATED_MODELS.find((m) => m.id === modelId);
+  return curated?.defaultDtype;
+}
+
+export function setStoredDtype(modelId: string, dtype: Dtype): void {
+  if (typeof window === 'undefined') return;
+  const raw = localStorage.getItem(IN_BROWSER_LLM_DTYPE_KEY);
+  let parsed: Record<string, Dtype> = {};
+  if (raw) {
+    try { parsed = JSON.parse(raw) as Record<string, Dtype>; } catch { /* noop */ }
+  }
+  parsed[modelId] = dtype;
+  localStorage.setItem(IN_BROWSER_LLM_DTYPE_KEY, JSON.stringify(parsed));
+}
+
 export function getAvailableModels(): InBrowserModelOption[] {
   const records = llmRecords();
   const seen = new Set<string>();
@@ -253,22 +358,48 @@ export function getAvailableModels(): InBrowserModelOption[] {
       id: 'server',
       actualModelId: null,
       label: 'Server-side Qwen 3.6',
+      runtime: 'server',
       source: 'server',
     },
   ];
 
   for (const curated of CURATED_MODELS) {
-    const record = records.find((item) => item.model_id === curated.actualModelId);
-    if (records.length > 0 && !record) continue;
-    seen.add(curated.actualModelId);
-    options.push({
-      id: curated.id,
-      actualModelId: curated.actualModelId,
-      label: curated.label,
-      vramRequiredMB: record?.vram_required_MB,
-      lowResourceRequired: record?.low_resource_required,
-      source: 'curated',
-    });
+    if (curated.runtime === 'web-llm') {
+      const record = records.find((item) => item.model_id === curated.modelRef);
+      // Records aren't loaded until loadWebLLM() runs at least once. If
+      // we have no records yet (initial render before refresh), include
+      // the curated entry so the picker has something to show.
+      if (records.length > 0 && !record) continue;
+      seen.add(curated.modelRef);
+      options.push({
+        id: curated.id,
+        actualModelId: curated.modelRef,
+        label: curated.label,
+        runtime: 'web-llm',
+        repoId: curated.modelRef,
+        approxSizeMB: curated.approxSizeMB,
+        contextWindow: curated.contextWindow,
+        notes: curated.notes,
+        vramRequiredMB: record?.vram_required_MB,
+        lowResourceRequired: record?.low_resource_required,
+        source: 'curated',
+      });
+    } else {
+      // transformers.js entry — always shown (we don't precheck the HF
+      // repo at picker render time).
+      options.push({
+        id: curated.id,
+        actualModelId: curated.modelRef,
+        label: curated.label,
+        runtime: 'transformers.js',
+        repoId: curated.modelRef,
+        defaultDtype: curated.defaultDtype,
+        approxSizeMB: curated.approxSizeMB,
+        contextWindow: curated.contextWindow,
+        notes: curated.notes,
+        source: 'curated',
+      });
+    }
   }
 
   for (const record of records) {
@@ -280,6 +411,8 @@ export function getAvailableModels(): InBrowserModelOption[] {
       id: record.model_id,
       actualModelId: record.model_id,
       label: displayName(record.model_id),
+      runtime: 'web-llm',
+      repoId: record.model_id,
       vramRequiredMB: record.vram_required_MB,
       lowResourceRequired: record.low_resource_required,
       source: 'web-llm',
@@ -302,67 +435,65 @@ export function getModelLabel(modelId: string): string {
   return displayName(modelId);
 }
 
+// For web-llm entries, resolve the picker id → actual MLC model_id.
+// transformers.js entries return their HF repo id; server returns 'server'.
 export function resolveActualModelId(modelId: string): string {
   if (modelId === 'server') return 'server';
-  const option = getAvailableModels().find((item) => item.id === modelId);
-  if (option?.actualModelId && findRecord(option.actualModelId)) {
-    return option.actualModelId;
-  }
+  const curated = CURATED_MODELS.find((m) => m.id === modelId);
+  if (curated) return curated.modelRef;
+  // Direct passthrough for web-llm record ids that weren't curated.
   if (findRecord(modelId)) return modelId;
 
-  const defaultOption = getAvailableModels().find(
-    (item) => item.id === DEFAULT_MODEL_ID,
-  );
-  if (defaultOption?.actualModelId) return defaultOption.actualModelId;
+  const defaultOption = CURATED_MODELS.find((m) => m.id === DEFAULT_MODEL_ID);
+  if (defaultOption) return defaultOption.modelRef;
 
   const fallback = llmRecords().find((record) => /qwen|gemma/i.test(record.model_id));
   return fallback?.model_id || llmRecords()[0]?.model_id || modelId;
+}
+
+export function getRuntimeForModelId(modelId: string): ModelRuntime | 'server' {
+  if (modelId === 'server') return 'server';
+  const curated = CURATED_MODELS.find((m) => m.id === modelId);
+  if (curated) return curated.runtime;
+  // Unknown id — assume web-llm (prebuilt record passthrough).
+  return 'web-llm';
 }
 
 function forceServer(modelId: string): boolean {
   return modelId === 'server' || getWebGPUStatus().forcedServer;
 }
 
-async function loadEngine(
-  modelId: string,
-  onProgress?: (report: InitProgressReport) => void,
-): Promise<MLCEngine> {
-  const webllm = await loadWebLLM();
-  const actualModelId = resolveActualModelId(modelId);
-  if (actualModelId === 'server') {
-    throw new Error('Server mode does not load a browser model.');
-  }
+// ---- Slice system prompt (kept in sync with backend/api/recording.py)
+const SLICE_SYSTEM_PROMPT =
+  'You are a live meeting summarizer. The user is currently in a meeting and wants a running summary that updates as new conversation happens. Given the transcript so far and the previous summary, produce an updated summary that:\n' +
+  '- Leads with what is NEW since the previous summary\n' +
+  '- Preserves key context, decisions, and action items from before\n' +
+  '- Stays under 200 words\n' +
+  '- Reads naturally, like notes a thoughtful attendee would take\n\n' +
+  'Do not list speakers verbatim. Do not repeat the previous summary word-for-word.';
 
-  const appConfig: AppConfig = {
-    ...webllm.prebuiltAppConfig,
-    cacheBackend: 'indexeddb',
-  };
-
-  if (!enginePromise) {
-    enginePromise = webllm.CreateMLCEngine(actualModelId, {
-      appConfig,
-      initProgressCallback: onProgress,
-      logLevel: 'WARN',
-    });
-    loadedActualModelId = actualModelId;
-    return enginePromise;
+function buildUserPrompt(transcript: string, previousSummary?: string): string {
+  const tail = transcript.slice(-50000);
+  if (previousSummary && previousSummary.trim()) {
+    return [
+      'Previous running summary:',
+      previousSummary.trim(),
+      '',
+      'New transcript since that summary (most recent at the bottom):',
+      tail,
+    ].join('\n');
   }
-
-  const engine = await enginePromise;
-  engine.setInitProgressCallback(onProgress);
-  if (loadedActualModelId !== actualModelId) {
-    await engine.reload(actualModelId);
-    loadedActualModelId = actualModelId;
-  }
-  return engine;
+  return [
+    'Transcript so far (most recent at the bottom):',
+    tail,
+  ].join('\n');
 }
 
+// ---- Server SSE fallback (unchanged from previous slice landing)
 async function* summarizeWithServer(
   transcript: string,
   opts?: SummarizeOptions,
 ): AsyncIterable<string> {
-  // The slice endpoint streams SSE tokens; reuse it for both fresh and
-  // continuing slices so the user sees tokens land in real time.
   const response = await fetch(`${config.apiUrl}/api/recordings/summarize-slice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -420,32 +551,353 @@ async function* summarizeWithServer(
   }
 }
 
-function buildUserPrompt(transcript: string, previousSummary?: string): string {
-  const tail = transcript.slice(-50000);
-  if (previousSummary && previousSummary.trim()) {
-    return [
-      'Previous running summary:',
-      previousSummary.trim(),
-      '',
-      'New transcript since that summary (most recent at the bottom):',
-      tail,
-    ].join('\n');
+// =============================================================
+// web-llm backend
+// =============================================================
+
+let webLLMEnginePromise: Promise<MLCEngine> | null = null;
+let webLLMLoadedActualModelId: string | null = null;
+
+async function loadWebLLMEngine(
+  actualModelId: string,
+  onProgress?: (report: InitProgressReport) => void,
+): Promise<MLCEngine> {
+  const webllm = await loadWebLLM();
+  if (actualModelId === 'server') {
+    throw new Error('Server mode does not load a browser model.');
   }
-  return [
-    'Transcript so far (most recent at the bottom):',
-    tail,
-  ].join('\n');
+
+  const appConfig: AppConfig = {
+    ...webllm.prebuiltAppConfig,
+    cacheBackend: 'indexeddb',
+  };
+
+  if (!webLLMEnginePromise) {
+    webLLMEnginePromise = webllm.CreateMLCEngine(actualModelId, {
+      appConfig,
+      initProgressCallback: onProgress,
+      logLevel: 'WARN',
+    });
+    webLLMLoadedActualModelId = actualModelId;
+    return webLLMEnginePromise;
+  }
+
+  const engine = await webLLMEnginePromise;
+  engine.setInitProgressCallback(onProgress);
+  if (webLLMLoadedActualModelId !== actualModelId) {
+    await engine.reload(actualModelId);
+    webLLMLoadedActualModelId = actualModelId;
+  }
+  return engine;
 }
 
-const SLICE_SYSTEM_PROMPT =
-  'You are a live meeting summarizer. The user is currently in a meeting and wants a running summary that updates as new conversation happens. Given the transcript so far and the previous summary, produce an updated summary that:\n' +
-  '- Leads with what is NEW since the previous summary\n' +
-  '- Preserves key context, decisions, and action items from before\n' +
-  '- Stays under 200 words\n' +
-  '- Reads naturally, like notes a thoughtful attendee would take\n\n' +
-  'Do not list speakers verbatim. Do not repeat the previous summary word-for-word.';
+async function* summarizeWithWebLLM(
+  transcript: string,
+  actualModelId: string,
+  opts?: SummarizeOptions,
+): AsyncIterable<string> {
+  const engine = await loadWebLLMEngine(actualModelId, opts?.onProgress);
+  if (opts?.signal?.aborted) {
+    await engine.interruptGenerate();
+    return;
+  }
 
-export class WebLLMSummarizer implements Summarizer {
+  const abortHandler = () => {
+    engine.interruptGenerate();
+  };
+  opts?.signal?.addEventListener('abort', abortHandler, { once: true });
+
+  try {
+    const stream = await engine.chat.completions.create({
+      model: actualModelId,
+      stream: true,
+      temperature: 0.25,
+      max_tokens: 600,
+      messages: [
+        { role: 'system', content: SLICE_SYSTEM_PROMPT },
+        { role: 'user', content: buildUserPrompt(transcript, opts?.previousSummary) },
+      ],
+    } as any);
+
+    for await (const chunk of stream as unknown as AsyncIterable<any>) {
+      if (opts?.signal?.aborted) break;
+      const token = chunk?.choices?.[0]?.delta?.content || '';
+      if (!token) continue;
+      opts?.onToken?.(token);
+      yield token;
+    }
+  } finally {
+    opts?.signal?.removeEventListener('abort', abortHandler);
+  }
+}
+
+// =============================================================
+// transformers.js backend
+// =============================================================
+
+let transformersModulePromise: Promise<any> | null = null;
+
+async function loadTransformersModule(): Promise<any> {
+  if (!transformersModulePromise) {
+    // Dynamic import keeps the ~4MB transformers runtime out of the
+    // initial bundle; only paid when the user actually picks a t.js model.
+    transformersModulePromise = import('@huggingface/transformers');
+  }
+  return transformersModulePromise;
+}
+
+interface TransformersLoaded {
+  repoId: string;
+  dtype: Dtype;
+  tokenizer: any;
+  model: any;
+  isMultimodal: boolean;
+}
+
+let transformersLoaded: TransformersLoaded | null = null;
+let transformersLoadingPromise: Promise<TransformersLoaded> | null = null;
+
+// Models known to expose vision/audio encoders on the same repo. Loaded
+// via AutoModelForImageTextToText so the multimodal sessions are wired up
+// correctly. We still drive them text-only.
+const MULTIMODAL_REPO_PREFIXES = [
+  'onnx-community/gemma-4',
+  'onnx-community/Gemma-4',
+];
+
+function isMultimodalRepo(repoId: string): boolean {
+  return MULTIMODAL_REPO_PREFIXES.some((p) => repoId.startsWith(p));
+}
+
+async function loadTransformersModel(
+  repoId: string,
+  dtype: Dtype,
+  onProgress?: (report: InitProgressReport) => void,
+): Promise<TransformersLoaded> {
+  if (
+    transformersLoaded &&
+    transformersLoaded.repoId === repoId &&
+    transformersLoaded.dtype === dtype
+  ) {
+    return transformersLoaded;
+  }
+  // If a different model was loaded, drop the reference so the GC can
+  // reclaim the WebGPU buffers. (transformers.js doesn't expose an
+  // explicit dispose; setting to null is the documented escape hatch.)
+  if (transformersLoaded && transformersLoaded.repoId !== repoId) {
+    transformersLoaded = null;
+  }
+
+  if (transformersLoadingPromise) return transformersLoadingPromise;
+
+  const transformers = await loadTransformersModule();
+  const { AutoTokenizer, AutoModelForCausalLM, AutoModelForImageTextToText } =
+    transformers as {
+      AutoTokenizer: any;
+      AutoModelForCausalLM: any;
+      AutoModelForImageTextToText: any;
+    };
+
+  const multimodal = isMultimodalRepo(repoId);
+
+  // Progress shim: transformers.js emits a richer event shape. Translate
+  // to the InitProgressReport shape callers already handle.
+  const onTransformersProgress = onProgress
+    ? (event: any) => {
+        if (event?.status === 'progress' || event?.status === 'progress_total') {
+          const progress =
+            typeof event.progress === 'number' ? event.progress / 100 : 0;
+          onProgress({
+            progress: Math.max(0, Math.min(1, progress)),
+            timeElapsed: 0,
+            text: `Downloading ${event.file || repoId}`,
+          });
+        } else if (event?.status === 'ready') {
+          onProgress({
+            progress: 1,
+            timeElapsed: 0,
+            text: `${repoId} ready`,
+          });
+        }
+      }
+    : undefined;
+
+  transformersLoadingPromise = (async () => {
+    const tokenizer = await AutoTokenizer.from_pretrained(repoId, {
+      progress_callback: onTransformersProgress,
+    });
+
+    let model: any;
+    if (multimodal) {
+      // Reference: webml-community/Gemma-4-WebGPU Space.
+      // Per-submodule dtypes mirror that bundle's loader.
+      model = await AutoModelForImageTextToText.from_pretrained(repoId, {
+        dtype: {
+          audio_encoder: 'fp16',
+          vision_encoder: 'fp16',
+          embed_tokens: dtype,
+          decoder_model_merged: dtype,
+        },
+        device: 'webgpu',
+        progress_callback: onTransformersProgress,
+      });
+    } else {
+      model = await AutoModelForCausalLM.from_pretrained(repoId, {
+        dtype,
+        device: 'webgpu',
+        progress_callback: onTransformersProgress,
+      });
+    }
+
+    const loaded: TransformersLoaded = {
+      repoId,
+      dtype,
+      tokenizer,
+      model,
+      isMultimodal: multimodal,
+    };
+    transformersLoaded = loaded;
+    return loaded;
+  })();
+
+  try {
+    return await transformersLoadingPromise;
+  } finally {
+    transformersLoadingPromise = null;
+  }
+}
+
+async function* summarizeWithTransformersJs(
+  transcript: string,
+  repoId: string,
+  dtype: Dtype,
+  opts?: SummarizeOptions,
+): AsyncIterable<string> {
+  const loaded = await loadTransformersModel(repoId, dtype, opts?.onProgress);
+  if (opts?.signal?.aborted) return;
+
+  const { tokenizer, model } = loaded;
+  const transformers = await loadTransformersModule();
+  const { TextStreamer } = transformers as { TextStreamer: any };
+
+  const messages = [
+    { role: 'system', content: SLICE_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: buildUserPrompt(transcript, opts?.previousSummary),
+    },
+  ];
+
+  // apply_chat_template returns token ids ready for generate().
+  const inputs = tokenizer.apply_chat_template(messages, {
+    add_generation_prompt: true,
+    return_tensors: 'pt',
+    return_dict: true,
+  });
+
+  // Token streaming via TextStreamer.callback_function. We bridge that
+  // callback into an AsyncIterable by buffering tokens and resolving a
+  // pending pull when one lands. Typed loose to keep TS happy across
+  // closure boundaries (TS narrows `pending` to never if it never sees
+  // a typed write to it from the same flow graph).
+  type TokenResolver = (v: IteratorResult<string>) => void;
+  const state: {
+    buffer: string[];
+    pending: TokenResolver | null;
+    done: boolean;
+    error: Error | null;
+  } = {
+    buffer: [],
+    pending: null,
+    done: false,
+    error: null,
+  };
+
+  const streamer = new TextStreamer(tokenizer, {
+    skip_prompt: true,
+    skip_special_tokens: true,
+    callback_function: (text: string) => {
+      if (!text) return;
+      opts?.onToken?.(text);
+      const resolver = state.pending;
+      if (resolver) {
+        state.pending = null;
+        resolver({ value: text, done: false });
+      } else {
+        state.buffer.push(text);
+      }
+    },
+  });
+
+  // Abort wiring — transformers.js generate() honors an interrupt callback
+  // via a stopping criterion. Simpler: track a flag and the streamer
+  // callback will get further calls regardless; we early-return out of
+  // the async iterator below.
+  const abortHandler = () => {
+    // Calling interrupt() short-circuits the model loop in 3.x+.
+    if (typeof (model as any).interrupt === 'function') {
+      try { (model as any).interrupt(); } catch { /* noop */ }
+    }
+  };
+  opts?.signal?.addEventListener('abort', abortHandler, { once: true });
+
+  // Kick off generation. We await this in a parallel task so the
+  // AsyncIterable can yield buffered tokens as they land.
+  const generatePromise = (async () => {
+    try {
+      const inputIds = (inputs && (inputs as any).input_ids) ?? inputs;
+      await model.generate({
+        ...((inputs && (inputs as any).input_ids) ? inputs : { input_ids: inputIds }),
+        max_new_tokens: 256,
+        do_sample: true,
+        temperature: 0.3,
+        top_p: 0.9,
+        streamer,
+      });
+    } catch (err) {
+      state.error = err instanceof Error ? err : new Error(String(err));
+    } finally {
+      state.done = true;
+      const resolver = state.pending;
+      state.pending = null;
+      if (resolver) {
+        resolver({ value: undefined as any, done: true });
+      }
+    }
+  })();
+
+  try {
+    while (true) {
+      if (opts?.signal?.aborted) break;
+      if (state.buffer.length > 0) {
+        const next = state.buffer.shift()!;
+        yield next;
+        continue;
+      }
+      if (state.done) {
+        if (state.error) throw state.error;
+        break;
+      }
+      const value = await new Promise<IteratorResult<string>>((resolve) => {
+        state.pending = resolve;
+      });
+      if (value.done) {
+        if (state.error) throw state.error;
+        break;
+      }
+      yield value.value;
+    }
+  } finally {
+    opts?.signal?.removeEventListener('abort', abortHandler);
+    await generatePromise.catch(() => undefined);
+  }
+}
+
+// =============================================================
+// Dispatcher
+// =============================================================
+
+export class InBrowserSummarizer implements Summarizer {
   async *summarize(
     transcript: string,
     modelId: string,
@@ -456,49 +908,51 @@ export class WebLLMSummarizer implements Summarizer {
       return;
     }
 
-    const actualModelId = resolveActualModelId(modelId);
-    const engine = await loadEngine(actualModelId, opts?.onProgress);
-    if (opts?.signal?.aborted) {
-      await engine.interruptGenerate();
+    const runtime = getRuntimeForModelId(modelId);
+    if (runtime === 'server') {
+      yield* summarizeWithServer(transcript, opts);
       return;
     }
 
-    const abortHandler = () => {
-      engine.interruptGenerate();
-    };
-    opts?.signal?.addEventListener('abort', abortHandler, { once: true });
-
-    try {
-      const stream = await engine.chat.completions.create({
-        model: actualModelId,
-        stream: true,
-        temperature: 0.25,
-        max_tokens: 600,
-        messages: [
-          { role: 'system', content: SLICE_SYSTEM_PROMPT },
-          { role: 'user', content: buildUserPrompt(transcript, opts?.previousSummary) },
-        ],
-      } as any);
-
-      for await (const chunk of stream as unknown as AsyncIterable<any>) {
-        if (opts?.signal?.aborted) break;
-        const token = chunk?.choices?.[0]?.delta?.content || '';
-        if (!token) continue;
-        opts?.onToken?.(token);
-        yield token;
+    if (runtime === 'transformers.js') {
+      const curated = CURATED_MODELS.find((m) => m.id === modelId);
+      if (!curated) {
+        // Unknown id but tagged transformers.js — fall through to server.
+        yield* summarizeWithServer(transcript, opts);
+        return;
       }
-    } finally {
-      opts?.signal?.removeEventListener('abort', abortHandler);
+      const dtype = getStoredDtype(modelId) || curated.defaultDtype || 'q4f16';
+      yield* summarizeWithTransformersJs(transcript, curated.modelRef, dtype, opts);
+      return;
     }
+
+    // web-llm path
+    const actualModelId = resolveActualModelId(modelId);
+    yield* summarizeWithWebLLM(transcript, actualModelId, opts);
   }
 
   async preloadModel(modelId: string, opts?: PreloadOptions): Promise<void> {
     if (forceServer(modelId)) return;
-    const engine = await loadEngine(modelId, opts?.onProgress);
+    const runtime = getRuntimeForModelId(modelId);
+    if (runtime === 'server') return;
+
+    if (runtime === 'transformers.js') {
+      const curated = CURATED_MODELS.find((m) => m.id === modelId);
+      if (!curated) return;
+      const dtype = opts?.dtype || getStoredDtype(modelId) || curated.defaultDtype || 'q4f16';
+      await loadTransformersModel(curated.modelRef, dtype, opts?.onProgress);
+      return;
+    }
+
+    const actualModelId = resolveActualModelId(modelId);
+    const engine = await loadWebLLMEngine(actualModelId, opts?.onProgress);
     if (opts?.signal?.aborted) {
       await engine.interruptGenerate();
     }
   }
 }
 
-export const inBrowserLLM = new WebLLMSummarizer();
+// Backwards-compat alias for any consumer that still imports the old name.
+export class WebLLMSummarizer extends InBrowserSummarizer {}
+
+export const inBrowserLLM = new InBrowserSummarizer();

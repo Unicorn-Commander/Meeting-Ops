@@ -5,12 +5,15 @@ import {
   LIVE_SUMMARY_THRESHOLDS,
   getAvailableModels,
   getLiveSummaryAutoConfig,
+  getStoredDtype,
   getStoredModelId,
   getWebGPUStatus,
   inBrowserLLM,
   refreshAvailableModels,
   setLiveSummaryAutoConfig,
+  setStoredDtype,
   setStoredModelId,
+  type Dtype,
   type InBrowserModelOption,
   type LiveSummaryThreshold,
 } from '../../services/inBrowserLLM';
@@ -22,30 +25,55 @@ function statusClasses(state: 'ready' | 'limited' | 'unavailable'): string {
   return 'border-red-500/30 bg-red-500/10 text-red-300';
 }
 
+function runtimeBadgeClasses(runtime: InBrowserModelOption['runtime']): string {
+  if (runtime === 'transformers.js') return 'border-violet-500/40 bg-violet-500/10 text-violet-200';
+  if (runtime === 'web-llm') return 'border-sky-500/40 bg-sky-500/10 text-sky-200';
+  return 'border-zinc-600 bg-zinc-700/40 text-zinc-300';
+}
+
+function formatSize(mb?: number): string | null {
+  if (!mb || mb <= 0) return null;
+  if (mb >= 1024) return `~${(mb / 1024).toFixed(1)}GB`;
+  return `~${mb}MB`;
+}
+
 function optionDetail(option?: InBrowserModelOption): string {
   if (!option) return '';
   if (option.id === 'server') return 'Highest quality, uses the backend Qwen 3.6 endpoint.';
-  const parts = [];
-  if (option.vramRequiredMB) {
+  const parts: string[] = [];
+  if (option.runtime === 'web-llm' && option.vramRequiredMB) {
     parts.push(`${(option.vramRequiredMB / 1024).toFixed(1)} GB VRAM`);
   }
-  if (option.lowResourceRequired) {
-    parts.push('low-resource profile');
-  }
+  const size = formatSize(option.approxSizeMB);
+  if (size) parts.push(size);
+  if (option.contextWindow) parts.push(`${option.contextWindow.toLocaleString()} ctx`);
+  if (option.lowResourceRequired) parts.push('low-resource profile');
+  if (option.notes) parts.push(option.notes);
   parts.push(option.source === 'curated' ? 'curated default' : 'web-llm prebuilt');
   return parts.join(' · ');
 }
+
+const DTYPE_OPTIONS: Array<{ value: Dtype; label: string }> = [
+  { value: 'q4f16', label: 'q4f16 (smallest, fastest)' },
+  { value: 'q4', label: 'q4 (small, slower)' },
+  { value: 'q8', label: 'q8 (medium)' },
+  { value: 'fp16', label: 'fp16 (largest, highest quality)' },
+];
 
 export default function InBrowserAISettings(_props: SectionProps) {
   const [models, setModels] = useState<InBrowserModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState(getStoredModelId);
   const [serverMode, setServerMode] = useState(() => getStoredModelId() === 'server');
+  const [selectedDtype, setSelectedDtype] = useState<Dtype | undefined>(() =>
+    getStoredDtype(getStoredModelId()),
+  );
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
   const [autoConfig, setAutoConfig] = useState(() => getLiveSummaryAutoConfig());
 
   const webGPUStatus = useMemo(() => getWebGPUStatus(), []);
   const selectedOption = models.find((model) => model.id === selectedModel);
+  const showDtypeSelector = selectedOption?.runtime === 'transformers.js';
 
   useEffect(() => {
     const available = getAvailableModels();
@@ -69,10 +97,24 @@ export default function InBrowserAISettings(_props: SectionProps) {
     }
   }, [selectedModel, webGPUStatus.forcedServer]);
 
+  // When the model changes, prefer that model's persisted dtype (or its
+  // default). This keeps each model's quantization choice independent.
+  useEffect(() => {
+    setSelectedDtype(getStoredDtype(selectedModel));
+  }, [selectedModel]);
+
   const updateModel = (modelId: string) => {
     setSelectedModel(modelId);
     setServerMode(modelId === 'server');
     setStoredModelId(modelId);
+    // Reset cached download UI state when switching models.
+    setDownloadProgress(null);
+    setDownloadState('idle');
+  };
+
+  const updateDtype = (dtype: Dtype) => {
+    setSelectedDtype(dtype);
+    setStoredDtype(selectedModel, dtype);
   };
 
   const updateServerMode = (enabled: boolean) => {
@@ -103,6 +145,7 @@ export default function InBrowserAISettings(_props: SectionProps) {
     setDownloadProgress(0);
     try {
       await inBrowserLLM.preloadModel(selectedModel, {
+        dtype: selectedDtype,
         onProgress: (report) => {
           setDownloadProgress(Math.max(0, Math.min(1, report.progress || 0)));
         },
@@ -139,16 +182,54 @@ export default function InBrowserAISettings(_props: SectionProps) {
           disabled={webGPUStatus.forcedServer}
           className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {models.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.label}
-            </option>
-          ))}
+          {models.map((model) => {
+            const size = formatSize(model.approxSizeMB);
+            const suffix = size ? ` — ${size}` : '';
+            return (
+              <option key={model.id} value={model.id}>
+                {model.label}
+                {suffix}
+              </option>
+            );
+          })}
         </select>
-        <p className="mt-2 text-xs text-zinc-500">
-          {webGPUStatus.forcedServer ? webGPUStatus.detail : optionDetail(selectedOption)}
-        </p>
+        <div className="mt-2 flex items-center gap-2">
+          {selectedOption && (
+            <span
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${runtimeBadgeClasses(selectedOption.runtime)}`}
+            >
+              {selectedOption.runtime}
+            </span>
+          )}
+          <p className="text-xs text-zinc-500">
+            {webGPUStatus.forcedServer ? webGPUStatus.detail : optionDetail(selectedOption)}
+          </p>
+        </div>
       </div>
+
+      {showDtypeSelector && (
+        <div>
+          <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="in-browser-dtype">
+            Quantization (dtype)
+          </label>
+          <select
+            id="in-browser-dtype"
+            value={selectedDtype || selectedOption?.defaultDtype || 'q4f16'}
+            onChange={(event) => updateDtype(event.target.value as Dtype)}
+            disabled={webGPUStatus.forcedServer}
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {DTYPE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-zinc-500">
+            Lower precision = smaller download + faster, at some quality cost. transformers.js only.
+          </p>
+        </div>
+      )}
 
       <label className="flex items-center justify-between gap-4 rounded-lg border border-zinc-800 bg-black/20 px-4 py-3">
         <span>
@@ -197,7 +278,7 @@ export default function InBrowserAISettings(_props: SectionProps) {
           </select>
           <p className="mt-2 text-xs text-zinc-500">
             {autoConfig.enabled
-              ? 'Manual “Summarize now” also still works and appends to the slice stack.'
+              ? 'Manual "Summarize now" also still works and appends to the slice stack.'
               : `Disabled. Default is ${DEFAULT_AUTO_CONFIG.threshold.replace('_', ' ')}.`}
           </p>
         </div>
