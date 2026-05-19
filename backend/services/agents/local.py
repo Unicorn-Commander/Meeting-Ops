@@ -12,11 +12,22 @@ from .base import AgentDescriptor, AgentSource
 LOCAL_AGENT_SPECS = [
     {
         "id": "meeting-rag",
-        "name": "Meeting RAG",
-        "description": "Searches and synthesizes across this org's meetings",
+        "name": "Meeting Assistant",
+        "description": (
+            "Tool-using assistant for your meetings. Searches, fetches "
+            "transcripts and summaries, and answers questions grounded in "
+            "real session data."
+        ),
         "source": "local",
         "domain": "meetings",
-        "capabilities": ["rag", "citations", "scope-filters"],
+        "capabilities": [
+            "tool-use",
+            "search",
+            "rag",
+            "citations",
+            "scope-filters",
+            "analytics",
+        ],
         "icon": "🎙️",
         "streaming": True,
     },

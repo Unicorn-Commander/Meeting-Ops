@@ -115,12 +115,46 @@ async def set_default_agent(
     return {"success": True, "message": f"Set {request.agent_slug} as default for {request.pipeline_role}"}
 
 @router.get("/{slug}")
-async def get_agent(slug: str, db: Session = Depends(get_db)):
-    """Get specific agent by slug"""
+async def get_agent(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Get specific agent by slug.
+
+    First checks the DB-backed agent registry (core-live-summary,
+    core-final-analysis, user-imported templates). If no row matches we
+    fall back to the federated source registry — that's how local agents
+    like ``meeting-rag`` (which has no DB row by design) surface here so
+    the frontend can fetch their metadata at ``/api/agents/<slug>``."""
     agent = agent_manager.get_agent_by_slug(slug, db)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return agent.to_dict()
+    if agent:
+        return agent.to_dict()
+
+    try:
+        from services.agents import get_agent_registry
+
+        # Federated descriptors are org-aware. Resolve the active org if we
+        # have an authenticated user (header-forwarded auth); otherwise 0
+        # gets us a metadata-only lookup, which is what most callers want
+        # from this endpoint.
+        org_id = 0
+        if current_user is not None:
+            try:
+                active_org = resolve_active_organization(db, request, current_user)
+                org_id = active_org.organization.id
+            except Exception:
+                org_id = 0
+
+        registry = get_agent_registry()
+        descriptor = await registry.get_agent(slug, request, db, org_id)
+        if descriptor:
+            return descriptor.to_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"Federated agent lookup failed for slug={slug}: {exc}")
+
+    raise HTTPException(status_code=404, detail="Agent not found")
 
 @router.post("/")
 async def create_agent(

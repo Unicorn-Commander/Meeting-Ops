@@ -259,11 +259,15 @@ async def dispatch_chat(
     history = _history_excluding_current(body.messages)
 
     if agent_id == "meeting-rag":
-        # Reuse the RAG pipeline directly.
-        from api.rag_chat import rag_chat_pipeline
-        return await rag_chat_pipeline(
-            question=user_message,
-            scope=body.scope or {},
+        # Tool-using agent — server-side loop on Qwen 3.6 with the helpers
+        # in services/agent_tools. The legacy single-shot rag_chat_pipeline
+        # is still exposed at POST /api/rag/chat for direct callers; we
+        # route the federated dispatcher through the tool-use loop so the
+        # Dashboard ask bar can call tools (search, details, transcripts,
+        # analytics) instead of just hitting Qdrant once.
+        from services.agents.meeting_rag import run_meeting_rag
+        return await run_meeting_rag(
+            user_message=user_message,
             history=history,
             db=db,
             org_id=org_id,
