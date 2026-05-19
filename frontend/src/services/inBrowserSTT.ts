@@ -12,11 +12,17 @@
 // coexist. A dynamic import of ort@1.26 from jsdelivr keeps the bundled
 // 1.17.3 untouched for VAD and gives Parakeet the API it expects.
 //
-// Tested model layout (under publicPrefix):
+// Tested model layout (fetched from HuggingFace at runtime):
 //   encoder-int8.onnx           1.4 MB   graph
 //   encoder-int8.onnx.data      838 MB   external weights
 //   decoder_joint-int8.onnx     ~52 MB   LSTM + joint
 //   vocab.txt                   ~92 KB   SentencePiece vocab + blank
+//
+// Source: huggingface.co/nasedkinpv/parakeet-tdt-0.6b-v3-onnx-int8.
+// Bytes are cached in CacheStorage after the first download — same
+// pattern transformers.js uses for the LLM models. This replaces an
+// earlier approach where the 880MB was baked into the docker image
+// (rsync'd manually, lost on clean redeploy from a fresh git checkout).
 //
 // CRITICAL gotchas captured in memory (see feedback_ort_web_external_data.md
 // and feedback_onnx_channels_first_stride.md):
@@ -27,8 +33,6 @@
 //     Per-frame slice at time t is `encoded[c * T + t]` for c in 0..D-1,
 //     NOT `subarray(t*D, (t+1)*D)`. Getting this wrong silently emits
 //     zero tokens.
-
-import { config } from '../config';
 
 // We talk to ORT-Web through `any` because we deliberately don't statically
 // import the package — see the file header. Once loadOrt() resolves we get
@@ -43,15 +47,43 @@ type OrtTensor = any;
 const ORT_WEB_CDN = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.bundle.min.mjs';
 const ORT_WEB_WASM_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/';
 
-// Public asset prefix. Vite serves `frontend/public/models/...` at
-// `/models/...` after build; nginx in meet-frontend serves the same. The
-// `config.apiUrl` is the *backend* origin and we don't want it — these
-// are same-origin static assets relative to the SPA root.
-const MODEL_PUBLIC_PREFIX = '/models/parakeet-0.6b-int8/';
+// Model fetch source. Same pattern transformers.js uses for the LLM
+// models: pull directly from HuggingFace at first-session, cache in
+// CacheStorage forever after. Eliminates the previous "880MB baked into
+// the docker image / rsync'd manually / lost on clean redeploy" failure
+// mode.
+//
+// HuggingFace 302-redirects large files to a `cas-bridge.xethub.hf.co`
+// CDN. fetch() follows redirects transparently. CORS is reflected per
+// Origin (verified 2026-05-19 against meet.magicunicorn.dev) so no
+// proxy is needed.
+const HF_BASE = 'https://huggingface.co/nasedkinpv/parakeet-tdt-0.6b-v3-onnx-int8/resolve/main';
+
+// Fallback mirror. Disabled in this build — if HF rate-limits (3000
+// resolves per 5 min per IP today) become a real production problem,
+// upload the four files to a Backblaze B2 bucket and set this to e.g.
+// 'https://f005.backblazeb2.com/file/meeting-ops-models/parakeet-0.6b-int8'.
+// The fetcher already tries this on HF failure when set; ship the
+// switch-flip in a follow-up commit when actually needed.
+const MIRROR_BASE: string | null = null;
+
+// Filenames at the HF repo root. Kept as a const so the few uses below
+// stay consistent and bumping a filename only requires one edit.
+const MODEL_FILES = {
+  encoderGraph: 'encoder-int8.onnx',
+  encoderData: 'encoder-int8.onnx.data',
+  decoder: 'decoder_joint-int8.onnx',
+  vocab: 'vocab.txt',
+} as const;
+
+// Public-facing label for the model layout. Used by the settings UI to
+// show users where the bytes live during first-load.
+const MODEL_PUBLIC_PREFIX = `${HF_BASE}/`;
 
 // Stable cache name — bumping it invalidates the on-device blob cache,
-// which is the right thing to do whenever we ship a different INT8 export.
-const CACHE_NAME = 'meetops-parakeet-0.6b-int8-v1';
+// which is the right thing to do whenever we ship a different INT8 export
+// or change the source URL (the cache is keyed by URL).
+const CACHE_NAME = 'meetops-parakeet-0.6b-int8-hf-v1';
 
 // Model constants — pulled from the spike. These are intrinsic to
 // parakeet-tdt-0.6b-v3 + this INT8 export and must not drift.
@@ -150,21 +182,18 @@ export class InBrowserSTT {
     // dominant cost (838MB); we give it the lion's share of the progress
     // bar so the UI doesn't sit at "5%" for two minutes.
     reportProgress(0.02, 'Loading vocab');
-    const vocabText = await fetchTextCached(
-      MODEL_PUBLIC_PREFIX + 'vocab.txt',
-      signal,
-    );
+    const vocabText = await fetchTextWithFallback(MODEL_FILES.vocab, signal);
     this.vocab = parseVocab(vocabText);
     reportProgress(0.04, 'Loading encoder graph');
 
-    const encGraphBytes = await fetchCached(
-      MODEL_PUBLIC_PREFIX + 'encoder-int8.onnx',
+    const encGraphBytes = await fetchWithFallback(
+      MODEL_FILES.encoderGraph,
       signal,
     );
     reportProgress(0.06, 'Loading encoder weights');
 
-    const encDataBytes = await fetchCachedWithProgress(
-      MODEL_PUBLIC_PREFIX + 'encoder-int8.onnx.data',
+    const encDataBytes = await fetchWithFallbackProgress(
+      MODEL_FILES.encoderData,
       signal,
       (downloaded, total) => {
         // 0.06 -> 0.85 is the encoder weights download segment.
@@ -174,10 +203,7 @@ export class InBrowserSTT {
     );
 
     reportProgress(0.85, 'Loading decoder');
-    const decBytes = await fetchCached(
-      MODEL_PUBLIC_PREFIX + 'decoder_joint-int8.onnx',
-      signal,
-    );
+    const decBytes = await fetchWithFallback(MODEL_FILES.decoder, signal);
 
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
 
@@ -424,6 +450,59 @@ function chooseExecutionProviders(): string[] {
   return ['wasm'];
 }
 
+// ---------- HF + mirror fallback wrappers ----------
+// All four model files go through these. Try HF first; if it throws
+// (network error, 429 rate-limit, 5xx) and a mirror is configured, try
+// the mirror. AbortError is re-thrown without retry — abort means the
+// user pulled the plug on the load, not a network failure.
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
+async function fetchWithFallback(
+  filename: string,
+  signal?: AbortSignal,
+): Promise<CacheEntry> {
+  try {
+    return await fetchCached(`${HF_BASE}/${filename}`, signal);
+  } catch (hfErr) {
+    if (isAbortError(hfErr) || !MIRROR_BASE) throw hfErr;
+    console.warn(`[STT] HF fetch failed for ${filename}, trying mirror:`, hfErr);
+    return await fetchCached(`${MIRROR_BASE}/${filename}`, signal);
+  }
+}
+
+async function fetchTextWithFallback(
+  filename: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const entry = await fetchWithFallback(filename, signal);
+  return new TextDecoder('utf-8').decode(entry.blob);
+}
+
+async function fetchWithFallbackProgress(
+  filename: string,
+  signal: AbortSignal | undefined,
+  onProgress: (downloaded: number, total: number) => void,
+): Promise<CacheEntry> {
+  try {
+    return await fetchCachedWithProgress(
+      `${HF_BASE}/${filename}`,
+      signal,
+      onProgress,
+    );
+  } catch (hfErr) {
+    if (isAbortError(hfErr) || !MIRROR_BASE) throw hfErr;
+    console.warn(`[STT] HF fetch failed for ${filename}, trying mirror:`, hfErr);
+    return await fetchCachedWithProgress(
+      `${MIRROR_BASE}/${filename}`,
+      signal,
+      onProgress,
+    );
+  }
+}
+
 async function openCache(): Promise<Cache | null> {
   if (typeof caches === 'undefined') return null;
   try {
@@ -467,14 +546,6 @@ async function fetchCached(
     }
   }
   return { blob, fromCache: false };
-}
-
-async function fetchTextCached(
-  url: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const entry = await fetchCached(url, signal);
-  return new TextDecoder('utf-8').decode(entry.blob);
 }
 
 async function fetchCachedWithProgress(

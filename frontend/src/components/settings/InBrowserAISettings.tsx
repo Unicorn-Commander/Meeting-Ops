@@ -115,6 +115,16 @@ export default function InBrowserAISettings(_props: SectionProps) {
   const [sttLastRTF, setSttLastRTF] = useState<number | null>(() =>
     inBrowserSTT.getDiagnostics().lastRTF,
   );
+  // STT pre-download: optional manual trigger so users can warm the
+  // CacheStorage entry before their first meeting (rather than eating
+  // a ~10-20s download mid-meeting). Pushes the same load() the always-on
+  // session calls — no transcribe.
+  const [sttPredownloadState, setSttPredownloadState] =
+    useState<'idle' | 'downloading' | 'ready' | 'error'>(() =>
+      inBrowserSTT.isReady() ? 'ready' : 'idle',
+    );
+  const [sttPredownloadProgress, setSttPredownloadProgress] = useState<number | null>(null);
+  const [sttPredownloadLabel, setSttPredownloadLabel] = useState<string | null>(null);
 
   const webGPUStatus = useMemo(() => getWebGPUStatus(), []);
   const selectedOption = models.find((model) => model.id === selectedModel);
@@ -232,6 +242,31 @@ export default function InBrowserAISettings(_props: SectionProps) {
     }
   };
 
+  // Warm the STT model cache without starting a meeting. Calls into the
+  // singleton's load() — idempotent, dedupes with any concurrent loader
+  // (e.g. always-on kicking the same load on first session start).
+  const predownloadSttModel = async () => {
+    if (!sttCapability.available || sttMode !== 'browser-parakeet') return;
+    setSttPredownloadState('downloading');
+    setSttPredownloadProgress(0);
+    setSttPredownloadLabel('Starting...');
+    try {
+      await inBrowserSTT.load({
+        onProgress: (progress, label) => {
+          setSttPredownloadProgress(Math.max(0, Math.min(1, progress)));
+          if (label) setSttPredownloadLabel(label);
+        },
+      });
+      setSttPredownloadProgress(1);
+      setSttPredownloadState('ready');
+      setSttPredownloadLabel('Cached');
+    } catch (err) {
+      console.error('[InBrowserAISettings] STT preload failed', err);
+      setSttPredownloadState('error');
+      setSttPredownloadLabel(err instanceof Error ? err.message : 'Download failed');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -291,7 +326,7 @@ export default function InBrowserAISettings(_props: SectionProps) {
               <Mic className="h-4 w-4 text-zinc-400" /> Speech-to-Text
             </h4>
             <p className="mt-1 text-xs text-zinc-500">
-              Run STT in the browser with Parakeet 0.6B INT8 (~880 MB one-time download). Falls back to the server when the browser can't host the model.
+              Run STT in the browser with Parakeet 0.6B INT8 (~880 MB). Downloaded from HuggingFace on first session, cached in browser thereafter. Falls back to the server when the browser can't host the model.
             </p>
           </div>
           <span
@@ -356,6 +391,43 @@ export default function InBrowserAISettings(_props: SectionProps) {
                 : `${sttLastRTF.toFixed(3)}x (${sttLastRTF < 1 ? 'faster than realtime' : 'slower than realtime'})`}
             </div>
           </div>
+        </div>
+
+        <div className="pt-1">
+          <button
+            type="button"
+            onClick={predownloadSttModel}
+            disabled={
+              !sttCapability.available ||
+              sttMode !== 'browser-parakeet' ||
+              sttPredownloadState === 'downloading' ||
+              (sttPredownloadState === 'ready' && sttReady)
+            }
+            className="inline-flex min-h-9 items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {sttPredownloadState === 'downloading' ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            {sttReady ? 'STT model cached' : 'Pre-download STT model'}
+          </button>
+          {sttPredownloadProgress !== null && (
+            <div className="mt-2 max-w-md">
+              <div className="mb-1 flex items-center justify-between text-[10px] text-zinc-500">
+                <span>{sttPredownloadLabel || 'Downloading'}</span>
+                <span>{Math.round(sttPredownloadProgress * 100)}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded bg-zinc-800">
+                <div
+                  className={`h-full transition-all ${
+                    sttPredownloadState === 'error' ? 'bg-red-400' : 'bg-emerald-400'
+                  }`}
+                  style={{ width: `${Math.round(sttPredownloadProgress * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
