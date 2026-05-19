@@ -361,18 +361,6 @@ class OrgProviderSettings(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
-class MeetingChunkEmbedding(Base):
-    """Tracks chunk embeddings for meeting transcripts in Qdrant."""
-    __tablename__ = "meeting_chunk_embedding"
-
-    id = Column(Integer, primary_key=True)
-    meeting_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, index=True)
-    chunk_idx = Column(Integer, nullable=False)
-    qdrant_point_id = Column(String(100), nullable=False)
-    text_snippet = Column(String(200), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
 class MeetingDigest(Base):
     """Cached time-window meeting digests."""
     __tablename__ = "meeting_digest"
