@@ -60,19 +60,50 @@ const CURATED_MODELS: Array<{
   actualModelId: string;
   label: string;
 }> = [
-  // Newest first. Entries whose actualModelId isn't published by web-llm
-  // are silently filtered out at runtime (see records.find check below),
-  // so we can stage future variants here optimistically — they appear in
-  // the picker the moment web-llm ships them.
+  // Order by quality/size, biggest-newest first. Entries whose actualModelId
+  // isn't published by web-llm are silently filtered out at runtime (see
+  // records.find check below), so we stage future variants here optimistically —
+  // they appear in the picker the moment web-llm ships them.
+  //
+  // Verified against mlc-ai/web-llm prebuiltAppConfig 2026-05-19:
+  // — Qwen3.6 + Gemma4 are NOT yet compiled for web-llm (open feature requests).
+  //   Left in the list so they auto-appear when MLC publishes.
+  // — Qwen 3.5 family IS available (0.8B/2B/4B/9B), newest series in browser today.
+  // — Phi-4-mini IS available, very strong reasoning for its size.
   {
     id: 'gemma-4-e2b-it',
     actualModelId: 'gemma4-E2B-it-q4f16_1-MLC',
-    label: 'Gemma 4 E2B (text mode)',
+    label: 'Gemma 4 E2B (when published)',
   },
   {
     id: 'qwen3.6-1.7b',
     actualModelId: 'Qwen3.6-1.7B-q4f16_1-MLC',
-    label: 'Qwen 3.6 1.7B',
+    label: 'Qwen 3.6 1.7B (when published)',
+  },
+  {
+    id: 'qwen3.5-9b',
+    actualModelId: 'Qwen3.5-9B-q4f16_1-MLC',
+    label: 'Qwen 3.5 9B (best quality, ~6GB)',
+  },
+  {
+    id: 'phi-4-mini-instruct',
+    actualModelId: 'Phi-4-mini-instruct-q4f16_1-MLC',
+    label: 'Phi 4 Mini Instruct (strong reasoning)',
+  },
+  {
+    id: 'qwen3.5-4b',
+    actualModelId: 'Qwen3.5-4B-q4f16_1-MLC',
+    label: 'Qwen 3.5 4B (recommended)',
+  },
+  {
+    id: 'gemma-3-4b-it',
+    actualModelId: 'gemma-3-4b-it-q4f16_1-MLC',
+    label: 'Gemma 3 4B IT',
+  },
+  {
+    id: 'qwen3.5-2b',
+    actualModelId: 'Qwen3.5-2B-q4f16_1-MLC',
+    label: 'Qwen 3.5 2B',
   },
   {
     id: 'qwen3-1.7b',
@@ -80,9 +111,14 @@ const CURATED_MODELS: Array<{
     label: 'Qwen 3 1.7B',
   },
   {
+    id: 'qwen3.5-0.8b',
+    actualModelId: 'Qwen3.5-0.8B-q4f16_1-MLC',
+    label: 'Qwen 3.5 0.8B (fast)',
+  },
+  {
     id: 'qwen3-0.6b',
     actualModelId: 'Qwen3-0.6B-q4f16_1-MLC',
-    label: 'Qwen 3 0.6B (smallest, fastest)',
+    label: 'Qwen 3 0.6B (smallest)',
   },
   {
     id: 'gemma-3-1b-it',
@@ -92,12 +128,12 @@ const CURATED_MODELS: Array<{
   {
     id: 'qwen2.5-1.5b-instruct',
     actualModelId: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
-    label: 'Qwen 2.5 1.5B Instruct',
+    label: 'Qwen 2.5 1.5B Instruct (default)',
   },
   {
     id: 'phi-3.5-mini-instruct',
     actualModelId: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
-    label: 'Phi 3.5 Mini Instruct (best quality)',
+    label: 'Phi 3.5 Mini Instruct',
   },
 ];
 
