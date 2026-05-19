@@ -6,6 +6,7 @@ import { useRecording } from './contexts/RecordingContext';
 import { redirectToLogin } from './utils/loginRedirect';
 import { Login } from './components/Login';
 import LiveRecording from './pages/LiveRecording';
+import Dashboard from './pages/Dashboard';
 import RAGChat from './pages/RAGChat';
 import DigestsPage from './pages/Digests';
 import { Sessions } from './pages/Sessions';
@@ -81,6 +82,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   const location = window.location.hash.replace('#', '');
 
   const navItems = [
+    { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
     { path: '/speakers', label: 'Speakers', icon: '🗣️' },
@@ -172,7 +174,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
 }
 
 function SsoLoginRedirect({ isAuthenticated }: { isAuthenticated: boolean }) {
-  if (isAuthenticated) return <Navigate to="/record" replace />;
+  if (isAuthenticated) return <Navigate to="/dashboard" replace />;
   redirectToLogin('/');
   return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
 }
@@ -213,7 +215,13 @@ export function AppRouterSimplified() {
     <Routes>
       <Route path="/login" element={<SsoLoginRedirect isAuthenticated={isAuthenticated} />} />
 
-      <Route path="/" element={<Navigate to="/record" replace />} />
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+
+      <Route path="/dashboard" element={
+        <ProtectedRoute>
+          <Dashboard />
+        </ProtectedRoute>
+      } />
 
       <Route path="/record" element={
         <ProtectedRoute>
@@ -276,7 +284,7 @@ export function AppRouterSimplified() {
         </ProtectedRoute>
       } />
 
-      <Route path="*" element={<Navigate to="/record" replace />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }
