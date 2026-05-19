@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, Mic, RefreshCw } from 'lucide-react';
+import { Download, Lock, Mic, RefreshCw } from 'lucide-react';
 import {
   DEFAULT_AUTO_CONFIG,
+  DEFAULT_MODEL_ID,
   LIVE_SUMMARY_THRESHOLDS,
   getAvailableModels,
   getLiveSummaryAutoConfig,
@@ -26,7 +27,27 @@ import {
   setSTTMode,
   type SttMode,
 } from '../../services/inBrowserSTTSettings';
+import {
+  getLocalOnly,
+  isPrivacyModeAvailable,
+  setLocalOnly,
+} from '../../services/privacyMode';
 import type { SectionProps } from './SettingsContext';
+
+const QWEN3_MODEL_IDS = new Set<string>([
+  'qwen3-0.6b-onnx-q4f16',
+  'qwen3.6-1.7b',
+  'qwen3-1.7b',
+  'qwen3-0.6b',
+]);
+
+function isQwen3Model(modelId: string): boolean {
+  return QWEN3_MODEL_IDS.has(modelId);
+}
+
+function isGemma4Model(modelId: string): boolean {
+  return modelId === 'gemma-4-e2b-q4f16' || modelId === 'gemma-4-e2b-it';
+}
 
 function statusClasses(state: 'ready' | 'limited' | 'unavailable'): string {
   if (state === 'ready') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
@@ -79,6 +100,12 @@ export default function InBrowserAISettings(_props: SectionProps) {
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
   const [autoConfig, setAutoConfig] = useState(() => getLiveSummaryAutoConfig());
+  // Privacy mode: persisted in localStorage. Forces browser STT + local
+  // LLM, never writes to the server, persists session data in
+  // IndexedDB. Available iff WebGPU exists (the final-summary roll-up
+  // needs it). The toggle here is the source of truth.
+  const [localOnly, setLocalOnlyState] = useState<boolean>(() => getLocalOnly());
+  const localOnlyAvailable = useMemo(() => isPrivacyModeAvailable(), []);
   // Speech-to-Text: own state, separate from the LLM picker. Default ON
   // when the browser can host the model; falls back automatically when
   // it can't.
@@ -161,6 +188,20 @@ export default function InBrowserAISettings(_props: SectionProps) {
     setSTTMode(next);
   };
 
+  const updateLocalOnly = (next: boolean) => {
+    setLocalOnlyState(next);
+    setLocalOnly(next);
+    // When the user opts in, force browser STT + non-server LLM to
+    // match. Standard mode preserves the previous picks.
+    if (next) {
+      if (sttMode !== 'browser-parakeet') updateSttMode('browser-parakeet');
+      if (serverMode || selectedModel === 'server') {
+        const fallback = models.find((model) => model.id !== 'server')?.id || DEFAULT_MODEL_ID;
+        updateModel(fallback);
+      }
+    }
+  };
+
   const updateAutoEnabled = (enabled: boolean) => {
     const next = { ...autoConfig, enabled };
     setAutoConfig(next);
@@ -205,6 +246,44 @@ export default function InBrowserAISettings(_props: SectionProps) {
         </span>
       </div>
 
+      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="flex items-center gap-2 text-sm font-medium text-white">
+              <Lock className="h-4 w-4 text-emerald-300" /> Privacy Mode
+            </h4>
+            <p className="mt-1 text-xs text-zinc-400">
+              Recommended for sensitive meetings. Transcript, summaries, and final notes stay in your browser's storage.
+              Trade-off: no cross-meeting search, no shared access from other devices, no server-side high-accuracy reprocess.
+            </p>
+          </div>
+        </div>
+        <label className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-black/40 px-3 py-2">
+          <span>
+            <span className="block text-sm font-medium text-zinc-200">
+              Local-only (nothing leaves this device)
+            </span>
+            <span className="mt-0.5 block text-xs text-zinc-500">
+              {localOnlyAvailable
+                ? 'Forces browser STT + in-browser LLM. Sessions are saved only in this browser.'
+                : 'WebGPU is required for the local final-summary roll-up. Toggle disabled on this device.'}
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={localOnly && localOnlyAvailable}
+            disabled={!localOnlyAvailable}
+            onChange={(event) => updateLocalOnly(event.target.checked)}
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        </label>
+        {localOnly && !localOnlyAvailable && (
+          <p className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            WebGPU required for local-only mode. Falling back to standard mode for this session.
+          </p>
+        )}
+      </div>
+
       <div className="rounded-lg border border-zinc-800 bg-black/20 p-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -231,14 +310,16 @@ export default function InBrowserAISettings(_props: SectionProps) {
             <span className="block text-sm font-medium text-zinc-200">Run STT in browser (Parakeet 0.6B INT8)</span>
             <span className="mt-0.5 block text-xs text-zinc-500">
               {sttCapability.available
-                ? 'Recommended. Audio never leaves the device.'
+                ? localOnly
+                  ? 'Locked ON by Privacy Mode. Audio never leaves the device.'
+                  : 'Recommended. Audio never leaves the device.'
                 : sttCapability.reason || 'Browser cannot host the STT model.'}
             </span>
           </span>
           <input
             type="checkbox"
             checked={sttMode === 'browser-parakeet'}
-            disabled={!sttCapability.available}
+            disabled={!sttCapability.available || localOnly}
             onChange={(event) => updateSttMode(event.target.checked ? 'browser-parakeet' : 'server-parakeet-1.1b')}
             className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
           />
@@ -292,20 +373,42 @@ export default function InBrowserAISettings(_props: SectionProps) {
           {models.map((model) => {
             const size = formatSize(model.approxSizeMB);
             const suffix = size ? ` — ${size}` : '';
+            const isDefault = model.id === DEFAULT_MODEL_ID;
+            const tag = isDefault
+              ? ' [DEFAULT]'
+              : isGemma4Model(model.id)
+                ? ' [PREMIUM QUALITY]'
+                : '';
             return (
               <option key={model.id} value={model.id}>
                 {model.label}
                 {suffix}
+                {tag}
               </option>
             );
           })}
         </select>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           {selectedOption && (
             <span
               className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${runtimeBadgeClasses(selectedOption.runtime)}`}
             >
               {selectedOption.runtime}
+            </span>
+          )}
+          {selectedOption?.id === DEFAULT_MODEL_ID && (
+            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-200">
+              Recommended default
+            </span>
+          )}
+          {selectedOption && isGemma4Model(selectedOption.id) && (
+            <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-200">
+              Premium quality · ~3GB first download
+            </span>
+          )}
+          {selectedOption && isQwen3Model(selectedOption.id) && (
+            <span className="rounded-full border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-200">
+              Thinking mode: off
             </span>
           )}
           <p className="text-xs text-zinc-500">
@@ -341,13 +444,18 @@ export default function InBrowserAISettings(_props: SectionProps) {
       <label className="flex items-center justify-between gap-4 rounded-lg border border-zinc-800 bg-black/20 px-4 py-3">
         <span>
           <span className="block text-sm font-medium text-zinc-200">Use server-side LLM instead</span>
-          <span className="mt-1 block text-xs text-zinc-500">Routes summaries to backend Qwen 3.6.</span>
+          <span className="mt-1 block text-xs text-zinc-500">
+            {localOnly
+              ? 'Locked OFF by Privacy Mode — summaries stay on this device.'
+              : 'Routes summaries to backend Qwen 3.6.'}
+          </span>
         </span>
         <input
           type="checkbox"
-          checked={serverMode}
+          checked={serverMode && !localOnly}
+          disabled={localOnly}
           onChange={(event) => updateServerMode(event.target.checked)}
-          className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
+          className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
         />
       </label>
 

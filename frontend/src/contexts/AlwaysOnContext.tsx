@@ -28,6 +28,17 @@ import {
   getSTTMode,
   type SttMode,
 } from '../services/inBrowserSTTSettings';
+import {
+  getLocalOnly,
+  isPrivacyModeAvailable,
+} from '../services/privacyMode';
+import {
+  appendChunk as appendLocalChunk,
+  appendSlice as appendLocalSlice,
+  createLocalSession,
+  endSession as endLocalSession,
+  type LocalTranscriptChunk,
+} from '../services/localSessionStore';
 
 export type AlwaysOnState = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping';
 
@@ -107,6 +118,10 @@ export interface AlwaysOnContextValue {
   sttLoadProgress: number | null;
   sttLoadLabel: string | null;
   sttBrowserFailed: boolean;
+  /** True when the current session is local-only (nothing leaves the device). */
+  localOnly: boolean;
+  /** True when WebGPU is missing and local-only would degrade to standard mode. */
+  localOnlyForcedOff: boolean;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
@@ -175,6 +190,19 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const sttBrowserFailedRef = useRef(false);
   const sttLoadAbortRef = useRef<AbortController | null>(null);
 
+  // Privacy mode: toggle persisted in localStorage. Locked-in per-session
+  // at start() time so a mid-meeting setting flip doesn't half-upload.
+  // When WebGPU is unavailable, the setting flips to "available off"
+  // and we silently treat the session as standard.
+  const [localOnlyPref, setLocalOnlyPref] = useState<boolean>(() => getLocalOnly());
+  const localOnlyAvailable = useMemo(() => isPrivacyModeAvailable(), []);
+  const [activeLocalOnly, setActiveLocalOnly] = useState<boolean>(false);
+  const activeLocalOnlyRef = useRef<boolean>(false);
+  useEffect(() => {
+    activeLocalOnlyRef.current = activeLocalOnly;
+  }, [activeLocalOnly]);
+  const localOnlyForcedOff = localOnlyPref && !localOnlyAvailable;
+
   const engineRef = useRef<AlwaysOnVadEngine | null>(null);
   const stateRef = useRef<AlwaysOnState>('idle');
   const sessionRef = useRef<string | null>(null);
@@ -242,6 +270,24 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     window.addEventListener('storage', onStorage);
     return () => {
       window.removeEventListener('meetingops:stt-mode', handler as EventListener);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<boolean>).detail;
+      if (typeof detail === 'boolean') setLocalOnlyPref(detail);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'meetingops.privacyMode.localOnly') {
+        setLocalOnlyPref(getLocalOnly());
+      }
+    };
+    window.addEventListener('meetingops:privacy-mode', handler as EventListener);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('meetingops:privacy-mode', handler as EventListener);
       window.removeEventListener('storage', onStorage);
     };
   }, []);
@@ -355,6 +401,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!currentSessionId) return;
+    // Local-only sessions never touch the server, so there's nothing on
+    // the other side of the websocket. Skip the connection entirely.
+    if (activeLocalOnlyRef.current || currentSessionId.startsWith('local-')) return;
     const socket = new WebSocket(config.wsEndpoints.transcription(currentSessionId));
     transcriptSocketRef.current = socket;
     let closedByEffect = false;
@@ -406,6 +455,17 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   }, [appendTranscriptSegments, currentSessionId]);
 
   const createSession = useCallback(async (): Promise<string> => {
+    // Local-only mode skips the server entirely. Session id lives only
+    // in IndexedDB; the rest of the always-on plumbing routes through
+    // the same id (with the `local-` prefix) but no network traffic
+    // ever fires for chunks / slices / finalize.
+    if (activeLocalOnlyRef.current) {
+      const session = await createLocalSession();
+      setCurrentSessionId(session.id);
+      sessionRef.current = session.id;
+      return session.id;
+    }
+
     if (!activeOrganization) {
       throw new Error('No active organization is selected.');
     }
@@ -430,6 +490,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   }, [activeOrganization]);
 
   const finalizeSession = useCallback(async (sessionId: string): Promise<void> => {
+    // Local-only finalize is handled inline by stop() (final-summary
+    // roll-up + endLocalSession). Don't touch the network here.
+    if (activeLocalOnlyRef.current) return;
     const response = await fetch(`${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`, {
       method: 'POST',
     });
@@ -510,6 +573,52 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       sessionId = await createSession();
     }
 
+    const localOnly = activeLocalOnlyRef.current;
+
+    // Local-only mode: STT MUST be browser-side. No server fallback.
+    // If transcription fails we surface a toast via setError and drop
+    // the chunk (the user keeps recording, no audio leaves the device).
+    if (localOnly) {
+      try {
+        const text = await inBrowserSTT.transcribe(chunk.blob);
+        const trimmed = (text || '').trim();
+        if (!trimmed) {
+          setChunksUploaded((count) => count + 1);
+          return;
+        }
+        const elapsed = Math.max(0, chunk.elapsedSeconds);
+        const localChunk: LocalTranscriptChunk = {
+          text: trimmed,
+          elapsedSeconds: elapsed,
+          durationSeconds: chunk.durationSeconds || 0,
+          provenance: CLIENT_STT_PROVENANCE,
+          createdAt: new Date().toISOString(),
+        };
+        await appendLocalChunk(sessionId, localChunk);
+        // Update the live transcript view for immediate feedback. The
+        // websocket isn't connected in local mode, so this is the only
+        // surface that shows the chunk.
+        appendTranscriptSegments(
+          [{
+            text: trimmed,
+            start: elapsed,
+            end: elapsed + (chunk.durationSeconds || 0),
+            speaker: null,
+          }],
+          sessionId,
+        );
+        setChunksUploaded((count) => count + 1);
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // eslint-disable-next-line no-console
+        console.warn('[always-on] Local-only STT failed for chunk:', message);
+        setError(`Local STT failed: ${message.slice(0, 120)}. Chunk dropped (nothing leaves the device).`);
+        setChunksUploaded((count) => count + 1);
+        return;
+      }
+    }
+
     const wantBrowser =
       sttModeRef.current === 'browser-parakeet'
       && sttReadyRef.current
@@ -541,7 +650,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     await uploadAudioChunk(chunk, sessionId);
     setChunksUploaded((count) => count + 1);
-  }, [createSession, uploadAudioChunk, uploadTextChunk]);
+  }, [appendTranscriptSegments, createSession, uploadAudioChunk, uploadTextChunk]);
 
   const queueChunkUpload = useCallback((chunk: VadAudioChunk) => {
     uploadQueueRef.current = uploadQueueRef.current
@@ -564,10 +673,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     try {
       await uploadQueueRef.current;
       setSessionsCompleted((count) => count + 1);
-      void finalizeSession(sessionId).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        setError(message);
-      });
+      if (activeLocalOnlyRef.current) {
+        // Local split: close the IndexedDB session without a final
+        // summary roll-up — we never want to block the next session on
+        // an LLM pass. The user can re-open the local session later if
+        // they want a roll-up retroactively (out of scope for v1).
+        endLocalSession(sessionId, null).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn('[always-on] Local split end failed:', err);
+        });
+      } else {
+        void finalizeSession(sessionId).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          setError(message);
+        });
+      }
       if (stateRef.current === 'recording') {
         await createSession();
       }
@@ -621,6 +741,14 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     startedAtRef.current = Date.now();
     setElapsedSeconds(0);
 
+    // Lock the privacy mode for this session at start. If the user
+    // wants local-only but WebGPU is missing, fall back silently to
+    // standard mode for this session — the banner in the UI tells them
+    // we did so. Otherwise honor the toggle.
+    const useLocalOnly = localOnlyPref && localOnlyAvailable;
+    activeLocalOnlyRef.current = useLocalOnly;
+    setActiveLocalOnly(useLocalOnly);
+
     try {
       await createSession();
       await ensureEngine().start();
@@ -662,13 +790,47 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summarizeAbortRef.current?.abort();
 
     const sessionId = sessionRef.current;
+    const wasLocalOnly = activeLocalOnlyRef.current;
+    // Snapshot the slices we accumulated before clearing state.
+    const slicesSnapshot = [...summary.slices];
+
     try {
       await engineRef.current?.stop();
       engineRef.current = null;
       await uploadQueueRef.current;
       if (sessionId) {
-        setStatusText('Generating final summary');
-        await finalizeSession(sessionId);
+        if (wasLocalOnly) {
+          setStatusText('Generating final summary locally');
+          let finalText: string | null = null;
+          // Concatenate slice texts oldest-first for the roll-up. If
+          // there are no slices, we still close the session — the user
+          // may have just talked for under one summary threshold.
+          if (slicesSnapshot.length > 0) {
+            const joined = slicesSnapshot
+              .map((s, i) => `Slice ${i + 1} (${s.createdAt}):\n${s.text.trim()}`)
+              .join('\n\n');
+            const modelId = getStoredModelId();
+            try {
+              const finalController = new AbortController();
+              let buffer = '';
+              for await (const token of inBrowserLLM.summarizeFinal(joined, modelId, {
+                signal: finalController.signal,
+                sessionId,
+              })) {
+                buffer += token;
+              }
+              finalText = buffer.trim() || null;
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn('[always-on] Local final summary failed:', err);
+              setError('Local final summary failed; slices are still saved.');
+            }
+          }
+          await endLocalSession(sessionId, finalText);
+        } else {
+          setStatusText('Generating final summary');
+          await finalizeSession(sessionId);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -679,8 +841,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       startedAtRef.current = null;
       setState('idle');
       setStatusText('Idle');
+      activeLocalOnlyRef.current = false;
+      setActiveLocalOnly(false);
     }
-  }, [finalizeSession]);
+  }, [finalizeSession, summary.slices]);
 
   const transcriptText = useMemo(
     () => liveTranscript
@@ -746,6 +910,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         modelLabel: getModelLabel(modelId),
         durationMs: Date.now() - startedAt,
       };
+
+      // Local-only mode: persist the slice to IndexedDB. Best-effort —
+      // a write failure surfaces a toast but doesn't block the live UI.
+      if (activeLocalOnlyRef.current && sessionRef.current) {
+        appendLocalSlice(sessionRef.current, {
+          text: finalText,
+          wordRangeStart: slice.transcriptStart,
+          wordRangeEnd: slice.transcriptEnd,
+          model: modelId,
+          createdAt: slice.createdAt,
+        }).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn('[always-on] Local slice persist failed:', err);
+        });
+      }
 
       setSummary((prev) => {
         const slices = [...prev.slices, slice];
@@ -861,6 +1040,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sttLoadProgress,
     sttLoadLabel,
     sttBrowserFailed,
+    localOnly: activeLocalOnly,
+    localOnlyForcedOff,
     start,
     stop,
     pause,
@@ -886,6 +1067,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sttLoadProgress,
     sttLoadLabel,
     sttBrowserFailed,
+    activeLocalOnly,
+    localOnlyForcedOff,
     start,
     stop,
     pause,

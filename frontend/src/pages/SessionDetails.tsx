@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
-  Briefcase, Edit2, Check, X
+  Briefcase, Edit2, Check, X, Trash2,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -28,6 +28,11 @@ import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
 import { config } from '../config';
+import {
+  deleteLocalSession,
+  exportLocalSession,
+  getLocalSession,
+} from '../services/localSessionStore';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
 
@@ -154,6 +159,8 @@ interface Session {
   project_slug?: string | null;
   participants?: Participant[];
   tags?: string[];
+  /** True for local-only (privacy-mode) sessions loaded from IndexedDB. */
+  is_local?: boolean;
 }
 
 interface Participant {
@@ -588,12 +595,75 @@ export const SessionDetails: React.FC = () => {
   const fetchSession = async () => {
     try {
       setError(null);
+
+      // Local-only sessions live in IndexedDB. Route through the local
+      // store instead of the server endpoint.
+      if (sessionId && sessionId.startsWith('local-')) {
+        const local = await getLocalSession(sessionId);
+        if (!local) {
+          setError('Local session not found. It may have been deleted.');
+          setLoading(false);
+          return;
+        }
+        const synthesized: any = {
+          id: local.id,
+          name: local.title,
+          title: local.title,
+          description: local.finalSummary || '',
+          created_at: local.startedAt,
+          started_at: local.startedAt,
+          ended_at: local.endedAt,
+          duration: local.durationSeconds,
+          status: local.endedAt ? 'completed' : 'active',
+          transcript_simple: local.transcript.map((c) => c.text).join('\n\n'),
+          transcript_diarized: {
+            text: local.transcript.map((c) => c.text).join('\n\n'),
+            segments: local.transcript.map((c, i) => ({
+              id: i,
+              text: c.text,
+              start: c.elapsedSeconds,
+              end: c.elapsedSeconds + (c.durationSeconds || 0),
+              speaker: null,
+            })),
+            speakers: [],
+          },
+          transcription: {
+            text: local.transcript.map((c) => c.text).join('\n\n'),
+            segments: local.transcript.map((c, i) => ({
+              id: i,
+              text: c.text,
+              start: c.elapsedSeconds,
+              end: c.elapsedSeconds + (c.durationSeconds || 0),
+              speaker: null,
+            })),
+          },
+          final_summary: local.finalSummary
+            ? { executive: local.finalSummary, bullets: [], actions: [], decisions: [] }
+            : undefined,
+          progressive_summaries: local.slices.map((slice) => ({
+            timestamp: slice.createdAt,
+            word_count_at_summary: slice.wordRangeEnd,
+            interval_used: 0,
+            text: slice.text,
+          })),
+          participants: local.participants.map((name) => ({ id: name, name })),
+          tags: local.tags,
+          is_local: true,
+        };
+        setSession(synthesized);
+        setParticipants(synthesized.participants);
+        setTags(local.tags);
+        setActionItems([]);
+        setLoading(false);
+        return;
+      }
+
       const url = `${config.apiUrl}/api/simple/recording-sessions/${sessionId}`;
-      
+
       const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
-        
+
         // Normalize transcription data - prefer transcription_segments, then diarized segments
         if (!data.transcription) {
           data.transcription = {};
@@ -1646,6 +1716,63 @@ export const SessionDetails: React.FC = () => {
             </div>
             
             <div className="flex items-center gap-3">
+              {/* Local-only sessions use a separate action set: there's
+                  no audio file on the server to share, email, or
+                  re-process. Export to markdown + Delete are the two
+                  operations the user has. */}
+              {session.is_local ? (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-700">
+                    Local-only session
+                  </span>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const blob = await exportLocalSession(session.id);
+                        if (!blob) {
+                          alert('Local session could not be exported.');
+                          return;
+                        }
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        const safeName = (session.title || session.name || session.id).replace(/[^a-z0-9_-]+/gi, '_');
+                        a.download = `${safeName}.md`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        URL.revokeObjectURL(url);
+                      } catch (err) {
+                        console.error('Local export failed:', err);
+                        alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+                      }
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 text-sm"
+                    title="Export this local session as markdown"
+                  >
+                    <Download className="w-4 h-4" />
+                    Export markdown
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!confirm('Delete this local session permanently? This cannot be undone.')) return;
+                      try {
+                        await deleteLocalSession(session.id);
+                        navigate('/sessions');
+                      } catch (err) {
+                        console.error('Local delete failed:', err);
+                        alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
+                      }
+                    }}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 text-sm"
+                    title="Delete this local session"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete
+                  </button>
+                </>
+              ) : (
+                <>
               {/* Upload Audio Button */}
               {!session.audio_file && (
                 <button
@@ -1691,8 +1818,10 @@ export const SessionDetails: React.FC = () => {
               </button>
               {/* Re-process button — re-runs transcribe/diarize/summarize against
                   the existing audio. Lets users change STT engine, speaker
-                  count, summary template etc. without re-uploading. */}
-              {session.audio_file && (
+                  count, summary template etc. without re-uploading.
+                  Hidden for local-only sessions (no audio file leaves the
+                  device, no server pipeline to re-run). */}
+              {session.audio_file && !session.is_local && (
                 <button
                   onClick={() => {
                     setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
@@ -1897,6 +2026,8 @@ export const SessionDetails: React.FC = () => {
                   </div>
                 </div>
               </div>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -3047,20 +3178,32 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* AI Chat Panel */}
+            {/* AI Chat Panel — disabled for local-only sessions because
+                Ask depends on server-side RAG over indexed transcripts. */}
             <div className="bg-white rounded-lg shadow-sm">
               <button
-                onClick={() => setChatOpen(!chatOpen)}
-                className="w-full p-4 flex items-center justify-between hover:bg-gray-50 rounded-lg transition-colors"
+                onClick={() => !session.is_local && setChatOpen(!chatOpen)}
+                disabled={session.is_local}
+                title={session.is_local ? 'Local-only session — Ask not available' : undefined}
+                className={`w-full p-4 flex items-center justify-between rounded-lg transition-colors ${
+                  session.is_local ? 'cursor-not-allowed opacity-60' : 'hover:bg-gray-50'
+                }`}
               >
                 <h3 className="text-lg font-semibold flex items-center gap-2">
                   <MessageCircle className="w-5 h-5 text-purple-600" />
                   AI Chat
+                  {session.is_local && (
+                    <span className="text-xs text-gray-500 font-normal">
+                      (disabled in local mode)
+                    </span>
+                  )}
                 </h3>
-                <ChevronRight className={`w-5 h-5 text-gray-400 transition-transform ${chatOpen ? 'rotate-90' : ''}`} />
+                {!session.is_local && (
+                  <ChevronRight className={`w-5 h-5 text-gray-400 transition-transform ${chatOpen ? 'rotate-90' : ''}`} />
+                )}
               </button>
 
-              {chatOpen && (
+              {chatOpen && !session.is_local && (
                 <div className="px-4 pb-4">
                   {/* Chat messages */}
                   <div className="border rounded-lg mb-3 max-h-64 overflow-y-auto bg-gray-50">

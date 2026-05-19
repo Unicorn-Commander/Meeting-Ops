@@ -5,6 +5,7 @@ import {
   ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
   Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
   ArrowUp, ArrowDown, ArrowUpDown, Briefcase, AlertTriangle,
+  Lock as LockIcon,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
@@ -20,6 +21,12 @@ import { useUploads } from '../contexts/UploadsContext';
 import { useOrg } from '../contexts/OrgContext';
 import { TagChip } from '../components/TagChip';
 import MobileSessionsList from '../components/MobileSessionsList';
+import {
+  deleteLocalSession,
+  isLocalSessionId,
+  listLocalSessions,
+  type LocalSession,
+} from '../services/localSessionStore';
 
 interface Participant {
   id: string;
@@ -50,6 +57,33 @@ interface Session {
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
+  /** True for local-only (privacy-mode) sessions read from IndexedDB. */
+  is_local?: boolean;
+}
+
+function localSessionToSession(local: LocalSession): Session {
+  // Map the IndexedDB record into the same shape the server list uses
+  // so the existing table/card components don't need to branch.
+  const endedAt = local.endedAt || local.startedAt;
+  return {
+    id: local.id,
+    name: local.title,
+    title: local.title,
+    description: local.finalSummary || '',
+    created_at: local.startedAt,
+    updated_at: endedAt,
+    duration: local.durationSeconds,
+    status: local.endedAt ? 'completed' : 'active',
+    participants: local.participants.map((name) => ({ id: name, name })),
+    tags: local.tags,
+    transcript: local.transcript.map((c) => c.text).join('\n'),
+    summary_preview: (local.finalSummary || local.slices.map((s) => s.text).join('\n\n')).slice(0, 240),
+    speaker_count: 0,
+    has_transcript: local.transcript.length > 0,
+    has_audio: false,
+    session_type: 'live',
+    is_local: true,
+  };
 }
 
 interface RagMessage {
@@ -302,14 +336,25 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                     className="border-b border-gray-800/60 hover:bg-gray-800/40 transition-colors"
                   >
                     <td className="px-4 py-3 align-middle">
-                      <button
-                        type="button"
-                        onClick={() => onOpen(session.id)}
-                        title={fullTitle}
-                        className="block text-left font-medium text-white hover:text-purple-300 transition-colors max-w-[44ch] truncate"
-                      >
-                        {truncated}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {session.is_local && (
+                          <span
+                            title="Local-only session (privacy mode). Stored only in this browser."
+                            className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-200"
+                          >
+                            <LockIcon className="w-3 h-3 mr-1" />
+                            Local
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onOpen(session.id)}
+                          title={fullTitle}
+                          className="block text-left font-medium text-white hover:text-purple-300 transition-colors max-w-[44ch] truncate"
+                        >
+                          {truncated}
+                        </button>
+                      </div>
                       {session.project_app && session.project_slug && (
                         <span
                           className={`mt-1 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] ${
@@ -461,6 +506,10 @@ export const Sessions: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  // Local-only privacy mode sessions are merged into the list. This
+  // chip toggles between showing all, only local, or only synced
+  // (server-stored). Default: all.
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'local' | 'synced'>('all');
   // Sort state hydrates from URL ?sort=&order= so refresh keeps the
   // user's column choice. Falls back to date-desc if missing/invalid.
   const initialSort: SortKey = (() => {
@@ -743,13 +792,17 @@ export const Sessions: React.FC = () => {
 
   useEffect(() => {
     filterSessions();
-  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sortBy, sortOrder]);
+  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, sortBy, sortOrder]);
 
   // showSpinner=false on polling refresh so the list doesn't flash
   // through the empty-loading state every 10 seconds. Initial mount + filter
   // changes still show the spinner. Background ticks set `refreshing` so the
   // mobile shell can show a subtle "refreshing" indicator without ripping
   // the list out from under the user.
+  //
+  // Local-only sessions (privacy mode) live in IndexedDB and are merged
+  // in here so the rest of the UI is unaware of the split. The merge
+  // sorts by created_at descending so the chronological mix is correct.
   const fetchSessions = async ({ showSpinner = true }: { showSpinner?: boolean } = {}) => {
     if (showSpinner) {
       setLoading(true);
@@ -763,16 +816,40 @@ export const Sessions: React.FC = () => {
       if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
 
       const tagsParam = selectedTags.length > 0 ? `?tags=${selectedTags.map(encodeURIComponent).join(',')}` : '';
-      const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions${tagsParam}`, {
-        headers
-      });
+      const [serverRes, localList] = await Promise.allSettled([
+        fetch(`${config.apiBaseUrl}/api/simple/recording-sessions${tagsParam}`, { headers }),
+        listLocalSessions(),
+      ]);
 
-      if (response.ok) {
-        const data = await response.json();
-        setSessions(data);
+      let serverSessions: Session[] = [];
+      if (serverRes.status === 'fulfilled' && serverRes.value.ok) {
+        const data = await serverRes.value.json();
+        serverSessions = Array.isArray(data) ? data : [];
+      } else if (serverRes.status === 'fulfilled') {
+        console.error('Failed to fetch sessions:', serverRes.value.status, serverRes.value.statusText);
       } else {
-        console.error('Failed to fetch sessions:', response.status, response.statusText);
+        console.error('Failed to fetch sessions:', serverRes.reason);
       }
+
+      const localSessions: Session[] =
+        localList.status === 'fulfilled'
+          ? localList.value.map(localSessionToSession)
+          : [];
+
+      // Merge: server + local, deduped by id (local ids are
+      // `local-` prefixed so a clash is structurally impossible, but
+      // we still de-dupe defensively).
+      const seen = new Set<string>();
+      const merged: Session[] = [];
+      for (const s of [...serverSessions, ...localSessions]) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        merged.push(s);
+      }
+      merged.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+      setSessions(merged);
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     } finally {
@@ -809,6 +886,13 @@ export const Sessions: React.FC = () => {
     // Type filter
     if (typeFilter !== 'all') {
       filtered = filtered.filter(session => session.session_type === typeFilter);
+    }
+
+    // Source filter: local-only (is_local=true) vs synced (server).
+    if (sourceFilter === 'local') {
+      filtered = filtered.filter((session) => session.is_local === true);
+    } else if (sourceFilter === 'synced') {
+      filtered = filtered.filter((session) => session.is_local !== true);
     }
 
     // Sort
@@ -904,6 +988,17 @@ export const Sessions: React.FC = () => {
 
   const deleteSession = async (sessionId: string) => {
     if (!confirm('Are you sure you want to delete this session?')) return;
+
+    if (isLocalSessionId(sessionId)) {
+      try {
+        await deleteLocalSession(sessionId);
+        fetchSessions();
+      } catch (error) {
+        console.error('Failed to delete local session:', error);
+        alert('Failed to delete local session');
+      }
+      return;
+    }
 
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/${sessionId}`, {
@@ -1219,7 +1314,7 @@ export const Sessions: React.FC = () => {
           {/* Extended Filters */}
           {showFilters && (
             <div className="mt-4 pt-4 border-t border-gray-800">
-              <div className="grid grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
@@ -1241,6 +1336,17 @@ export const Sessions: React.FC = () => {
                   <option value="all">All Types</option>
                   <option value="live">Live Recording</option>
                   <option value="upload">Uploaded Audio</option>
+                </select>
+
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value as 'all' | 'local' | 'synced')}
+                  className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-purple-500"
+                  title="Filter by storage tier"
+                >
+                  <option value="all">All Storage</option>
+                  <option value="local">Local only</option>
+                  <option value="synced">Synced only</option>
                 </select>
 
                 <select
@@ -1469,8 +1575,17 @@ export const Sessions: React.FC = () => {
                   {/* Header */}
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight">
-                        {session.title || session.name}
+                      <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight flex items-center gap-2">
+                        {session.is_local && (
+                          <span
+                            title="Local-only session (privacy mode). Stored only in this browser."
+                            className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-200"
+                          >
+                            <LockIcon className="w-3 h-3 mr-1" />
+                            Local
+                          </span>
+                        )}
+                        <span>{session.title || session.name}</span>
                       </h3>
                       {session.title && session.name !== session.title && (
                         <p className="text-gray-500 text-xs mt-0.5">Original: {session.name}</p>

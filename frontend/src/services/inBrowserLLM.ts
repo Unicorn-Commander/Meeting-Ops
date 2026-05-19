@@ -8,10 +8,11 @@ import { config } from '../config';
 
 export const IN_BROWSER_LLM_MODEL_KEY = 'meetingops.inBrowserLLM.model.v1';
 export const IN_BROWSER_LLM_DTYPE_KEY = 'meetingops.inBrowserLLM.dtype.v1';
-// Default model when fresh install / no choice persisted. Picks a
-// transformers.js entry so Aaron can validate the second runtime out of
-// the box; user can still pick any web-llm entry from the picker.
-export const DEFAULT_MODEL_ID = 'gemma-4-e2b-q4f16';
+// Default model when fresh install / no choice persisted. Qwen 3 0.6B
+// q4f16 lands at ~570MB, ~11s cold load, ~43 tok/s on M2 Mac with
+// WebGPU; structured prompt captures ~90% of facts. Premium-tier Gemma
+// 4 E2B (~3GB) stays as a manual upgrade.
+export const DEFAULT_MODEL_ID = 'qwen3-0.6b-onnx-q4f16';
 
 export const LIVE_SUMMARY_AUTO_KEY = 'meetingops.liveSummary.autoConfig.v1';
 
@@ -160,6 +161,16 @@ const CURATED_MODELS: CuratedEntry[] = [
   // Total q4f16 download with encoders is ~3GB; pure text decoder path
   // is ~1.5GB cached.
   {
+    id: 'qwen3-0.6b-onnx-q4f16',
+    label: 'Qwen 3 0.6B ONNX (q4f16 · ~570MB)',
+    runtime: 'transformers.js',
+    modelRef: 'onnx-community/Qwen3-0.6B-ONNX',
+    defaultDtype: 'q4f16',
+    approxSizeMB: 570,
+    contextWindow: 32768,
+    notes: 'Default. Fastest cold-start. Thinking mode is off — structured prompt only.',
+  },
+  {
     id: 'gemma-4-e2b-q4f16',
     label: 'Gemma 4 E2B (q4f16 · ~3GB)',
     runtime: 'transformers.js',
@@ -167,17 +178,7 @@ const CURATED_MODELS: CuratedEntry[] = [
     defaultDtype: 'q4f16',
     approxSizeMB: 3200,
     contextWindow: 8192,
-    notes: 'Multimodal model used text-only for summaries. First load is the slowest.',
-  },
-  {
-    id: 'qwen3-0.6b-onnx-q4f16',
-    label: 'Qwen 3 0.6B ONNX (q4f16 · ~500MB)',
-    runtime: 'transformers.js',
-    modelRef: 'onnx-community/Qwen3-0.6B-ONNX',
-    defaultDtype: 'q4f16',
-    approxSizeMB: 540,
-    contextWindow: 32768,
-    notes: 'Tiny + fast. Great for short slices.',
+    notes: 'Premium quality. Multimodal model loaded text-only via AutoModelForCausalLM (vision+audio encoders skipped at load when possible).',
   },
   {
     id: 'smollm2-1.7b-onnx-q4f16',
@@ -464,29 +465,43 @@ function forceServer(modelId: string): boolean {
 }
 
 // ---- Slice system prompt (kept in sync with backend/api/recording.py)
-const SLICE_SYSTEM_PROMPT =
-  'You are a live meeting summarizer. The user is currently in a meeting and wants a running summary that updates as new conversation happens. Given the transcript so far and the previous summary, produce an updated summary that:\n' +
-  '- Leads with what is NEW since the previous summary\n' +
-  '- Preserves key context, decisions, and action items from before\n' +
-  '- Stays under 200 words\n' +
-  '- Reads naturally, like notes a thoughtful attendee would take\n\n' +
-  'Do not list speakers verbatim. Do not repeat the previous summary word-for-word.';
+// Structured grouping (Decisions / Action Items / Metrics / Risks) is
+// the format Aaron validated against Qwen 3 0.6B in the browser: ~90%
+// fact capture vs the prior narrative prompt. `/no_think` is appended
+// here AND on the user message so Qwen 3 disables its internal thinking
+// block at both ends; other models silently ignore the token.
+export const SLICE_SYSTEM_PROMPT =
+  'You are a meeting-notes assistant. Output bullet points capturing every concrete decision, action item with owner and due date, every number/metric mentioned, and every dependency or risk. Do not omit details. Group as Decisions / Action Items / Metrics / Risks. /no_think';
+
+// Final-summary roll-up at session end (local-only privacy mode). Same
+// structural shape, but framed as a consolidation rather than a live tick.
+export const FINAL_SUMMARY_SYSTEM_PROMPT =
+  'You are a meeting-notes assistant. Consolidate the slice summaries below into a single comprehensive meeting notes document. Capture every concrete decision, action item with owner and due date, every number/metric mentioned, and every dependency or risk. Do not omit details. Group as Decisions / Action Items / Metrics / Risks. /no_think';
+
+const NO_THINK_TAG = '\n\n/no_think';
 
 function buildUserPrompt(transcript: string, previousSummary?: string): string {
   const tail = transcript.slice(-50000);
+  let body: string;
   if (previousSummary && previousSummary.trim()) {
-    return [
+    body = [
       'Previous running summary:',
       previousSummary.trim(),
       '',
       'New transcript since that summary (most recent at the bottom):',
       tail,
     ].join('\n');
+  } else {
+    body = [
+      'Transcript so far (most recent at the bottom):',
+      tail,
+    ].join('\n');
   }
-  return [
-    'Transcript so far (most recent at the bottom):',
-    tail,
-  ].join('\n');
+  return `${body}${NO_THINK_TAG}`;
+}
+
+function buildFinalSummaryUserPrompt(slicesText: string): string {
+  return `Slice summaries to consolidate (oldest first):\n\n${slicesText}${NO_THINK_TAG}`;
 }
 
 // ---- Server SSE fallback (unchanged from previous slice landing)
@@ -728,19 +743,42 @@ async function loadTransformersModel(
     });
 
     let model: any;
+    let usedMultimodal = false;
     if (multimodal) {
-      // Reference: webml-community/Gemma-4-WebGPU Space.
-      // Per-submodule dtypes mirror that bundle's loader.
-      model = await AutoModelForImageTextToText.from_pretrained(repoId, {
-        dtype: {
-          audio_encoder: 'fp16',
-          vision_encoder: 'fp16',
-          embed_tokens: dtype,
-          decoder_model_merged: dtype,
-        },
-        device: 'webgpu',
-        progress_callback: onTransformersProgress,
-      });
+      // Try text-only path first: AutoModelForCausalLM against the
+      // multimodal repo. If transformers.js can resolve a causal-LM
+      // config from the repo's text submodule it skips downloading the
+      // vision/audio encoder ONNX shards entirely (~270MB+ saved). If it
+      // can't, we fall back to the original AutoModelForImageTextToText
+      // loader. The first form is what we want — verify via Network
+      // panel that vision_encoder_*/audio_encoder_* never request.
+      try {
+        model = await AutoModelForCausalLM.from_pretrained(repoId, {
+          dtype,
+          device: 'webgpu',
+          progress_callback: onTransformersProgress,
+        });
+      } catch (causalErr) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[in-browser-llm] AutoModelForCausalLM rejected ${repoId}; ` +
+            'falling back to AutoModelForImageTextToText (vision+audio sessions will load).',
+          causalErr,
+        );
+        // Reference: webml-community/Gemma-4-WebGPU Space.
+        // Per-submodule dtypes mirror that bundle's loader.
+        model = await AutoModelForImageTextToText.from_pretrained(repoId, {
+          dtype: {
+            audio_encoder: 'fp16',
+            vision_encoder: 'fp16',
+            embed_tokens: dtype,
+            decoder_model_merged: dtype,
+          },
+          device: 'webgpu',
+          progress_callback: onTransformersProgress,
+        });
+        usedMultimodal = true;
+      }
     } else {
       model = await AutoModelForCausalLM.from_pretrained(repoId, {
         dtype,
@@ -754,7 +792,7 @@ async function loadTransformersModel(
       dtype,
       tokenizer,
       model,
-      isMultimodal: multimodal,
+      isMultimodal: usedMultimodal,
     };
     transformersLoaded = loaded;
     return loaded;
@@ -767,32 +805,40 @@ async function loadTransformersModel(
   }
 }
 
-async function* summarizeWithTransformersJs(
-  transcript: string,
+interface TransformersGenerateOpts {
+  signal?: AbortSignal;
+  onToken?: (token: string) => void;
+  onProgress?: (report: InitProgressReport) => void;
+  systemPrompt: string;
+  userContent: string;
+  maxNewTokens?: number;
+}
+
+async function* generateWithTransformersJs(
   repoId: string,
   dtype: Dtype,
-  opts?: SummarizeOptions,
+  opts: TransformersGenerateOpts,
 ): AsyncIterable<string> {
-  const loaded = await loadTransformersModel(repoId, dtype, opts?.onProgress);
-  if (opts?.signal?.aborted) return;
+  const loaded = await loadTransformersModel(repoId, dtype, opts.onProgress);
+  if (opts.signal?.aborted) return;
 
   const { tokenizer, model } = loaded;
   const transformers = await loadTransformersModule();
   const { TextStreamer } = transformers as { TextStreamer: any };
 
   const messages = [
-    { role: 'system', content: SLICE_SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: buildUserPrompt(transcript, opts?.previousSummary),
-    },
+    { role: 'system', content: opts.systemPrompt },
+    { role: 'user', content: opts.userContent },
   ];
 
   // apply_chat_template returns token ids ready for generate().
+  // enable_thinking: false disables Qwen 3's <think> block at the
+  // template level. Other model templates ignore the flag.
   const inputs = tokenizer.apply_chat_template(messages, {
     add_generation_prompt: true,
     return_tensors: 'pt',
     return_dict: true,
+    enable_thinking: false,
   });
 
   // Token streaming via TextStreamer.callback_function. We bridge that
@@ -848,7 +894,7 @@ async function* summarizeWithTransformersJs(
       const inputIds = (inputs && (inputs as any).input_ids) ?? inputs;
       await model.generate({
         ...((inputs && (inputs as any).input_ids) ? inputs : { input_ids: inputIds }),
-        max_new_tokens: 256,
+        max_new_tokens: opts.maxNewTokens ?? 256,
         do_sample: true,
         temperature: 0.3,
         top_p: 0.9,
@@ -893,6 +939,44 @@ async function* summarizeWithTransformersJs(
   }
 }
 
+// Slice-summary wrapper: applies the slice system prompt + user prompt
+// + /no_think tail. Kept as a thin shim so the dispatcher reads naturally.
+async function* summarizeWithTransformersJs(
+  transcript: string,
+  repoId: string,
+  dtype: Dtype,
+  opts?: SummarizeOptions,
+): AsyncIterable<string> {
+  yield* generateWithTransformersJs(repoId, dtype, {
+    signal: opts?.signal,
+    onToken: opts?.onToken,
+    onProgress: opts?.onProgress,
+    systemPrompt: SLICE_SYSTEM_PROMPT,
+    userContent: buildUserPrompt(transcript, opts?.previousSummary),
+    maxNewTokens: 256,
+  });
+}
+
+// Final-summary roll-up: consolidates slice texts into one document.
+// Larger max_new_tokens since this is the final pass and the user wants
+// completeness over latency. Local-only privacy mode runs this at
+// session-end; otherwise the server-side final-summary pipeline owns it.
+async function* finalSummaryWithTransformersJs(
+  slicesText: string,
+  repoId: string,
+  dtype: Dtype,
+  opts?: SummarizeOptions,
+): AsyncIterable<string> {
+  yield* generateWithTransformersJs(repoId, dtype, {
+    signal: opts?.signal,
+    onToken: opts?.onToken,
+    onProgress: opts?.onProgress,
+    systemPrompt: FINAL_SUMMARY_SYSTEM_PROMPT,
+    userContent: buildFinalSummaryUserPrompt(slicesText),
+    maxNewTokens: 1024,
+  });
+}
+
 // =============================================================
 // Dispatcher
 // =============================================================
@@ -929,6 +1013,67 @@ export class InBrowserSummarizer implements Summarizer {
     // web-llm path
     const actualModelId = resolveActualModelId(modelId);
     yield* summarizeWithWebLLM(transcript, actualModelId, opts);
+  }
+
+  // Final-summary roll-up. Only the transformers.js + web-llm paths are
+  // wired here; the local-only privacy mode never reaches server mode
+  // (the caller gates on localOnly + WebGPU before invoking). If the
+  // current model is server, the caller is expected to skip this and
+  // surface "WebGPU required" instead.
+  async *summarizeFinal(
+    slicesText: string,
+    modelId: string,
+    opts?: SummarizeOptions,
+  ): AsyncIterable<string> {
+    if (forceServer(modelId)) {
+      // Reuse the server slice endpoint as a fallback. Not ideal for
+      // long roll-ups (the server prompt expects "running" framing) but
+      // local-only mode never lands here.
+      yield* summarizeWithServer(slicesText, opts);
+      return;
+    }
+    const runtime = getRuntimeForModelId(modelId);
+    if (runtime === 'transformers.js') {
+      const curated = CURATED_MODELS.find((m) => m.id === modelId);
+      if (!curated) {
+        yield* summarizeWithServer(slicesText, opts);
+        return;
+      }
+      const dtype = getStoredDtype(modelId) || curated.defaultDtype || 'q4f16';
+      yield* finalSummaryWithTransformersJs(slicesText, curated.modelRef, dtype, opts);
+      return;
+    }
+    // web-llm path: reuse the slice generator with a custom system
+    // prompt by going through the SDK directly.
+    const actualModelId = resolveActualModelId(modelId);
+    const engine = await loadWebLLMEngine(actualModelId, opts?.onProgress);
+    if (opts?.signal?.aborted) {
+      await engine.interruptGenerate();
+      return;
+    }
+    const abortHandler = () => { engine.interruptGenerate(); };
+    opts?.signal?.addEventListener('abort', abortHandler, { once: true });
+    try {
+      const stream = await engine.chat.completions.create({
+        model: actualModelId,
+        stream: true,
+        temperature: 0.25,
+        max_tokens: 1024,
+        messages: [
+          { role: 'system', content: FINAL_SUMMARY_SYSTEM_PROMPT },
+          { role: 'user', content: buildFinalSummaryUserPrompt(slicesText) },
+        ],
+      } as any);
+      for await (const chunk of stream as unknown as AsyncIterable<any>) {
+        if (opts?.signal?.aborted) break;
+        const token = chunk?.choices?.[0]?.delta?.content || '';
+        if (!token) continue;
+        opts?.onToken?.(token);
+        yield token;
+      }
+    } finally {
+      opts?.signal?.removeEventListener('abort', abortHandler);
+    }
   }
 
   async preloadModel(modelId: string, opts?: PreloadOptions): Promise<void> {

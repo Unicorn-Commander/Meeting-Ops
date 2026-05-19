@@ -132,6 +132,20 @@ export default function AlwaysOnControl() {
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-5 shadow-xl shadow-black/20">
       <AlwaysOnPopout requestKey={popoutRequestKey} />
 
+      {/* Privacy-mode banners: live notice when local-only is active for
+          the current session, and a degraded-mode warning when the user
+          asked for local-only but WebGPU is missing. */}
+      {alwaysOn.localOnly && (
+        <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+          Local-only mode — nothing leaves this device.
+        </div>
+      )}
+      {alwaysOn.localOnlyForcedOff && !alwaysOn.localOnly && (
+        <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          WebGPU required for local-only mode. Falling back to standard mode for this session.
+        </div>
+      )}
+
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex items-center gap-3">
