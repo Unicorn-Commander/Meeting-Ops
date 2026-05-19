@@ -21,6 +21,7 @@
     "@radix-ui/react-separator": "^1.1.7",
     "@radix-ui/react-slot": "^1.2.3",
     "@ricky0123/vad-web": "0.0.30",
+    "onnxruntime-web": "1.17.3",
     "@types/react-router-dom": "^5.3.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
