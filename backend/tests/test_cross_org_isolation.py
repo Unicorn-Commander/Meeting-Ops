@@ -23,6 +23,14 @@ Coverage:
 | ``GET  /api/simple/recording-sessions``             | http  | Postgres            |
 | ``GET  /api/simple/recording-sessions/{id}``        | http  | Postgres            |
 | ``GET  /api/simple/recording-sessions/search``      | http  | Postgres            |
+| ``POST /api/satellites/register``                   | http  | Postgres            |
+| ``GET  /api/satellites``                            | http  | Postgres            |
+| ``GET  /api/satellites/{device_id}``                | http  | Postgres            |
+| ``PUT  /api/satellites/{device_id}``                | http  | Postgres            |
+| ``DELETE /api/satellites/{device_id}``              | http  | Postgres            |
+| ``GET  /api/satellites/rooms``                      | http  | Postgres            |
+| ``POST /api/satellites/{device_id}/heartbeat``      | http  | Postgres            |
+| ``POST /api/satellites/{device_id}/start-recording``| http  | Postgres            |
 
 Qdrant is faked at the ``SemanticSearchService`` boundary. Mocks return
 results scoped to whatever ``organization_id`` the service passes in. A
@@ -544,3 +552,297 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
 
     else:  # pragma: no cover
         pytest.fail(f"Unhandled HTTP path: {path_under_test}")
+
+
+# ---------------------------------------------------------------------------
+# Satellite device isolation (CR-001)
+# ---------------------------------------------------------------------------
+#
+# Regression coverage for the cross-org leak in backend/api/satellite_api.py
+# (task #82). Before the fix, every satellite endpoint looked up devices by
+# ``device_id`` alone — any authenticated user could read, mutate, delete,
+# or upload to another tenant's satellite devices. Same shape as the
+# ``meet_chunks`` payload-key drift bug we closed in 8dec955.
+#
+# These tests use the existing two_orgs seed pattern, then layer on one
+# satellite device per org. Every endpoint that takes a device_id must
+# return 404 when called from the other org's credentials; the list/rooms
+# endpoints must omit other-org devices entirely; the register endpoint
+# must bind the new device to the caller's active org regardless of any
+# payload-supplied org hint.
+
+
+def _seed_satellite_device(
+    db,
+    *,
+    organization_id: int,
+    device_id: str,
+    name: str,
+    room_name: str | None = None,
+):
+    """Insert a satellite_devices row directly. Mirrors the prod register
+    endpoint enough that the read/update/delete paths see a realistic row.
+    """
+    from database.models import SatelliteDevice
+
+    from datetime import datetime, timezone
+
+    device = SatelliteDevice(
+        device_id=device_id,
+        name=name,
+        room_name=room_name,
+        device_type="esp32-s3",
+        status="online",
+        last_heartbeat=datetime.now(timezone.utc),
+        api_key="test-hashed-key-" + device_id,
+        organization_id=organization_id,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    return device
+
+
+@pytest.fixture()
+def two_orgs_with_satellites(two_orgs):
+    """Extend the two_orgs fixture with one satellite device per org. Returns
+    the same ctx dict plus device_id keys for each side.
+
+    Unique device_id values per test run (suffix from two_orgs) so reruns
+    against the same SQLite db never collide on the global unique
+    constraint.
+    """
+    _, _, _, SessionLocal, _ = _models()
+    db = SessionLocal()
+    suffix = uuid.uuid4().hex[:6]
+    try:
+        device_a = _seed_satellite_device(
+            db,
+            organization_id=two_orgs["org_a_id"],
+            device_id=f"esp-alpha-{suffix}",
+            name=f"Alpha Conf Room Mic {suffix}",
+            room_name="Alpha Conference Room",
+        )
+        device_b = _seed_satellite_device(
+            db,
+            organization_id=two_orgs["org_b_id"],
+            device_id=f"esp-bravo-{suffix}",
+            name=f"Bravo Conf Room Mic {suffix}",
+            room_name="Bravo Conference Room",
+        )
+        two_orgs["device_a_id"] = device_a.device_id
+        two_orgs["device_b_id"] = device_b.device_id
+        two_orgs["device_a_pk"] = device_a.id
+        two_orgs["device_b_pk"] = device_b.id
+        two_orgs["device_a_room"] = device_a.room_name
+        two_orgs["device_b_room"] = device_b.room_name
+    finally:
+        db.close()
+
+    return two_orgs
+
+
+SATELLITE_PATHS = [
+    "satellites.list",
+    "satellites.get_other_org",
+    "satellites.update_other_org",
+    "satellites.delete_other_org",
+    "satellites.heartbeat_other_org",
+    "satellites.start_recording_other_org",
+    "satellites.rooms",
+    "satellites.register_under_caller_org",
+]
+
+
+@pytest.mark.parametrize("path_under_test", SATELLITE_PATHS)
+def test_no_cross_org_leak_satellites(client, two_orgs_with_satellites, path_under_test):
+    """Every satellite endpoint, when invoked as org A, must refuse to read,
+    list, or mutate org B's devices. Register must bind the new device to
+    the caller's org regardless of any client-supplied org hint."""
+    ctx = two_orgs_with_satellites
+    headers_a = ctx["headers_a"]
+    org_a_id = ctx["org_a_id"]
+    org_b_id = ctx["org_b_id"]
+    device_a_id = ctx["device_a_id"]
+    device_b_id = ctx["device_b_id"]
+
+    if path_under_test == "satellites.list":
+        response = client.get("/api/satellites", headers=headers_a)
+        assert response.status_code == 200, response.text
+        rows = response.json()
+        # Org A must see its own device.
+        seen_ids = {row.get("device_id") for row in rows}
+        assert device_a_id in seen_ids, (
+            f"Harness broken: org A cannot see its own device "
+            f"{device_a_id} in /api/satellites: {seen_ids}"
+        )
+        # And must NEVER see org B's device.
+        assert device_b_id not in seen_ids, (
+            f"Leak: GET /api/satellites returned org B device {device_b_id} "
+            f"to org A. Full payload: {rows}"
+        )
+
+    elif path_under_test == "satellites.get_other_org":
+        response = client.get(
+            f"/api/satellites/{device_b_id}",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: GET /api/satellites/{{org_b_device}} returned "
+            f"status {response.status_code} when fetched as org A. "
+            f"Body: {response.text[:500]}"
+        )
+
+    elif path_under_test == "satellites.update_other_org":
+        response = client.put(
+            f"/api/satellites/{device_b_id}",
+            json={"name": "PWNED-BY-ALPHA", "room_name": "alpha-room"},
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: PUT /api/satellites/{{org_b_device}} returned "
+            f"status {response.status_code} (expected 404) when called as "
+            f"org A. Body: {response.text[:500]}"
+        )
+
+        # Belt-and-suspenders: the org B device row must be untouched.
+        _, _, _, SessionLocal, _ = _models()
+        db = SessionLocal()
+        try:
+            from database.models import SatelliteDevice
+            row = db.query(SatelliteDevice).filter(
+                SatelliteDevice.device_id == device_b_id
+            ).first()
+            assert row is not None
+            assert row.name != "PWNED-BY-ALPHA", (
+                "Leak: org A's update succeeded in mutating org B's device row "
+                f"(name={row.name!r})."
+            )
+            assert row.organization_id == org_b_id, (
+                f"Leak: org A's update changed org B device's organization_id "
+                f"from {org_b_id} to {row.organization_id}."
+            )
+        finally:
+            db.close()
+
+    elif path_under_test == "satellites.delete_other_org":
+        response = client.delete(
+            f"/api/satellites/{device_b_id}",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: DELETE /api/satellites/{{org_b_device}} returned "
+            f"status {response.status_code} (expected 404) when called as "
+            f"org A. Body: {response.text[:500]}"
+        )
+
+        # The org B device row must still exist.
+        _, _, _, SessionLocal, _ = _models()
+        db = SessionLocal()
+        try:
+            from database.models import SatelliteDevice
+            row = db.query(SatelliteDevice).filter(
+                SatelliteDevice.device_id == device_b_id
+            ).first()
+            assert row is not None, (
+                "Leak: org A's DELETE removed org B's satellite device row."
+            )
+        finally:
+            db.close()
+
+    elif path_under_test == "satellites.heartbeat_other_org":
+        response = client.post(
+            f"/api/satellites/{device_b_id}/heartbeat",
+            json={"status": "recording"},
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST /api/satellites/{{org_b_device}}/heartbeat "
+            f"returned status {response.status_code} (expected 404) when "
+            f"called as org A. Body: {response.text[:500]}"
+        )
+
+    elif path_under_test == "satellites.start_recording_other_org":
+        response = client.post(
+            f"/api/satellites/{device_b_id}/start-recording",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST /api/satellites/{{org_b_device}}/start-recording "
+            f"returned status {response.status_code} (expected 404) when "
+            f"called as org A. Body: {response.text[:500]}"
+        )
+
+    elif path_under_test == "satellites.rooms":
+        response = client.get("/api/satellites/rooms", headers=headers_a)
+        assert response.status_code == 200, response.text
+        rooms = response.json()
+        # Flatten device_ids out of every room.
+        flat_device_ids = {
+            d.get("device_id")
+            for room in rooms
+            for d in room.get("devices", [])
+        }
+        assert device_a_id in flat_device_ids, (
+            "Harness broken: org A cannot see its own device under "
+            "/api/satellites/rooms."
+        )
+        assert device_b_id not in flat_device_ids, (
+            f"Leak: GET /api/satellites/rooms returned org B device "
+            f"{device_b_id} to org A. Full rooms payload: {rooms}"
+        )
+        # And the room name should not surface either, since that's how
+        # users actually browse devices in the UI.
+        seen_rooms = {room.get("room_name") for room in rooms}
+        assert ctx["device_b_room"] not in seen_rooms, (
+            f"Leak: org B's room name {ctx['device_b_room']!r} surfaced "
+            f"in org A's /api/satellites/rooms listing: {seen_rooms}"
+        )
+
+    elif path_under_test == "satellites.register_under_caller_org":
+        # The client tries to specify org B in the payload (no schema field
+        # exists for organization_id, so we lean on the default behavior:
+        # the server must always bind to the caller's active org, never to
+        # any payload hint or default). Use a unique device_id so this run
+        # doesn't collide with previously-registered fixtures.
+        new_device_id = f"esp-new-{uuid.uuid4().hex[:8]}"
+        response = client.post(
+            "/api/satellites/register",
+            json={
+                "device_id": new_device_id,
+                "name": "Test New Device",
+                "device_type": "esp32-s3",
+                # NOTE: organization_id is not part of the schema. Even if a
+                # caller smuggles it in via extra fields, Pydantic should
+                # drop it on the way in and the server must end up with the
+                # caller's org.
+                "organization_id": org_b_id,
+            },
+            headers=headers_a,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "device" in body, body
+        assert body["device"]["device_id"] == new_device_id
+
+        # Verify the row landed under org A, not org B.
+        _, _, _, SessionLocal, _ = _models()
+        db = SessionLocal()
+        try:
+            from database.models import SatelliteDevice
+            row = db.query(SatelliteDevice).filter(
+                SatelliteDevice.device_id == new_device_id
+            ).first()
+            assert row is not None, "Newly-registered device missing from DB"
+            assert row.organization_id == org_a_id, (
+                f"Leak: POST /api/satellites/register stored "
+                f"organization_id={row.organization_id} for device "
+                f"{new_device_id} when caller is in org {org_a_id}. "
+                f"Payload-supplied org B hint ({org_b_id}) must be ignored."
+            )
+        finally:
+            db.close()
+
+    else:  # pragma: no cover
+        pytest.fail(f"Unhandled satellite path: {path_under_test}")

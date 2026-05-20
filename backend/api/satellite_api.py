@@ -19,7 +19,8 @@ import hashlib
 
 from database.database import get_db
 from database.models import SatelliteDevice, RecordingSession as DBRecordingSession, Transcription
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_organization
+from auth.organization import ActiveOrganization
 from auth.models import User
 
 router = APIRouter(prefix="/api/satellites", tags=["satellites"])
@@ -136,9 +137,21 @@ def _hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def _get_device_or_404(db: Session, device_id: str) -> SatelliteDevice:
-    """Get a satellite device by device_id or raise 404."""
-    device = db.query(SatelliteDevice).filter(
+def _scoped_device_query(db: Session, organization_id: int):
+    """Base query for satellite devices scoped to one org."""
+    return db.query(SatelliteDevice).filter(
+        SatelliteDevice.organization_id == organization_id
+    )
+
+
+def _get_device_or_404(db: Session, device_id: str, organization_id: int) -> SatelliteDevice:
+    """Get a satellite device by device_id within the given org, or raise 404.
+
+    Devices belonging to other organizations are indistinguishable from
+    non-existent devices — the lookup must never reveal existence across
+    org boundaries.
+    """
+    device = _scoped_device_query(db, organization_id).filter(
         SatelliteDevice.device_id == device_id
     ).first()
     if not device:
@@ -169,6 +182,10 @@ def _create_satellite_session(
         source_type=source_type,
         room_name=device.room_name,
         audio_file=audio_file,
+        # Pin the recording session to the same org as the device. Without
+        # this, downstream org-scoped readers (list/search/RAG) would not
+        # find satellite-originated meetings.
+        organization_id=device.organization_id,
     )
     db.add(db_session)
     db.commit()
@@ -183,10 +200,21 @@ async def register_satellite(
     request: SatelliteRegisterRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    """Register a new satellite device. Returns an API key for the device."""
+    """Register a new satellite device. Returns an API key for the device.
 
-    # Check if device already exists
+    The device is bound to the calling user's active organization. The
+    request body is NOT trusted to specify which org owns the device —
+    that is always taken from the resolved ``active_org``.
+    """
+    org_id = active_org.organization.id
+
+    # device_id uniqueness is enforced at the column level (unique=True),
+    # so the check below is global by design. A device id collision across
+    # orgs is rare in practice (esp32 MACs / pi serials), but if it ever
+    # happens we still refuse the registration rather than letting two orgs
+    # claim the same physical device.
     existing = db.query(SatelliteDevice).filter(
         SatelliteDevice.device_id == request.device_id
     ).first()
@@ -214,12 +242,16 @@ async def register_satellite(
         last_heartbeat=datetime.now(timezone.utc),
         api_key=hashed_key,
         created_at=datetime.now(timezone.utc),
+        organization_id=org_id,
     )
     db.add(device)
     db.commit()
     db.refresh(device)
 
-    logger.info(f"Registered satellite device: {request.device_id} (type={request.device_type})")
+    logger.info(
+        f"Registered satellite device: {request.device_id} "
+        f"(type={request.device_type}, org_id={org_id})"
+    )
 
     response = _device_to_response(device)
     return {
@@ -235,18 +267,21 @@ async def list_satellites(
     room: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ) -> List[SatelliteResponse]:
-    """List all registered satellite devices."""
-    query = db.query(SatelliteDevice).order_by(desc(SatelliteDevice.created_at))
+    """List satellite devices registered to the caller's active organization."""
+    org_id = active_org.organization.id
+    query = _scoped_device_query(db, org_id).order_by(desc(SatelliteDevice.created_at))
 
     if status_filter:
         query = query.filter(SatelliteDevice.status == status_filter)
     if room:
         query = query.filter(SatelliteDevice.room_name == room)
 
-    # Auto-mark stale devices as offline (no heartbeat in 90 seconds)
+    # Auto-mark stale devices as offline (no heartbeat in 90 seconds).
+    # Scoped to this org — never touch another tenant's device rows.
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=90)
-    stale_devices = db.query(SatelliteDevice).filter(
+    stale_devices = _scoped_device_query(db, org_id).filter(
         SatelliteDevice.status != "offline",
         SatelliteDevice.last_heartbeat < stale_cutoff,
     ).all()
@@ -263,9 +298,14 @@ async def list_satellites(
 async def list_rooms(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ) -> List[RoomResponse]:
-    """List rooms and their assigned satellite devices."""
-    devices = db.query(SatelliteDevice).order_by(SatelliteDevice.room_name).all()
+    """List rooms and their assigned satellite devices, scoped to the caller's org."""
+    devices = (
+        _scoped_device_query(db, active_org.organization.id)
+        .order_by(SatelliteDevice.room_name)
+        .all()
+    )
 
     rooms: Dict[str, List[SatelliteDevice]] = {}
     for d in devices:
@@ -288,9 +328,10 @@ async def get_satellite(
     device_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ) -> SatelliteResponse:
-    """Get details of a specific satellite device."""
-    device = _get_device_or_404(db, device_id)
+    """Get details of a specific satellite device in the caller's org."""
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
     return _device_to_response(device)
 
 
@@ -300,9 +341,10 @@ async def update_satellite(
     request: SatelliteUpdateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ) -> SatelliteResponse:
     """Update satellite device configuration."""
-    device = _get_device_or_404(db, device_id)
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
 
     if request.name is not None:
         device.name = request.name
@@ -330,9 +372,10 @@ async def delete_satellite(
     device_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Remove a satellite device."""
-    device = _get_device_or_404(db, device_id)
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
     db.delete(device)
     db.commit()
     logger.info(f"Deleted satellite device: {device_id}")
@@ -345,9 +388,10 @@ async def satellite_heartbeat(
     request: Optional[HeartbeatRequest] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Update heartbeat timestamp and optional status for a satellite device."""
-    device = _get_device_or_404(db, device_id)
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
 
     device.last_heartbeat = datetime.now(timezone.utc)
 
@@ -391,12 +435,14 @@ async def upload_audio(
     session_name: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Upload a WAV audio file from a satellite device (store-and-forward mode).
 
     Creates a recording session and triggers the transcription + AI pipeline.
     """
-    device = _get_device_or_404(db, device_id)
+    org_id = active_org.organization.id
+    device = _get_device_or_404(db, device_id, org_id)
 
     # Validate file type
     if file.content_type and "audio" not in file.content_type and "octet-stream" not in file.content_type:
@@ -423,10 +469,13 @@ async def upload_audio(
     if room_name:
         device.room_name = room_name
 
-    # Create or use existing recording session
+    # Create or use existing recording session. Lookup is scoped to the
+    # caller's org so a malicious upload can never attach audio to another
+    # tenant's session row.
     if session_id:
         db_session = db.query(DBRecordingSession).filter(
-            DBRecordingSession.session_id == session_id
+            DBRecordingSession.session_id == session_id,
+            DBRecordingSession.organization_id == org_id,
         ).first()
         if not db_session:
             raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
@@ -484,12 +533,13 @@ async def upload_transcript(
     request: TranscriptUploadRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Upload a transcript from a satellite device running local STT (e.g., RPi with whisper.cpp).
 
     Creates a session with the transcript pre-populated and triggers LLM summarization.
     """
-    device = _get_device_or_404(db, device_id)
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
 
     if request.room_name:
         device.room_name = request.room_name
@@ -641,13 +691,14 @@ async def start_satellite_recording(
     device_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Signal a satellite device to start recording.
 
     Creates a recording session on the server side and updates device status.
     The device polls its status or receives the command via WebSocket.
     """
-    device = _get_device_or_404(db, device_id)
+    device = _get_device_or_404(db, device_id, active_org.organization.id)
 
     if device.status == "recording":
         raise HTTPException(
@@ -677,9 +728,11 @@ async def stop_satellite_recording(
     device_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Signal a satellite device to stop recording."""
-    device = _get_device_or_404(db, device_id)
+    org_id = active_org.organization.id
+    device = _get_device_or_404(db, device_id, org_id)
 
     if device.status != "recording":
         raise HTTPException(
@@ -687,10 +740,13 @@ async def stop_satellite_recording(
             detail=f"Device '{device_id}' is not currently recording (status: {device.status})"
         )
 
-    # Update the recording session
+    # Update the recording session — scoped to caller's org so a forged
+    # current_session_id (e.g., from a stale DB write) cannot mutate another
+    # tenant's session row.
     if device.current_session_id:
         db_session = db.query(DBRecordingSession).filter(
-            DBRecordingSession.session_id == device.current_session_id
+            DBRecordingSession.session_id == device.current_session_id,
+            DBRecordingSession.organization_id == org_id,
         ).first()
         if db_session:
             db_session.status = "processing"
