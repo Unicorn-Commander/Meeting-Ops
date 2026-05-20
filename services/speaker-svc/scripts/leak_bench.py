@@ -34,16 +34,21 @@ import requests
 
 
 def query_vram(gpu_host: str) -> int | None:
-    """Return GPU 0 used VRAM in MiB via ssh nvidia-smi, or None on failure."""
+    """Return GPU 0 used VRAM in MiB. If gpu_host == 'local', call nvidia-smi
+    directly; otherwise ssh to gpu_host. Returns None on failure."""
     try:
-        result = subprocess.run(
-            [
+        if gpu_host == "local":
+            cmd = ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits", "--id=0"]
+        else:
+            cmd = [
                 "ssh",
                 "-o",
                 "ConnectTimeout=5",
                 gpu_host,
                 "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits --id=0",
-            ],
+            ]
+        result = subprocess.run(
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
