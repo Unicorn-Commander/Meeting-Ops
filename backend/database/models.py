@@ -89,6 +89,20 @@ class RecordingSession(Base):
     # Free-form per-session tags. Postgres native TEXT[] so we can use
     # array containment (@>) to filter sessions by tag set without scanning.
     tags = Column(ARRAY(String), nullable=False, server_default="{}")
+    # Conference Room linkage (alembic 023). NULL for browser/upload/satellite
+    # sessions. SET NULL on parent delete so historical recordings survive
+    # the room being deleted.
+    room_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("conference_rooms.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    room_source_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("room_audio_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     def to_dict(self):
         return {

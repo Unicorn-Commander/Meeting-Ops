@@ -192,6 +192,12 @@ _load_router(app, "simple_settings", "api.simple_settings")
 _load_router(app, "satellite_api", "api.satellite_api")
 _load_router(app, "websocket_satellite", "api.websocket_satellite")
 
+# === CONFERENCE ROOM ROUTERS (optional) ===
+# `router` carries /api/rooms/* (CRUD + sources + pairing + recordings + ACL).
+# `system_router` carries /api/system/audio-devices for the setup wizard.
+_load_router(app, "rooms", "api.rooms")
+_load_router(app, "rooms_system", "api.rooms", router_attr="system_router")
+
 # === COMPANION APP ROUTERS (optional) ===
 _load_router(app, "websocket_remote_audio", "api.websocket_remote_audio")
 

@@ -846,3 +846,204 @@ def test_no_cross_org_leak_satellites(client, two_orgs_with_satellites, path_und
 
     else:  # pragma: no cover
         pytest.fail(f"Unhandled satellite path: {path_under_test}")
+
+
+# ---------------------------------------------------------------------------
+# Conference Room cross-org isolation (CR-002 / CR-003)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the satellite block above. Every /api/rooms/* path must refuse
+# to read, list, or mutate another org's rooms. The fixture seeds one
+# room per org so the assertions can match against the wrong-org row id.
+
+
+def _seed_conference_room(db, *, organization_id: int, name: str):
+    from database.models_rooms import ConferenceRoom
+    row = ConferenceRoom(organization_id=organization_id, name=name)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _seed_conference_room_source(db, *, room_id, hardware_type="server_usb_mic", device_path="hw:1,0"):
+    from database.models_rooms import RoomAudioSource
+    src = RoomAudioSource(
+        room_id=room_id,
+        hardware_type=hardware_type,
+        device_path=device_path,
+    )
+    db.add(src)
+    db.commit()
+    db.refresh(src)
+    return src
+
+
+@pytest.fixture()
+def two_orgs_with_rooms(two_orgs):
+    """Extend the two_orgs fixture with one conference room per org.
+
+    Promotes org A's and org B's seeded user to org admin so create/grant
+    paths in the parametrized test can actually exercise the admin gate
+    (the base fixture seeds 'user' role).
+    """
+    _, _, _, SessionLocal, _ = _models()
+    from auth.models import UserOrganization
+
+    db = SessionLocal()
+    try:
+        # Promote both seeded users to admin so the admin-gated paths under
+        # test return 200/403 (not 403/403 ambiguous).
+        for user_org_id, user_id in [
+            (two_orgs["org_a_id"], None),
+            (two_orgs["org_b_id"], None),
+        ]:
+            pass
+        # Simpler — promote by username.
+        from auth.models import User
+        for username in (two_orgs["user_a_username"], two_orgs["user_b_username"]):
+            user = db.query(User).filter(User.username == username).first()
+            mem = (
+                db.query(UserOrganization)
+                .filter(UserOrganization.user_id == user.id)
+                .first()
+            )
+            if mem and mem.role != "admin":
+                mem.role = "admin"
+        db.commit()
+
+        room_a = _seed_conference_room(
+            db,
+            organization_id=two_orgs["org_a_id"],
+            name=f"Alpha Conf {uuid.uuid4().hex[:6]}",
+        )
+        room_b = _seed_conference_room(
+            db,
+            organization_id=two_orgs["org_b_id"],
+            name=f"Bravo Conf {uuid.uuid4().hex[:6]}",
+        )
+        src_b = _seed_conference_room_source(db, room_id=room_b.id)
+        two_orgs["room_a_id"] = str(room_a.id)
+        two_orgs["room_b_id"] = str(room_b.id)
+        two_orgs["room_a_name"] = room_a.name
+        two_orgs["room_b_name"] = room_b.name
+        two_orgs["room_b_source_id"] = str(src_b.id)
+    finally:
+        db.close()
+
+    return two_orgs
+
+
+ROOM_PATHS = [
+    "rooms.list",
+    "rooms.get_other_org",
+    "rooms.update_other_org",
+    "rooms.delete_other_org",
+    "rooms.add_source_other_org",
+    "rooms.list_sources_other_org",
+    "rooms.pairing_code_other_org",
+    "rooms.start_recording_other_org",
+    "rooms.stop_recording_other_org",
+    "rooms.acl_grant_other_org",
+]
+
+
+@pytest.mark.parametrize("path_under_test", ROOM_PATHS)
+def test_no_cross_org_leak_rooms(client, two_orgs_with_rooms, path_under_test):
+    """Every room endpoint must refuse to read or mutate another org's room."""
+    ctx = two_orgs_with_rooms
+    headers_a = ctx["headers_a"]
+    room_a_id = ctx["room_a_id"]
+    room_b_id = ctx["room_b_id"]
+
+    if path_under_test == "rooms.list":
+        response = client.get("/api/rooms", headers=headers_a)
+        assert response.status_code == 200, response.text
+        rows = response.json()
+        ids = {row.get("id") for row in rows}
+        assert room_a_id in ids, (
+            f"Harness broken: org A cannot see its own room {room_a_id}"
+        )
+        assert room_b_id not in ids, (
+            f"Leak: GET /api/rooms returned org B room {room_b_id}. Payload: {rows}"
+        )
+
+    elif path_under_test == "rooms.get_other_org":
+        response = client.get(f"/api/rooms/{room_b_id}", headers=headers_a)
+        assert response.status_code == 404, (
+            f"Leak: GET /api/rooms/{{org_b}} returned {response.status_code} "
+            f"to org A. Body: {response.text[:300]}"
+        )
+
+    elif path_under_test == "rooms.update_other_org":
+        response = client.put(
+            f"/api/rooms/{room_b_id}",
+            json={"name": "PWNED-BY-ALPHA"},
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: PUT /api/rooms/{{org_b}} returned {response.status_code}. "
+            f"Body: {response.text[:300]}"
+        )
+
+    elif path_under_test == "rooms.delete_other_org":
+        response = client.delete(f"/api/rooms/{room_b_id}", headers=headers_a)
+        assert response.status_code == 404
+
+    elif path_under_test == "rooms.add_source_other_org":
+        response = client.post(
+            f"/api/rooms/{room_b_id}/sources",
+            json={"hardware_type": "server_usb_mic", "device_path": "hw:9,0"},
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST /api/rooms/{{org_b}}/sources returned "
+            f"{response.status_code}. Body: {response.text[:300]}"
+        )
+
+    elif path_under_test == "rooms.list_sources_other_org":
+        response = client.get(
+            f"/api/rooms/{room_b_id}/sources",
+            headers=headers_a,
+        )
+        # Could be 403 (org-mismatch ACL fails) or 404 (org-scoped lookup).
+        # Spec is: never reveal existence — must be 404.
+        assert response.status_code == 404, (
+            f"Leak: GET /api/rooms/{{org_b}}/sources returned "
+            f"{response.status_code}. Body: {response.text[:300]}"
+        )
+
+    elif path_under_test == "rooms.pairing_code_other_org":
+        response = client.post(
+            f"/api/rooms/{room_b_id}/pairing-codes",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST /api/rooms/{{org_b}}/pairing-codes returned "
+            f"{response.status_code}. Body: {response.text[:300]}"
+        )
+
+    elif path_under_test == "rooms.start_recording_other_org":
+        response = client.post(
+            f"/api/rooms/{room_b_id}/recordings/start",
+            headers=headers_a,
+        )
+        assert response.status_code == 404
+
+    elif path_under_test == "rooms.stop_recording_other_org":
+        response = client.post(
+            f"/api/rooms/{room_b_id}/recordings/stop",
+            headers=headers_a,
+        )
+        assert response.status_code == 404
+
+    elif path_under_test == "rooms.acl_grant_other_org":
+        response = client.post(
+            f"/api/rooms/{room_b_id}/acl",
+            json={"user_id": 99999, "role": "viewer"},
+            headers=headers_a,
+        )
+        assert response.status_code == 404
+
+    else:  # pragma: no cover
+        pytest.fail(f"Unhandled rooms path: {path_under_test}")

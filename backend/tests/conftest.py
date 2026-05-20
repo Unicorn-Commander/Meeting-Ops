@@ -101,12 +101,27 @@ def app():
         importlib.reload(sys.modules["database.database"])
     if "auth.models" in sys.modules:
         importlib.reload(sys.modules["auth.models"])
+    # Conference Room models depend on database.models (for Base) AND on
+    # auth.models being importable. Reload AFTER both so the FK targets
+    # resolve to the freshly-reloaded tables on Base.metadata.
+    if "database.models_rooms" in sys.modules:
+        importlib.reload(sys.modules["database.models_rooms"])
     from database.database import engine, SessionLocal
     from database.models import Base
 
     # Import the auth models needed by these API tests before create_all so
     # their tables register on the same metadata object as the core DB models.
     from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
+    # Same for the Conference Room models — without this the room tables
+    # never get attached to Base.metadata under SQLite, and the
+    # recording_sessions FK pointing at room_audio_sources fails to
+    # resolve at create_all time.
+    from database.models_rooms import (  # noqa: F401
+        ConferenceRoom,
+        RoomAudioSource,
+        RoomPairingCode,
+        RoomAcl,
+    )
 
     # Create all tables in the test SQLite DB
     Base.metadata.create_all(bind=engine)

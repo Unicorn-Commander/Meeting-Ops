@@ -1,7 +1,10 @@
 # Backend Dockerfile - Python 3.12 + NPU Support
 FROM python:3.12-slim
 
-# Install system dependencies for NPU and audio
+# Install system dependencies for NPU and audio. alsa-utils ships
+# arecord, which the Conference Room setup wizard uses to enumerate
+# USB capture devices via `arecord -l` and which the RoomRecorder
+# service spawns to capture audio from a specific hw:X,Y ALSA device.
 RUN apt-get update && apt-get install -y \
     build-essential \
     portaudio19-dev \
@@ -10,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     cmake \
     libasound2-dev \
+    alsa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

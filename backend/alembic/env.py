@@ -15,6 +15,12 @@ from database.models import (  # noqa: F401
     SessionCollaborator,
     ActionItem,
 )
+from database.models_rooms import (  # noqa: F401
+    ConferenceRoom,
+    RoomAudioSource,
+    RoomPairingCode,
+    RoomAcl,
+)
 from auth.models import Organization, User, UserOrganization, AuditLog  # noqa: F401
 from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary  # noqa: F401
 # Agent system tables are live (routers wired in main.py) but their model

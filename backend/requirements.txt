@@ -44,6 +44,12 @@ soundfile>=0.12.1
 pyaudio==0.2.14
 pydub==0.25.1
 ffmpeg-python==0.2.0
+# Voice activity detection — used by the Conference Room recorder to
+# segment arecord output into per-turn chunks before POSTing to the
+# /chunks endpoint. CPU-only; ~30 KB native build, no GPU/runtime deps.
+# webrtcvad-wheels provides the same `webrtcvad` module without the
+# pkg_resources import (setuptools 81+ dropped it).
+webrtcvad-wheels==2.0.14
 
 # LLM Providers
 openai==1.54.4
