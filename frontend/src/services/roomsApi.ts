@@ -256,6 +256,37 @@ export interface LiveSessionPoll {
   }>;
   progressive_summaries?: Array<Record<string, unknown>>;
   metadata?: Record<string, unknown>;
+  /** Non-null when the session is a conference-room recording. Drives
+   * the server-rolled vs client-rolled live-summary path. */
+  room_id?: string | null;
+  room_source_id?: string | null;
+  room_name?: string | null;
+}
+
+/** Server-rolled live summary slice for a recording session.
+ *
+ * For browser always-on sessions the slice list is still client state and
+ * does not flow through these endpoints. For room sessions (room_id set)
+ * the slices are persisted in `processing_metadata.summary_slices` and
+ * returned by `GET /api/recordings/sessions/{id}/summary-slices`. */
+export interface SummarySlice {
+  id: string;
+  text: string;
+  word_count: number;
+  word_range_start: number;
+  word_range_end: number;
+  model?: string | null;
+  provider?: string | null;
+  created_at?: string | null;
+  triggered_by: string;
+}
+
+export interface SummarySlicesResponse {
+  session_id: string;
+  is_room_session: boolean;
+  slices: SummarySlice[];
+  trigger_words: number;
+  max_per_session: number;
 }
 
 export interface CreateRoomBody {
@@ -928,6 +959,56 @@ export const roomsApi = {
         (raw.progressive_summaries as LiveSessionPoll['progressive_summaries']) ||
         [],
       metadata: (raw.metadata as Record<string, unknown>) || {},
+      room_id: (raw.room_id as string | null | undefined) ?? null,
+      room_source_id:
+        (raw.room_source_id as string | null | undefined) ?? null,
+      room_name: (raw.room_name as string | null | undefined) ?? null,
+    };
+  },
+
+  /**
+   * Read the persisted summary slice stack for a session. Room sessions
+   * land here for both auto-triggered (from the room recorder) and
+   * manually-triggered slices. Non-room sessions can also be read — they
+   * just usually return an empty list because the browser still owns
+   * their slice rolling.
+   */
+  async getSummarySlices(
+    sessionId: string,
+    { orgSlug }: RoomsApiOptions,
+  ): Promise<SummarySlicesResponse> {
+    const raw = await request<Record<string, unknown>>(
+      `/api/recordings/sessions/${sessionId}/summary-slices`,
+      { orgSlug, method: 'GET' },
+    );
+    return {
+      session_id: String(raw.session_id || sessionId),
+      is_room_session: Boolean(raw.is_room_session),
+      slices: Array.isArray(raw.slices)
+        ? (raw.slices as SummarySlice[])
+        : [],
+      trigger_words: Number(raw.trigger_words || 500),
+      max_per_session: Number(raw.max_per_session || 200),
+    };
+  },
+
+  /**
+   * Generate a new slice now ("Summarize now" button). The backend rolls
+   * the slice from the current transcript window, persists into
+   * processing_metadata, and returns the new slice. Returns 422 when
+   * there isn't enough new transcript since the previous slice.
+   */
+  async createSummarySlice(
+    sessionId: string,
+    { orgSlug }: RoomsApiOptions,
+  ): Promise<{ slice: SummarySlice; session_id: string }> {
+    const raw = await request<Record<string, unknown>>(
+      `/api/recordings/sessions/${sessionId}/summary-slices`,
+      { orgSlug, method: 'POST' },
+    );
+    return {
+      slice: raw.slice as SummarySlice,
+      session_id: String(raw.session_id || sessionId),
     };
   },
 

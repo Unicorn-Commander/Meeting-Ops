@@ -446,6 +446,8 @@ HTTP_PATHS = [
     "recordings.list",
     "recordings.get_other_org",
     "recordings.search",
+    "recordings.summary_slices_get_other_org",
+    "recordings.summary_slices_post_other_org",
 ]
 
 
@@ -520,6 +522,35 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
             f"Leak: /api/simple/recording-sessions/{{org_b_id}} returned "
             f"status {response.status_code} when fetched as org A. "
             f"Body: {response.text[:500]}"
+        )
+
+    elif path_under_test == "recordings.summary_slices_get_other_org":
+        # GET /api/recordings/sessions/{org_b_id}/summary-slices as org A
+        # must 404 — never reveal existence and never return any slice
+        # text that might have leaked through the JSONB column.
+        response = client.get(
+            f"/api/recordings/sessions/{org_b_session}/summary-slices",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: GET summary-slices for org B session as org A "
+            f"returned status {response.status_code}. Body: "
+            f"{response.text[:500]}"
+        )
+
+    elif path_under_test == "recordings.summary_slices_post_other_org":
+        # POST /api/recordings/sessions/{org_b_id}/summary-slices as
+        # org A must 404 — both as a defense against existence leaks
+        # AND because a successful slice POST would persist bravo
+        # content (transcript_simple) inside an "org A summary" header.
+        response = client.post(
+            f"/api/recordings/sessions/{org_b_session}/summary-slices",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST summary-slices for org B session as org A "
+            f"returned status {response.status_code}. Body: "
+            f"{response.text[:500]}"
         )
 
     elif path_under_test == "recordings.search":
@@ -1047,3 +1078,127 @@ def test_no_cross_org_leak_rooms(client, two_orgs_with_rooms, path_under_test):
 
     else:  # pragma: no cover
         pytest.fail(f"Unhandled rooms path: {path_under_test}")
+
+
+# ---------------------------------------------------------------------------
+# Per-device secret cross-org isolation (task #85)
+# ---------------------------------------------------------------------------
+#
+# A device secret minted in org A MUST NOT authenticate as any device in
+# org B — even if an attacker knows org B's device_id. The state-mutating
+# satellite endpoints look up the device by device_id, so this is a
+# direct test of "does the lookup ignore the secret's origin org?". The
+# device_id is globally unique at the column level, so the only way org
+# A's secret could authenticate against org B is if the verify path
+# ignored the device row's stored hash entirely.
+
+
+@pytest.fixture()
+def two_orgs_with_paired_satellites(two_orgs):
+    """Like ``two_orgs_with_satellites`` but each device has a real
+    bcrypt-hashed secret + we keep the plaintext around for the test."""
+    from auth.device_auth import (
+        generate_device_secret,
+        hash_device_secret,
+        reset_rate_limiter_for_tests,
+    )
+
+    reset_rate_limiter_for_tests()
+
+    _, _, _, SessionLocal, _ = _models()
+    db = SessionLocal()
+    suffix = uuid.uuid4().hex[:6]
+
+    secret_a = generate_device_secret()
+    secret_b = generate_device_secret()
+
+    try:
+        from database.models import SatelliteDevice
+        from datetime import datetime, timezone
+
+        device_a = SatelliteDevice(
+            device_id=f"esp-alpha-paired-{suffix}",
+            name=f"Alpha Paired {suffix}",
+            device_type="esp32-s3",
+            status="online",
+            last_heartbeat=datetime.now(timezone.utc),
+            device_secret=hash_device_secret(secret_a),
+            organization_id=two_orgs["org_a_id"],
+            created_at=datetime.now(timezone.utc),
+        )
+        device_b = SatelliteDevice(
+            device_id=f"esp-bravo-paired-{suffix}",
+            name=f"Bravo Paired {suffix}",
+            device_type="esp32-s3",
+            status="online",
+            last_heartbeat=datetime.now(timezone.utc),
+            device_secret=hash_device_secret(secret_b),
+            organization_id=two_orgs["org_b_id"],
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add_all([device_a, device_b])
+        db.commit()
+        db.refresh(device_a)
+        db.refresh(device_b)
+
+        two_orgs["paired_device_a_id"] = device_a.device_id
+        two_orgs["paired_device_b_id"] = device_b.device_id
+        two_orgs["paired_secret_a"] = secret_a
+        two_orgs["paired_secret_b"] = secret_b
+    finally:
+        db.close()
+
+    yield two_orgs
+
+    reset_rate_limiter_for_tests()
+
+
+def test_device_secret_does_not_cross_orgs(client, two_orgs_with_paired_satellites):
+    """Org A's device_secret presented against org B's device_id ⇒ 401.
+    The reverse path is symmetric."""
+    ctx = two_orgs_with_paired_satellites
+
+    # Secret_a vs device B
+    resp = client.post(
+        f"/api/satellites/{ctx['paired_device_b_id']}/heartbeat",
+        json={"status": "online"},
+        headers={"X-Device-Secret": ctx["paired_secret_a"]},
+    )
+    assert resp.status_code == 401, (
+        "Leak: org A's device_secret authenticated against org B's "
+        f"device_id={ctx['paired_device_b_id']}. Status={resp.status_code}, "
+        f"body={resp.text[:300]}"
+    )
+
+    # Secret_b vs device A — also denied. Reset the limiter first so
+    # the previous failure doesn't taint this assertion.
+    from auth.device_auth import reset_rate_limiter_for_tests
+    reset_rate_limiter_for_tests()
+
+    resp = client.post(
+        f"/api/satellites/{ctx['paired_device_a_id']}/heartbeat",
+        json={"status": "online"},
+        headers={"X-Device-Secret": ctx["paired_secret_b"]},
+    )
+    assert resp.status_code == 401, (
+        "Leak: org B's device_secret authenticated against org A's "
+        f"device_id={ctx['paired_device_a_id']}. Status={resp.status_code}, "
+        f"body={resp.text[:300]}"
+    )
+
+
+def test_device_secret_works_against_own_device(client, two_orgs_with_paired_satellites):
+    """Sanity: the matching secret + device_id pair succeeds."""
+    ctx = two_orgs_with_paired_satellites
+    from auth.device_auth import reset_rate_limiter_for_tests
+    reset_rate_limiter_for_tests()
+
+    resp = client.post(
+        f"/api/satellites/{ctx['paired_device_a_id']}/heartbeat",
+        json={"status": "online"},
+        headers={"X-Device-Secret": ctx["paired_secret_a"]},
+    )
+    assert resp.status_code == 200, (
+        f"Harness broken: org A's secret should authenticate against "
+        f"its own device_id. Got {resp.status_code} body={resp.text[:300]}"
+    )

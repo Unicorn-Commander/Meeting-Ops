@@ -564,6 +564,12 @@ function LiveTab({
           orgSlug={orgSlug}
           recording={isRecording}
           transcript={livePoll?.transcript_simple || ''}
+          // RoomDetail only renders for conference-room recordings, so
+          // we always opt in to the server-rolled slice store here. The
+          // `room_id` field on the live poll is what marks a session
+          // as room-owned upstream — we trust the URL having brought us
+          // to this page in lieu of waiting for the first poll to land.
+          isRoomSession={true}
         />
       </div>
 

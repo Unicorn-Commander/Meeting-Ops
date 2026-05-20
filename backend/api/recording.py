@@ -26,6 +26,13 @@ from auth.models import User
 from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import AudioFile, RecordingSession, Transcription
+from services.summary_slices import (
+    MAX_SLICES_PER_SESSION,
+    ROOM_SLICE_TRIGGER_WORDS,
+    generate_slice,
+    get_slices,
+    maybe_auto_trigger_slice,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["always-on-recording"])
@@ -390,6 +397,68 @@ async def _broadcast_segments(session: RecordingSession, segments: list[dict[str
         logger.warning("Could not broadcast always-on transcription segments: %s", exc)
 
 
+async def _maybe_persist_slice_after_chunk(
+    db: Session, session: RecordingSession
+) -> None:
+    """Server-roll a summary slice for room sessions when the transcript
+    grows past the trigger threshold.
+
+    The trigger function itself decides whether to fire (no-op when
+    ``session.room_id`` is null). On success it persists the slice and
+    broadcasts on the same websocket the transcript stream uses, so
+    multiple viewers see the new slice without polling delay.
+
+    Failures are logged inside the trigger helper and never raised — a
+    transient LLM outage must not block chunk ingest.
+    """
+    slice_obj: Optional[dict[str, Any]] = None
+    try:
+        slice_obj = await maybe_auto_trigger_slice(db, session)
+    except Exception:  # noqa: BLE001 — defensive belt-and-suspenders
+        logger.exception(
+            "maybe_auto_trigger_slice raised for session=%s", session.id
+        )
+        return
+    if not slice_obj:
+        return
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to commit auto-triggered slice for session=%s", session.id
+        )
+        return
+    await _broadcast_slice(session, slice_obj)
+
+
+async def _broadcast_slice(
+    session: RecordingSession, slice_obj: dict[str, Any]
+) -> None:
+    """Push a new slice to any websocket subscribers on this session.
+
+    Reuses the existing transcript-stream broadcast channel — same key,
+    different envelope. Clients distinguish slices by the
+    ``type: "summary_slice"`` discriminator in the payload. If the
+    broadcast helper isn't available (legacy bundle), we silently skip;
+    the GET polling fallback in ``RoomLiveSummary`` will catch up on the
+    next tick.
+    """
+    try:
+        from api.websocket_transcription import broadcast_transcription_update
+
+        session_key = session.session_id or str(session.id)
+        envelope = {
+            "type": "summary_slice",
+            "slice": slice_obj,
+        }
+        await broadcast_transcription_update(session_key, envelope)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "Slice broadcast skipped for session=%s: %s", session.id, exc
+        )
+
+
 @router.post("/start-always-on")
 async def start_always_on(
     request: StartAlwaysOnRequest,
@@ -489,6 +558,13 @@ async def upload_always_on_chunk(
 
     await _broadcast_segments(session, segments)
 
+    # Room sessions roll their summary slices server-side so multi-viewer
+    # + after-the-fact playback works. Always-on browser sessions skip
+    # this branch (their slices still live in client state). Failures
+    # are logged and swallowed inside the helper — never block chunk
+    # ingest on an LLM hiccup.
+    await _maybe_persist_slice_after_chunk(db, session)
+
     return {
         "session": _session_payload(session),
         "segments": segments,
@@ -579,6 +655,10 @@ async def append_client_text_chunk(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     await _broadcast_segments(session, [segment])
+
+    # Same room-slice hook as /chunks above — server-rolled slices for
+    # room sessions, no-op for browser always-on sessions.
+    await _maybe_persist_slice_after_chunk(db, session)
 
     total_words = len((session.transcript_simple or "").split())
     return {
@@ -849,3 +929,122 @@ async def summarize_slice(
         )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# === Server-rolled summary slices (room recordings) =====================
+#
+# For browser always-on sessions the slice stack lives in the user's
+# browser. For conference-room sessions there's no privileged user, so we
+# persist the slices on the server (in ``processing_metadata.summary_slices``)
+# and expose GET + POST so any viewer can see them live and reviewers can
+# read them after the meeting ends.
+
+
+def _serialize_slice(slice_obj: dict[str, Any]) -> dict[str, Any]:
+    """Public shape for the GET/POST responses. We pass the JSONB through
+    largely as-is — every field already has a documented contract in
+    services.summary_slices. ``id`` is always a string for the frontend.
+    """
+    return {
+        "id": str(slice_obj.get("id") or ""),
+        "text": slice_obj.get("text") or "",
+        "word_count": int(slice_obj.get("word_count") or 0),
+        "word_range_start": int(slice_obj.get("word_range_start") or 0),
+        "word_range_end": int(slice_obj.get("word_range_end") or 0),
+        "model": slice_obj.get("model"),
+        "provider": slice_obj.get("provider"),
+        "created_at": slice_obj.get("created_at"),
+        "triggered_by": slice_obj.get("triggered_by") or "unknown",
+    }
+
+
+@router.get("/sessions/{session_id}/summary-slices")
+async def list_summary_slices(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the persisted slice stack for this session.
+
+    Org-scoped — cross-org reads get a 404 indistinguishable from
+    "no such session". Empty array for legacy sessions that never
+    auto-triggered. The list is sorted oldest-first so the client can
+    render the same chronological stack the auto-triggered + manual
+    paths both append onto.
+    """
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    slices = [_serialize_slice(s) for s in get_slices(session)]
+    return {
+        "session_id": session.session_id or str(session.id),
+        "is_room_session": session.room_id is not None,
+        "slices": slices,
+        "trigger_words": ROOM_SLICE_TRIGGER_WORDS,
+        "max_per_session": MAX_SLICES_PER_SESSION,
+    }
+
+
+@router.post("/sessions/{session_id}/summary-slices")
+async def create_summary_slice(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Generate + persist a slice now ("Summarize now" button).
+
+    Org-scoped via ``_find_session``. Works for any session, room or not —
+    if the calling user wants the server to roll a slice on their behalf
+    for a browser always-on session they can do that, it just won't
+    auto-trigger going forward.
+
+    Returns 422 when there isn't enough new transcript since the previous
+    slice; 503 when the LLM provider fails.
+    """
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    transcript = (session.transcript_simple or "").strip()
+    if not transcript:
+        raise HTTPException(
+            status_code=422,
+            detail="Session has no transcript yet; nothing to summarize.",
+        )
+
+    try:
+        slice_obj = await generate_slice(
+            db,
+            session,
+            triggered_by="manual",
+            organization_id=active_org.organization.id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Manual slice generation failed for session=%s", session.id
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not slice_obj:
+        raise HTTPException(
+            status_code=422,
+            detail="No new transcript since the last slice.",
+        )
+
+    try:
+        db.commit()
+        db.refresh(session)
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to persist manual slice for session=%s", session.id
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    await _broadcast_slice(session, slice_obj)
+
+    return {
+        "slice": _serialize_slice(slice_obj),
+        "session_id": session.session_id or str(session.id),
+    }

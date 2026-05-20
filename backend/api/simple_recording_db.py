@@ -665,6 +665,15 @@ async def get_session(
             "project_app": session.project_app,
             "project_id": session.project_id,
             "project_slug": session.project_slug,
+            # Conference Room linkage. `room_id` is the canonical "this is a
+            # room session" signal — non-null means the live-summary UI
+            # should pull slices from the server-rolled store instead of
+            # rolling them client-side.
+            "room_id": str(session.room_id) if session.room_id else None,
+            "room_source_id": (
+                str(session.room_source_id) if session.room_source_id else None
+            ),
+            "room_name": session.room_name,
             # Per-session participants (attendees). Editable from the
             # session detail sidebar; feeds the email-attendees default.
             "participants": _participants_payload(session),
