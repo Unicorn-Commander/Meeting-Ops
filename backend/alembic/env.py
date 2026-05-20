@@ -17,6 +17,12 @@ from database.models import (  # noqa: F401
 )
 from auth.models import Organization, User, UserOrganization, AuditLog  # noqa: F401
 from models.vocabulary import CustomVocabulary, VocabularySet, SessionVocabulary  # noqa: F401
+# Agent system tables are live (routers wired in main.py) but their model
+# classes weren't reaching target_metadata, so autogenerate kept flagging
+# them as "drop_table" drift. Importing here pulls them into Base.metadata
+# without changing any runtime behaviour.
+from models.agent_system import MeetingAgent, AgentTemplate, AgentSession  # noqa: F401
+from models.unified_agent import UnifiedMeetingAgent  # noqa: F401
 
 config = context.config
 

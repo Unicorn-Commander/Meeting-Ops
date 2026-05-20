@@ -247,7 +247,11 @@ class AgentSession(Base):
     
     # Relations
     agent_id = Column(UUID(as_uuid=True), ForeignKey('meeting_agents.id'), nullable=False)
-    meeting_session_id = Column(Integer, ForeignKey('recording_sessions.id'))  # Optional
+    # CASCADE on parent delete per 012_cascade_session_children.
+    meeting_session_id = Column(
+        Integer,
+        ForeignKey('recording_sessions.id', ondelete='CASCADE'),
+    )  # Optional
     user_id = Column(UUID(as_uuid=True))  # User interacting
     
     # Session Data

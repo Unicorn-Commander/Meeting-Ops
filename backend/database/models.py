@@ -7,6 +7,16 @@ import uuid
 
 Base = declarative_base()
 
+
+# JSON type that renders as JSONB on Postgres and falls back to JSON on
+# SQLite (test fixtures). Use this for any column the alembic migrations
+# created with JSONB so autogenerate stops flagging "JSONB(astext_type=Text)
+# -> JSON" drift. Old `Column(JSON, ...)` declarations are the autogenerate
+# false-positives; this preserves SQLite test compat while matching the
+# real Postgres schema.
+def _JsonB():
+    return JSON().with_variant(JSONB(), "postgresql")
+
 class Settings(Base):
     """Settings model"""
     __tablename__ = "settings"
@@ -21,7 +31,17 @@ class Settings(Base):
 class RecordingSession(Base):
     """Recording session model"""
     __tablename__ = "recording_sessions"
-    
+    # GIN index on tags exists in Postgres (017_session_tags) for cheap
+    # @> containment lookups from the list filter. Declared here so
+    # autogenerate doesn't try to drop it.
+    __table_args__ = (
+        Index(
+            "ix_recording_sessions_tags_gin",
+            "tags",
+            postgresql_using="gin",
+        ),
+    )
+
     id = Column(Integer, primary_key=True)  # Keep as Integer to match existing table
     session_id = Column(String(100), unique=True, nullable=True)  # Legacy field
     name = Column(String(200))
@@ -55,7 +75,8 @@ class RecordingSession(Base):
     source_device_id = Column(String(100), nullable=True)  # Which satellite recorded this
     source_type = Column(String(50), default="local_mic")  # "local_mic", "satellite_stream", "satellite_upload", "satellite_transcript", "companion_app"
     room_name = Column(String(200), nullable=True)  # Physical room name
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+    # NOT NULL on Postgres per 004_multi_org_scoping.
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
     project_app = Column(String(50), nullable=True)  # 'project-ops', 'crisis-ops', or NULL
     # project_id is a string (UUID for project-ops; whatever crisis-ops uses).
     # Migrated from Integer in 010_project_id_to_text.
@@ -158,6 +179,9 @@ class SessionCollaborator(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+        # 014_session_collaborators created this column with
+        # server_default=now(); declared here so autogenerate stops flagging.
+        server_default=func.now(),
     )
 
 
@@ -289,7 +313,7 @@ class Speaker(Base):
 class AudioFile(Base):
     """Audio file model"""
     __tablename__ = "audio_files"
-    
+
     id = Column(Integer, primary_key=True)
     file_id = Column(String(100), unique=True, nullable=False)
     session_id = Column(String(100), nullable=False)
@@ -303,7 +327,8 @@ class AudioFile(Base):
     sample_rate = Column(Integer)
     channels = Column(Integer)
     uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+    # NOT NULL on Postgres per 004_multi_org_scoping.
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
 
 
 class ChatHistory(Base):
@@ -317,7 +342,8 @@ class ChatHistory(Base):
     content = Column(Text, nullable=False)
     metadata_json = Column(Text, nullable=True)  # JSON string for extra metadata
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+    # NOT NULL on Postgres per 004_multi_org_scoping.
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
 
 
 class SatelliteDevice(Base):
@@ -392,24 +418,31 @@ class UploadJob(Base):
     upload_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4, index=True)
     filename = Column(Text, nullable=False)
     content_type = Column(Text, nullable=True)
-    action = Column(String(20), nullable=False, default="transcribe")
+    # server_default values match the create-table in 007_uploads. Declared
+    # here so autogenerate stops flagging the drift.
+    action = Column(String(20), nullable=False, default="transcribe", server_default="transcribe")
     total_size = Column(BigInteger, nullable=False)
-    bytes_received = Column(BigInteger, nullable=False, default=0)
-    chunks_received = Column(Integer, nullable=False, default=0)
-    total_chunks = Column(Integer, nullable=False, default=0)
-    stage = Column(String(30), nullable=False, default="queued")
+    bytes_received = Column(BigInteger, nullable=False, default=0, server_default="0")
+    chunks_received = Column(Integer, nullable=False, default=0, server_default="0")
+    total_chunks = Column(Integer, nullable=False, default=0, server_default="0")
+    stage = Column(String(30), nullable=False, default="queued", server_default="queued")
     last_completed_stage = Column(String(30), nullable=True)
-    progress_pct = Column(Integer, nullable=False, default=0)
+    progress_pct = Column(Integer, nullable=False, default=0, server_default="0")
     error_message = Column(Text, nullable=True)
-    retry_count = Column(Integer, nullable=False, default=0)
-    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0, server_default="0")
+    # CASCADE on parent delete per 012_cascade_session_children.
+    session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     job_started_at = Column(DateTime, nullable=True)
     job_completed_at = Column(DateTime, nullable=True)
     # Per-upload transcription preferences. Falls back to org-level
     # ProviderRegistry settings when fields are missing. Schema in
-    # services/transcription_options.py. JSON for SQLite test fixtures,
-    # the alembic migration uses JSONB on Postgres directly.
-    transcription_options = Column(JSON, nullable=True)
+    # services/transcription_options.py. Renders as JSONB on Postgres
+    # (per 011_upload_transcription_options) and JSON on SQLite test fixtures.
+    transcription_options = Column(_JsonB(), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -433,6 +466,9 @@ class SpeakerProfile(Base):
     __table_args__ = (
         Index("ix_speaker_org", "organization_id"),
         Index("ix_speaker_org_name", "organization_id", "display_name", unique=True),
+        # Added in 015_speaker_profile_contacts; declared here so
+        # autogenerate doesn't try to drop it.
+        Index("ix_speaker_linked_user", "linked_user_id"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -448,13 +484,14 @@ class SpeakerProfile(Base):
     company = Column(String(200), nullable=True) # their employer / org (NOT our `organization_id`)
     linked_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # External CRM references: {hubspot_id, salesforce_id, ...}. Schema
-    # is per-org; backend stores it verbatim, callers normalize.
-    external_refs = Column(JSON, nullable=True)
+    # is per-org; backend stores it verbatim, callers normalize. JSONB
+    # on Postgres (per 015_speaker_profile_contacts) and JSON on SQLite.
+    external_refs = Column(_JsonB(), nullable=True)
     notes = Column(Text, nullable=True)
     centroid_embedding = Column(LargeBinary, nullable=True)
     embedding_dim = Column(Integer, nullable=True)
     embedding_model = Column(String(100), nullable=True)
-    sample_count = Column(Integer, nullable=False, default=0)
+    sample_count = Column(Integer, nullable=False, default=0, server_default="0")
     created_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -502,8 +539,8 @@ class SpeakerSessionLink(Base):
     raw_label = Column(String(100), nullable=False)
     speaker_id = Column(Integer, ForeignKey("speaker.id", ondelete="SET NULL"), nullable=True)
     similarity = Column(Float, nullable=True)
-    source = Column(String(20), nullable=False, default="auto")  # "auto" | "manual"
-    confirmed = Column(Boolean, nullable=False, default=False)
+    source = Column(String(20), nullable=False, default="auto", server_default="auto")  # "auto" | "manual"
+    confirmed = Column(Boolean, nullable=False, default=False, server_default="false")
     confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -524,20 +561,33 @@ class TtsJob(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    # No single-column index — the composite ix_tts_jobs_org_job_id above
+    # already provides org_id lookups, matching what 009_tts_jobs created.
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    job_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4, index=True)
-    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, index=True)
+    # job_id has unique=True; the index=True was redundant (the UNIQUE
+    # constraint already provides lookups) and produced an extra ix_*
+    # index in autogenerate. Dropped.
+    job_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4)
+    # CASCADE on parent delete per 012_cascade_session_children.
+    session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     kind = Column(String(20), nullable=False)  # 'summary' | 'podcast'
     voice = Column(String(80), nullable=True)         # used for summary
     host_voice = Column(String(80), nullable=True)    # used for podcast
     analyst_voice = Column(String(80), nullable=True) # used for podcast
-    format = Column(String(8), nullable=False, default="mp3")
-    stage = Column(String(30), nullable=False, default="queued")
-    progress_pct = Column(Integer, nullable=False, default=0)
+    # server_default values match the create-table in 009_tts_jobs. Declared
+    # here so autogenerate stops flagging the drift.
+    format = Column(String(8), nullable=False, default="mp3", server_default="mp3")
+    stage = Column(String(30), nullable=False, default="queued", server_default="queued")
+    progress_pct = Column(Integer, nullable=False, default=0, server_default="0")
     output_path = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
-    retry_count = Column(Integer, nullable=False, default=0)
+    retry_count = Column(Integer, nullable=False, default=0, server_default="0")
     job_started_at = Column(DateTime, nullable=True)
     job_completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
