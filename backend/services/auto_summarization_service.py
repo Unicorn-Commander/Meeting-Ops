@@ -43,6 +43,39 @@ def _resolve_org_id(session_id: str) -> Optional[int]:
     return None
 
 
+def _load_session_transcript(session_id: str) -> str:
+    """Load the canonical live transcript text for a session.
+
+    Reads `RecordingSession.transcript_simple`, which is populated by both
+    the browser-STT chunks-text path (`/api/recordings/sessions/{id}/chunks-text`,
+    landed in bf345ec) and the legacy appliance whisper path
+    (`_append_transcription` in `api/recording.py`). Returns "" on any
+    missing/empty/error state so callers can treat absence uniformly.
+
+    Replaces the legacy in-memory `live_recording_transcription.transcript_buffer`
+    read, which only worked on the appliance whisper-server code path and was
+    empty in cloud builds (where DISABLE_LOCAL_AUDIO=1 keeps that service inert).
+    """
+    try:
+        from database.database import SessionLocal
+        from database.models import RecordingSession
+
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(RecordingSession.transcript_simple)
+                .filter(RecordingSession.session_id == session_id)
+                .first()
+            )
+            if row and row[0]:
+                return str(row[0])
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug(f"Could not load transcript for session {session_id}: {exc}")
+    return ""
+
+
 _SUMMARY_PROMPTS = {
     "executive": (
         "Create an executive summary with:\n"
@@ -334,19 +367,12 @@ class AutoSummarizationService:
         Returns summary data or None if transcript hasn't changed significantly
         """
         try:
-            # Get the current transcript from live transcription buffer
-            transcript_text = ""
-            try:
-                from services.live_recording_transcription import live_recording_transcription
-                if (hasattr(live_recording_transcription, 'session_id') and
-                    live_recording_transcription.session_id == session_id and
-                    live_recording_transcription.transcript_buffer):
-                    for segment in live_recording_transcription.transcript_buffer:
-                        text = segment.get("text", "").strip()
-                        if text:
-                            transcript_text += text + " "
-            except Exception:
-                pass
+            # Get the current transcript from the canonical DB column. This
+            # covers browser-STT (cloud + always_on) and the legacy appliance
+            # whisper path, both of which write transcript_simple.
+            transcript_text = (
+                await asyncio.to_thread(_load_session_transcript, session_id)
+            ).strip()
 
             if not transcript_text:
                 logger.warning(f"No transcript available for session {session_id}")
@@ -447,13 +473,13 @@ class AutoSummarizationService:
             except ImportError:
                 pass
             
-            # Fallback to live transcription buffer
+            # Fallback to the canonical DB transcript_simple column.
             try:
-                from services.live_recording_transcription import live_recording_transcription
-                if (hasattr(live_recording_transcription, 'session_id') and
-                    live_recording_transcription.session_id == session_id and
-                    live_recording_transcription.transcript_buffer):
-                    total = sum(len(seg.get('text', '').split()) for seg in live_recording_transcription.transcript_buffer)
+                transcript_text = await asyncio.to_thread(
+                    _load_session_transcript, session_id
+                )
+                if transcript_text:
+                    total = len(transcript_text.split())
                     self.total_word_count[session_id] = total
                     return total
             except Exception:
@@ -477,19 +503,12 @@ class AutoSummarizationService:
                 logger.info(f"Final summary disabled for session {session_id}")
                 return None
             
-            # Get the full transcript from live transcription buffer
-            full_transcript = ""
-            try:
-                from services.live_recording_transcription import live_recording_transcription
-                if (hasattr(live_recording_transcription, 'session_id') and
-                    live_recording_transcription.session_id == session_id and
-                    live_recording_transcription.transcript_buffer):
-                    for segment in live_recording_transcription.transcript_buffer:
-                        text = segment.get("text", "").strip()
-                        if text:
-                            full_transcript += text + " "
-            except Exception:
-                pass
+            # Get the full transcript from the canonical DB column. By the
+            # time the recording stops, transcript_simple holds the complete
+            # browser-STT or appliance-whisper output.
+            full_transcript = (
+                await asyncio.to_thread(_load_session_transcript, session_id)
+            ).strip()
 
             if len(full_transcript) < 50:
                 logger.info(f"Not enough content for final summary in session {session_id}")
