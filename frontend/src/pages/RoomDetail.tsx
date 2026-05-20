@@ -26,6 +26,7 @@ import roomsApi, {
   type LiveSessionPoll,
   type OrgUser,
   type PairingCode,
+  type PairingRedeemResult,
   type RecordingSessionSummary,
   type Room,
   type RoomAclEntry,
@@ -35,6 +36,7 @@ import roomsApi, {
 import ConfirmModal from '../components/ConfirmModal';
 import AudioDeviceList from '../components/rooms/AudioDeviceList';
 import PairingCodeDisplay from '../components/rooms/PairingCodeDisplay';
+import DeviceSecretReveal from '../components/rooms/DeviceSecretReveal';
 import RoomLevelMeter from '../components/rooms/RoomLevelMeter';
 import RoomLiveTranscript from '../components/rooms/RoomLiveTranscript';
 import RoomLiveSummary from '../components/rooms/RoomLiveSummary';
@@ -703,6 +705,9 @@ function SettingsTab({
   const [legalHold, setLegalHold] = useState(room.legal_hold);
   const [pairing, setPairing] = useState<PairingCode | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
+  const [manualDeviceId, setManualDeviceId] = useState('');
+  const [revealedSecret, setRevealedSecret] = useState<PairingRedeemResult | null>(null);
+  const [redeemLoading, setRedeemLoading] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
   const [pendingDevice, setPendingDevice] = useState<AudioDevice | null>(null);
   const [pendingLabel, setPendingLabel] = useState('');
@@ -801,6 +806,24 @@ function SettingsTab({
       setError(err instanceof Error ? err.message : 'Failed to generate pairing code');
     } finally {
       setPairingLoading(false);
+    }
+  };
+
+  const redeemManualPair = async () => {
+    if (!pairing) return;
+    setRedeemLoading(true);
+    try {
+      const result = await roomsApi.redeemPairingCode(pairing.code, {
+        orgSlug,
+        deviceId: manualDeviceId.trim() || undefined,
+      });
+      setRevealedSecret(result);
+      setPairing(null);
+      setManualDeviceId('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to redeem pairing code');
+    } finally {
+      setRedeemLoading(false);
     }
   };
 
@@ -1095,12 +1118,51 @@ function SettingsTab({
 
       {/* Pairing codes */}
       {isAdmin && (
-        <section>
+        <section className="space-y-3">
           <PairingCodeDisplay
             code={pairing}
             onGenerate={generatePairingCode}
             loading={pairingLoading}
           />
+          {pairing && !revealedSecret && (
+            <details className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+              <summary className="cursor-pointer text-sm text-zinc-300 hover:text-zinc-100">
+                Pair a device manually (ops / testing)
+              </summary>
+              <div className="mt-3 space-y-3">
+                <p className="text-xs text-zinc-500">
+                  Real satellite devices redeem from their own firmware. Use this only to test the
+                  pairing flow without hardware, or to manually enrol a device you'll configure by
+                  pasting its secret elsewhere.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={manualDeviceId}
+                    onChange={(e) => setManualDeviceId(e.target.value)}
+                    placeholder="device_id (optional — backend assigns one if blank)"
+                    className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={redeemManualPair}
+                    disabled={redeemLoading}
+                    className="rounded-lg bg-fuchsia-600 px-4 py-2 text-sm font-medium text-white hover:bg-fuchsia-500 disabled:opacity-50"
+                  >
+                    {redeemLoading ? 'Redeeming...' : 'Redeem'}
+                  </button>
+                </div>
+              </div>
+            </details>
+          )}
+          {revealedSecret?.device_secret && (
+            <DeviceSecretReveal
+              secret={revealedSecret.device_secret}
+              deviceId={revealedSecret.device_id || 'unknown'}
+              warning={revealedSecret.secret_warning}
+              onDismiss={() => setRevealedSecret(null)}
+            />
+          )}
         </section>
       )}
 
