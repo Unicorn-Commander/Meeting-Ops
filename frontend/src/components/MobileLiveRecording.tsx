@@ -13,6 +13,11 @@ import {
   getPreferredDeviceId,
   openMicrophoneStream,
 } from '../utils/audioDevicePreference';
+import {
+  isAlwaysOnActive,
+  setRecordActive,
+} from '../utils/recordingPresence';
+import ConfirmModal from './ConfirmModal';
 
 type RecorderState = 'idle' | 'preparing' | 'recording' | 'finalizing' | 'uploading';
 
@@ -56,6 +61,10 @@ export default function MobileLiveRecording() {
     const v = localStorage.getItem(AUDIO_SOURCE_KEY);
     return (v === 'tab' || v === 'mic+tab') ? v : 'mic';
   });
+  // Collision-guard prompt — surfaces when the user taps Record while
+  // always-on is capturing. We refuse to start until they confirm + stop
+  // always-on from its own surface.
+  const [collisionOpen, setCollisionOpen] = useState(false);
   const tabCaptureAvailable = supportsTabCapture();
 
   useEffect(() => {
@@ -116,6 +125,9 @@ export default function MobileLiveRecording() {
       levelTapRef.current = null;
     }
     setAudioLevel(0);
+    // Cross-surface presence flag — clear here so error/unmount paths
+    // free always-on. Idempotent.
+    setRecordActive(false);
   }, []);
 
   useEffect(() => () => cleanupCapture(), [cleanupCapture]);
@@ -128,6 +140,14 @@ export default function MobileLiveRecording() {
   const beginRecording = useCallback(async () => {
     setError(null);
     setPermissionDenied(false);
+
+    // Cross-surface guard. If always-on is already capturing audio,
+    // prompt the user instead of silently starting a second capture.
+    if (isAlwaysOnActive()) {
+      setCollisionOpen(true);
+      return;
+    }
+
     setState('preparing');
     unlockAudioContext();
 
@@ -242,6 +262,9 @@ export default function MobileLiveRecording() {
     setTranscript([]);
     setLastUploadLocalId(null);
     setState('recording');
+    // Flip the cross-surface presence flag — always-on refuses to start
+    // while this is true. cleanupCapture + finishRecording clear it.
+    setRecordActive(true);
 
     localStorage.setItem(ACTIVE_RECORDING_KEY, JSON.stringify({
       startedAt: startTimeRef.current,
@@ -529,6 +552,24 @@ export default function MobileLiveRecording() {
           </div>
         </div>
       )}
+
+      {/* Cross-surface collision guard for mobile. Mirrors the desktop
+          flow: refuses to start a tap-Record while always-on is live. */}
+      <ConfirmModal
+        isOpen={collisionOpen}
+        title="Always-on is already recording"
+        description={(
+          <>
+            Always-on capture is currently running. Stop it from the
+            Always-on panel, then tap Record again.
+          </>
+        )}
+        confirmLabel="Got it"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={() => setCollisionOpen(false)}
+        onCancel={() => setCollisionOpen(false)}
+      />
     </div>
   );
 }

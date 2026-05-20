@@ -12,6 +12,11 @@ import {
   getPreferredDeviceId,
   openMicrophoneStream,
 } from '../utils/audioDevicePreference';
+import {
+  isAlwaysOnActive,
+  setRecordActive,
+} from '../utils/recordingPresence';
+import ConfirmModal from './ConfirmModal';
 
 type State = 'idle' | 'preparing' | 'recording' | 'finalizing' | 'uploading';
 type AudioSource = 'mic' | 'tab' | 'mic+tab';
@@ -50,6 +55,10 @@ export default function DesktopBrowserRecorder() {
   const [error, setError] = useState<string | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [recorderTarget, setRecorderTarget] = useState<MediaRecorderTarget | null>(null);
+  // Collision-guard state for the "always-on is already running" prompt.
+  // When the user clicks Record while always-on is active we show a
+  // confirm modal instead of silently starting two captures.
+  const [collisionOpen, setCollisionOpen] = useState(false);
   const tabCaptureAvailable = supportsTabCapture();
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -95,6 +104,10 @@ export default function DesktopBrowserRecorder() {
       levelTapRef.current = null;
     }
     setAudioLevel(0);
+    // Belt + suspenders — cleanupCapture is the common drain for both
+    // normal stop and error/unmount paths. setRecordActive(false) is
+    // idempotent so this can't double-toggle.
+    setRecordActive(false);
   }, []);
 
   useEffect(() => () => cleanupCapture(), [cleanupCapture]);
@@ -102,6 +115,16 @@ export default function DesktopBrowserRecorder() {
   const beginRecording = useCallback(async () => {
     setError(null);
     setPermissionDenied(false);
+
+    // Cross-surface collision guard: refuse to start if always-on is
+    // already capturing audio. The modal walks the user through stopping
+    // the other surface first. Dismissing the modal closes it without
+    // starting; the user retries after stopping always-on.
+    if (isAlwaysOnActive()) {
+      setCollisionOpen(true);
+      return;
+    }
+
     setState('preparing');
     unlockAudioContext();
 
@@ -212,6 +235,9 @@ export default function DesktopBrowserRecorder() {
     startTimeRef.current = Date.now();
     setDuration(0);
     setState('recording');
+    // Flip the cross-surface presence flag so always-on refuses to start
+    // until we stop. Cleared in stopRecording + on unmount.
+    setRecordActive(true);
   }, [audioSource, recorderTarget, tabCaptureAvailable, cleanupCapture]);
 
   const stopRecording = useCallback(async () => {
@@ -227,6 +253,12 @@ export default function DesktopBrowserRecorder() {
         resolve();
       }
     });
+
+    // Recorder is no longer capturing — let always-on start if the user
+    // wants to switch surfaces. We clear here (rather than after upload)
+    // because the audio capture *itself* is what blocks always-on, not
+    // the upload bookkeeping.
+    setRecordActive(false);
 
     const target = recorderTarget ?? pickRecorderTarget();
     const extension = target?.extension ?? 'webm';
@@ -343,6 +375,25 @@ export default function DesktopBrowserRecorder() {
       <p className="mt-3 text-[11px] text-zinc-500">
         Upload progress appears in the tray at the bottom right of the screen.
       </p>
+
+      {/* Cross-surface collision guard. beginRecording sets collisionOpen
+          when always-on is already capturing; the user must stop that
+          surface first and re-click Record. */}
+      <ConfirmModal
+        isOpen={collisionOpen}
+        title="Always-on is already recording"
+        description={(
+          <>
+            Always-on capture is currently running. Stop it from the
+            Always-on panel, then click Record again.
+          </>
+        )}
+        confirmLabel="Got it"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={() => setCollisionOpen(false)}
+        onCancel={() => setCollisionOpen(false)}
+      />
     </div>
   );
 }

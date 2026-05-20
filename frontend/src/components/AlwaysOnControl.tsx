@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Mic,
+  MonitorSpeaker,
   PanelTopOpen,
   Pause,
   Play,
@@ -17,6 +19,12 @@ import AlwaysOnPopout, { isDocumentPictureInPictureSupported } from './AlwaysOnP
 import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
 import AudioMeter from './AudioMeter';
 import SessionMicChip from './SessionMicChip';
+import ConfirmModal from './ConfirmModal';
+import {
+  audioSourceLabel,
+  isTabCaptureSupported,
+  type AudioSourceMode,
+} from '../utils/audioSourceStream';
 
 function relativeTime(iso: string): string {
   const created = new Date(iso).getTime();
@@ -97,6 +105,83 @@ function formatDuration(seconds: number): string {
   return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
+interface AudioSourcePickerProps {
+  value: AudioSourceMode;
+  onChange: (mode: AudioSourceMode) => void;
+  /** Disable picking once a session is live. Picker re-enables when idle. */
+  disabled: boolean;
+}
+
+/**
+ * Picker for the always-on session's audio source. Three radio options:
+ *   - Mic: existing behavior, the user's chosen microphone
+ *   - Tab audio: capture a Chrome tab's audio via getDisplayMedia
+ *   - Mic + Tab: mix both (useful for in-person + remote hybrid)
+ *
+ * Tab + Mic+Tab are hidden in browsers without getDisplayMedia (Safari
+ * on iOS, older browsers). The user-friendly explanation lives in the
+ * helper text below the radio group — "you'll be prompted to pick a tab
+ * after clicking Start".
+ */
+function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps) {
+  const tabSupported = isTabCaptureSupported();
+  const options: { id: AudioSourceMode; label: string; sub: string }[] = [
+    { id: 'mic', label: 'Mic', sub: 'Your microphone' },
+    { id: 'tab', label: 'Tab audio', sub: 'Capture a Chrome tab' },
+    { id: 'mic+tab', label: 'Mic + Tab', sub: 'Both, mixed' },
+  ];
+
+  return (
+    <div className="mt-5 rounded-lg border border-zinc-800 bg-black/20 px-4 py-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs uppercase tracking-wide text-zinc-500">
+          Audio source
+        </span>
+        {value !== 'mic' && (value === 'tab' || value === 'mic+tab') && !disabled && (
+          <span className="text-[11px] text-zinc-500">
+            You'll pick a tab after clicking Start.
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Audio source for always-on">
+        {options.map((opt) => {
+          const isTabOption = opt.id !== 'mic';
+          const optDisabled = disabled || (isTabOption && !tabSupported);
+          const active = value === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              disabled={optDisabled}
+              onClick={() => onChange(opt.id)}
+              className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                active
+                  ? 'border-fuchsia-500 bg-fuchsia-600/20 text-white'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+              } ${optDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+              title={
+                isTabOption && !tabSupported
+                  ? 'Tab audio requires a Chromium-based desktop browser'
+                  : undefined
+              }
+            >
+              <div className="font-semibold">{opt.label}</div>
+              <div className="text-[11px] text-zinc-400">{opt.sub}</div>
+            </button>
+          );
+        })}
+      </div>
+      {!tabSupported && (
+        <p className="mt-2 text-[11px] text-zinc-500">
+          Tab audio requires a Chromium-based desktop browser (Chrome / Edge / Brave).
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function AlwaysOnControl() {
   const alwaysOn = useAlwaysOn();
   const [popoutRequestKey, setPopoutRequestKey] = useState(0);
@@ -134,6 +219,28 @@ export default function AlwaysOnControl() {
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-5 shadow-xl shadow-black/20">
       <AlwaysOnPopout requestKey={popoutRequestKey} />
 
+      {/* Simultaneous-recording guard. start() refuses to begin when the
+          explicit Record button is active and sets startBlockedByRecord;
+          this modal asks the user to stop the other one first. Dismissing
+          it clears the flag — the user can then stop Record from its own
+          surface and retry. */}
+      <ConfirmModal
+        isOpen={alwaysOn.startBlockedByRecord}
+        title="Recording already in progress"
+        description={(
+          <>
+            The Record button is already capturing audio. Stop that recording
+            first, then try starting always-on again.
+          </>
+        )}
+        confirmLabel="Got it"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={alwaysOn.clearStartBlocked}
+        onCancel={alwaysOn.clearStartBlocked}
+      />
+
+
       {/* Privacy-mode banners: live notice when local-only is active for
           the current session, and a degraded-mode warning when the user
           asked for local-only but WebGPU is missing. */}
@@ -165,17 +272,41 @@ export default function AlwaysOnControl() {
             </div>
           )}
           {/* Active mic indicator + per-session override. Only shown while
-              a session is live — the chip is meaningless when idle. */}
+              a session is live — the chip is meaningless when idle. The
+              mic chip is hidden when the audio source isn't mic-based,
+              since deviceId selection doesn't apply to tab capture. */}
           {isActive && (
-            <div className="mt-3 flex items-center gap-2">
-              <SessionMicChip
-                activeDeviceId={alwaysOn.activeMicDeviceId}
-                onSelect={(id) => void alwaysOn.switchMicDevice(id)}
-                disabled={alwaysOn.switchingDevice}
-              />
-              {alwaysOn.switchingDevice && (
-                <span className="text-xs text-zinc-400">Switching…</span>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {(alwaysOn.audioSourceMode === 'mic' || alwaysOn.audioSourceMode === 'mic+tab') && (
+                <>
+                  <SessionMicChip
+                    activeDeviceId={alwaysOn.activeMicDeviceId}
+                    onSelect={(id) => void alwaysOn.switchMicDevice(id)}
+                    disabled={alwaysOn.switchingDevice}
+                  />
+                  {alwaysOn.switchingDevice && (
+                    <span className="text-xs text-zinc-400">Switching…</span>
+                  )}
+                </>
               )}
+              {/* Audio source chip — shows what the session is currently
+                  capturing. Read-only mid-session; the picker (below the
+                  controls) is disabled while recording. */}
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
+                  alwaysOn.audioSourceMode === 'mic'
+                    ? 'border-zinc-700 bg-zinc-800/70 text-zinc-200'
+                    : 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+                }`}
+                title="Audio source for this session. Change before starting to use a different source."
+              >
+                {alwaysOn.audioSourceMode === 'mic' ? (
+                  <Mic className="h-3.5 w-3.5" />
+                ) : (
+                  <MonitorSpeaker className="h-3.5 w-3.5" />
+                )}
+                {audioSourceLabel(alwaysOn.audioSourceMode)}
+              </span>
             </div>
           )}
         </div>
@@ -244,6 +375,16 @@ export default function AlwaysOnControl() {
           </button>
         </div>
       </div>
+
+      {/* Audio source picker. Lets the user passively listen to a tab
+          (e.g. the meeting window in a separate Chrome tab) instead of
+          just the local mic. Locked during recording — the picker only
+          takes effect on the next start(). */}
+      <AudioSourcePicker
+        value={alwaysOn.audioSourceMode}
+        onChange={alwaysOn.setAudioSourceMode}
+        disabled={isActive || alwaysOn.state === 'starting'}
+      />
 
       {/* Live VU meter — gives the user confidence the mic is hearing them
           even between speech chunks (the VAD indicator only flips during

@@ -10,13 +10,26 @@ import React, {
 } from 'react';
 import { config } from '../config';
 import { useOrg } from './OrgContext';
-import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk } from '../utils/vadEngine';
+import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk, type VadStreamOpenResult } from '../utils/vadEngine';
 import {
   getAutoPreferUsb,
   getPreferredDeviceId,
   isUsbAudioDevice,
   setPreferredDeviceId,
 } from '../utils/audioDevicePreference';
+import {
+  AUDIO_SOURCE_MODE_EVENT,
+  AUDIO_SOURCE_MODE_KEY,
+  getAudioSourceMode,
+  openAudioSourceStream,
+  setAudioSourceMode,
+  type AudioSourceMode,
+  type OpenedAudioSource,
+} from '../utils/audioSourceStream';
+import {
+  isRecordActive,
+  setAlwaysOnActive,
+} from '../utils/recordingPresence';
 import { showToast } from '../components/Toast';
 import { toast as toastify } from 'react-toastify';
 import {
@@ -151,11 +164,32 @@ export interface AlwaysOnContextValue {
    * `utils/audioDevicePreference` instead.
    */
   switchMicDevice: (deviceId: string | null) => Promise<void>;
+  /**
+   * The audio source mode the user has picked: mic / tab / mic+tab.
+   * Persisted in localStorage; mirrored here so the UI can react.
+   * When mode != 'mic' the SessionMicChip + auto-prefer-USB are no-ops
+   * for the duration of the session.
+   */
+  audioSourceMode: AudioSourceMode;
+  /** Persist a new audio source mode. Only takes effect on next start. */
+  setAudioSourceMode: (mode: AudioSourceMode) => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   triggerSummarize: () => Promise<void>;
+  /**
+   * Result of the cross-surface collision check, run as part of start().
+   * When non-null, the start() call refused to begin because the
+   * Record button surface is already active. Callers (AlwaysOnControl)
+   * surface a confirm modal asking the user to stop the other one first.
+   */
+  startBlockedByRecord: boolean;
+  /**
+   * Reset the blocked state. Called by the UI after the user dismisses
+   * the collision modal (whether they decide to abort or proceed).
+   */
+  clearStartBlocked: () => void;
 }
 
 const AlwaysOnContext = createContext<AlwaysOnContextValue | null>(null);
@@ -243,6 +277,32 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     null,
   );
   const [switchingDevice, setSwitchingDevice] = useState<boolean>(false);
+
+  // Audio source mode (mic | tab | mic+tab). Persisted via the helper.
+  // We mirror into state so the picker UI stays reactive, and listen for
+  // cross-tab + custom events so a Settings flip in another tab updates
+  // the picker. Locked at start() time so a mid-session change doesn't
+  // half-swap the engine.
+  const [audioSourceMode, setAudioSourceModeState] = useState<AudioSourceMode>(
+    () => getAudioSourceMode(),
+  );
+  const activeAudioSourceModeRef = useRef<AudioSourceMode>('mic');
+  // Tracks the opened source so we can register an "unexpected end"
+  // listener on the underlying tab stream — when the user closes the
+  // shared tab, the track ends and we want to gracefully stop the
+  // session + toast.
+  const openedSourceRef = useRef<OpenedAudioSource | null>(null);
+
+  // Cross-surface guard. When the user clicks Start while the explicit
+  // Record button is active, we set this flag so the UI can surface a
+  // confirm modal instead of silently running two captures.
+  const [startBlockedByRecord, setStartBlockedByRecord] = useState<boolean>(false);
+
+  // Forward-ref to stop() — populated below after stop is defined.
+  // Used inside the engine opener's track-ended handler, which is built
+  // in ensureEngine() (defined before stop). Without this we'd have a
+  // temporal-dead-zone reference.
+  const stopRef = useRef<() => Promise<void>>(async () => undefined);
   // Track the USB-swap toast so we don't pile up duplicates when the user
   // wiggles a cable. Keyed by deviceId.
   const usbToastShownRef = useRef<Set<string>>(new Set());
@@ -334,6 +394,42 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('meetingops:privacy-mode', handler as EventListener);
       window.removeEventListener('storage', onStorage);
     };
+  }, []);
+
+  // Audio source mode listener — keeps the picker in sync if Settings or
+  // another tab flips it. Does NOT swap the engine mid-session; the new
+  // mode applies on the next start().
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<AudioSourceMode>).detail;
+      if (detail === 'mic' || detail === 'tab' || detail === 'mic+tab') {
+        setAudioSourceModeState(detail);
+      }
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === AUDIO_SOURCE_MODE_KEY) {
+        setAudioSourceModeState(getAudioSourceMode());
+      }
+    };
+    window.addEventListener(AUDIO_SOURCE_MODE_EVENT, handler as EventListener);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(AUDIO_SOURCE_MODE_EVENT, handler as EventListener);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const updateAudioSourceMode = useCallback((mode: AudioSourceMode) => {
+    // Persist immediately. The local state will follow via the event
+    // listener above, but we also call setState here so a same-tick
+    // re-render sees the new value without round-tripping through the
+    // event loop.
+    setAudioSourceMode(mode);
+    setAudioSourceModeState(mode);
+  }, []);
+
+  const clearStartBlocked = useCallback(() => {
+    setStartBlockedByRecord(false);
   }, []);
 
   // Kick off the browser STT load whenever the mode flips to
@@ -756,6 +852,65 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         // Read from localStorage at each start/swap so cross-tab Settings
         // edits propagate without a page reload.
         getPreferredDeviceId: () => getPreferredDeviceId(),
+        // Source-aware stream opener. Reads the locked-in mode from the
+        // ref each call so a session that was started in 'tab' stays in
+        // 'tab' even if the user flips the picker mid-session.
+        openStream: async (deviceId): Promise<VadStreamOpenResult> => {
+          const mode = activeAudioSourceModeRef.current;
+          // Dispose any previously-opened source (e.g. on hot-swap). The
+          // engine also calls releaseExtras via stopCurrentStream(), but
+          // this is belt-and-suspenders.
+          const previous = openedSourceRef.current;
+          openedSourceRef.current = null;
+          if (previous) {
+            try {
+              previous.cleanup();
+            } catch {
+              // ignore
+            }
+          }
+
+          const opened = await openAudioSourceStream(mode, {
+            preferredDeviceId: deviceId,
+          });
+          openedSourceRef.current = opened;
+
+          // Register the tab-closed listener. When the underlying tab
+          // stream ends (user closes the captured tab, navigates away,
+          // or clicks "Stop sharing" in the Chrome bar) we gracefully
+          // stop the session and surface a toast.
+          opened.onUnexpectedEnd((reason) => {
+            // Only fire if we're still the active source — defensive
+            // against a stale closure after stop()/restart.
+            if (openedSourceRef.current !== opened) return;
+            const label = reason === 'tab' ? 'Captured tab closed' : 'Audio source ended';
+            showToast.warning(`${label} — recording stopped.`);
+            // Defer the actual stop to the next tick so the engine
+            // doesn't race with track-ended teardown inside MicVAD.
+            window.setTimeout(() => {
+              if (stateRef.current === 'recording' || stateRef.current === 'paused') {
+                void stopRef.current();
+              }
+            }, 0);
+          });
+
+          return {
+            stream: opened.stream,
+            // Mic-only sources can return their deviceId; tab and mic+tab
+            // return null since "deviceId" doesn't apply.
+            deviceId: mode === 'mic' ? deviceId : null,
+            fellBack: false,
+            // The VAD engine calls releaseExtras as part of stopCurrentStream().
+            // That hooks into our opener's cleanup, which stops raw streams +
+            // closes the AudioContext used for mic+tab mixing.
+            releaseExtras: () => {
+              if (openedSourceRef.current === opened) {
+                openedSourceRef.current = null;
+              }
+              opened.cleanup();
+            },
+          };
+        },
         onDeviceChanged: (deviceId) => {
           setActiveMicDeviceId(deviceId);
         },
@@ -779,6 +934,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       });
     }
     return engineRef.current;
+    // `stop` is intentionally omitted from deps — it's a stable callback
+    // and including it would re-create the engine on every state change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getElapsed, queueChunkUpload, splitSession]);
 
   /**
@@ -957,6 +1115,16 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
   const start = useCallback(async () => {
     if (stateRef.current !== 'idle') return;
+
+    // Cross-surface guard. If the explicit Record button is in use,
+    // refuse to start until the user resolves the collision. The UI
+    // shows a confirm modal driven by `startBlockedByRecord`; the
+    // caller dismisses + retries.
+    if (isRecordActive()) {
+      setStartBlockedByRecord(true);
+      return;
+    }
+
     setState('starting');
     setError(null);
     setStatusText('Starting microphone and VAD');
@@ -976,6 +1144,17 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     activeLocalOnlyRef.current = useLocalOnly;
     setActiveLocalOnly(useLocalOnly);
 
+    // Lock the audio source mode for this session. Same locking pattern
+    // as privacy mode — a mid-session flip in another tab doesn't half-
+    // swap the engine. The ref is read inside the engine opener.
+    const lockedMode = getAudioSourceMode();
+    activeAudioSourceModeRef.current = lockedMode;
+    setAudioSourceModeState(lockedMode);
+
+    // Flag the presence so the explicit Record surfaces can refuse a
+    // collision. Cleared in stop() or in the catch branch below.
+    setAlwaysOnActive(true);
+
     try {
       await createSession();
       await ensureEngine().start();
@@ -988,11 +1167,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       sessionRef.current = null;
       setCurrentSessionId(null);
       startedAtRef.current = null;
+      setAlwaysOnActive(false);
       setState('idle');
       setStatusText('Idle');
       setError(message);
     }
-  }, [createSession, ensureEngine]);
+  }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable]);
 
   const pause = useCallback(async () => {
     if (stateRef.current !== 'recording') return;
@@ -1070,8 +1250,23 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setStatusText('Idle');
       activeLocalOnlyRef.current = false;
       setActiveLocalOnly(false);
+      // Clear the cross-surface presence flag — the Record button is
+      // free to start now. Idempotent if it's already cleared.
+      setAlwaysOnActive(false);
+      // Drop the opened-source ref. The engine called releaseExtras
+      // already which invoked our cleanup; this just nukes the dangling
+      // reference so the GC can drop it.
+      openedSourceRef.current = null;
     }
   }, [finalizeSession, summary.slices]);
+
+  // Wire stopRef now that stop is defined. Used by ensureEngine's
+  // track-ended handler (which is constructed before stop in the file
+  // order). Don't include stop in the engine's dep array — re-creating
+  // the engine on every stop change would be wrong.
+  useEffect(() => {
+    stopRef.current = stop;
+  }, [stop]);
 
   const transcriptText = useMemo(
     () => liveTranscript
@@ -1245,6 +1440,18 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(autoDebounceRef.current);
       autoDebounceRef.current = null;
     }
+    // Clean up the opened source (closes AudioContext, stops tab stream).
+    if (openedSourceRef.current) {
+      try {
+        openedSourceRef.current.cleanup();
+      } catch {
+        // ignore
+      }
+      openedSourceRef.current = null;
+    }
+    // Drop the presence flag — if the user navigates away mid-session
+    // the next mount shouldn't think a stale always-on session is live.
+    setAlwaysOnActive(false);
   }, []);
 
   const value = useMemo<AlwaysOnContextValue>(() => ({
@@ -1273,11 +1480,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     activeMicStream,
     switchingDevice,
     switchMicDevice,
+    audioSourceMode,
+    setAudioSourceMode: updateAudioSourceMode,
     start,
     stop,
     pause,
     resume,
     triggerSummarize,
+    startBlockedByRecord,
+    clearStartBlocked,
   }), [
     state,
     vadActive,
@@ -1304,11 +1515,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     activeMicStream,
     switchingDevice,
     switchMicDevice,
+    audioSourceMode,
+    updateAudioSourceMode,
     start,
     stop,
     pause,
     resume,
     triggerSummarize,
+    startBlockedByRecord,
+    clearStartBlocked,
   ]);
 
   return (

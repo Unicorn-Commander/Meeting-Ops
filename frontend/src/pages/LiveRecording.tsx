@@ -29,6 +29,11 @@ import { useOrg } from '../contexts/OrgContext';
 import MobileLiveRecording from '../components/MobileLiveRecording';
 import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
 import AlwaysOnControl from '../components/AlwaysOnControl';
+import ConfirmModal from '../components/ConfirmModal';
+import {
+  isAlwaysOnActive,
+  setRecordActive,
+} from '../utils/recordingPresence';
 
 interface SummaryFormats {
   executive: boolean;
@@ -134,6 +139,9 @@ export default function LiveRecording() {
   const [audioLevel, setAudioLevel] = useState(0);
   const [duration, setDuration] = useState(storedSession?.duration || 0);
   const [isProcessing, setIsProcessing] = useState(false);
+  // Cross-surface collision modal — set when the user clicks Start
+  // (legacy server recorder) while always-on is already capturing.
+  const [collisionOpen, setCollisionOpen] = useState(false);
   const [summaryFormats, setSummaryFormats] = useState<SummaryFormats>({
     executive: true,
     minutes: false,
@@ -666,6 +674,14 @@ export default function LiveRecording() {
   };
 
   const startRecording = async () => {
+    // Cross-surface guard. Always-on already captures the mic; running
+    // the legacy server-side recorder at the same time would mean
+    // double-prompting + two parallel streams. Bail out and surface a
+    // modal instead.
+    if (isAlwaysOnActive()) {
+      setCollisionOpen(true);
+      return;
+    }
     setIsProcessing(true);
     try {
       // Create session
@@ -877,9 +893,13 @@ export default function LiveRecording() {
 
       setIsRecording(true);
       setDuration(0);
+      // Cross-surface presence flag — always-on refuses to start while
+      // this is set. Cleared in stopRecording / error / unmount.
+      setRecordActive(true);
     } catch (error: any) {
       alert(`Failed to start recording: ${error.message}`);
       setIsRecording(false);
+      setRecordActive(false);
     } finally {
       setIsProcessing(false);
     }
@@ -940,6 +960,9 @@ export default function LiveRecording() {
       }
       
       setIsRecording(false);
+      // Cross-surface presence flag — server-side capture stopped, so
+      // always-on is free to start again. setRecordActive is idempotent.
+      setRecordActive(false);
       // Keep audio level monitoring active
       startTimeRef.current = null;
       localStorage.removeItem('activeRecordingSession');
@@ -1754,6 +1777,24 @@ export default function LiveRecording() {
         </div>
       </div>
       </div>
+      {/* Cross-surface collision guard for the legacy server-side
+          recorder. Surfaces when the user clicks Start while always-on
+          is already capturing. */}
+      <ConfirmModal
+        isOpen={collisionOpen}
+        title="Always-on is already recording"
+        description={(
+          <>
+            Always-on capture is currently running. Stop it from the
+            Always-on panel, then click Start Recording again.
+          </>
+        )}
+        confirmLabel="Got it"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={() => setCollisionOpen(false)}
+        onCancel={() => setCollisionOpen(false)}
+      />
     </>
   );
 }

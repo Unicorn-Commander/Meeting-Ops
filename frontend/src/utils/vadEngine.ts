@@ -20,6 +20,31 @@ export interface VadAudioChunk {
   elapsedSeconds: number;
 }
 
+/**
+ * Caller-provided stream opener. Lets the engine work with mic, tab
+ * audio (getDisplayMedia), or a mix without baking knowledge of those
+ * sources into the engine itself. The opener is invoked at start time
+ * (and again on device hot-swap when the source is mic).
+ *
+ * Returns:
+ *   - stream: the MediaStream to feed to MicVAD
+ *   - deviceId: the actual deviceId in use (mic mode only; null for tab
+ *     since "deviceId" is meaningless there)
+ *   - fellBack: true if the preferred mic was unavailable and we fell
+ *     back to a default
+ *   - releaseExtras: optional cleanup hook for resources the opener
+ *     created but the engine doesn't directly own (e.g. AudioContext +
+ *     raw tab stream in mic+tab mode). Engine calls it on stop/restart.
+ */
+export interface VadStreamOpenResult {
+  stream: MediaStream;
+  deviceId: string | null;
+  fellBack: boolean;
+  releaseExtras?: () => void;
+}
+
+export type VadStreamOpener = (deviceId: string | null) => Promise<VadStreamOpenResult>;
+
 export interface AlwaysOnVadEngineOptions {
   silenceThresholdMs?: number;
   getElapsedSeconds: () => number;
@@ -31,6 +56,18 @@ export interface AlwaysOnVadEngineOptions {
    * If omitted, falls back to the persisted preference in localStorage.
    */
   getPreferredDeviceId?: () => string | null;
+  /**
+   * Override the default mic-only stream opener. Used by always-on when
+   * the user picks tab/mic+tab as the audio source. If omitted, the
+   * engine falls back to its built-in `openMicrophoneStream(deviceId)`
+   * call so existing call sites stay unchanged.
+   *
+   * IMPORTANT: when this opener is provided, `switchDevice()` becomes a
+   * no-op for the non-mic portion of the source. The current pattern
+   * (always-on) only triggers switchDevice for mic sources via the
+   * SessionMicChip, which is appropriately disabled for non-mic modes.
+   */
+  openStream?: VadStreamOpener;
   /**
    * Called after a successful hot-swap so the parent UI can sync its
    * "active device" indicator. Argument is the deviceId actually opened
@@ -139,9 +176,31 @@ export class AlwaysOnVadEngine {
   // VU meter consumer can attach to the live one.
   private currentStream: MediaStream | null = null;
   private currentDeviceId: string | null = null;
+  // Extras cleanup from the caller-provided opener — e.g. AudioContext +
+  // raw tab stream in mic+tab mode. Cleared on stop/restart.
+  private releaseExtras: (() => void) | null = null;
 
   constructor(private readonly options: AlwaysOnVadEngineOptions) {
     this.thresholdMs = options.silenceThresholdMs ?? DEFAULT_SILENCE_THRESHOLD_MS;
+  }
+
+  /**
+   * Default stream opener. Used when `options.openStream` was not set.
+   * Wraps `openMicrophoneStream()` to match the VadStreamOpener shape.
+   */
+  private async defaultOpenStream(
+    deviceId: string | null,
+  ): Promise<VadStreamOpenResult> {
+    const opened = await openMicrophoneStream(deviceId);
+    return {
+      stream: opened.stream,
+      deviceId: opened.deviceId,
+      fellBack: opened.fellBack,
+    };
+  }
+
+  private getOpener(): VadStreamOpener {
+    return this.options.openStream ?? ((id) => this.defaultOpenStream(id));
   }
 
   /** The deviceId we're capturing from RIGHT NOW (may be null = default). */
@@ -188,17 +247,22 @@ export class AlwaysOnVadEngine {
     this.vad = null;
     this.stopCurrentStream();
 
-    // Open the new stream. Build options snapshot the new deviceId.
-    let opened: { stream: MediaStream; deviceId: string | null };
+    // Open the new stream via the configured opener. The opener is the
+    // sole owner of the per-mode setup (mic, tab, mic+tab); we just hand
+    // it the requested device hint.
+    const opener = this.getOpener();
+    let opened: VadStreamOpenResult;
     try {
-      opened = await openMicrophoneStream(deviceId);
+      opened = await opener(deviceId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.options.onError?.(`Failed to switch microphone: ${message}`);
-      // We've blown away the old engine. Try to recover by falling back
-      // to system default.
+      // We've blown away the old engine. Try to recover by asking the
+      // opener for the system default (deviceId=null). For non-mic
+      // openers this typically does nothing useful, but mic-mode benefits
+      // from the fallback.
       try {
-        opened = await openMicrophoneStream(null);
+        opened = await opener(null);
       } catch (fallbackErr) {
         const fmsg =
           fallbackErr instanceof Error
@@ -214,6 +278,7 @@ export class AlwaysOnVadEngine {
 
     this.currentStream = opened.stream;
     this.currentDeviceId = opened.deviceId;
+    this.releaseExtras = opened.releaseExtras ?? null;
     this.options.onStreamChanged?.(opened.stream);
     this.options.onDeviceChanged?.(opened.deviceId);
 
@@ -231,16 +296,15 @@ export class AlwaysOnVadEngine {
     await acquireWakeLock();
 
     if (!this.vad) {
-      // Open the stream ourselves so we control its lifecycle. The
-      // MicVAD `getStream` callback returns the stream we already
-      // opened — preventing it from invoking getUserMedia twice (once
-      // for our analyser, once for the model).
+      // Open the stream via the configured opener. Default = mic-only;
+      // overridable for tab / mic+tab.
       const preferredId =
         this.options.getPreferredDeviceId?.() ?? getPreferredDeviceId();
       try {
-        const opened = await openMicrophoneStream(preferredId);
+        const opened = await this.getOpener()(preferredId);
         this.currentStream = opened.stream;
         this.currentDeviceId = opened.deviceId;
+        this.releaseExtras = opened.releaseExtras ?? null;
         if (opened.fellBack) {
           this.options.onError?.(
             'Preferred microphone unavailable. Recording with system default.',
@@ -307,11 +371,23 @@ export class AlwaysOnVadEngine {
 
   private stopCurrentStream(): void {
     const s = this.currentStream;
+    const extras = this.releaseExtras;
     this.currentStream = null;
     this.currentDeviceId = null;
+    this.releaseExtras = null;
     if (s) {
       try {
         s.getTracks().forEach((t) => t.stop());
+      } catch {
+        // ignore
+      }
+    }
+    // Release any per-opener extras (e.g. mic+tab AudioContext + raw
+    // tab stream). The opener is the only place that knows what those
+    // are; we just call its cleanup. Idempotent by contract.
+    if (extras) {
+      try {
+        extras();
       } catch {
         // ignore
       }
