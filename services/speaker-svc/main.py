@@ -38,6 +38,12 @@ TARGET_SR = 16000  # wespeaker + Pyannote both expect 16 kHz mono
 MIN_SECONDS = float(os.getenv("MIN_AUDIO_SECONDS", "0.5"))
 MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "1800"))  # 30 min
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "").strip() or None
+# Task #79 v2: call torch.cuda.empty_cache() after every Nth /diarize. Set to
+# 0 to disable. Default 1 (every request) — measure throughput impact and
+# bump to 5/10 if material. The caching allocator legitimately holds memory
+# across calls; periodic clearing reduces peak reservation in a long-running
+# service and is the primary leak-mitigation knob.
+EMPTY_CACHE_EVERY = int(os.getenv("SPEAKER_EMPTY_CACHE_EVERY", "1"))
 EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 DIARIZATION_FALLBACK_MODEL = "pyannote/speaker-diarization-3.1"
@@ -48,6 +54,8 @@ _embedder = None
 _diarizer = None
 _diarizer_backend: Optional[str] = None
 _diarizer_load_error: Optional[str] = None
+# Task #79 v2: /diarize request counter, used to gate periodic empty_cache().
+_diarize_request_count: int = 0
 
 
 def _load_embedder():
@@ -328,20 +336,22 @@ async def diarize(
     # pyannote pipelines expect a file path or a torchaudio waveform tuple.
     waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, T)
 
-    # Per-call clustering threshold override. Re-instantiate the pipeline
-    # only when the caller asked for a value different from what's
-    # already loaded — re-instantiation is cheap (no model reload) but
-    # not free, and most calls use the env default.
+    # Task #79 v2: per-request clustering threshold overrides are no longer
+    # supported. Calling pipeline.instantiate() per request appears to retain
+    # the previous parameter graph in pyannote 3.1/4.x and contributes to the
+    # VRAM accumulation that necessitates the 8h restart workaround. The
+    # threshold is now fixed at startup via PYANNOTE_CLUSTERING_THRESHOLD env
+    # var (default 0.72; midboy2 deploy sets 0.78). Callers who need a
+    # different value must redeploy the service with the new env value.
     if clustering_threshold is not None:
-        try:
-            params = pipeline.parameters(instantiated=True)
-            current_thr = float(params.get("clustering", {}).get("threshold") or 0)
-            if abs(current_thr - float(clustering_threshold)) > 1e-4:
-                params["clustering"]["threshold"] = float(clustering_threshold)
-                pipeline.instantiate(params)
-                logger.info("Pyannote per-call threshold override: %.3f", clustering_threshold)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Per-call threshold override skipped: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "per-request clustering_threshold override is no longer supported "
+                "(task #79 v2: prevents pyannote VRAM accumulation). "
+                "Set PYANNOTE_CLUSTERING_THRESHOLD env on the speaker-svc deploy."
+            ),
+        )
 
     diarize_kwargs: dict[str, int] = {}
     if num_speakers is not None:
@@ -352,15 +362,22 @@ async def diarize(
         if max_speakers is not None:
             diarize_kwargs["max_speakers"] = int(max_speakers)
     logger.info(
-        "/diarize duration=%.1fs hints=%s threshold=%s",
+        "/diarize duration=%.1fs hints=%s threshold=env-default",
         duration,
         diarize_kwargs or "auto",
-        clustering_threshold if clustering_threshold is not None else "env-default",
     )
-    result = pipeline(
-        {"waveform": waveform, "sample_rate": TARGET_SR},
-        **diarize_kwargs,
-    )
+    # Task #79 v2: wrap the top-level pipeline call in torch.inference_mode().
+    # Pyannote uses inference_mode() internally at the Inference.infer() layer
+    # but the top-level Pipeline.__call__ in 3.1 does not — this is
+    # belt-and-suspenders against any autograd state pyannote may build during
+    # diarization (clustering, segmentation post-processing). inference_mode()
+    # is strictly more memory-efficient than no_grad() since it also disables
+    # view tracking.
+    with torch.inference_mode():
+        result = pipeline(
+            {"waveform": waveform, "sample_rate": TARGET_SR},
+            **diarize_kwargs,
+        )
     if hasattr(result, "exclusive_speaker_diarization"):
         diarization = result.exclusive_speaker_diarization
     elif hasattr(result, "speaker_diarization"):
@@ -398,12 +415,29 @@ async def diarize(
         for turn, _, speaker in diarization.itertracks(yield_label=True):
             add_segment(turn, speaker)
 
-    return DiarizeResponse(
+    response = DiarizeResponse(
         segments=segments,
         num_speakers=len(speakers_seen),
         backend=_diarizer_backend or "pyannote-3.1",
         duration_seconds=duration,
     )
+
+    # Task #79 v2: periodic empty_cache() to release the caching allocator's
+    # held memory back to the device. Pyannote 3.1 + autograd state legitimately
+    # grows the allocator's reserved pool across calls; explicitly clearing
+    # after every Nth request keeps the reserved pool from monotonically
+    # growing in a long-running service. Set SPEAKER_EMPTY_CACHE_EVERY=0 to
+    # disable, or raise N if throughput is impacted >10%.
+    global _diarize_request_count
+    _diarize_request_count += 1
+    if (
+        EMPTY_CACHE_EVERY > 0
+        and torch.cuda.is_available()
+        and _diarize_request_count % EMPTY_CACHE_EVERY == 0
+    ):
+        torch.cuda.empty_cache()
+
+    return response
 
 
 @app.post("/identify", response_model=IdentifyResponse)
