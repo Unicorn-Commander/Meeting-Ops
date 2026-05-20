@@ -30,6 +30,7 @@ import MobileLiveRecording from '../components/MobileLiveRecording';
 import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
 import AlwaysOnControl from '../components/AlwaysOnControl';
 import ConfirmModal from '../components/ConfirmModal';
+import PipelineStatusPicker from '../components/PipelineStatusPicker';
 import {
   isAlwaysOnActive,
   setRecordActive,
@@ -1509,110 +1510,37 @@ export default function LiveRecording() {
 
         {/* Right: Status & Metrics */}
         <div className="space-y-4 md:space-y-6">
-          {/* Agent & Pipeline Status */}
-          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-              <Cpu className="w-5 h-5 text-purple-400" />
-              Agent & Pipeline Status
-            </h3>
-            
-            {/* Active Agent Display */}
-            <div className="mb-4 p-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
-              <div className="flex items-center gap-3 mb-2">
-                <Bot className="w-5 h-5 text-purple-400" />
-                <div>
-                  <div className="text-sm font-medium text-white">
-                    {activeAgent?.name ?? 'Meeting Assistant'}
-                  </div>
-                  <div className="text-xs text-purple-300">
-                    {activeAgent?.model_name ?? pipelineStatus?.llm?.label ?? 'AI Assistant'}
-                  </div>
-                </div>
-              </div>
-              <div className="text-xs text-zinc-400">
-                {activeAgent?.description ?? 'Live + post-meeting summarization, action items, and Q&A.'}
-              </div>
-            </div>
-            
-            {/* Pipeline Status Grid — live, sourced from /api/system/pipeline */}
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              {/* Recording Status (local UI state, not server-side) */}
-              <div className="p-3 bg-zinc-800/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Mic className={`w-4 h-4 ${isRecording ? 'text-red-400' : 'text-blue-400'}`} />
-                  <span className="text-xs text-zinc-400">Recording</span>
-                </div>
-                <div className={`text-sm font-medium ${isRecording ? 'text-red-300' : 'text-zinc-300'}`}>
-                  {isRecording ? 'Active' : 'Ready'}
-                </div>
-                <div className="text-xs text-zinc-500">{formatDuration(duration)}</div>
-              </div>
+          {/* Agent & Pipeline Status — pipeline rows are now per-session
+              dropdowns. See PipelineStatusPicker for the wiring; sources
+              are the same as the AI Providers + In-Browser AI settings
+              panels (no duplicate config). */}
+          <PipelineStatusPicker
+            isRecording={isRecording}
+            recordingDurationLabel={formatDuration(duration)}
+            agentName={activeAgent?.name}
+            agentDescription={activeAgent?.description}
+            agentModelLabel={activeAgent?.model_name}
+          />
 
-              {/* Transcription (STT) */}
-              <div className="p-3 bg-zinc-800/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <FileText className={`w-4 h-4 ${pipelineStatus?.stt?.ready ? 'text-green-400' : 'text-zinc-500'}`} />
-                  <span className="text-xs text-zinc-400">Transcription</span>
-                </div>
-                <div className={`text-sm font-medium ${pipelineStatus?.stt?.ready ? 'text-green-300' : 'text-red-300'}`}>
-                  {pipelineStatus?.stt?.label ?? sttModelName}
-                </div>
-                <div className="text-xs text-orange-300">
-                  {pipelineStatus?.stt?.ready
-                    ? (pipelineStatus.stt.gpu || pipelineStatus.stt.engine)
-                    : 'unreachable'}
-                </div>
-              </div>
-
-              {/* Diarization — real backend reported, real GPU */}
-              <div className="p-3 bg-zinc-800/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Users className={`w-4 h-4 ${pipelineStatus?.diarization?.ready ? 'text-emerald-400' : 'text-zinc-500'}`} />
-                  <span className="text-xs text-zinc-400">Diarization</span>
-                </div>
-                <div className={`text-sm font-medium ${pipelineStatus?.diarization?.ready ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {pipelineStatus?.diarization?.label ?? '—'}
-                </div>
-                <div className="text-xs text-emerald-400">
-                  {pipelineStatus?.diarization?.ready
-                    ? (pipelineStatus.diarization.gpu || pipelineStatus.diarization.backend)
-                    : 'unreachable'}
-                </div>
-              </div>
-
-              {/* Summarizer LLM */}
-              <div className="p-3 bg-zinc-800/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Zap className={`w-4 h-4 ${pipelineStatus?.llm?.ready ? 'text-yellow-400' : 'text-zinc-500'}`} />
-                  <span className="text-xs text-zinc-400">Summarizer</span>
-                </div>
-                <div className="text-sm font-medium text-yellow-300">
-                  {pipelineStatus?.llm?.label ?? llmModelName}
-                </div>
-                <div className="text-xs text-yellow-400">
-                  {pipelineStatus?.llm
-                    ? `${pipelineStatus.llm.route}${pipelineStatus.llm.thinking ? ' · thinking' : ''}`
-                    : 'unknown'}
-                </div>
-              </div>
-            </div>
-            
-            {/* Live Summarization Progress */}
-            {isRecording && summarySettings.enableLiveSummarization && (
-              <div className="mt-4 p-3 bg-gradient-to-r from-purple-900/30 to-blue-900/30 border border-purple-500/20 rounded-lg">
+          {/* Live Summarization Progress — moved out of the pipeline card
+              so the dropdown grid stays the dominant visual. Renders only
+              while a session is active and live summarization is on. */}
+          {isRecording && summarySettings.enableLiveSummarization && (
+            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4">
+              <div className="p-3 bg-gradient-to-r from-purple-900/30 to-blue-900/30 border border-purple-500/20 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs text-purple-300">Live Summary Progress</span>
                   <span className="text-xs text-purple-400">{wordCount} / {Math.ceil(wordCount / 500) * 500}</span>
                 </div>
                 <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className="h-full bg-gradient-to-r from-purple-500 to-blue-500 transition-all duration-500"
                     style={{ width: `${Math.min((wordCount % 500) / 500 * 100, 100)}%` }}
                   />
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Live Transcription */}
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">

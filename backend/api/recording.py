@@ -625,6 +625,84 @@ async def finalize_always_on_session(
     return _session_payload(session)
 
 
+@router.delete("/sessions/{session_id}")
+async def discard_always_on_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Hard-delete an always-on session and everything it produced.
+
+    Cascade order (server-side equivalent of the user clicking Discard):
+      1. DB rows: Transcription + AudioFile + RecordingSession itself
+      2. Disk: the per-session chunk directory under ALWAYS_ON_DIR (audio
+         blobs + any extracted WAVs)
+      3. Vector store: Qdrant points for this session_id
+         (semantic_search.delete_session)
+
+    Best-effort on the file/vector cleanup — a failure in either path
+    shouldn't strand the DB row. We log and proceed. The DB delete is
+    the canonical "session is gone" signal.
+
+    Org-scoped: only sessions belonging to the caller's active org are
+    deletable. Returns 404 for missing or cross-org session ids so we
+    don't leak existence.
+    """
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    # Lock to always-on mode so this endpoint can't be used to wipe
+    # uploaded meetings or legacy server-recorded sessions — those have
+    # their own delete flows that expect different cleanup paths.
+    if getattr(session, "mode", "upload") != "always_on":
+        raise HTTPException(
+            status_code=409,
+            detail="This endpoint only deletes always-on sessions.",
+        )
+
+    canonical_id = session.session_id or str(session.id)
+    org_slug = active_org.organization.slug
+    chunk_dir = _session_dir(org_slug, canonical_id)
+
+    # 1. DB rows. Transcription is keyed on the integer pk; AudioFile is
+    #    keyed on the string session_id (legacy column convention).
+    try:
+        db.query(Transcription).filter(Transcription.session_id == session.id).delete()
+        db.query(AudioFile).filter(
+            AudioFile.session_id == canonical_id,
+            AudioFile.organization_id == active_org.organization.id,
+        ).delete()
+        db.delete(session)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to delete always-on session rows for %s", session_id)
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+
+    # 2. Disk cleanup — best-effort, errors logged but not surfaced.
+    try:
+        if chunk_dir.exists():
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Chunk-dir cleanup failed for %s: %s", canonical_id, exc)
+
+    # 3. Vector store — best-effort. semantic_search is import-on-use to
+    #    avoid pulling qdrant into the recording hot path on cold start.
+    try:
+        from services.semantic_search_service import semantic_search
+
+        semantic_search.delete_session(canonical_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Qdrant cleanup failed for %s: %s", canonical_id, exc)
+
+    return {
+        "deleted": True,
+        "session_id": canonical_id,
+    }
+
+
 @router.post("/summarize")
 async def summarize_with_server_llm(
     request: ServerSummaryRequest,

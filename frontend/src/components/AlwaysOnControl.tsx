@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Copy,
   Lightbulb,
   Mic,
   MonitorSpeaker,
@@ -11,8 +12,10 @@ import {
   Pause,
   Play,
   RefreshCw,
+  RotateCw,
   Sparkles,
   Square,
+  Trash2,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -261,6 +264,12 @@ export default function AlwaysOnControl() {
   const alwaysOn = useAlwaysOn();
   const [popoutRequestKey, setPopoutRequestKey] = useState(0);
   const [expandedSliceIds, setExpandedSliceIds] = useState<Set<string>>(new Set());
+  // Lifecycle confirm modals. Both are dismissable; the destructive
+  // Discard surfaces the consequences before firing.
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  // Brief inline "copied" indicator next to the session id chip.
+  const [copiedSessionId, setCopiedSessionId] = useState(false);
   // First-time onboarding hint for the audio-source picker. Lazy-init
   // from localStorage so SSR-style guards still work and we only touch
   // storage once on mount.
@@ -431,7 +440,30 @@ export default function AlwaysOnControl() {
                 className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Square className="h-4 w-4" />
-                Stop
+                Stop & save
+              </button>
+              {/* Discard — opens a confirm modal then hard-deletes the
+                  current session. Disabled mid-stop because the engine is
+                  in an inconsistent state until stop() resolves. */}
+              <button
+                onClick={() => setDiscardOpen(true)}
+                disabled={alwaysOn.state === 'stopping'}
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Permanently delete this recording"
+              >
+                <Trash2 className="h-4 w-4" />
+                Discard
+              </button>
+              {/* New session — finalize current + start fresh. Confirmed
+                  because the user may have intended Pause instead. */}
+              <button
+                onClick={() => setNewSessionOpen(true)}
+                disabled={alwaysOn.state === 'stopping'}
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Save current and start a new session"
+              >
+                <RotateCw className="h-4 w-4" />
+                New session
               </button>
             </>
           )}
@@ -460,6 +492,94 @@ export default function AlwaysOnControl() {
           </button>
         </div>
       </div>
+
+      {/* Session header — visible while a session is live. Shows the
+          session ID (with click-to-copy), the start time, and elapsed.
+          The elapsed metric is still rendered in the stats grid below
+          for parity; the header just keeps the info above-the-fold. */}
+      {isActive && alwaysOn.currentSessionId && (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-300">
+          <span className="text-zinc-500">Session</span>
+          <button
+            type="button"
+            onClick={async () => {
+              if (!alwaysOn.currentSessionId) return;
+              try {
+                await navigator.clipboard.writeText(alwaysOn.currentSessionId);
+                setCopiedSessionId(true);
+                setTimeout(() => setCopiedSessionId(false), 1500);
+              } catch {
+                /* clipboard may be blocked; user can still see the truncated id */
+              }
+            }}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900/70 px-2 py-1 font-mono text-[11px] text-zinc-200 hover:bg-zinc-800"
+            title={`Click to copy ${alwaysOn.currentSessionId}`}
+          >
+            <span>
+              {alwaysOn.currentSessionId.length > 12
+                ? `${alwaysOn.currentSessionId.slice(0, 8)}...${alwaysOn.currentSessionId.slice(-4)}`
+                : alwaysOn.currentSessionId}
+            </span>
+            <Copy className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+          </button>
+          {copiedSessionId && (
+            <span className="text-[11px] text-emerald-300">copied</span>
+          )}
+          {alwaysOn.sessionStartedAt && (
+            <>
+              <span className="text-zinc-700">|</span>
+              <span className="text-zinc-500">Started</span>
+              <span>{clockTime(alwaysOn.sessionStartedAt)}</span>
+            </>
+          )}
+          <span className="text-zinc-700">|</span>
+          <span className="text-zinc-500">Elapsed</span>
+          <span className="font-mono">{formatDuration(alwaysOn.elapsedSeconds)}</span>
+        </div>
+      )}
+
+      {/* Confirm modals for the destructive / disruptive controls.
+          discardSession() hard-deletes the current session (audio +
+          chunks + qdrant embeddings + DB row); restartSession() stops
+          current and immediately starts a new one. */}
+      <ConfirmModal
+        isOpen={discardOpen}
+        title="Discard this recording?"
+        description={(
+          <>
+            Audio, transcript, and summaries for this session will be{' '}
+            <span className="font-semibold text-red-200">deleted permanently</span>.
+            This cannot be undone.
+          </>
+        )}
+        confirmLabel="Discard"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={async () => {
+          setDiscardOpen(false);
+          await alwaysOn.discardSession();
+        }}
+        onCancel={() => setDiscardOpen(false)}
+      />
+      <ConfirmModal
+        isOpen={newSessionOpen}
+        title="Start a fresh session?"
+        description={(
+          <>
+            The current session will be saved (chunks finalized) and a new
+            session begins immediately. You can review the saved session
+            from the Sessions list.
+          </>
+        )}
+        confirmLabel="Start new session"
+        cancelLabel="Cancel"
+        tone="primary"
+        onConfirm={async () => {
+          setNewSessionOpen(false);
+          await alwaysOn.restartSession();
+        }}
+        onCancel={() => setNewSessionOpen(false)}
+      />
 
       {/* First-time onboarding hint for the audio-source picker. Hidden
           once dismissed (localStorage). Also suppressed in privacy mode

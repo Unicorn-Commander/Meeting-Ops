@@ -57,7 +57,9 @@ import {
   appendChunk as appendLocalChunk,
   appendSlice as appendLocalSlice,
   createLocalSession,
+  deleteLocalSession,
   endSession as endLocalSession,
+  isLocalSessionId,
   type LocalTranscriptChunk,
 } from '../services/localSessionStore';
 
@@ -179,6 +181,24 @@ export interface AlwaysOnContextValue {
   resume: () => Promise<void>;
   triggerSummarize: () => Promise<void>;
   /**
+   * Hard-delete the current session. For server-backed sessions this
+   * calls `DELETE /api/recordings/sessions/{id}` which cascades to
+   * transcript rows + audio chunks on disk + qdrant points. For
+   * local-only sessions we just drop the IndexedDB record. After the
+   * delete the engine is reset to `idle` so the next Start begins a
+   * brand new session (no leftover state).
+   */
+  discardSession: () => Promise<void>;
+  /**
+   * Stop and immediately start again. Finalizes the current session
+   * normally (so it's saved and visible in the sessions list) and
+   * begins a new session with a fresh UUID. Audio source + mic
+   * selection + privacy mode are preserved across the swap.
+   */
+  restartSession: () => Promise<void>;
+  /** ISO timestamp when the current session began (or null when idle). */
+  sessionStartedAt: string | null;
+  /**
    * Result of the cross-surface collision check, run as part of start().
    * When non-null, the start() call refused to begin because the
    * Record button surface is already active. Callers (AlwaysOnControl)
@@ -227,6 +247,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AlwaysOnState>('idle');
   const [vadActive, setVadActive] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  // ISO timestamp the user-visible session "Started" header reads.
+  // Cleared in stop()/discard so the UI knows when to hide the header.
+  const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
   const [chunksUploaded, setChunksUploaded] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [summary, setSummary] = useState<AlwaysOnSummary>(EMPTY_SUMMARY);
@@ -1134,6 +1157,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setChunksUploaded(0);
     setSessionsCompleted(0);
     startedAtRef.current = Date.now();
+    setSessionStartedAt(new Date().toISOString());
     setElapsedSeconds(0);
 
     // Lock the privacy mode for this session at start. If the user
@@ -1166,6 +1190,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       engineRef.current = null;
       sessionRef.current = null;
       setCurrentSessionId(null);
+      setSessionStartedAt(null);
       startedAtRef.current = null;
       setAlwaysOnActive(false);
       setState('idle');
@@ -1245,6 +1270,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     } finally {
       sessionRef.current = null;
       setCurrentSessionId(null);
+      setSessionStartedAt(null);
       startedAtRef.current = null;
       setState('idle');
       setStatusText('Idle');
@@ -1454,6 +1480,97 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setAlwaysOnActive(false);
   }, []);
 
+  /**
+   * Hard-delete the current session and reset to idle. Server-backed
+   * sessions call DELETE /api/recordings/sessions/{id} which cascades
+   * to transcript rows + audio chunks on disk + qdrant points. Local-
+   * only sessions just drop the IndexedDB record.
+   *
+   * Engine is stopped first (no chunks-in-flight after the delete) and
+   * the DB row is wiped before we surface success — if the cascade
+   * delete fails the session stays around and we surface the error.
+   */
+  const discardSession = useCallback(async () => {
+    if (stateRef.current === 'idle') return;
+    const sessionId = sessionRef.current;
+    const wasLocalOnly = activeLocalOnlyRef.current;
+
+    setState('stopping');
+    setVadActive(false);
+    setStatusText('Discarding session');
+    summarizeAbortRef.current?.abort();
+
+    try {
+      // Stop the engine BEFORE we touch the backend — otherwise an
+      // in-flight chunk-upload can race the delete and recreate a row.
+      await engineRef.current?.stop().catch(() => undefined);
+      engineRef.current = null;
+      await uploadQueueRef.current;
+
+      if (sessionId) {
+        if (wasLocalOnly || isLocalSessionId(sessionId)) {
+          await deleteLocalSession(sessionId);
+        } else {
+          const res = await fetch(
+            `${config.apiUrl}/api/recordings/sessions/${sessionId}`,
+            { method: 'DELETE' },
+          );
+          if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            throw new Error(detail || `DELETE failed (${res.status})`);
+          }
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(`Discard failed: ${message}`);
+    } finally {
+      sessionRef.current = null;
+      setCurrentSessionId(null);
+      setSessionStartedAt(null);
+      startedAtRef.current = null;
+      setSummary(EMPTY_SUMMARY);
+      setLiveTranscript([]);
+      setChunksUploaded(0);
+      setState('idle');
+      setStatusText('Idle');
+      activeLocalOnlyRef.current = false;
+      setActiveLocalOnly(false);
+      setAlwaysOnActive(false);
+      openedSourceRef.current = null;
+    }
+  }, []);
+
+  // Forward-ref for start() — populated in an effect below since start
+  // depends on createSession + ensureEngine which are defined earlier
+  // in the file. restartSession needs to wait for stop() before
+  // start()ing again, so we go through this ref.
+  const startRef = useRef<() => Promise<void>>(async () => undefined);
+  useEffect(() => {
+    startRef.current = start;
+  }, [start]);
+
+  /**
+   * Stop the current session normally (so it's saved + finalized) and
+   * immediately start a new one. Audio source mode + privacy mode are
+   * preserved across the swap; the only thing that changes is the
+   * session UUID. If stop() fails, we don't auto-start — the user can
+   * see the error and retry.
+   */
+  const restartSession = useCallback(async () => {
+    if (stateRef.current === 'idle') {
+      // Nothing live; just start.
+      await startRef.current();
+      return;
+    }
+    await stop();
+    // Give the engine a tick to fully release the mic + AudioContext
+    // before we reopen. Without this, Chromium sometimes 0-channels
+    // the new MediaStream for ~50ms.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await startRef.current();
+  }, [stop]);
+
   const value = useMemo<AlwaysOnContextValue>(() => ({
     state,
     vadActive,
@@ -1487,6 +1604,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     pause,
     resume,
     triggerSummarize,
+    discardSession,
+    restartSession,
+    sessionStartedAt,
     startBlockedByRecord,
     clearStartBlocked,
   }), [
@@ -1522,6 +1642,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     pause,
     resume,
     triggerSummarize,
+    discardSession,
+    restartSession,
+    sessionStartedAt,
     startBlockedByRecord,
     clearStartBlocked,
   ]);
