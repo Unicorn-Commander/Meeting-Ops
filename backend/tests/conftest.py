@@ -12,6 +12,72 @@ _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
+
+# ---------------------------------------------------------------------------
+# Make Postgres-specific column types (JSONB/ARRAY/UUID/CITEXT) work on the
+# SQLite test fixture. database.models imports these directly, and SQLite's
+# type compiler raises CompileError when it sees them. We register SQLite
+# compilation handlers + JSON bind/result processors so the columns
+# round-trip values cleanly. Production Postgres is untouched.
+# ---------------------------------------------------------------------------
+from sqlalchemy import JSON
+from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, JSONB, UUID
+from sqlalchemy.ext.compiler import compiles
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_sqlite(element, compiler, **kw):
+    return "JSON"
+
+
+@compiles(UUID, "sqlite")
+def _uuid_sqlite(element, compiler, **kw):
+    return "VARCHAR(36)"
+
+
+@compiles(CITEXT, "sqlite")
+def _citext_sqlite(element, compiler, **kw):
+    return "VARCHAR"
+
+
+@compiles(ARRAY, "sqlite")
+def _array_sqlite(element, compiler, **kw):
+    return "JSON"
+
+
+# JSON bind/result processors for the columns that store lists/dicts. Without
+# these, SQLAlchemy raises "unsupported type" at flush time because JSONB and
+# ARRAY don't know how to serialize Python collections on SQLite.
+_json_instance = JSON()
+
+
+def _patch_json_processors(type_cls):
+    """Override bind_processor / result_processor so SQLite uses JSON's
+    serialization. Idempotent — leaves Postgres path alone."""
+    if getattr(type_cls, "_uc_test_patched", False):
+        return
+    original_bind = type_cls.bind_processor
+    original_result = type_cls.result_processor
+
+    def bind_processor(self, dialect):
+        if dialect.name == "sqlite":
+            return _json_instance.bind_processor(dialect)
+        return original_bind(self, dialect)
+
+    def result_processor(self, dialect, coltype):
+        if dialect.name == "sqlite":
+            return _json_instance.result_processor(dialect, coltype)
+        return original_result(self, dialect, coltype)
+
+    type_cls.bind_processor = bind_processor
+    type_cls.result_processor = result_processor
+    type_cls._uc_test_patched = True
+
+
+_patch_json_processors(JSONB)
+_patch_json_processors(ARRAY)
+
+
 import pytest
 
 
