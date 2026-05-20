@@ -29,7 +29,11 @@ VALID_PROVIDERS = {
     "tts": ("kokoro", "vibevoice", "openai"),
     "embeddings": ("infinity", "openai", "voyage", "cohere"),
     "reranking": ("infinity", "cohere", "voyage"),
-    "diarization": ("local_diarization", "deepgram", "assemblyai"),
+    # "off" = skip diarization for every new session in this org. The
+    # PipelineStatusPicker "Save as default" button promotes the per-session
+    # toggle here; backend chunk handlers read it via _org_diarization_off
+    # and skip the pyannote/speaker-svc call.
+    "diarization": ("local_diarization", "off", "deepgram", "assemblyai"),
 }
 
 

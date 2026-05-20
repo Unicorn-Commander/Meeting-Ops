@@ -63,6 +63,34 @@ class ClientTextChunkRequest(BaseModel):
     duration_seconds: float = Field(default=0.0, ge=0)
     elapsed_seconds: float = Field(default=0.0, ge=0)
     provenance: str = Field(default="client-parakeet-0.6b-int8", max_length=120)
+    skip_diarization: bool = Field(default=False)
+
+
+
+
+def _org_diarization_off(db: Session, organization_id: int) -> bool:
+    """Return True when the org has promoted diarization "off" as its default
+    provider via PipelineStatusPicker "Save as default". Every chunk in that
+    org then skips diarization unless the caller passes skip_diarization
+    explicitly. Safe-fails to False on any DB or import error so a transient
+    glitch never *adds* diarization the user didn't ask for, but also doesn't
+    cause chunk upload to 500."""
+    try:
+        from database.models import OrgProviderSettings
+
+        row = (
+            db.query(OrgProviderSettings)
+            .filter(
+                OrgProviderSettings.organization_id == organization_id,
+                OrgProviderSettings.service_kind == "diarization",
+            )
+            .first()
+        )
+        if not row:
+            return False
+        return (row.provider_name or "").strip().lower() == "off"
+    except Exception:
+        return False
 
 
 SLICE_SYSTEM_PROMPT = (
@@ -405,6 +433,7 @@ async def upload_always_on_chunk(
     session_id: str,
     chunk: UploadFile = File(...),
     elapsed_seconds: Optional[float] = Form(None),
+    skip_diarization: bool = Form(False),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
@@ -445,7 +474,9 @@ async def upload_always_on_chunk(
             language="en",
         )
         segments = _offset_segments(result, offset_seconds=offset)
-        await _diarize_chunk(db, session, wav_path, segments, offset_seconds=offset)
+        effective_skip = skip_diarization or _org_diarization_off(db, session.organization_id)
+        if not effective_skip:
+            await _diarize_chunk(db, session, wav_path, segments, offset_seconds=offset)
         _append_transcription(db, session, segments, result, offset_seconds=offset)
         _record_audio_file(db, session, current_user, active_org, wav_path, chunk)
         session.status = "recording"
@@ -531,6 +562,9 @@ async def append_client_text_chunk(
         prov_counts[payload.provenance] = int(prov_counts.get(payload.provenance, 0)) + 1
         metadata["chunk_provenance_counts"] = prov_counts
         metadata["last_chunk_provenance"] = payload.provenance
+        effective_skip = payload.skip_diarization or _org_diarization_off(db, session.organization_id)
+        if effective_skip:
+            metadata["diarization_skipped"] = True
         session.processing_metadata = metadata
         flag_modified(session, "processing_metadata")
 

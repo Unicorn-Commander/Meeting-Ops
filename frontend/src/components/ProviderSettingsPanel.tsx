@@ -30,7 +30,7 @@ const VALID_PROVIDERS: Record<string, string[]> = {
   tts: ['kokoro', 'vibevoice', 'openai'],
   embeddings: ['infinity', 'openai', 'voyage', 'cohere'],
   reranking: ['infinity', 'cohere', 'voyage'],
-  diarization: ['local_diarization', 'deepgram', 'assemblyai'],
+  diarization: ['local_diarization', 'off', 'deepgram', 'assemblyai'],
 };
 
 export default function ProviderSettingsPanel() {

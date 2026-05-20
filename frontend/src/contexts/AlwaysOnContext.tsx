@@ -63,6 +63,21 @@ import {
   type LocalTranscriptChunk,
 } from '../services/localSessionStore';
 
+
+// Localstorage key matches PipelineStatusPicker. Read at upload time so the
+// user can toggle Diarization on/off mid-session and the next chunk reflects
+// the change without restarting the engine.
+const DIARIZATION_OFF_KEY = 'meetingops.pipeline.diarization.off.v1';
+
+function getDiarizationOff(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(DIARIZATION_OFF_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export type AlwaysOnState = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping';
 
 export interface LiveTranscriptSegment {
@@ -675,6 +690,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const form = new FormData();
     form.append('chunk', chunk.blob, `always-on-${Date.now()}.wav`);
     form.append('elapsed_seconds', String(Math.max(0, chunk.elapsedSeconds)));
+    if (getDiarizationOff()) form.append('skip_diarization', 'true');
 
     const response = await fetch(`${config.apiUrl}/api/recordings/sessions/${sessionId}/chunks`, {
       method: 'POST',
@@ -709,6 +725,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           duration_seconds: chunk.durationSeconds,
           elapsed_seconds: Math.max(0, chunk.elapsedSeconds),
           provenance: CLIENT_STT_PROVENANCE,
+          skip_diarization: getDiarizationOff(),
         }),
       },
     );

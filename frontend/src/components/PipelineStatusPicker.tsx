@@ -39,6 +39,7 @@ import { getLocalOnly } from '../services/privacyMode';
  */
 
 const DIARIZATION_OFF_KEY = 'meetingops.pipeline.diarization.off.v1';
+const DIARIZATION_USER_OVERRIDE_KEY = 'meetingops.pipeline.diarization.user-override.v1';
 
 function getDiarizationOff(): boolean {
   if (typeof window === 'undefined') return false;
@@ -53,6 +54,25 @@ function setDiarizationOff(off: boolean): void {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(DIARIZATION_OFF_KEY, off ? '1' : '0');
+    window.localStorage.setItem(DIARIZATION_USER_OVERRIDE_KEY, '1');
+  } catch {
+    /* noop */
+  }
+}
+
+function getDiarizationUserOverride(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(DIARIZATION_USER_OVERRIDE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function clearDiarizationUserOverride(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(DIARIZATION_USER_OVERRIDE_KEY);
   } catch {
     /* noop */
   }
@@ -204,6 +224,9 @@ export default function PipelineStatusPicker({
   const [llmModelId, setLlmModelId] = useState<string>(() => getStoredModelId());
   const [sttMode, setSttModeState] = useState<SttMode>(() => getSTTMode());
   const [diarizationOff, setDiarizationOffState] = useState<boolean>(() => getDiarizationOff());
+  // Org-level default for diarization. "off" means new sessions skip
+  // diarization unless the user explicitly overrides per-session.
+  const [orgDiarizationDefault, setOrgDiarizationDefault] = useState<string>('local_diarization');
 
   // Capability flags -- privacy mode forces browser; WebGPU absence forces server.
   const [localOnly, setLocalOnlyState] = useState<boolean>(() => getLocalOnly());
@@ -213,6 +236,47 @@ export default function PipelineStatusPicker({
 
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  // Read org-level diarization default. The "Save as default" button
+  // writes here; the chunk-upload path also reads the same setting via
+  // the backend `_org_diarization_off` helper. We mirror it into the
+  // per-session localStorage flag so the dropdown shows the right initial
+  // state, and so the chunk upload picks it up without an extra round-trip.
+  useEffect(() => {
+    let cancelled = false;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+    (async () => {
+      try {
+        const res = await fetch(`${config.apiBaseUrl}/api/providers/diarization`, { headers });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const provider = (data?.provider_name || 'local_diarization').toLowerCase();
+        if (cancelled) return;
+        setOrgDiarizationDefault(provider);
+        // Only mirror into the per-session flag if the user hasn't
+        // explicitly overridden. This way a user who picked "On" for
+        // a single session doesn't have their override stomped when the
+        // org default is "off".
+        if (!getDiarizationUserOverride()) {
+          const off = provider === 'off';
+          if (typeof window !== 'undefined') {
+            try {
+              window.localStorage.setItem(DIARIZATION_OFF_KEY, off ? '1' : '0');
+            } catch {
+              /* noop */
+            }
+          }
+          setDiarizationOffState(off);
+        }
+      } catch {
+        /* leave defaults */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOrganization?.slug]);
 
   // Refresh the live pipeline snapshot every 30s so STT/diarization/LLM
   // labels reflect what the BACKEND is wired to right now.
@@ -410,7 +474,9 @@ export default function PipelineStatusPicker({
     !!orgDefaultLlmId &&
     llmModelId.startsWith('server:') &&
     llmModelId.slice('server:'.length) !== orgDefaultLlmId;
-  const isCustomDiarization = diarizationOff;
+  // "Custom for this session" = current value differs from org default.
+  const orgWantsOff = orgDiarizationDefault === 'off';
+  const isCustomDiarization = diarizationOff !== orgWantsOff;
 
   const canSaveDefault = !!activeOrganization && (isCustomLlm || isCustomDiarization);
 
@@ -421,9 +487,6 @@ export default function PipelineStatusPicker({
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (activeOrganization.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
-      // Only LLM has a clean PUT shape here; diarization "off" is a UI-only
-      // affordance for now. If/when a `local_diarization` "off" provider
-      // ships we can promote that too.
       if (isCustomLlm) {
         const model = llmModelId.startsWith('server:') ? llmModelId.slice('server:'.length) : null;
         if (model) {
@@ -439,6 +502,22 @@ export default function PipelineStatusPicker({
           if (!res.ok) throw new Error(`PUT /api/providers/llm -> ${res.status}`);
         }
       }
+      if (isCustomDiarization) {
+        const providerName = diarizationOff ? 'off' : 'local_diarization';
+        const res = await fetch(`${config.apiBaseUrl}/api/providers/diarization`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({
+            provider_name: providerName,
+            overrides: {},
+          }),
+        });
+        if (!res.ok) throw new Error(`PUT /api/providers/diarization -> ${res.status}`);
+        // The new org default now matches the user's session selection — clear
+        // the override flag so the picker tracks the org default on next mount.
+        setOrgDiarizationDefault(providerName);
+        clearDiarizationUserOverride();
+      }
       setSaveMessage('Saved as org default');
       // Refresh the pipeline so the "custom" indicator clears.
       const res = await fetch(`${config.apiUrl}/api/system/pipeline`);
@@ -452,7 +531,7 @@ export default function PipelineStatusPicker({
       setSaving(false);
       window.setTimeout(() => setSaveMessage(null), 4000);
     }
-  }, [activeOrganization, isCustomLlm, llmModelId]);
+  }, [activeOrganization, isCustomLlm, isCustomDiarization, llmModelId, diarizationOff]);
 
   // --- Rendering --------------------------------------------------------
   return (
