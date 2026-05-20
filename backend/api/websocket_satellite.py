@@ -5,6 +5,18 @@ Accepts binary PCM frames (16-bit, 16kHz, mono) from satellite devices,
 writes them to a WAV file progressively, and triggers transcription
 every 15 seconds. On disconnect, finalizes the WAV and runs the full
 post-processing pipeline (transcription + AI summary).
+
+Authentication (task #85):
+  * Every connection MUST present the device's per-device secret, issued
+    at pairing-code redemption time.
+  * Either ``Authorization: Bearer <secret>`` header or ``?token=<secret>``
+    query param is accepted — browser WebSocket clients can't set
+    custom headers, hence the query-param fallback.
+  * Mismatch / missing / unknown-device ⇒ accept-then-close with code
+    1008 (policy violation). Five failures inside any 10-minute window
+    per device_id triggers a 30-minute lockout (in-memory limiter).
+  * A device with NULL ``device_secret`` (legacy / orphan) cannot
+    authenticate — it must re-pair.
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -17,6 +29,10 @@ import os
 import struct
 import time
 import uuid
+
+# WebSocket close codes used by this module. 1008 = policy violation
+# (RFC 6455 §7.4.1) — the correct code for authentication failures.
+_WS_CLOSE_POLICY_VIOLATION = 1008
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -82,14 +98,122 @@ def _finalize_wav(file_path: str, total_bytes_written: int):
         logger.error(f"Failed to finalize WAV header for {file_path}: {e}")
 
 
+def _extract_ws_device_secret(websocket: WebSocket) -> Optional[str]:
+    """Pull the device secret out of a WebSocket request.
+
+    Accepts:
+      * ``Authorization: Bearer <secret>`` header (preferred when the
+        client can set headers — ESP-IDF, Python clients)
+      * ``?token=<secret>`` query parameter (fallback for browsers, which
+        cannot set headers on the WebSocket handshake)
+
+    Header takes precedence over query param. Returns None if neither is
+    present. The WebSocket endpoint is device-only — there is no
+    admin/user JWT path here — but we keep the extraction logic
+    consistent with the HTTP path for clarity.
+    """
+    auth_header = websocket.headers.get("authorization") or websocket.headers.get(
+        "Authorization"
+    )
+    if auth_header:
+        parts = auth_header.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            candidate = parts[1].strip()
+            if candidate:
+                return candidate
+
+    token = websocket.query_params.get("token")
+    if token:
+        token = token.strip()
+        if token:
+            return token
+
+    return None
+
+
+def _ensure_organization_id_set(db_session, device) -> None:
+    """Pin the recording session to the device's org_id.
+
+    The org column is NOT NULL — without this assignment SQLite + Postgres
+    will both refuse the insert. Existing code paths already set this when
+    creating via /api/satellites/upload-audio (see _create_satellite_session
+    in satellite_api.py); the WS path was missing it because the original
+    handshake predates multi-org scoping.
+    """
+    if getattr(db_session, "organization_id", None) is None:
+        db_session.organization_id = device.organization_id
+
+
 @router.websocket("/ws/satellite/{device_id}/audio")
 async def websocket_satellite_audio(websocket: WebSocket, device_id: str):
     """WebSocket endpoint for real-time satellite audio streaming.
 
-    Accepts binary frames of raw 16-bit PCM at 16kHz mono.
+    Accepts binary frames of raw 16-bit PCM at 16kHz mono. Authentication
+    happens immediately after ``accept()`` — invalid credentials close
+    the connection with 1008 (policy violation) before any frames are
+    consumed.
     """
+    # Accept first so we can send a structured close frame on failure.
+    # Per RFC 6455 §7.4.1, code 1008 is the correct close code for an
+    # authentication failure; the body is intentionally generic so an
+    # attacker can't distinguish "unknown device" from "wrong secret"
+    # from "locked out".
     await websocket.accept()
-    logger.info(f"Satellite WebSocket connected: {device_id}")
+
+    presented_secret = _extract_ws_device_secret(websocket)
+
+    # --- Authenticate (rate-limited, generic failure) ---
+    try:
+        from auth.device_auth import (
+            DeviceAuthError,
+            authenticate_device,
+        )
+        from database.database import SessionLocal
+        from database.models import RecordingSession as DBRecordingSession
+
+        db = SessionLocal()
+    except Exception as e:
+        logger.error(f"Satellite WS: failed to import auth/db modules: {e}")
+        await websocket.close(code=1011)
+        return
+
+    try:
+        try:
+            auth_result = authenticate_device(
+                db=db,
+                device_id=device_id,
+                plaintext_secret=presented_secret,
+            )
+        except DeviceAuthError:
+            # Never log the presented secret. Never include it in any
+            # outgoing frame. The presence/absence of the device row is
+            # an authentication-internal detail.
+            try:
+                await websocket.send_json({"error": "auth_failed"})
+            except Exception:
+                pass
+            await websocket.close(code=_WS_CLOSE_POLICY_VIOLATION)
+            return
+    except Exception as e:
+        logger.error(f"Satellite WS auth path crashed for device_id=%s: %s", device_id, e)
+        try:
+            await websocket.send_json({"error": "auth_error"})
+        except Exception:
+            pass
+        await websocket.close(code=1011)
+        return
+    finally:
+        # We pulled the row above; the rest of the handshake re-queries
+        # by id and uses its own session. Close the auth session early
+        # to free the connection.
+        pass
+
+    device = auth_result.device
+    logger.info(
+        "Satellite WebSocket authenticated: device_id=%s (org=%s)",
+        device_id,
+        device.organization_id,
+    )
 
     # --- Check for reconnection to an existing session ---
     existing_stream = _active_streams.get(device_id)
@@ -100,28 +224,22 @@ async def websocket_satellite_audio(websocket: WebSocket, device_id: str):
             resuming = True
             logger.info(f"Satellite {device_id} reconnected within {elapsed:.0f}s, resuming session")
 
-    # --- Set up database session and recording ---
+    # --- Set up recording on the auth-session ---
     try:
-        from database.database import SessionLocal
-        from database.models import SatelliteDevice, RecordingSession as DBRecordingSession
-
-        db = SessionLocal()
-    except Exception as e:
-        logger.error(f"Database connection failed for satellite WS: {e}")
-        await websocket.send_json({"error": "Server database unavailable"})
-        await websocket.close(code=1011)
-        return
-
-    try:
-        # Validate device
-        device = db.query(SatelliteDevice).filter(
-            SatelliteDevice.device_id == device_id
-        ).first()
+        # Re-fetch the device on this DB session so we have a fresh
+        # attached instance for the recording flow.
+        from database.models import SatelliteDevice as _SatDev
+        device = db.query(_SatDev).filter(_SatDev.device_id == device_id).first()
 
         if not device:
-            logger.warning(f"Unknown satellite device attempted to stream: {device_id}")
-            await websocket.send_json({"error": f"Device '{device_id}' not registered"})
-            await websocket.close(code=4004)
+            # Should be impossible — we just authenticated. Treat as a
+            # race (device deleted between auth and recording setup).
+            logger.warning(f"Satellite device disappeared post-auth: {device_id}")
+            try:
+                await websocket.send_json({"error": "device_gone"})
+            except Exception:
+                pass
+            await websocket.close(code=_WS_CLOSE_POLICY_VIOLATION)
             db.close()
             return
 
@@ -146,7 +264,11 @@ async def websocket_satellite_audio(websocket: WebSocket, device_id: str):
             _write_wav_header(wav_file, num_samples=0)
             total_bytes = 0
 
-            # Create recording session in database
+            # Create recording session in database. Pin org_id to the
+            # device's org — this is a NOT NULL column for multi-org
+            # scoping. Matches the same convention used by the satellite
+            # HTTP upload path (_create_satellite_session in
+            # satellite_api.py).
             session_name = f"{device.name or device_id} - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
             db_session = DBRecordingSession(
                 session_id=session_id,
@@ -161,6 +283,7 @@ async def websocket_satellite_audio(websocket: WebSocket, device_id: str):
                 source_type="satellite_stream",
                 room_name=device.room_name,
                 audio_file=file_path,
+                organization_id=device.organization_id,
             )
             db.add(db_session)
             db.commit()

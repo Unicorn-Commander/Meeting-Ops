@@ -176,6 +176,24 @@ export interface PairingCode {
   room_id: number;
 }
 
+/**
+ * Result of redeeming a pairing code with a device_id. The
+ * ``device_secret`` field is the PLAINTEXT secret returned exactly once
+ * — devices must persist it locally; it cannot be re-fetched. Lose it ⇒
+ * re-pair.
+ *
+ * The legacy redemption path (no device_id supplied) returns the same
+ * shape with the device_* fields all null.
+ */
+export interface PairingRedeemResult {
+  room_id: string;
+  redeemed_at: string;
+  device_id?: string | null;
+  organization_id?: number | null;
+  device_secret?: string | null;
+  secret_warning?: string | null;
+}
+
 export interface RoomAclEntry {
   user_id: number;
   username?: string | null;
@@ -685,6 +703,51 @@ export const roomsApi = {
       MOCK_STORE.pairing.set(Number(roomId), code);
       return code;
     }
+  },
+
+  /**
+   * Redeem a pairing code. With ``deviceId`` set this is the Phase 3
+   * satellite-enrolment path — the response carries a ``device_secret``
+   * that MUST be persisted by the device on receipt; the server returns
+   * it exactly once. Without ``deviceId`` this is the Phase 1 legacy
+   * host-side flow (no secret issued).
+   *
+   * Wired here so the admin UI can drive a one-time secret reveal flow
+   * for ops who need to enrol a device manually. Real devices will
+   * usually redeem from their own firmware/agent.
+   */
+  async redeemPairingCode(
+    code: string,
+    {
+      orgSlug,
+      deviceId,
+      deviceName,
+      deviceType,
+    }: RoomsApiOptions & {
+      deviceId?: string;
+      deviceName?: string;
+      deviceType?: string;
+    },
+  ): Promise<PairingRedeemResult> {
+    const body: Record<string, unknown> = { code };
+    if (deviceId) body.device_id = deviceId;
+    if (deviceName) body.device_name = deviceName;
+    if (deviceType) body.device_type = deviceType;
+
+    const raw = await request<Record<string, unknown>>(
+      `/api/rooms/pairing-codes/redeem`,
+      { orgSlug, method: 'POST', body: JSON.stringify(body) },
+    );
+    return {
+      room_id: String(raw.room_id || ''),
+      redeemed_at: String(raw.redeemed_at || ''),
+      device_id: (raw.device_id as string | null | undefined) ?? null,
+      organization_id:
+        typeof raw.organization_id === 'number' ? raw.organization_id : null,
+      device_secret: (raw.device_secret as string | null | undefined) ?? null,
+      secret_warning:
+        (raw.secret_warning as string | null | undefined) ?? null,
+    };
   },
 
   async startRecording(roomId: number | string, { orgSlug }: RoomsApiOptions): Promise<{ session_id: string }> {

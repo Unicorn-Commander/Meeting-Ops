@@ -32,10 +32,11 @@ from sqlalchemy import and_, desc
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
+from auth.device_auth import generate_device_secret, hash_device_secret
 from auth.models import User
 from auth.organization import ActiveOrganization
 from database.database import get_db
-from database.models import RecordingSession
+from database.models import RecordingSession, SatelliteDevice
 from database.models_rooms import (
     ROOM_HARDWARE_TYPES,
     ROOM_ROLES,
@@ -117,12 +118,31 @@ class PairingCodeResponse(BaseModel):
 
 class PairingRedeemRequest(BaseModel):
     code: str = Field(min_length=6, max_length=6)
-    device_id: Optional[int] = None  # satellite_devices.id once Phase 3 wires it
+    # Phase 3 enrolment: the device provides its own device_id (string —
+    # the value the device will use against
+    # /ws/satellite/{device_id}/audio). If absent we fall back to the
+    # legacy server-side flow used by USB-mic enrolment in Phase 1, which
+    # does not need a device_secret because nothing on the host is
+    # remotely-addressable as a "device".
+    device_id: Optional[str] = None
+    # Optional human-readable name + room hint the device may carry
+    # forward from its provisioning step. Server is free to override.
+    device_name: Optional[str] = Field(default=None, max_length=200)
+    device_type: Optional[str] = Field(default=None, max_length=50)
 
 
 class PairingRedeemResponse(BaseModel):
     room_id: str
     redeemed_at: str
+    # Phase 3: the issued device record + the PLAINTEXT device secret. The
+    # plaintext is returned exactly once — devices store it locally and
+    # cannot retrieve it from the server. Both fields are absent on the
+    # legacy host-side redemption path (USB mic, Phase 1) where no
+    # satellite device is involved.
+    device_id: Optional[str] = None
+    organization_id: Optional[int] = None
+    device_secret: Optional[str] = None
+    secret_warning: Optional[str] = None
 
 
 class AclGrantRequest(BaseModel):
@@ -647,11 +667,24 @@ async def redeem_pairing_code(
 ):
     """Redeem a pairing code, marking it consumed.
 
-    In Phase 1, redemption is server-side — admins use this to enrol a
-    USB mic (or any host process) into a room. In Phase 3 satellite
-    devices will redeem via their own API key flow. The redemption is
-    scoped to the caller's org for safety: a code generated in org A
-    cannot be redeemed from org B's session.
+    Two flows are supported:
+
+    * **Legacy (Phase 1)** — no ``device_id`` in the request. Used by
+      USB-mic enrolment from the host. The code is marked consumed; no
+      satellite device row is created and no secret is issued. This
+      preserves backward compat for the admin UI's Phase 1 flow.
+
+    * **Phase 3 satellite** — ``device_id`` (string identifier the
+      device will use on /ws/satellite/{device_id}/audio) is in the
+      request. We create or look up the SatelliteDevice row in this
+      org, generate a fresh cryptographically-random ``device_secret``,
+      bcrypt-hash it, and persist it on the device row. The plaintext
+      secret is returned in this response **exactly once** — devices
+      store it locally and can never retrieve it again. Losing the
+      secret means re-pairing.
+
+    Org scoping: a code generated in org A cannot be redeemed from
+    org B's session — the join through ConferenceRoom enforces this.
     """
     code = request.code.strip()
     if not code.isdigit() or len(code) != 6:
@@ -676,15 +709,105 @@ async def redeem_pairing_code(
         # brute-force discovery of valid codes from other orgs.
         raise HTTPException(status_code=404, detail="Code is invalid or expired")
 
-    pairing.redeemed_at = now
+    org_id = active_org.organization.id
+
+    issued_secret: Optional[str] = None
+    device_row: Optional[SatelliteDevice] = None
+
     if request.device_id is not None:
-        pairing.redeemed_by_device_id = request.device_id
+        device_id_str = request.device_id.strip()
+        if not device_id_str:
+            raise HTTPException(
+                status_code=400,
+                detail="device_id must be a non-empty string",
+            )
+
+        # Look up existing device (must belong to this org), else create.
+        # device_id is globally unique at the column level — refuse to
+        # let another org's device "redeem" into this org.
+        device_row = db.query(SatelliteDevice).filter(
+            SatelliteDevice.device_id == device_id_str
+        ).first()
+
+        if device_row is not None and device_row.organization_id not in (
+            None,
+            org_id,
+        ):
+            # Cross-org collision: the same device_id is already bound to
+            # a different org. Refuse — never let a redemption move a
+            # device between orgs.
+            raise HTTPException(
+                status_code=409,
+                detail="Device is already registered to another organization",
+            )
+
+        # Generate the fresh secret + hash before any DB mutation so we
+        # never persist a half-state.
+        issued_secret = generate_device_secret()
+        hashed = hash_device_secret(issued_secret)
+
+        if device_row is None:
+            device_row = SatelliteDevice(
+                device_id=device_id_str,
+                name=request.device_name or device_id_str,
+                device_type=request.device_type or "satellite",
+                organization_id=org_id,
+                status="online",
+                last_heartbeat=now,
+                device_secret=hashed,
+                created_at=now,
+            )
+            db.add(device_row)
+            db.flush()  # populate device_row.id before linking
+        else:
+            # Re-pair: rotate the secret on the existing row. Any
+            # previously-issued secret is now invalid.
+            device_row.device_secret = hashed
+            device_row.organization_id = org_id  # idempotent — was already org_id
+            if request.device_name:
+                device_row.name = request.device_name
+            if request.device_type:
+                device_row.device_type = request.device_type
+
+        pairing.redeemed_by_device_id = device_row.id
+        # Attach the device's "room_name" hint so list_rooms surfaces
+        # this device under the room it just paired into.
+        room_row = (
+            db.query(ConferenceRoom)
+            .filter(ConferenceRoom.id == pairing.room_id)
+            .first()
+        )
+        if room_row and not device_row.room_name:
+            device_row.room_name = room_row.name
+
+    pairing.redeemed_at = now
     db.commit()
     db.refresh(pairing)
-    return PairingRedeemResponse(
+
+    response = PairingRedeemResponse(
         room_id=str(pairing.room_id),
         redeemed_at=pairing.redeemed_at.isoformat(),
     )
+    if device_row is not None and issued_secret is not None:
+        response.device_id = device_row.device_id
+        response.organization_id = org_id
+        response.device_secret = issued_secret
+        response.secret_warning = (
+            "Save this device_secret securely. It is shown exactly once "
+            "and cannot be retrieved later. Re-pair this device if lost."
+        )
+
+        # Audit log — record that a secret was issued, never the secret
+        # itself. The plaintext is in the response body and nowhere else
+        # on the server.
+        logger.info(
+            "Issued device_secret for satellite device_id=%s (org=%s, room=%s)",
+            device_row.device_id,
+            org_id,
+            pairing.room_id,
+        )
+
+    return response
 
 
 # === Recording lifecycle ================================================

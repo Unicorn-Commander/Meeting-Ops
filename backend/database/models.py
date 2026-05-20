@@ -376,6 +376,11 @@ class SatelliteDevice(Base):
     firmware_version = Column(String(50))
     config = Column(Text)  # JSON string: {"sample_rate": 16000, "bit_depth": 16, "channels": 1, "stream_mode": "websocket"}
     api_key = Column(String(200))  # Hashed API key for device authentication
+    # Per-device authentication secret (bcrypt-hashed). Issued at pairing-
+    # code redemption, required for the satellite WebSocket and every
+    # state-mutating satellite HTTP endpoint. Nullable for legacy rows but
+    # any row with a NULL secret cannot authenticate — see task #85.
+    device_secret = Column(String(200), nullable=True)
     current_session_id = Column(String(100), nullable=True)  # Active recording session
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))

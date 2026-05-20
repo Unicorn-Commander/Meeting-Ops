@@ -2,12 +2,37 @@
 Satellite Device Management API
 Handles registration, heartbeat, audio upload, and transcript upload
 for remote satellite recording devices (ESP32-S3, Raspberry Pi, companion apps).
+
+Endpoint auth taxonomy (task #85):
+
+  * **User-auth only** — admin CRUD operations driven by the web UI:
+      register, list, get, update, delete, rooms.
+  * **Dual-auth** — endpoints a deployed satellite device hits AND that
+    an admin may invoke from the UI for diagnostics/control:
+      heartbeat, upload-audio, transcript, start-recording, stop-recording.
+    These accept either:
+        - ``Authorization: Bearer <device_secret>`` /
+          ``X-Device-Secret: <device_secret>`` header (device flow), OR
+        - The normal user+active_org cookie/JWT (admin flow).
+    When the device-secret flow authenticates, the request is bound to
+    that device's organization_id. When the user flow authenticates,
+    the device must belong to the user's active org (existing behaviour).
 """
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Depends,
+    Header,
+    Request,
+    UploadFile,
+    File,
+    Form,
+    Query,
+)
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 import json
@@ -20,6 +45,11 @@ import hashlib
 from database.database import get_db
 from database.models import SatelliteDevice, RecordingSession as DBRecordingSession, Transcription
 from auth.dependencies import get_current_user, get_current_organization
+from auth.device_auth import (
+    DeviceAuthError,
+    authenticate_device,
+    device_auth_from_http,
+)
 from auth.organization import ActiveOrganization
 from auth.models import User
 
@@ -157,6 +187,100 @@ def _get_device_or_404(db: Session, device_id: str, organization_id: int) -> Sat
     if not device:
         raise HTTPException(status_code=404, detail=f"Satellite device '{device_id}' not found")
     return device
+
+
+async def _optional_active_org(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Optional[ActiveOrganization]:
+    """Best-effort user-flow auth: returns the user's active org if a valid
+    user session is present, or ``None`` otherwise.
+
+    This is the inverse of ``get_current_organization`` — that one raises
+    401 on missing/invalid auth; this one swallows the error so the
+    endpoint can decide between device flow (header present) and user
+    flow (header absent). The actual decision lives in
+    ``_resolve_dual_auth``.
+    """
+    from auth.dependencies import get_current_user_optional
+    from auth.organization import resolve_active_organization
+
+    # Re-drive get_current_user_optional manually since we already have
+    # the Request object — calling it through Depends inside another
+    # Depends would force every state-mutating endpoint to share its
+    # signature.
+    try:
+        # Pull the OAuth2 token + API key headers the way OAuth2PasswordBearer would.
+        auth_header = request.headers.get("Authorization", "")
+        token: Optional[str] = None
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header.split(None, 1)[1].strip() or None
+        api_key = request.headers.get("X-API-Key") or None
+
+        user = await get_current_user_optional(
+            request=request,
+            token=token,
+            api_key=api_key,
+            db=db,
+        )
+        if user is None or not user.is_active:
+            return None
+        return resolve_active_organization(db, request, user)
+    except HTTPException:
+        # resolve_active_organization may raise if the user has no org.
+        # That's a user-flow auth failure; let the device flow handle it.
+        return None
+    except Exception as exc:
+        logger.warning("Optional user-flow auth failed unexpectedly: %s", exc)
+        return None
+
+
+def _resolve_dual_auth(
+    *,
+    db: Session,
+    device_id: str,
+    presented_secret: Optional[str],
+    active_org: Optional[ActiveOrganization],
+) -> Tuple[SatelliteDevice, int]:
+    """Dual-auth resolver for state-mutating satellite endpoints.
+
+    Resolves either:
+      * **Device flow** — caller presented a device secret (in
+        ``Authorization: Bearer`` or ``X-Device-Secret``). We verify it
+        via the rate-limited ``authenticate_device`` helper. The
+        device's ``organization_id`` wins; we ignore whatever org the
+        user session was bound to. This is the path a deployed satellite
+        uses.
+      * **User flow** — no device secret presented. The user must have a
+        live session and an active org, AND the device must belong to
+        that org. This is the path an admin uses from the UI for
+        diagnostics or remote control.
+
+    Both flows return ``(device, organization_id)``.
+
+    A request that presents BOTH (a device secret AND a valid user
+    session) uses the **device flow**. We never silently fall back from
+    device-auth-failed to user-auth — that would let an attacker
+    holding a user session probe device secrets while masquerading as
+    the user.
+    """
+    if presented_secret is not None:
+        result = authenticate_device(
+            db=db,
+            device_id=device_id,
+            plaintext_secret=presented_secret,
+        )
+        return result.device, result.org_id
+
+    # User flow — fall through to the standard org-scoped lookup.
+    if active_org is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+        )
+    org_id = active_org.organization.id
+    device = _get_device_or_404(db, device_id, org_id)
+    return device, org_id
 
 
 def _create_satellite_session(
@@ -387,11 +511,19 @@ async def satellite_heartbeat(
     device_id: str,
     request: Optional[HeartbeatRequest] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    presented_secret: Optional[str] = Depends(device_auth_from_http),
+    active_org: Optional[ActiveOrganization] = Depends(_optional_active_org),
 ):
-    """Update heartbeat timestamp and optional status for a satellite device."""
-    device = _get_device_or_404(db, device_id, active_org.organization.id)
+    """Update heartbeat timestamp and optional status for a satellite device.
+
+    Dual-auth: device flow (Bearer/X-Device-Secret) OR user flow.
+    """
+    device, _org_id = _resolve_dual_auth(
+        db=db,
+        device_id=device_id,
+        presented_secret=presented_secret,
+        active_org=active_org,
+    )
 
     device.last_heartbeat = datetime.now(timezone.utc)
 
@@ -434,15 +566,21 @@ async def upload_audio(
     room_name: Optional[str] = Form(None),
     session_name: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    presented_secret: Optional[str] = Depends(device_auth_from_http),
+    active_org: Optional[ActiveOrganization] = Depends(_optional_active_org),
 ):
     """Upload a WAV audio file from a satellite device (store-and-forward mode).
 
     Creates a recording session and triggers the transcription + AI pipeline.
+
+    Dual-auth: device flow (Bearer/X-Device-Secret) OR user flow.
     """
-    org_id = active_org.organization.id
-    device = _get_device_or_404(db, device_id, org_id)
+    device, org_id = _resolve_dual_auth(
+        db=db,
+        device_id=device_id,
+        presented_secret=presented_secret,
+        active_org=active_org,
+    )
 
     # Validate file type
     if file.content_type and "audio" not in file.content_type and "octet-stream" not in file.content_type:
@@ -532,14 +670,21 @@ async def upload_transcript(
     device_id: str,
     request: TranscriptUploadRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    presented_secret: Optional[str] = Depends(device_auth_from_http),
+    active_org: Optional[ActiveOrganization] = Depends(_optional_active_org),
 ):
     """Upload a transcript from a satellite device running local STT (e.g., RPi with whisper.cpp).
 
     Creates a session with the transcript pre-populated and triggers LLM summarization.
+
+    Dual-auth: device flow (Bearer/X-Device-Secret) OR user flow.
     """
-    device = _get_device_or_404(db, device_id, active_org.organization.id)
+    device, _org_id = _resolve_dual_auth(
+        db=db,
+        device_id=device_id,
+        presented_secret=presented_secret,
+        active_org=active_org,
+    )
 
     if request.room_name:
         device.room_name = request.room_name
@@ -690,15 +835,22 @@ async def upload_transcript(
 async def start_satellite_recording(
     device_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    presented_secret: Optional[str] = Depends(device_auth_from_http),
+    active_org: Optional[ActiveOrganization] = Depends(_optional_active_org),
 ):
     """Signal a satellite device to start recording.
 
     Creates a recording session on the server side and updates device status.
     The device polls its status or receives the command via WebSocket.
+
+    Dual-auth: device flow (Bearer/X-Device-Secret) OR user flow.
     """
-    device = _get_device_or_404(db, device_id, active_org.organization.id)
+    device, _org_id = _resolve_dual_auth(
+        db=db,
+        device_id=device_id,
+        presented_secret=presented_secret,
+        active_org=active_org,
+    )
 
     if device.status == "recording":
         raise HTTPException(
@@ -727,12 +879,19 @@ async def start_satellite_recording(
 async def stop_satellite_recording(
     device_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    presented_secret: Optional[str] = Depends(device_auth_from_http),
+    active_org: Optional[ActiveOrganization] = Depends(_optional_active_org),
 ):
-    """Signal a satellite device to stop recording."""
-    org_id = active_org.organization.id
-    device = _get_device_or_404(db, device_id, org_id)
+    """Signal a satellite device to stop recording.
+
+    Dual-auth: device flow (Bearer/X-Device-Secret) OR user flow.
+    """
+    device, org_id = _resolve_dual_auth(
+        db=db,
+        device_id=device_id,
+        presented_secret=presented_secret,
+        active_org=active_org,
+    )
 
     if device.status != "recording":
         raise HTTPException(
