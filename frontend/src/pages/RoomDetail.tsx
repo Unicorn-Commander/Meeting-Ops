@@ -38,8 +38,9 @@ import PairingCodeDisplay from '../components/rooms/PairingCodeDisplay';
 import RoomLevelMeter from '../components/rooms/RoomLevelMeter';
 import RoomLiveTranscript from '../components/rooms/RoomLiveTranscript';
 import RoomLiveSummary from '../components/rooms/RoomLiveSummary';
+import { SkeletonBlock } from '../components/Skeleton';
+import { cacheKey, useHydratedState } from '../utils/cachedState';
 import { getLocalOnly } from '../services/privacyMode';
-import { isAdminRole } from '../utils/roles';
 
 type TabId = 'live' | 'sessions' | 'settings';
 
@@ -52,6 +53,10 @@ const RETENTION_PRESETS: Array<{ label: string; days: number | null }> = [
   { label: 'Unlimited', days: null },
 ];
 
+function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
+  if (isSuperuser) return true;
+  return role === 'admin' || role === 'superuser';
+}
 
 function formatElapsed(startIso: string): string {
   const start = new Date(startIso).getTime();
@@ -83,9 +88,19 @@ export default function RoomDetail() {
   const orgSlug = activeOrganization?.slug || null;
   const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
 
-  const [room, setRoom] = useState<Room | null>(null);
-  const [sources, setSources] = useState<RoomSource[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Hydrate the room shell + sources from last-known-good cache so
+  // refresh paints the page content immediately instead of replacing
+  // the whole layout with "Loading room…".
+  const [room, setRoom, roomHydrated] = useHydratedState<Room | null>(
+    cacheKey('roomDetail.room', orgSlug, id),
+    null,
+  );
+  const [sources, setSources, sourcesHydrated] = useHydratedState<RoomSource[]>(
+    cacheKey('roomDetail.sources', orgSlug, id),
+    [],
+  );
+  const hydrated = roomHydrated || sourcesHydrated;
+  const [loading, setLoading] = useState(!hydrated);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('live');
@@ -106,7 +121,7 @@ export default function RoomDetail() {
     } finally {
       setLoading(false);
     }
-  }, [id, orgSlug]);
+  }, [id, orgSlug, setRoom, setSources]);
 
   useEffect(() => {
     fetchAll();
@@ -162,12 +177,28 @@ export default function RoomDetail() {
     );
   }
 
-  if (loading) {
+  if (loading && !room) {
+    // Skeleton layout mirrors the real page shell so refresh shows
+    // the structure immediately instead of "Loading room…" then a
+    // hard jump to the populated UI.
     return (
       <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
-        <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading room…
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <SkeletonBlock className="h-8 w-8 rounded-lg" />
+            <div className="space-y-2">
+              <SkeletonBlock className="h-4 w-40" />
+              <SkeletonBlock className="h-3 w-24" />
+            </div>
+          </div>
+          <SkeletonBlock className="h-6 w-24 rounded-full" />
         </div>
+        <div className="mb-4 flex gap-4 border-b border-zinc-800 pb-2">
+          <SkeletonBlock className="h-4 w-12" />
+          <SkeletonBlock className="h-4 w-16" />
+          <SkeletonBlock className="h-4 w-16" />
+        </div>
+        <SkeletonBlock className="h-40 w-full rounded-2xl" />
       </div>
     );
   }

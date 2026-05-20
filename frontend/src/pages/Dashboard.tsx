@@ -9,6 +9,7 @@ import { RecentMeetings } from '../components/dashboard/RecentMeetings';
 import { RecentActionItems } from '../components/dashboard/RecentActionItems';
 import { AskBar } from '../components/dashboard/AskBar';
 import { PipelineFooter } from '../components/dashboard/PipelineFooter';
+import { cacheKey, useHydratedState } from '../utils/cachedState';
 
 export interface DashboardSession {
   id: string;
@@ -36,9 +37,18 @@ export default function Dashboard() {
   const { user } = useAuth();
   const { activeOrganization } = useOrg();
   const { startUploads } = useUploads();
-  const [sessions, setSessions] = useState<DashboardSession[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [detailsLoading, setDetailsLoading] = useState(true);
+  // Hydrate from last-known-good sessions for this org so the dashboard
+  // paints with real numbers immediately on refresh, even before the
+  // network call comes back.
+  const [sessions, setSessions, hydratedFromCache] = useHydratedState<DashboardSession[]>(
+    cacheKey('dashboardSessions', activeOrganization?.slug),
+    [],
+  );
+  // `loading` is only `true` until the first fetch resolves AND there's
+  // nothing cached. Subsequent (polling) fetches don't toggle it, so
+  // the visible UI never flips back into a "loading" state.
+  const [loading, setLoading] = useState(!hydratedFromCache);
+  const [detailsLoading, setDetailsLoading] = useState(!hydratedFromCache);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -116,7 +126,10 @@ export default function Dashboard() {
   }, [activeOrganization?.slug, buildHeaders, enrichWithDetails]);
 
   useEffect(() => {
-    setLoading(true);
+    // Don't reset loading=true on every effect re-run — that throws away
+    // the cached data we just hydrated. Only the very first mount sees
+    // loading=true (set in useState init), and even then only if there
+    // was nothing in the cache.
     fetchSessions();
     const id = window.setInterval(fetchSessions, 30000);
     return () => window.clearInterval(id);

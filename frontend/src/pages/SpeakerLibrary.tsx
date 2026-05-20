@@ -3,7 +3,7 @@ import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X } from 'luc
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
-import { isAdminRole } from '../utils/roles';
+import { cacheKey, useHydratedState } from '../utils/cachedState';
 
 interface SpeakerSummary {
   id: number;
@@ -37,6 +37,10 @@ interface SpeakerDetail extends SpeakerSummary {
   session_count: number;
 }
 
+const isAdminRole = (role?: string, isSuperuser?: boolean): boolean => {
+  if (isSuperuser) return true;
+  return role === 'admin' || role === 'superuser';
+};
 
 export const SpeakerLibrary: React.FC = () => {
   const { user } = useAuth();
@@ -44,8 +48,13 @@ export const SpeakerLibrary: React.FC = () => {
 
   const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
 
-  const [speakers, setSpeakers] = useState<SpeakerSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Speaker list hydrates from cache so the admin sidebar populates
+  // immediately on refresh instead of flashing through "Loading…".
+  const [speakers, setSpeakers, speakersHydrated] = useHydratedState<SpeakerSummary[]>(
+    cacheKey('speakers', activeOrganization?.slug),
+    [],
+  );
+  const [loading, setLoading] = useState(!speakersHydrated);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<SpeakerDetail | null>(null);
@@ -66,7 +75,10 @@ export const SpeakerLibrary: React.FC = () => {
   };
 
   const loadSpeakers = async () => {
-    setLoading(true);
+    // Only show the "Loading…" sidebar state when we have nothing to
+    // show. Once the list is populated (from cache or a previous fetch)
+    // we refresh in place — no spinner takeover.
+    if (speakers.length === 0) setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${config.apiBaseUrl}/api/speakers`, { headers: orgHeaders() });

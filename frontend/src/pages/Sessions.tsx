@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
+import { SkeletonSessionGrid } from '../components/Skeleton';
+import { cacheKey, useHydratedState } from '../utils/cachedState';
 import { config } from '../config';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -483,14 +485,28 @@ export const Sessions: React.FC = () => {
   const { startUploads } = useUploads();
   const { activeOrganization } = useOrg();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
   // Active tag filter chips (AND). Server applies the filter via ?tags=
   // so the UI never has to reason about which sessions to hide locally.
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  // Hydrate sessions from localStorage cache so the list paints
+  // immediately on refresh. Cache key includes orgSlug + tag selection
+  // so wrong-org / wrong-filter data is never read.
+  const sessionsCacheKey = cacheKey(
+    'sessions',
+    activeOrganization?.slug,
+    selectedTags.length > 0 ? selectedTags.slice().sort().join(',') : 'all',
+  );
+  const [sessions, setSessions, sessionsHydratedFromCache] = useHydratedState<Session[]>(
+    sessionsCacheKey,
+    [],
+  );
+  const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
   // All tags used across the org's sessions; powers the filter chip bar.
   const [orgTags, setOrgTags] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Loading is only true on the very first mount when nothing is cached.
+  // Subsequent polls + filter changes don't toggle this — they update
+  // the list in place.
+  const [loading, setLoading] = useState(!sessionsHydratedFromCache);
   const [refreshing, setRefreshing] = useState(false);
   const [showCreator, setShowCreator] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -784,7 +800,11 @@ export const Sessions: React.FC = () => {
   }, [activeOrganization?.slug, sessions]);
 
   useEffect(() => {
-    fetchSessions({ showSpinner: true });
+    // If we already painted from cache, skip the spinner-on path —
+    // the user sees yesterday's list (almost always identical) and
+    // the refetch swaps in the latest in place. Only show the spinner
+    // when there's genuinely nothing on screen yet.
+    fetchSessions({ showSpinner: !sessionsHydratedFromCache });
     const interval = setInterval(() => fetchSessions({ showSpinner: false }), 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1518,12 +1538,7 @@ export const Sessions: React.FC = () => {
 
         {/* Sessions */}
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="text-center">
-              <div className="w-8 h-8 border-4 border-purple-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="text-gray-400">Loading sessions...</p>
-            </div>
-          </div>
+          <SkeletonSessionGrid count={6} />
         ) : filteredSessions.length === 0 ? (
           <div className="text-center py-12">
             <FolderOpen className="w-16 h-16 text-gray-600 mx-auto mb-4" />

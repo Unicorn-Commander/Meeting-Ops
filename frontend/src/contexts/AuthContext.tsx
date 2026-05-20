@@ -9,6 +9,21 @@ import {
   isMeetingOpsApiRequest,
   type OrganizationMembership,
 } from '../utils/organization';
+import { clearAllHydratedCaches, HYDRATED_CACHE_CLEAR_EVENT } from '../utils/cachedState';
+
+/**
+ * Wipe every hydrated-state cache and let live components know to
+ * reset to defaults. Called on login (new user might be a different
+ * person) and logout (clear all data from the device).
+ */
+function broadcastHydratedCacheClear(): void {
+  clearAllHydratedCaches();
+  try {
+    window.dispatchEvent(new Event(HYDRATED_CACHE_CLEAR_EVENT));
+  } catch {
+    /* SSR or restricted env — caches already cleared above */
+  }
+}
 
 interface User {
   id: number;
@@ -205,6 +220,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       if (response.ok) {
         const data = await response.json();
+        // Fresh login: wipe any leftover hydrated caches from a
+        // previous user on this device before storing new auth state.
+        broadcastHydratedCacheClear();
         setToken(data.access_token);
         setRefreshToken(data.refresh_token);
         setUser(data.user);
@@ -258,6 +276,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     clearStoredOrgSlug();
+    // Wipe hydrated state caches so the next user (or login bounce)
+    // doesn't see this user's data flash on screen first.
+    broadcastHydratedCacheClear();
     setError(null);
 
     // SSO sign-out: clear oauth2-proxy session, then Keycloak session,

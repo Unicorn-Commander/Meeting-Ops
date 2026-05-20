@@ -6,12 +6,13 @@ import {
   Filter,
   DoorOpen,
   AlertCircle,
-  Loader2,
   Lock as LockIcon,
 } from 'lucide-react';
 import { useOrg } from '../contexts/OrgContext';
 import roomsApi, { isMockMode, type Room } from '../services/roomsApi';
 import RoomCard from '../components/rooms/RoomCard';
+import { SkeletonRoomGrid } from '../components/Skeleton';
+import { cacheKey, useHydratedState } from '../utils/cachedState';
 import { getLocalOnly } from '../services/privacyMode';
 
 type StatusFilter = 'all' | 'recording' | 'idle' | 'error';
@@ -20,8 +21,15 @@ export default function Rooms() {
   const { activeOrganization } = useOrg();
   const navigate = useNavigate();
 
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [loading, setLoading] = useState(true);
+  const orgSlug = activeOrganization?.slug || null;
+  const [rooms, setRooms, hydratedFromCache] = useHydratedState<Room[]>(
+    cacheKey('rooms', orgSlug),
+    [],
+  );
+  // Only show the "no data yet, show skeleton" state on the very first
+  // fetch when there's no cached data. Once we have rooms (cached or
+  // fresh), background fetches must never wipe them.
+  const [initialFetchPending, setInitialFetchPending] = useState(!hydratedFromCache);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -29,11 +37,8 @@ export default function Rooms() {
   const [privacyMode] = useState<boolean>(() => getLocalOnly());
   const [mockBanner, setMockBanner] = useState(false);
 
-  const orgSlug = activeOrganization?.slug || null;
-
   const fetchRooms = useCallback(async () => {
     if (!orgSlug) return;
-    setLoading(true);
     setError(null);
     try {
       const data = await roomsApi.list({ orgSlug });
@@ -42,9 +47,9 @@ export default function Rooms() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load rooms');
     } finally {
-      setLoading(false);
+      setInitialFetchPending(false);
     }
-  }, [orgSlug]);
+  }, [orgSlug, setRooms]);
 
   useEffect(() => {
     fetchRooms();
@@ -190,10 +195,8 @@ export default function Rooms() {
         </div>
       )}
 
-      {loading && rooms.length === 0 ? (
-        <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading rooms…
-        </div>
+      {initialFetchPending && rooms.length === 0 ? (
+        <SkeletonRoomGrid count={3} />
       ) : filteredRooms.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950/40 px-6 py-12 text-center">
           <DoorOpen className="mx-auto h-10 w-10 text-zinc-600" />
