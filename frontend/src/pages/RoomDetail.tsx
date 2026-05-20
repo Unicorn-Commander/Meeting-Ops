@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -17,11 +17,13 @@ import {
   X,
   Check,
   Plus,
+  FilePlus,
 } from 'lucide-react';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
 import roomsApi, {
   type AudioDevice,
+  type LiveSessionPoll,
   type OrgUser,
   type PairingCode,
   type RecordingSessionSummary,
@@ -33,6 +35,9 @@ import roomsApi, {
 import ConfirmModal from '../components/ConfirmModal';
 import AudioDeviceList from '../components/rooms/AudioDeviceList';
 import PairingCodeDisplay from '../components/rooms/PairingCodeDisplay';
+import RoomLevelMeter from '../components/rooms/RoomLevelMeter';
+import RoomLiveTranscript from '../components/rooms/RoomLiveTranscript';
+import RoomLiveSummary from '../components/rooms/RoomLiveSummary';
 import { getLocalOnly } from '../services/privacyMode';
 
 type TabId = 'live' | 'sessions' | 'settings';
@@ -225,9 +230,11 @@ export default function RoomDetail() {
         <LiveTab
           room={room}
           sources={sources}
+          orgSlug={orgSlug}
           busy={busy}
           onStart={handleStart}
           onStop={handleStop}
+          onRefresh={fetchAll}
         />
       )}
       {activeTab === 'sessions' && (
@@ -325,18 +332,98 @@ function TabButton({
 function LiveTab({
   room,
   sources,
+  orgSlug,
   busy,
   onStart,
   onStop,
+  onRefresh,
 }: {
   room: Room;
   sources: RoomSource[];
+  orgSlug: string | null;
   busy: boolean;
   onStart: () => void;
   onStop: () => void;
+  onRefresh: () => Promise<void>;
 }) {
   const isRecording = room.status === 'recording';
   const activeSources = sources.filter((s) => s.is_active);
+  const apiId: number | string = room.raw_id || room.id;
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [livePoll, setLivePoll] = useState<LiveSessionPoll | null>(null);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [discardBusy, setDiscardBusy] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  sessionIdRef.current = activeSessionId;
+
+  // Discover the in-progress session id while recording. Cleared when
+  // recording stops so the transcript pane wipes cleanly.
+  useEffect(() => {
+    if (!isRecording) {
+      setActiveSessionId(null);
+      setLivePoll(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchSession = async () => {
+      try {
+        const reply = await roomsApi.getActiveSession(apiId, { orgSlug });
+        if (!cancelled) setActiveSessionId(reply.session_id);
+      } catch {
+        // Best-effort. The transcript pane handles null gracefully.
+      }
+    };
+    fetchSession();
+    // Re-probe every 8 s in case the parent's room-level poll is slow
+    // to pick up a freshly-started session.
+    const i = window.setInterval(fetchSession, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(i);
+    };
+  }, [isRecording, apiId, orgSlug]);
+
+  const handleDiscard = async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setDiscardBusy(true);
+    setDiscardError(null);
+    try {
+      // Stop the recording first so the recorder releases the device,
+      // then delete the session. We don't surface the stop failure
+      // beyond a log — if it fails, the discard still hard-deletes the
+      // row.
+      try {
+        await roomsApi.stopRecording(apiId, { orgSlug });
+      } catch {
+        // ignore; the delete handles the cleanup
+      }
+      await roomsApi.discardSession(sid, { orgSlug });
+      await onRefresh();
+      setDiscardOpen(false);
+    } catch (err) {
+      setDiscardError(err instanceof Error ? err.message : 'Discard failed');
+    } finally {
+      setDiscardBusy(false);
+    }
+  };
+
+  const handleNewSession = async () => {
+    try {
+      await roomsApi.stopRecording(apiId, { orgSlug });
+    } catch {
+      /* best-effort */
+    }
+    await onRefresh();
+    // Auto-start a fresh session after the stop completes.
+    try {
+      await roomsApi.startRecording(apiId, { orgSlug });
+      await onRefresh();
+    } catch (err) {
+      setDiscardError(err instanceof Error ? err.message : 'New session failed');
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -351,6 +438,22 @@ function LiveTab({
                 className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
               >
                 <Square className="h-4 w-4" /> Stop & save
+              </button>
+              <button
+                type="button"
+                onClick={handleNewSession}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <FilePlus className="h-4 w-4" /> New session
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiscardOpen(true)}
+                disabled={busy || !activeSessionId}
+                className="inline-flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" /> Discard
               </button>
             </>
           ) : (
@@ -369,6 +472,11 @@ function LiveTab({
             </span>
           )}
         </div>
+        {discardError && (
+          <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            <AlertCircle className="h-3.5 w-3.5" /> {discardError}
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
@@ -378,55 +486,74 @@ function LiveTab({
             No active sources. Add one in Settings.
           </p>
         ) : (
-          <ul className="mt-3 flex flex-col gap-2">
+          <ul className="mt-3 flex flex-col gap-3">
             {activeSources.map((src) => (
               <li
                 key={src.id}
-                className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-sm"
+                className="rounded-lg border border-zinc-800 bg-black/30 px-3 py-2.5 text-sm"
               >
-                <div className="flex items-center gap-2">
-                  <Mic className="h-4 w-4 text-zinc-400" />
-                  <span className="text-zinc-100">{src.label}</span>
-                  <span className="text-xs text-zinc-500">{src.device_path}</span>
+                <div className="flex items-center justify-between">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Mic className="h-4 w-4 shrink-0 text-zinc-400" />
+                    <span className="truncate text-zinc-100">{src.label}</span>
+                    <span className="truncate text-xs text-zinc-500">
+                      {src.device_path}
+                    </span>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide ${
+                      src.health_status === 'healthy'
+                        ? 'bg-emerald-500/10 text-emerald-200 border border-emerald-500/30'
+                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                    }`}
+                  >
+                    {src.health_status}
+                  </span>
                 </div>
-                <span
-                  className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide ${
-                    src.health_status === 'healthy'
-                      ? 'bg-emerald-500/10 text-emerald-200 border border-emerald-500/30'
-                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                  }`}
-                >
-                  {src.health_status}
-                </span>
+                <div className="mt-2">
+                  <RoomLevelMeter
+                    roomId={apiId}
+                    orgSlug={orgSlug}
+                    recording={isRecording}
+                    label={src.label || src.device_path || 'Live level'}
+                  />
+                </div>
               </li>
             ))}
           </ul>
         )}
-        <p className="mt-3 text-xs text-zinc-500">
-          Live VU meters from server-side microphones will appear here once the backend stream
-          endpoint lands in Phase 2. For now, status reflects health probes from the room
-          recorder.
-        </p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-          <h2 className="text-sm font-semibold text-zinc-100">Live transcript</h2>
-          <p className="mt-2 text-sm leading-6 text-zinc-400">
-            {isRecording
-              ? 'Live transcript will stream here from the room recorder.'
-              : 'Start the recording to see live transcript here.'}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-          <h2 className="text-sm font-semibold text-zinc-100">Live summary</h2>
-          <p className="mt-2 text-sm leading-6 text-zinc-400">
-            {isRecording
-              ? 'The auto-summary agent will publish slices here every few minutes.'
-              : 'Auto-summary will start when the room is recording.'}
-          </p>
-        </div>
+        <RoomLiveTranscript
+          sessionId={activeSessionId}
+          orgSlug={orgSlug}
+          recording={isRecording}
+          onPoll={(s) => setLivePoll(s)}
+        />
+        <RoomLiveSummary
+          sessionId={activeSessionId}
+          orgSlug={orgSlug}
+          recording={isRecording}
+          transcript={livePoll?.transcript_simple || ''}
+        />
       </div>
+
+      <ConfirmModal
+        isOpen={discardOpen}
+        title="Discard this session?"
+        description={
+          <span>
+            This stops the recording and permanently deletes the current
+            session, including any audio and partial transcript already
+            captured. This cannot be undone.
+          </span>
+        }
+        confirmLabel={discardBusy ? 'Discarding…' : 'Discard'}
+        tone="danger"
+        onConfirm={handleDiscard}
+        onCancel={() => setDiscardOpen(false)}
+      />
     </div>
   );
 }

@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import struct
 import subprocess
 import tempfile
 import wave
@@ -155,6 +157,58 @@ def _load_vad():
     return webrtcvad.Vad(2)  # moderate sensitivity
 
 
+# Floor for dB conversion. -90 dB is "nominally silent" for 16-bit PCM —
+# matches the noise-floor of consumer USB mics. The level-stream UI clamps
+# to this so the bar bottom is stable instead of jittering near -inf.
+LEVEL_DB_FLOOR = -90.0
+
+
+def _samples_to_db(rms_amp: float, peak_amp: float) -> tuple[float, float]:
+    """Convert linear amplitude (0..1 of full-scale int16) to dBFS."""
+    rms_db = 20.0 * math.log10(rms_amp) if rms_amp > 1e-9 else LEVEL_DB_FLOOR
+    peak_db = 20.0 * math.log10(peak_amp) if peak_amp > 1e-9 else LEVEL_DB_FLOOR
+    return max(rms_db, LEVEL_DB_FLOOR), max(peak_db, LEVEL_DB_FLOOR)
+
+
+def _pcm_s16le_stats(buf: bytes) -> tuple[float, float]:
+    """Return (rms_amplitude, peak_amplitude) for raw S16_LE bytes.
+
+    Amplitudes are normalized to [0, 1] of int16 full-scale (32768). Empty
+    or partial buffers return (0, 0).
+
+    numpy is available in the backend image but kept optional here so the
+    recorder still works if numpy ever gets pulled.
+    """
+    if not buf or len(buf) < 2:
+        return 0.0, 0.0
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(buf, dtype=np.int16)
+        if samples.size == 0:
+            return 0.0, 0.0
+        # Convert once; keep float32 to bound memory on long buffers.
+        x = samples.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(x))))
+        peak = float(np.max(np.abs(x)))
+        return rms, peak
+    except ImportError:
+        # Fallback: pure-Python (slower but correct).
+        n = len(buf) // 2
+        if n == 0:
+            return 0.0, 0.0
+        samples = struct.unpack(f"<{n}h", buf[: n * 2])
+        sq = 0.0
+        peak_i = 0
+        for s in samples:
+            sq += float(s) * float(s)
+            ai = -s if s < 0 else s
+            if ai > peak_i:
+                peak_i = ai
+        rms_int = (sq / n) ** 0.5
+        return rms_int / 32768.0, peak_i / 32768.0
+
+
 # === Recorder class =====================================================
 
 
@@ -192,9 +246,61 @@ class RoomRecorder:
         self._started_at: Optional[datetime] = None
         self._elapsed_seconds: float = 0.0
 
+        # Level-tap state. Updated on every VAD frame so the SSE endpoint
+        # at /api/rooms/{id}/levels can read recent values without
+        # synchronizing with the recorder loop. A short rolling window
+        # smooths the bar visually — 200ms ≈ 6 frames at 30ms each.
+        self._level_window_ms: int = 200
+        self._level_frames_per_window: int = max(
+            1, self._level_window_ms // VAD_FRAME_MS
+        )
+        self._level_rms_window: list[float] = []
+        self._level_peak_window: list[float] = []
+        self._latest_rms_db: float = LEVEL_DB_FLOOR
+        self._latest_peak_db: float = LEVEL_DB_FLOOR
+        self._latest_level_at: Optional[datetime] = None
+
     @property
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    def get_levels(self) -> dict[str, Any]:
+        """Snapshot the most recent audio levels. Safe to call from any task.
+
+        Returns dB-FS values bounded by ``LEVEL_DB_FLOOR``. If the recorder
+        hasn't produced a frame yet, returns silence with a ``None``
+        timestamp.
+        """
+        return {
+            "rms_db": self._latest_rms_db,
+            "peak_db": self._latest_peak_db,
+            "timestamp": (
+                self._latest_level_at.isoformat() if self._latest_level_at else None
+            ),
+            "window_ms": self._level_window_ms,
+        }
+
+    def _push_level(self, frame: bytes) -> None:
+        """Update rolling RMS+peak from a freshly-read VAD frame.
+
+        Kept cheap so it can run on every VAD frame without skewing the
+        recorder's chunking timing. ~6 frames buffered (200 ms window).
+        """
+        rms, peak = _pcm_s16le_stats(frame)
+        self._level_rms_window.append(rms)
+        self._level_peak_window.append(peak)
+        while len(self._level_rms_window) > self._level_frames_per_window:
+            self._level_rms_window.pop(0)
+        while len(self._level_peak_window) > self._level_frames_per_window:
+            self._level_peak_window.pop(0)
+        if not self._level_rms_window:
+            return
+        avg_rms = sum(self._level_rms_window) / len(self._level_rms_window)
+        max_peak = max(self._level_peak_window)
+        rms_db, peak_db = _samples_to_db(avg_rms, max_peak)
+        self._latest_rms_db = rms_db
+        self._latest_peak_db = peak_db
+        self._latest_level_at = datetime.now(timezone.utc)
 
     async def start(self) -> None:
         """Spawn arecord and start the VAD loop. Idempotent."""
@@ -286,6 +392,11 @@ class RoomRecorder:
             except Exception:
                 # Bad frame size or VAD freakout — treat as silence.
                 is_speech = False
+
+            # Update the rolling level window before we touch the chunk
+            # buffer — keeps the VU meter responsive regardless of how
+            # the chunk ends up being assembled.
+            self._push_level(frame)
 
             buffer.extend(frame)
             frames_in_chunk += 1

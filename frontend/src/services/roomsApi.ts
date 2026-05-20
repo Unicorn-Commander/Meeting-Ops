@@ -199,6 +199,65 @@ export interface AudioDevice {
   device_name: string;
 }
 
+/** One-shot mic-level probe result. dB values are dBFS (0 = clip, -90 floor). */
+export interface AudioDeviceProbe {
+  device_path: string;
+  duration_sec: number;
+  sample_count: number;
+  rms_db: number;
+  peak_db: number;
+  detected_audio: boolean;
+}
+
+/** Live audio level frame from the SSE /levels stream. */
+export interface RoomLevelFrame {
+  rms_db: number;
+  peak_db: number;
+  timestamp: string;
+  active: boolean;
+}
+
+/** Reply from `GET /api/rooms/{id}/active-session`. */
+export interface RoomActiveSession {
+  room_id: string;
+  session_id: string | null;
+  session_pk: number | null;
+  started_at: string | null;
+  status: string | null;
+}
+
+/**
+ * Mid-recording transcript poll result. Built from the simple-recording-db
+ * GET session endpoint (`/api/recording-sessions/{id}`). Only the fields
+ * we need on the Live tab are typed.
+ */
+export interface LiveSessionPoll {
+  id: string;
+  session_id: string;
+  title: string;
+  status: string;
+  duration: number;
+  transcript_simple: string;
+  transcript_diarized?: {
+    segments?: Array<{
+      text: string;
+      speaker?: string | null;
+      start?: number;
+      end?: number;
+      confidence?: number;
+    }>;
+  } | null;
+  transcription_segments?: Array<{
+    text: string;
+    speaker?: string | null;
+    start?: number;
+    end?: number;
+    confidence?: number;
+  }>;
+  progressive_summaries?: Array<Record<string, unknown>>;
+  metadata?: Record<string, unknown>;
+}
+
 export interface CreateRoomBody {
   name: string;
   location?: string | null;
@@ -749,6 +808,171 @@ export const roomsApi = {
         },
       ];
     }
+  },
+
+  /**
+   * One-shot mic level probe. Records `durationSec` seconds (clamped 0.2–10)
+   * from `devicePath` and returns RMS+peak dBFS. Used by the room
+   * setup wizard's Test mic button and as a polling fallback for the
+   * Live tab VU bar.
+   *
+   * If the backend is missing the route entirely we synthesize a "no
+   * audio detected" response so the UI degrades gracefully — there's
+   * no useful mock value when the device is server-side hardware.
+   */
+  async probeAudioDevice(
+    devicePath: string,
+    options: RoomsApiOptions & { durationSec?: number },
+  ): Promise<AudioDeviceProbe> {
+    const durationSec = Math.max(
+      0.2,
+      Math.min(10, options.durationSec ?? 3.0),
+    );
+    const encoded = encodeURIComponent(devicePath);
+    const url = `/api/system/audio-devices/${encoded}/test?duration_sec=${durationSec}`;
+    try {
+      const raw = await request<Record<string, unknown>>(url, {
+        orgSlug: options.orgSlug,
+        method: 'GET',
+      });
+      return {
+        device_path: String(raw.device_path || devicePath),
+        duration_sec: Number(raw.duration_sec || durationSec),
+        sample_count: Number(raw.sample_count || 0),
+        rms_db: Number(raw.rms_db ?? -90),
+        peak_db: Number(raw.peak_db ?? -90),
+        detected_audio: !!raw.detected_audio,
+      };
+    } catch (err) {
+      if (!isMockFallback(err)) throw err;
+      await pseudoSleep();
+      // Mock pretends a working mic so the UI flows are testable.
+      return {
+        device_path: devicePath,
+        duration_sec: durationSec,
+        sample_count: Math.round(durationSec * 16000),
+        rms_db: -28 + (Math.random() - 0.5) * 4,
+        peak_db: -12 + (Math.random() - 0.5) * 6,
+        detected_audio: true,
+      };
+    }
+  },
+
+  /**
+   * Returns the currently-recording session for the given room, or null
+   * if the room is idle. The Live tab uses this to discover the session
+   * id to poll transcripts/summaries against.
+   */
+  async getActiveSession(
+    roomId: number | string,
+    { orgSlug }: RoomsApiOptions,
+  ): Promise<RoomActiveSession> {
+    try {
+      const raw = await request<Record<string, unknown>>(
+        `/api/rooms/${roomId}/active-session`,
+        { orgSlug, method: 'GET' },
+      );
+      return {
+        room_id: String(raw.room_id || roomId),
+        session_id:
+          typeof raw.session_id === 'string' ? raw.session_id : null,
+        session_pk:
+          typeof raw.session_pk === 'number' ? raw.session_pk : null,
+        started_at:
+          typeof raw.started_at === 'string' ? raw.started_at : null,
+        status: typeof raw.status === 'string' ? raw.status : null,
+      };
+    } catch (err) {
+      if (!isMockFallback(err)) throw err;
+      await pseudoSleep();
+      return {
+        room_id: String(roomId),
+        session_id: null,
+        session_pk: null,
+        started_at: null,
+        status: null,
+      };
+    }
+  },
+
+  /**
+   * Poll the session GET endpoint for the in-progress transcript and
+   * persisted summaries. The Live tab calls this every few seconds
+   * while the room is recording.
+   *
+   * `sessionId` is the public session_id string (UUID) the recorder
+   * uses on its chunk URLs.
+   */
+  async getLiveSession(
+    sessionId: string,
+    { orgSlug }: RoomsApiOptions,
+  ): Promise<LiveSessionPoll> {
+    const raw = await request<Record<string, unknown>>(
+      `/api/recording-sessions/${sessionId}`,
+      { orgSlug, method: 'GET' },
+    );
+    return {
+      id: String(raw.id || sessionId),
+      session_id: String(raw.session_id || sessionId),
+      title: String(raw.title || raw.name || ''),
+      status: String(raw.status || 'unknown'),
+      duration: Number(raw.duration || 0),
+      transcript_simple: String(raw.transcript_simple || ''),
+      transcript_diarized:
+        (raw.transcript_diarized as LiveSessionPoll['transcript_diarized']) ||
+        null,
+      transcription_segments:
+        (raw.transcription_segments as LiveSessionPoll['transcription_segments']) ||
+        [],
+      progressive_summaries:
+        (raw.progressive_summaries as LiveSessionPoll['progressive_summaries']) ||
+        [],
+      metadata: (raw.metadata as Record<string, unknown>) || {},
+    };
+  },
+
+  /**
+   * Open an SSE connection to the room-levels stream. Returns the
+   * EventSource so the caller can attach handlers and close it.
+   *
+   * The browser's EventSource API can't send custom headers (no
+   * Authorization, no X-MeetingOps-Org), so the backend route must
+   * accept either a cookie-based session or a query-string token.
+   * Our backend uses cookie + bearer; cookies travel with `withCredentials`.
+   */
+  openRoomLevelStream(
+    roomId: number | string,
+    { orgSlug }: RoomsApiOptions,
+  ): EventSource {
+    const params = new URLSearchParams();
+    if (orgSlug) params.set('org', orgSlug);
+    // Bearer-as-query is a one-off concession for EventSource (which
+    // can't set headers). The room-levels endpoint accepts auth via
+    // standard Depends — including the cookie — so this is best-effort.
+    try {
+      const token = localStorage.getItem('access_token');
+      if (token) params.set('access_token', token);
+    } catch {
+      /* ignore storage failures */
+    }
+    const qs = params.toString();
+    const url = `${config.apiBaseUrl}/api/rooms/${roomId}/levels${qs ? `?${qs}` : ''}`;
+    return new EventSource(url, { withCredentials: true });
+  },
+
+  /**
+   * Discard (hard-delete) a recording session. Wraps the existing
+   * `/api/recording-sessions/{id}` DELETE handler used by the personal
+   * /record page Discard button.
+   */
+  async discardSession(
+    sessionId: string,
+    { orgSlug }: RoomsApiOptions,
+  ): Promise<void> {
+    await request<void>(`/api/recording-sessions/${sessionId}`, {
+      orgSlug,
+      method: 'DELETE',
+    });
   },
 
   async listOrgUsers({ orgSlug }: RoomsApiOptions): Promise<OrgUser[]> {

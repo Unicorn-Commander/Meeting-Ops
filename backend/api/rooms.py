@@ -11,15 +11,22 @@ augment org membership with per-room grants (admin/member/viewer). The
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import math
 import re
 import secrets
+import struct
 import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, desc
 from sqlalchemy.orm import Session
@@ -154,6 +161,31 @@ class AudioDeviceInfo(BaseModel):
     device_label: str
     device_path: str  # hw:X,Y
     is_usb: bool
+
+
+class AudioDeviceProbeResponse(BaseModel):
+    """One-shot mic level probe: record N seconds and return RMS+peak.
+
+    Values are dBFS — 0 dB = clipping, -90 dB = nominal silence floor.
+    The frontend renders these as a VU bar.
+    """
+    device_path: str
+    duration_sec: float
+    sample_count: int
+    rms_db: float
+    peak_db: float
+    detected_audio: bool
+
+
+class RoomActiveSessionResponse(BaseModel):
+    """Quick lookup for "which session is currently recording in this room"
+    so the Live tab can poll its transcript without a separate sessions
+    list scan."""
+    room_id: str
+    session_id: Optional[str] = None
+    session_pk: Optional[int] = None
+    started_at: Optional[str] = None
+    status: Optional[str] = None
 
 
 # === Conversion helpers =================================================
@@ -1036,3 +1068,376 @@ async def list_audio_devices(
         logger.info("arecord -l returned %s: %s", proc.returncode, proc.stderr.strip())
         return []
     return _parse_arecord_l(proc.stdout)
+
+
+# === System: audio device probe (mic test + standalone VU) ==============
+
+
+# Hard cap on probe duration. The endpoint blocks for `duration_sec`, so a
+# rogue caller could otherwise hold a worker hostage. 10 s is plenty for a
+# "say a sentence" check and small enough not to matter.
+PROBE_DURATION_MAX_SEC = 10.0
+PROBE_DURATION_MIN_SEC = 0.2
+# dBFS floor (matches services.room_recorder.LEVEL_DB_FLOOR).
+_PROBE_DB_FLOOR = -90.0
+# Anything quieter than -55 dBFS is treated as "no audio detected" — that
+# covers the noise floor of an open-but-disconnected USB mic.
+_PROBE_DETECT_THRESHOLD_DB = -55.0
+
+
+def _probe_db_from_pcm(buf: bytes) -> tuple[float, float, int]:
+    """Compute (rms_db, peak_db, sample_count) for a raw S16_LE buffer.
+
+    Mirrors the math in services.room_recorder._pcm_s16le_stats but lives
+    here so the probe endpoint doesn't take a hard import dependency on
+    the recorder (the recorder can be uninstalled / patched out in tests).
+    """
+    if not buf or len(buf) < 2:
+        return _PROBE_DB_FLOOR, _PROBE_DB_FLOOR, 0
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(buf, dtype=np.int16)
+        if samples.size == 0:
+            return _PROBE_DB_FLOOR, _PROBE_DB_FLOOR, 0
+        x = samples.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(x))))
+        peak = float(np.max(np.abs(x)))
+        n = int(samples.size)
+    except ImportError:
+        n = len(buf) // 2
+        if n == 0:
+            return _PROBE_DB_FLOOR, _PROBE_DB_FLOOR, 0
+        samples = struct.unpack(f"<{n}h", buf[: n * 2])
+        sq = 0.0
+        peak_i = 0
+        for s in samples:
+            sq += float(s) * float(s)
+            ai = -s if s < 0 else s
+            if ai > peak_i:
+                peak_i = ai
+        rms = (sq / n) ** 0.5 / 32768.0
+        peak = peak_i / 32768.0
+
+    rms_db = 20.0 * math.log10(rms) if rms > 1e-9 else _PROBE_DB_FLOOR
+    peak_db = 20.0 * math.log10(peak) if peak > 1e-9 else _PROBE_DB_FLOOR
+    return max(rms_db, _PROBE_DB_FLOOR), max(peak_db, _PROBE_DB_FLOOR), n
+
+
+def _validate_probe_device_path(device_path: str) -> str:
+    """Validate `device_path` against the live `arecord -L` output.
+
+    `arecord -L` returns every PCM the system knows about — a strict
+    superset of `arecord -l`. This is what we match against so users can
+    pick `plughw:` aliases without us hardcoding them. If `arecord -L` is
+    unavailable, fall back to the same regex used at source-add time so
+    the probe still works in test fixtures.
+    """
+    # Normalize. We never trust user input even after validation — the
+    # cleaned value is what gets passed to subprocess as a -D arg.
+    cleaned = device_path.strip()
+    if not cleaned or "\n" in cleaned or "\r" in cleaned or ";" in cleaned:
+        raise HTTPException(status_code=400, detail="Invalid device_path")
+    # Loose shape-check is the floor; the arecord -L round-trip is the
+    # real safety check.
+    if not re.match(
+        r"^(plug)?hw:\d+(,\d+)?$|^default$|^sysdefault$|^[A-Za-z0-9_:,=.\-]+$",
+        cleaned,
+    ):
+        raise HTTPException(status_code=400, detail="Invalid device_path")
+
+    try:
+        proc = subprocess.run(
+            ["arecord", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        # arecord absent — let the probe attempt fail loudly downstream.
+        return cleaned
+    except (subprocess.TimeoutExpired, Exception) as exc:  # noqa: BLE001
+        logger.warning("arecord -L lookup failed during probe validation: %s", exc)
+        return cleaned
+
+    # arecord -L emits PCM names at column 0 and descriptive text indented.
+    # Pull every non-indented line as a candidate name.
+    known: set[str] = set()
+    for raw in proc.stdout.splitlines():
+        if raw and not raw.startswith(" ") and not raw.startswith("\t"):
+            known.add(raw.strip())
+    # `hw:X,Y` from `arecord -l` is always valid even when -L only lists
+    # the parent name (some systems collapse to `hw:CARD=X,DEV=Y`).
+    if cleaned in known:
+        return cleaned
+    if re.match(r"^(plug)?hw:\d+(,\d+)?$", cleaned):
+        return cleaned
+    raise HTTPException(
+        status_code=400,
+        detail=f"Device {cleaned!r} not found in arecord -L output",
+    )
+
+
+async def _probe_device_record(device_path: str, duration_sec: float) -> bytes:
+    """Spawn arecord, capture `duration_sec` of raw S16_LE 16k mono, return bytes.
+
+    Uses an explicit timeout — even if arecord refuses to exit cleanly
+    (USB unplugged mid-capture) we terminate it aggressively so the
+    request doesn't hang the worker.
+    """
+    cmd = [
+        "arecord",
+        "-D",
+        device_path,
+        "-f",
+        "S16_LE",
+        "-r",
+        "16000",
+        "-c",
+        "1",
+        "-t",
+        "raw",
+        "-d",
+        f"{max(1, int(round(duration_sec)))}",
+        "-q",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    # Allow a small slack on top of the recording window for arecord
+    # startup overhead.
+    hard_timeout = duration_sec + 3.0
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=hard_timeout
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        raise HTTPException(
+            status_code=504,
+            detail="Audio probe timed out — the device may be in use.",
+        )
+    if proc.returncode != 0:
+        err = (stderr or b"").decode("utf-8", errors="ignore")[:300]
+        raise HTTPException(
+            status_code=502,
+            detail=f"arecord failed (rc={proc.returncode}): {err}",
+        )
+    return stdout or b""
+
+
+@system_router.get(
+    "/audio-devices/{device_path:path}/test",
+    response_model=AudioDeviceProbeResponse,
+)
+async def probe_audio_device(
+    device_path: str,
+    duration_sec: float = 3.0,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """One-shot mic level probe.
+
+    Records `duration_sec` of audio from `device_path` (an ALSA name like
+    ``hw:2,0`` — URL-encode any commas) and returns RMS + peak in dBFS.
+    Used by the Room setup wizard "Test mic" button and as a polling
+    fallback for the Live tab VU meter when SSE isn't available.
+
+    Admin-only because it enumerates server hardware and starts a
+    subprocess; the standard org-membership check happens via
+    ``get_current_organization``.
+    """
+    _require_org_admin(active_org)
+
+    if not isinstance(duration_sec, (int, float)) or math.isnan(float(duration_sec)):
+        raise HTTPException(status_code=400, detail="duration_sec must be numeric")
+    duration_sec = float(duration_sec)
+    if duration_sec < PROBE_DURATION_MIN_SEC or duration_sec > PROBE_DURATION_MAX_SEC:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"duration_sec must be between {PROBE_DURATION_MIN_SEC}"
+                f" and {PROBE_DURATION_MAX_SEC}"
+            ),
+        )
+
+    validated_path = _validate_probe_device_path(device_path)
+    raw = await _probe_device_record(validated_path, duration_sec)
+    rms_db, peak_db, samples = _probe_db_from_pcm(raw)
+    detected = peak_db > _PROBE_DETECT_THRESHOLD_DB
+
+    return AudioDeviceProbeResponse(
+        device_path=validated_path,
+        duration_sec=duration_sec,
+        sample_count=samples,
+        rms_db=rms_db,
+        peak_db=peak_db,
+        detected_audio=detected,
+    )
+
+
+# === Live room audio levels (SSE) =======================================
+
+
+# How often to emit a level frame while streaming. 100 ms matches the
+# RoomDetail Live tab's VU bar refresh — anything faster wastes CPU,
+# anything slower looks choppy.
+_LEVEL_STREAM_INTERVAL_SEC = 0.1
+# Maximum lifetime of a single SSE connection. Browsers will auto-
+# reconnect; this just stops an idle tab from holding a worker forever.
+_LEVEL_STREAM_MAX_SECONDS = 30 * 60
+# Keepalive cadence — proxies happily drop a stream that's silent for
+# too long. Comment frames are ignored by EventSource clients.
+_LEVEL_STREAM_KEEPALIVE_SEC = 15.0
+
+
+@router.get("/{room_id}/levels")
+async def stream_room_levels(
+    room_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Server-Sent Events stream of audio levels for an active room recording.
+
+    Each event payload is ``{rms_db, peak_db, timestamp}`` (all dBFS) at
+    ~10 Hz. When the recorder shuts down, the stream emits a final
+    ``{event: "end"}`` and closes.
+
+    The recorder ships an in-memory level tap so this endpoint never
+    touches the audio buffer directly — it just snapshots the latest
+    reading every 100 ms.
+
+    Auth: room viewer-or-better. Cross-org reads return 404.
+    """
+    room = _get_room_or_404(db, room_id, active_org.organization.id)
+    _require_room_role(db, current_user, room, active_org, "viewer")
+
+    # Best-effort grab the recorder. If none is active we still emit a
+    # short stream of silence frames so the UI doesn't spin on "connecting".
+    try:
+        from services.room_recorder import get_active_recorders
+    except Exception:  # noqa: BLE001
+        get_active_recorders = lambda: {}  # type: ignore[assignment]
+
+    async def event_stream():
+        started = datetime.now(timezone.utc)
+        last_keepalive = started
+        first = True
+        while True:
+            if await request.is_disconnected():
+                return
+            now = datetime.now(timezone.utc)
+            if (now - started).total_seconds() >= _LEVEL_STREAM_MAX_SECONDS:
+                yield (
+                    "event: end\n"
+                    f"data: {json.dumps({'reason': 'max-lifetime'})}\n\n"
+                )
+                return
+
+            recorder = get_active_recorders().get(room.id)
+            if recorder is None:
+                # Either the room never started, or it just stopped.
+                # First tick: emit a silence frame so the EventSource
+                # opens cleanly. Subsequent ticks: shut down so the
+                # client knows to stop polling.
+                if first:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "rms_db": _PROBE_DB_FLOOR,
+                                "peak_db": _PROBE_DB_FLOOR,
+                                "timestamp": now.isoformat(),
+                                "active": False,
+                            }
+                        )
+                        + "\n\n"
+                    )
+                    first = False
+                    await asyncio.sleep(_LEVEL_STREAM_INTERVAL_SEC)
+                    continue
+                yield (
+                    "event: end\n"
+                    f"data: {json.dumps({'reason': 'recorder-stopped'})}\n\n"
+                )
+                return
+
+            levels = recorder.get_levels()
+            payload = {
+                "rms_db": levels.get("rms_db", _PROBE_DB_FLOOR),
+                "peak_db": levels.get("peak_db", _PROBE_DB_FLOOR),
+                "timestamp": levels.get("timestamp") or now.isoformat(),
+                "active": True,
+            }
+            yield "data: " + json.dumps(payload) + "\n\n"
+            first = False
+
+            if (now - last_keepalive).total_seconds() >= _LEVEL_STREAM_KEEPALIVE_SEC:
+                yield ": keepalive\n\n"
+                last_keepalive = now
+            await asyncio.sleep(_LEVEL_STREAM_INTERVAL_SEC)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx/traefik buffering
+        },
+    )
+
+
+# === Active session lookup ==============================================
+
+
+@router.get(
+    "/{room_id}/active-session",
+    response_model=RoomActiveSessionResponse,
+)
+async def get_active_session(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Return the currently-recording session for this room, if any.
+
+    The Live tab uses this to discover the public session id to poll
+    transcripts against. Returns ``session_id: null`` when the room is
+    idle — that's a 200, not a 404, so the frontend can treat it as a
+    steady-state. Viewer-or-better.
+    """
+    room = _get_room_or_404(db, room_id, active_org.organization.id)
+    _require_room_role(db, current_user, room, active_org, "viewer")
+
+    session = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.room_id == room.id,
+            RecordingSession.organization_id == active_org.organization.id,
+            RecordingSession.status.in_(("recording", "processing", "paused")),
+        )
+        .order_by(desc(RecordingSession.created_at))
+        .first()
+    )
+    if not session:
+        return RoomActiveSessionResponse(room_id=str(room.id))
+    return RoomActiveSessionResponse(
+        room_id=str(room.id),
+        session_id=session.session_id or str(session.id),
+        session_pk=session.id,
+        started_at=session.started_at.isoformat() if session.started_at else None,
+        status=session.status,
+    )
