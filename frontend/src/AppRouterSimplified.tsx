@@ -16,7 +16,10 @@ import SettingsEnhanced from './pages/SettingsEnhanced';
 import { AgentConfiguration } from './pages/admin/AgentConfiguration';
 import { SharedSessionRedirect } from './components/SharedSessionRedirect';
 import { AgentDashboard } from './pages/admin/AgentDashboard';
-import { Menu, X, Circle, Clock } from 'lucide-react';
+import Rooms from './pages/Rooms';
+import RoomSetupWizard from './pages/RoomSetupWizard';
+import RoomDetail from './pages/RoomDetail';
+import { Menu, X, Circle, Clock, DoorOpen } from 'lucide-react';
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {
@@ -81,11 +84,21 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   const { isRecording, recordingTime } = useRecording();
   const location = window.location.hash.replace('#', '');
 
-  const navItems = [
+  // navItems supports either an emoji string or a lucide-react icon
+  // component. The Rooms entry uses the lucide DoorOpen glyph so it
+  // stays visually anchored to the actions sidebar style; everything
+  // else keeps its existing emoji to avoid a global cosmetic change.
+  type NavItem = {
+    path: string;
+    label: string;
+    icon: string | React.ComponentType<{ className?: string }>;
+  };
+  const navItems: NavItem[] = [
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
     { path: '/speakers', label: 'Speakers', icon: '🗣️' },
+    { path: '/rooms', label: 'Rooms', icon: DoorOpen },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
@@ -144,21 +157,24 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
       )}
 
       <div className="space-y-2">
-        {navItems.map(item => (
-          <a
-            key={item.path}
-            href={`#${item.path}`}
-            onClick={onClose}
-            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
-              (item.path === '/' ? location === item.path : location.startsWith(item.path))
-                ? 'bg-zinc-800 text-white'
-                : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-            }`}
-          >
-            <span>{item.icon}</span>
-            <span>{item.label}</span>
-          </a>
-        ))}
+        {navItems.map(item => {
+          const Icon = typeof item.icon === 'string' ? null : item.icon;
+          return (
+            <a
+              key={item.path}
+              href={`#${item.path}`}
+              onClick={onClose}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
+                (item.path === '/' ? location === item.path : location.startsWith(item.path))
+                  ? 'bg-zinc-800 text-white'
+                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+              }`}
+            >
+              {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
+              <span>{item.label}</span>
+            </a>
+          );
+        })}
       </div>
 
       <div className="absolute bottom-4 left-4 right-4">
@@ -223,7 +239,15 @@ export function AppRouterSimplified() {
         </ProtectedRoute>
       } />
 
-      <Route path="/record" element={
+      {/*
+        /record is preserved as a redirect to /record/personal so any
+        existing bookmarks, recording-indicator hash links, and
+        notification surfaces keep working. The personal/browser
+        recording page lives under /record/personal; future room-host
+        UIs can land under /record/<roomid>.
+       */}
+      <Route path="/record" element={<Navigate to="/record/personal" replace />} />
+      <Route path="/record/personal" element={
         <ProtectedRoute>
           <LiveRecording />
         </ProtectedRoute>
@@ -251,6 +275,24 @@ export function AppRouterSimplified() {
       <Route path="/speakers" element={
         <ProtectedRoute>
           <SpeakerLibrary />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/rooms" element={
+        <ProtectedRoute>
+          <Rooms />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/rooms/new" element={
+        <ProtectedRoute>
+          <RoomSetupWizard />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/rooms/:id" element={
+        <ProtectedRoute>
+          <RoomDetail />
         </ProtectedRoute>
       } />
 
