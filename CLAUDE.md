@@ -194,3 +194,27 @@ UC-Meeting-Ops/
   models/                      # GGUF model files for llama.cpp
   docker-compose-full-stack.yml
 ```
+
+## Cloud deployment (bigboy)
+
+The cloud Meeting-Ops instance lives at `/home/muut/Production/UC-Meeting-Ops/` on bigboy (magicunicorn on Tailscale, 100.121.80.175). Source tree is at `/home/muut/Production/UC-Meeting-Ops/src/` (where .git lives).
+
+### Compose invocation quirk
+
+`deploy/` is symlinked from the project root: `/home/muut/Production/UC-Meeting-Ops/deploy → src/deploy`. The compose file uses a build context of `../../src/backend` which only resolves via the symlinked path. Therefore:
+
+```bash
+# CORRECT — run from project root (where the symlink is)
+cd /home/muut/Production/UC-Meeting-Ops/
+docker compose --env-file deploy/bigboy/.env.bigboy -f deploy/bigboy/docker-compose.bigboy.yml up -d --force-recreate --build
+
+# WRONG — runs from src/, build context resolves to a non-existent path
+cd /home/muut/Production/UC-Meeting-Ops/src/
+docker compose -f deploy/bigboy/docker-compose.bigboy.yml ...
+```
+
+Always invoke compose from `/home/muut/Production/UC-Meeting-Ops/`, not from `/src/`.
+
+### Always pass --env-file
+
+Compose without `--env-file deploy/bigboy/.env.bigboy` will silently fall back to a partial environment and may boot containers with wrong config. The env file is required — make it part of every `docker compose` invocation.
