@@ -19,7 +19,20 @@ import { AgentDashboard } from './pages/admin/AgentDashboard';
 import Rooms from './pages/Rooms';
 import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
-import { Menu, X, Circle, Clock, DoorOpen } from 'lucide-react';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck } from 'lucide-react';
+
+/**
+ * Admin detection used across the layout. Mirrors the pattern from
+ * SpeakerLibrary / RoomDetail so a single shape covers superusers
+ * (system-wide) plus per-org admin/superuser roles. Crucially we read
+ * `activeOrganization.role` not user.role, so a user who is admin in
+ * one org and member in another sees admin nav only when the admin
+ * org is currently selected — exactly what Aaron asked for.
+ */
+function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
+  if (isSuperuser) return true;
+  return role === 'admin' || role === 'superuser';
+}
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {
@@ -80,9 +93,16 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
 // Simplified Navigation Component
 function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
+  const { activeOrganization } = useOrg();
   const { isRecording, recordingTime } = useRecording();
   const location = window.location.hash.replace('#', '');
+
+  // Admin visibility is derived from the ACTIVE org's role + the
+  // global superuser flag. Switching org rebinds this immediately —
+  // a user who's admin in Magic Unicorn but member in Aaron-personal
+  // sees the Admin section only when Magic Unicorn is active.
+  const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
 
   // navItems supports either an emoji string or a lucide-react icon
   // component. The Rooms entry uses the lucide DoorOpen glyph so it
@@ -93,15 +113,26 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     label: string;
     icon: string | React.ComponentType<{ className?: string }>;
   };
+  // Workspace-level nav — visible to everyone. Aaron's directive is
+  // that admin items move OUT of the main list and into their own
+  // section, so Speakers / Rooms (the multi-tenant configuration
+  // surfaces) get pushed to the admin section below.
   const navItems: NavItem[] = [
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
-    { path: '/speakers', label: 'Speakers', icon: '🗣️' },
-    { path: '/rooms', label: 'Rooms', icon: DoorOpen },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
+  ];
+  // Admin-only nav — entirely hidden for non-admin users. Even the
+  // section heading goes away when isAdmin is false; an empty
+  // labeled bucket is noisy and Aaron wants the cleaner non-admin
+  // view to land for regular users.
+  const adminNavItems: NavItem[] = [
+    { path: '/rooms', label: 'Rooms', icon: DoorOpen },
+    { path: '/speakers', label: 'Speakers', icon: '🗣️' },
+    { path: '/admin/agents', label: 'Agents', icon: '🤖' },
   ];
 
   const formatTime = (seconds: number) => {
@@ -109,6 +140,25 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const renderNavItem = (item: NavItem) => {
+    const Icon = typeof item.icon === 'string' ? null : item.icon;
+    return (
+      <a
+        key={item.path}
+        href={`#${item.path}`}
+        onClick={onClose}
+        className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
+          (item.path === '/' ? location === item.path : location.startsWith(item.path))
+            ? 'bg-zinc-800 text-white'
+            : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+        }`}
+      >
+        {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
+        <span>{item.label}</span>
+      </a>
+    );
   };
 
   return (
@@ -157,25 +207,26 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
       )}
 
       <div className="space-y-2">
-        {navItems.map(item => {
-          const Icon = typeof item.icon === 'string' ? null : item.icon;
-          return (
-            <a
-              key={item.path}
-              href={`#${item.path}`}
-              onClick={onClose}
-              className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
-                (item.path === '/' ? location === item.path : location.startsWith(item.path))
-                  ? 'bg-zinc-800 text-white'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
-            >
-              {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
-              <span>{item.label}</span>
-            </a>
-          );
-        })}
+        {navItems.map(renderNavItem)}
       </div>
+
+      {/* Admin-only section. Renders only when the current user is an
+          admin in the active organization (or a global superuser). The
+          subtle divider + section heading visually separates these
+          items per Aaron's "labeled as such" directive. Non-admin
+          users see exactly the workspace nav with no admin signal. */}
+      {isAdmin && (
+        <div className="mt-6">
+          <div className="mt-2 border-t border-zinc-800/70" />
+          <div className="mt-4 mb-2 flex items-center gap-2 px-3">
+            <ShieldCheck className="w-3.5 h-3.5 text-zinc-500" />
+            <span className="text-[11px] uppercase tracking-wider text-zinc-500">Admin</span>
+          </div>
+          <div className="space-y-2">
+            {adminNavItems.map(renderNavItem)}
+          </div>
+        </div>
+      )}
 
       <div className="absolute bottom-4 left-4 right-4">
         <button
@@ -215,6 +266,35 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">No organization access.</div></div>;
   }
 
+  return <AppLayout>{children}</AppLayout>;
+}
+
+/**
+ * Admin-only wrapper. Same gating as the sidebar — if the user isn't
+ * an admin in the active org (and not a global superuser), bounce
+ * them to /dashboard. Prevents direct-URL access to /rooms,
+ * /speakers, and /admin/* for regular users. Pages still apply their
+ * own internal admin checks for finer-grained controls (e.g. only
+ * enroll speakers as admin), but this is the route-level gate.
+ */
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  const { activeOrganization, hasAccess, isLoading: isOrgLoading } = useOrg();
+
+  if (isLoading || isOrgLoading) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Authenticating…</div></div>;
+  }
+  if (!isAuthenticated) {
+    redirectToLogin();
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
+  }
+  if (!hasAccess) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">No organization access.</div></div>;
+  }
+  if (!isAdminRole(activeOrganization?.role, user?.is_superuser)) {
+    // Silently bounce, no flash of forbidden content.
+    return <Navigate to="/dashboard" replace />;
+  }
   return <AppLayout>{children}</AppLayout>;
 }
 
@@ -272,28 +352,32 @@ export function AppRouterSimplified() {
         </ProtectedRoute>
       } />
 
+      {/* Admin-gated surfaces. Speakers + Rooms + Agents are all
+          workspace-configuration features Aaron flagged as "admin
+          stuff"; route-level guard bounces non-admin direct links to
+          /dashboard so the sidebar gating + URL gating stay in sync. */}
       <Route path="/speakers" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <SpeakerLibrary />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
       <Route path="/rooms" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <Rooms />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
       <Route path="/rooms/new" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <RoomSetupWizard />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
       <Route path="/rooms/:id" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <RoomDetail />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
       <Route path="/settings" element={
@@ -303,15 +387,15 @@ export function AppRouterSimplified() {
       } />
 
       <Route path="/admin/agents" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <AgentDashboard />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
       <Route path="/admin/agents-old" element={
-        <ProtectedRoute>
+        <AdminRoute>
           <AgentConfiguration />
-        </ProtectedRoute>
+        </AdminRoute>
       } />
 
             <Route path="/rag" element={

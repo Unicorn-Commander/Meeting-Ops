@@ -1,13 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import {
   Activity,
   ChevronDown,
   ChevronUp,
   Clock,
   Copy,
+  Headphones,
   Lightbulb,
   Mic,
-  MonitorSpeaker,
   PanelTopOpen,
   Pause,
   Play,
@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
   UploadCloud,
+  Users,
   X,
 } from 'lucide-react';
 import { useAlwaysOn, type AlwaysOnSummarySlice } from '../contexts/AlwaysOnContext';
@@ -26,7 +27,6 @@ import AudioMeter from './AudioMeter';
 import SessionMicChip from './SessionMicChip';
 import ConfirmModal from './ConfirmModal';
 import {
-  audioSourceLabel,
   isTabCaptureSupported,
   type AudioSourceMode,
 } from '../utils/audioSourceStream';
@@ -142,10 +142,11 @@ interface AudioSourceHintBannerProps {
 }
 
 /**
- * First-time onboarding hint. Sits above the AudioSourcePicker and tells
- * the user that the default "Mic" only captures their own voice — they
- * need "Tab audio" or "Mic + Tab" to include remote callers' voices
- * from Zoom/Meet/Teams. Dismissible; once dismissed, never shown again.
+ * First-time onboarding hint. Sits above the AudioSourcePicker and
+ * nudges the user toward the use-case framing — pick "Online meeting"
+ * to capture other voices from Zoom/Meet/Teams, "In-person, just me"
+ * for solo notes, "Mixed" for hybrid. Dismissible; once dismissed,
+ * never shown again.
  */
 function AudioSourceHintBanner({ onDismiss }: AudioSourceHintBannerProps) {
   return (
@@ -156,12 +157,14 @@ function AudioSourceHintBanner({ onDismiss }: AudioSourceHintBannerProps) {
     >
       <Lightbulb className="mt-0.5 h-5 w-5 flex-shrink-0 text-sky-300" aria-hidden="true" />
       <div className="min-w-0 flex-1">
-        <div className="font-semibold text-white">New: Capture meeting audio</div>
+        <div className="font-semibold text-white">Pick the kind of meeting you're in</div>
         <p className="mt-1 text-[13px] leading-5 text-zinc-300">
-          Pick <span className="font-medium text-sky-200">Tab audio</span> or{' '}
-          <span className="font-medium text-sky-200">Mic + Tab</span> below to include what others say in
-          Zoom, Meet, or Teams calls. The default{' '}
-          <span className="font-medium text-zinc-200">Mic</span> only captures your voice.
+          <span className="font-medium text-sky-200">Online meeting</span> captures the
+          meeting tab plus your mic so remote voices land in the transcript.{' '}
+          <span className="font-medium text-zinc-200">In-person, just me</span> is your
+          mic only.{' '}
+          <span className="font-medium text-sky-200">Mixed</span> is both, for hybrid
+          calls.
         </p>
         <button
           type="button"
@@ -191,71 +194,415 @@ interface AudioSourcePickerProps {
 }
 
 /**
- * Picker for the always-on session's audio source. Three radio options:
- *   - Mic: existing behavior, the user's chosen microphone
- *   - Tab audio: capture a Chrome tab's audio via getDisplayMedia
- *   - Mic + Tab: mix both (useful for in-person + remote hybrid)
+ * Three use-case cards Aaron asked for — users don't think in
+ * Mic/Tab/Mic+Tab, they think "I'm in a Zoom call" or "sitting at my
+ * desk." Each card maps 1:1 to an AudioSourceMode under the hood:
  *
- * Tab + Mic+Tab are hidden in browsers without getDisplayMedia (Safari
- * on iOS, older browsers). The user-friendly explanation lives in the
- * helper text below the radio group — "you'll be prompted to pick a tab
- * after clicking Start".
+ *   In-person, just me   →  'mic'      (your microphone only)
+ *   Online meeting       →  'mic+tab'  (default — captures meeting tab
+ *                                       AND your voice, per Aaron's
+ *                                       "regardless, capturing audio
+ *                                       from people in the meeting")
+ *   Mixed                →  'mic+tab'  (explicitly hybrid, same engine
+ *                                       wiring but labeled differently
+ *                                       so the picker reads cleanly for
+ *                                       Aaron's "in-person + online"
+ *                                       case)
+ *
+ * Within "Online meeting" we expose a sub-toggle to drop the mic if
+ * the user is observing silently — flips the mode to 'tab'. Within
+ * "In-person, just me" we expose the reciprocal — add tab if you're
+ * also on a call — flips to 'mic+tab'. Both sub-toggles persist as
+ * part of the same audioSourceMode setting, so behavior is durable
+ * across page reloads without a second storage key.
+ *
+ * Advanced expander shows the raw Mic / Tab / Mic+Tab buttons for
+ * power users who want to skip the framing.
  */
+
+type UseCase = 'inperson' | 'online' | 'mixed';
+
+function modeToUseCase(mode: AudioSourceMode): UseCase {
+  // We treat 'tab' as a sub-state of 'online' (online + silent observer).
+  // 'mic' is in-person, 'mic+tab' could be either online-active or mixed.
+  // The last-explicit-pick is remembered via localStorage so we don't
+  // bounce the user between two cards every time they reload.
+  if (mode === 'mic') return 'inperson';
+  if (mode === 'tab') return 'online';
+  // mic+tab — fall back to the user's last-explicit choice if we have
+  // one; otherwise default to 'online' (the more common case per Aaron).
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = window.localStorage.getItem(USE_CASE_HINT_KEY);
+      if (stored === 'mixed' || stored === 'online') return stored;
+    } catch {
+      /* ignore */
+    }
+  }
+  return 'online';
+}
+
+const USE_CASE_HINT_KEY = 'meetingops.alwayson.useCaseHint';
+
+function rememberUseCase(uc: UseCase): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(USE_CASE_HINT_KEY, uc);
+  } catch {
+    /* ignore */
+  }
+}
+
 function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps) {
   const tabSupported = isTabCaptureSupported();
-  const options: { id: AudioSourceMode; label: string; sub: string }[] = [
-    { id: 'mic', label: 'Mic', sub: 'Your microphone' },
-    { id: 'tab', label: 'Tab audio', sub: 'Capture a Chrome tab' },
-    { id: 'mic+tab', label: 'Mic + Tab', sub: 'Both, mixed' },
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const useCase = modeToUseCase(value);
+
+  // Sub-toggle for "Online meeting" — when true (default), include mic
+  // on top of tab audio. When false, capture tab only (silent observer).
+  const onlineIncludesMic = value === 'mic+tab';
+  // Sub-toggle for "In-person, just me" — when true, ALSO include tab
+  // (e.g. you're in-person AND on a call). When false (default), mic only.
+  const inpersonIncludesTab = value === 'mic+tab' && useCase === 'mixed';
+
+  const pickInperson = () => {
+    rememberUseCase('inperson');
+    onChange('mic');
+  };
+  const pickOnline = () => {
+    rememberUseCase('online');
+    // Default Online = mic+tab (per Aaron: "capturing audio from people
+    // in the meeting" is non-negotiable, but mic-on-top is the right
+    // default for an active participant). Sub-toggle below can flip
+    // to tab-only.
+    onChange('mic+tab');
+  };
+  const pickMixed = () => {
+    rememberUseCase('mixed');
+    onChange('mic+tab');
+  };
+
+  const cards: Array<{
+    id: UseCase;
+    icon: React.ElementType;
+    title: string;
+    sub: string;
+    blurb: string;
+    onClick: () => void;
+    disabled: boolean;
+  }> = [
+    {
+      id: 'inperson',
+      icon: Mic,
+      title: 'In-person, just me',
+      sub: 'Solo notes / room mic',
+      blurb: "Just my microphone. Best when no one else is on a call.",
+      onClick: pickInperson,
+      disabled,
+    },
+    {
+      id: 'online',
+      icon: Headphones,
+      title: 'Online meeting',
+      sub: 'Zoom / Meet / Teams',
+      blurb: 'Captures the meeting tab audio. Includes my mic by default.',
+      onClick: pickOnline,
+      disabled: disabled || !tabSupported,
+    },
+    {
+      id: 'mixed',
+      icon: Users,
+      title: 'Mixed',
+      sub: 'Me + meeting audio',
+      blurb: 'Both my mic AND a shared tab. For in-person + remote calls.',
+      onClick: pickMixed,
+      disabled: disabled || !tabSupported,
+    },
   ];
 
   return (
-    <div className="mt-5 rounded-lg border border-zinc-800 bg-black/20 px-4 py-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-xs uppercase tracking-wide text-zinc-500">
-          Audio source
+    <div className="mt-5 rounded-lg border border-zinc-800 bg-black/20 px-4 py-4">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-zinc-200">
+          What kind of meeting?
         </span>
-        {value !== 'mic' && (value === 'tab' || value === 'mic+tab') && !disabled && (
+        {(value === 'tab' || value === 'mic+tab') && !disabled && (
           <span className="text-[11px] text-zinc-500">
             You'll pick a tab after clicking Start.
           </span>
         )}
       </div>
-      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Audio source for always-on">
-        {options.map((opt) => {
-          const isTabOption = opt.id !== 'mic';
-          const optDisabled = disabled || (isTabOption && !tabSupported);
-          const active = value === opt.id;
+
+      <div
+        className="grid grid-cols-1 gap-2 sm:grid-cols-3"
+        role="radiogroup"
+        aria-label="Audio source use case"
+      >
+        {cards.map((card) => {
+          const Icon = card.icon;
+          const active = useCase === card.id;
           return (
             <button
-              key={opt.id}
+              key={card.id}
               type="button"
               role="radio"
               aria-checked={active}
-              disabled={optDisabled}
-              onClick={() => onChange(opt.id)}
-              className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+              disabled={card.disabled}
+              onClick={card.onClick}
+              className={`flex flex-col items-start gap-2 rounded-lg border px-3 py-3 text-left text-xs transition-colors ${
                 active
                   ? 'border-fuchsia-500 bg-fuchsia-600/20 text-white'
                   : 'border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
-              } ${optDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+              } ${card.disabled ? 'cursor-not-allowed opacity-40' : ''}`}
               title={
-                isTabOption && !tabSupported
+                card.id !== 'inperson' && !tabSupported
                   ? 'Tab audio requires a Chromium-based desktop browser'
                   : undefined
               }
             >
-              <div className="font-semibold">{opt.label}</div>
-              <div className="text-[11px] text-zinc-400">{opt.sub}</div>
+              <div className="flex items-center gap-2">
+                <Icon className="h-4 w-4" />
+                <span className="font-semibold">{card.title}</span>
+              </div>
+              <div className="text-[11px] text-zinc-400">{card.sub}</div>
+              <div className="text-[11px] leading-4 text-zinc-500">{card.blurb}</div>
             </button>
           );
         })}
       </div>
+
+      {/* Sub-toggles. Online-meeting card lets the user drop their mic
+          for silent observation. In-person card lets the user add tab
+          audio when they're also dialed into a call. Both flip the
+          underlying mode without leaving the chosen use case. */}
+      {useCase === 'online' && !disabled && (
+        <label className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            checked={onlineIncludesMic}
+            onChange={(e) => onChange(e.target.checked ? 'mic+tab' : 'tab')}
+            className="h-3.5 w-3.5 accent-fuchsia-500"
+          />
+          <span>
+            Also include my mic{' '}
+            <span className="text-zinc-500">(recommended for active participants)</span>
+          </span>
+        </label>
+      )}
+      {useCase === 'inperson' && !disabled && tabSupported && (
+        <label className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            checked={inpersonIncludesTab}
+            onChange={(e) => {
+              if (e.target.checked) {
+                rememberUseCase('mixed');
+                onChange('mic+tab');
+              } else {
+                onChange('mic');
+              }
+            }}
+            className="h-3.5 w-3.5 accent-fuchsia-500"
+          />
+          <span>
+            Include meeting tab audio{' '}
+            <span className="text-zinc-500">(if I'm also on a call)</span>
+          </span>
+        </label>
+      )}
+
       {!tabSupported && (
         <p className="mt-2 text-[11px] text-zinc-500">
           Tab audio requires a Chromium-based desktop browser (Chrome / Edge / Brave).
+          Mic-only still works everywhere.
         </p>
       )}
+
+      {/* Advanced expander — raw mode picker for power users who want
+          the unframed semantics. Same three modes, no copy. */}
+      <button
+        type="button"
+        onClick={() => setShowAdvanced((s) => !s)}
+        className="mt-3 inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200"
+        aria-expanded={showAdvanced}
+      >
+        {showAdvanced ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        Advanced: pick audio source manually
+      </button>
+      {showAdvanced && (
+        <div className="mt-2 grid grid-cols-3 gap-2" role="radiogroup" aria-label="Raw audio source">
+          {(
+            [
+              { id: 'mic', label: 'Mic', sub: 'getUserMedia' },
+              { id: 'tab', label: 'Tab', sub: 'getDisplayMedia' },
+              { id: 'mic+tab', label: 'Mic + Tab', sub: 'Web Audio mix' },
+            ] as Array<{ id: AudioSourceMode; label: string; sub: string }>
+          ).map((opt) => {
+            const isTabOption = opt.id !== 'mic';
+            const optDisabled = disabled || (isTabOption && !tabSupported);
+            const active = value === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                disabled={optDisabled}
+                onClick={() => onChange(opt.id)}
+                className={`rounded-lg border px-2 py-1.5 text-left text-[11px] transition-colors ${
+                  active
+                    ? 'border-fuchsia-500 bg-fuchsia-600/20 text-white'
+                    : 'border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+                } ${optDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+              >
+                <div className="font-semibold">{opt.label}</div>
+                <div className="text-[10px] text-zinc-500">{opt.sub}</div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface InSessionSourceMenuProps {
+  /** Current mode from the engine. */
+  value: AudioSourceMode;
+  /** Triggered after the user confirms the swap. */
+  onSwap: (mode: AudioSourceMode) => Promise<void>;
+  /** True while a swap is in flight; disables the menu. */
+  swapping: boolean;
+}
+
+/**
+ * In-session source dropdown — Aaron's "would be nice if that could
+ * be changed on the fly" feature. Renders as a chip-shaped button that
+ * opens a menu of the three use cases. Picking a different one triggers
+ * a confirm modal (cheap, but Aaron explicitly wanted users to know
+ * the current chunk would finalize). On confirm we call
+ * `alwaysOn.switchAudioSource` which goes through the same opener
+ * the device-swap uses — ~200ms gap.
+ */
+function InSessionSourceMenu({ value, onSwap, swapping }: InSessionSourceMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState<AudioSourceMode | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const tabSupported = isTabCaptureSupported();
+  const useCase = modeToUseCase(value);
+
+  // Close on outside click — simple captured-handler pattern, no
+  // popper or focus trap (the menu is tiny and self-contained).
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onDoc);
+    return () => window.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const friendlyLabel: Record<UseCase, string> = {
+    inperson: 'In-person',
+    online: 'Online meeting',
+    mixed: 'Mixed',
+  };
+  const friendlyIcon: Record<UseCase, React.ElementType> = {
+    inperson: Mic,
+    online: Headphones,
+    mixed: Users,
+  };
+  const Icon = friendlyIcon[useCase];
+
+  const items: Array<{ uc: UseCase; mode: AudioSourceMode; label: string; disabled: boolean }> = [
+    { uc: 'inperson', mode: 'mic', label: 'In-person, just me', disabled: false },
+    { uc: 'online', mode: 'mic+tab', label: 'Online meeting', disabled: !tabSupported },
+    { uc: 'mixed', mode: 'mic+tab', label: 'Mixed (me + meeting)', disabled: !tabSupported },
+  ];
+
+  return (
+    <div ref={containerRef} className="relative inline-flex">
+      <button
+        type="button"
+        disabled={swapping}
+        onClick={() => setOpen((o) => !o)}
+        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+          value === 'mic'
+            ? 'border-zinc-700 bg-zinc-800/70 text-zinc-200 hover:bg-zinc-800'
+            : 'border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20'
+        } disabled:cursor-not-allowed disabled:opacity-50`}
+        title="Click to switch the audio source mid-session"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Icon className="h-3.5 w-3.5" />
+        Source: {friendlyLabel[useCase]}
+        <ChevronDown className="h-3 w-3 opacity-60" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-40 mt-1 w-56 rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl shadow-black/40"
+        >
+          {items.map((item) => {
+            const ItemIcon = friendlyIcon[item.uc];
+            const active = useCase === item.uc;
+            return (
+              <button
+                key={item.uc}
+                role="menuitemradio"
+                aria-checked={active}
+                disabled={item.disabled}
+                onClick={() => {
+                  setOpen(false);
+                  if (active) return; // no-op pick of current source
+                  setPending(item.mode);
+                  // Sync the use-case hint so the next session reload
+                  // remembers "Mixed" vs "Online" within mic+tab.
+                  rememberUseCase(item.uc);
+                }}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                  active
+                    ? 'bg-fuchsia-600/20 text-white'
+                    : 'text-zinc-200 hover:bg-zinc-800'
+                } ${item.disabled ? 'cursor-not-allowed opacity-40' : ''}`}
+              >
+                <ItemIcon className="h-3.5 w-3.5" />
+                {item.label}
+                {active && <span className="ml-auto text-[10px] text-zinc-400">current</span>}
+              </button>
+            );
+          })}
+          {!tabSupported && (
+            <div className="px-2 pt-1 pb-0.5 text-[10px] text-zinc-500">
+              Tab capture needs a Chromium-based desktop browser.
+            </div>
+          )}
+        </div>
+      )}
+      <ConfirmModal
+        isOpen={pending !== null}
+        title="Switch audio source mid-recording?"
+        description={(
+          <>
+            The current chunk will finalize and the new source will take
+            over. There's a brief audio gap (under a second) during the
+            swap. Continue?
+          </>
+        )}
+        confirmLabel="Switch"
+        cancelLabel="Cancel"
+        tone="primary"
+        onConfirm={async () => {
+          const target = pending;
+          setPending(null);
+          if (target) await onSwap(target);
+        }}
+        onCancel={() => setPending(null)}
+      />
     </div>
   );
 }
@@ -383,24 +730,17 @@ export default function AlwaysOnControl() {
                   )}
                 </>
               )}
-              {/* Audio source chip — shows what the session is currently
-                  capturing. Read-only mid-session; the picker (below the
-                  controls) is disabled while recording. */}
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
-                  alwaysOn.audioSourceMode === 'mic'
-                    ? 'border-zinc-700 bg-zinc-800/70 text-zinc-200'
-                    : 'border-sky-500/40 bg-sky-500/10 text-sky-200'
-                }`}
-                title="Audio source for this session. Change before starting to use a different source."
-              >
-                {alwaysOn.audioSourceMode === 'mic' ? (
-                  <Mic className="h-3.5 w-3.5" />
-                ) : (
-                  <MonitorSpeaker className="h-3.5 w-3.5" />
-                )}
-                {audioSourceLabel(alwaysOn.audioSourceMode)}
-              </span>
+              {/* On-the-fly source dropdown. Aaron asked for the source
+                  to be swappable mid-session, so this used to be a
+                  read-only chip but is now a clickable menu. Picking a
+                  different option opens a confirm modal and triggers
+                  alwaysOn.switchAudioSource → engine.switchDevice with
+                  the new mode (~200ms gap). */}
+              <InSessionSourceMenu
+                value={alwaysOn.audioSourceMode}
+                swapping={alwaysOn.switchingDevice}
+                onSwap={(mode) => alwaysOn.switchAudioSource(mode)}
+              />
             </div>
           )}
         </div>

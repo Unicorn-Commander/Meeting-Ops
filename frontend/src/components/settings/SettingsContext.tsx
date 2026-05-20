@@ -10,62 +10,77 @@ import {
 } from 'lucide-react';
 import type { SettingsSectionMeta } from './SettingsLayout';
 
+// Settings sections, regrouped into Aaron's three buckets:
+//   - "Your preferences"  → per-user, visible to everyone
+//   - "Workspace setup"   → per-org, admin-only (adminOnly: true)
+//   - "Advanced"          → power-user / debugging / appliance plumbing
+//
+// Don't delete sections during regrouping — just re-bucket. Existing
+// functionality (load/save, lazy section imports in SettingsEnhanced)
+// stays intact; only the sidebar grouping shifts.
 export const ALL_SECTIONS: SettingsSectionMeta[] = [
+  // Your preferences — per-user surfaces.
   {
     id: 'audio',
     title: 'Audio & Recording',
     icon: Mic,
-    description: 'Audio devices and recording configuration',
-    category: 'app',
+    description: 'Microphone, devices, recording defaults',
+    category: 'preferences',
   },
   {
-    id: 'ai',
-    title: 'AI & Transcription',
-    icon: Cpu,
-    description: 'Legacy NPU model picker — superseded by AI Providers',
-    category: 'app',
+    id: 'in-browser-ai',
+    title: 'In-browser AI',
+    icon: Brain,
+    description: 'WebGPU model + privacy-mode fallback',
+    category: 'preferences',
+  },
+
+  // Workspace setup — per-org, admin-only.
+  {
+    id: 'providers',
+    title: 'AI Providers',
+    icon: Network,
+    description: 'Per-service AI provider configuration',
+    category: 'workspace',
+    adminOnly: true,
   },
   {
     id: 'vocabulary',
     title: 'Custom Vocabulary',
     icon: BookOpen,
     description: 'Industry terms and acronyms for transcription',
-    category: 'app',
+    category: 'workspace',
+    adminOnly: true,
   },
+
+  // Advanced — appliance plumbing + debugging surfaces.
   {
-    id: 'providers',
-    title: 'AI Providers',
-    icon: Network,
-    description: 'Per-service AI provider configuration',
-    category: 'app',
-  },
-  {
-    id: 'in-browser-ai',
-    title: 'In-browser AI',
-    icon: Brain,
-    description: 'WebGPU model downloads and fallback mode',
-    category: 'app',
+    id: 'ai',
+    title: 'AI & Transcription (legacy)',
+    icon: Cpu,
+    description: 'Legacy NPU model picker — superseded by AI Providers',
+    category: 'advanced',
   },
   {
     id: 'network',
     title: 'Network Configuration',
     icon: Network,
     description: 'Ethernet, IP, DNS settings',
-    category: 'system',
+    category: 'advanced',
   },
   {
     id: 'wifi',
     title: 'WiFi Settings',
     icon: Wifi,
     description: 'Wireless network configuration',
-    category: 'system',
+    category: 'advanced',
   },
   {
     id: 'performance',
     title: 'Performance & NPU',
     icon: Monitor,
     description: 'Hardware acceleration and limits',
-    category: 'system',
+    category: 'advanced',
   },
 ];
 

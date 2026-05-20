@@ -1,6 +1,8 @@
-import { lazy, useEffect, useState } from 'react';
+import { lazy, useEffect, useMemo, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { config } from '../config';
+import { useAuth } from '../contexts/AuthContext';
+import { useOrg } from '../contexts/OrgContext';
 import SettingsLayout, {
   SaveStatus,
 } from '../components/settings/SettingsLayout';
@@ -13,6 +15,14 @@ import {
   SETTINGS_STORAGE_KEY,
   loadStoredSettings,
 } from '../components/settings/SettingsContext';
+
+// Same admin shape as the router — superuser OR per-org admin. Used to
+// hide adminOnly settings sections from regular users (Aaron: "hide it
+// entirely, don't show with a disabled gray state").
+function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
+  if (isSuperuser) return true;
+  return role === 'admin' || role === 'superuser';
+}
 
 const AudioSettings = lazy(() => import('../components/settings/AudioSettings'));
 const AISettings = lazy(() => import('../components/settings/AISettings'));
@@ -34,7 +44,14 @@ const PerformanceSettings = lazy(
 );
 
 export default function SettingsEnhanced() {
-  const [activeSection, setActiveSection] = useState('providers');
+  const { user } = useAuth();
+  const { activeOrganization } = useOrg();
+  const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
+  // Default to 'audio' (the user-preferences section everyone can see).
+  // We re-select to a visible section in a useEffect below in case
+  // adminOnly filtering kicks out the current pick after a hostCaps /
+  // role flip mid-life.
+  const [activeSection, setActiveSection] = useState(isAdmin ? 'providers' : 'audio');
   const [hostCaps, setHostCaps] = useState<HostCapabilities>({
     local_audio: true,
     npu: false,
@@ -101,9 +118,31 @@ export default function SettingsEnhanced() {
     })();
   }, []);
 
-  const sections = hostCaps.local_audio
-    ? ALL_SECTIONS
-    : ALL_SECTIONS.filter((s) => !APPLIANCE_ONLY_SECTIONS.has(s.id));
+  // Three filters applied in order:
+  //   1. Appliance-only sections are dropped in cloud builds (existing).
+  //   2. adminOnly sections are dropped entirely for non-admin users
+  //      (Aaron's "hide it entirely" directive).
+  // Memoized so the layout doesn't re-render the sidebar list each
+  // unrelated re-render.
+  const sections = useMemo(() => {
+    let list = hostCaps.local_audio
+      ? ALL_SECTIONS
+      : ALL_SECTIONS.filter((s) => !APPLIANCE_ONLY_SECTIONS.has(s.id));
+    if (!isAdmin) {
+      list = list.filter((s) => !s.adminOnly);
+    }
+    return list;
+  }, [hostCaps.local_audio, isAdmin]);
+
+  // If the active section vanishes (admin/role flip, hostCaps load),
+  // re-anchor to the first visible section so the panel doesn't show
+  // an "Select a setting category" empty state mid-life.
+  useEffect(() => {
+    if (sections.length === 0) return;
+    if (!sections.some((s) => s.id === activeSection)) {
+      setActiveSection(sections[0].id);
+    }
+  }, [sections, activeSection]);
 
   const handleSave = async () => {
     setSaving(true);

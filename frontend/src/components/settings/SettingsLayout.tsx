@@ -10,12 +10,40 @@ import {
 
 export type SaveStatus = 'idle' | 'success' | 'error' | 'backend-pending';
 
+/**
+ * Settings sections are bucketed into one of three groups per Aaron's
+ * regrouping audit (2026-05-20 UX refactor). The pre-existing
+ * 'app' / 'admin' / 'system' values are retained for compatibility
+ * with any callers we missed, but the modern groups are:
+ *   - 'preferences'  → per-user, mostly client-side. Visible to
+ *                       everyone. Mic device, in-browser AI, theme.
+ *   - 'workspace'    → per-org, admin-only. AI Providers, Custom
+ *                       Vocabulary, anything that ties to the active
+ *                       organization's shared config.
+ *   - 'advanced'     → power-user / debugging / appliance plumbing.
+ *                       Network, WiFi, Performance, legacy AI panel.
+ */
+export type SettingsCategory =
+  | 'preferences'
+  | 'workspace'
+  | 'advanced'
+  | 'app'
+  | 'admin'
+  | 'system';
+
 export interface SettingsSectionMeta {
   id: string;
   title: string;
   icon: React.ElementType;
   description: string;
-  category: 'app' | 'admin' | 'system';
+  category: SettingsCategory;
+  /**
+   * When true, the section is hidden entirely from non-admin users
+   * (not shown disabled — actually omitted). Aaron's directive: "If a
+   * setting is admin-only but the user isn't admin, hide it entirely
+   * (don't show with a disabled gray state — that's noisy)."
+   */
+  adminOnly?: boolean;
 }
 
 interface SettingsLayoutProps {
@@ -57,14 +85,28 @@ export default function SettingsLayout({
   saveStatus,
   onSave,
 }: SettingsLayoutProps) {
-  const groupedSections = useMemo(
-    () => ({
-      'App Settings': sections.filter((s) => s.category === 'app'),
-      'Admin Settings': sections.filter((s) => s.category === 'admin'),
-      'System Settings': sections.filter((s) => s.category === 'system'),
-    }),
-    [sections]
-  );
+  // Group sections by the new categories first; map old categories
+  // ('app' → preferences, 'admin' → workspace, 'system' → advanced) so
+  // any callers that haven't migrated still render under the right
+  // heading. Empty groups are filtered out in the render below.
+  const groupedSections = useMemo(() => {
+    const buckets: Record<string, SettingsSectionMeta[]> = {
+      'Your preferences': [],
+      'Workspace setup': [],
+      'Advanced': [],
+    };
+    for (const s of sections) {
+      if (s.category === 'preferences' || s.category === 'app') {
+        buckets['Your preferences'].push(s);
+      } else if (s.category === 'workspace' || s.category === 'admin') {
+        buckets['Workspace setup'].push(s);
+      } else {
+        // 'advanced' + 'system' + anything unknown lands in Advanced
+        buckets['Advanced'].push(s);
+      }
+    }
+    return buckets;
+  }, [sections]);
 
   const active = sections.find((s) => s.id === activeSection);
 

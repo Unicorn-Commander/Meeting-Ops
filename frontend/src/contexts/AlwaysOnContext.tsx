@@ -190,6 +190,14 @@ export interface AlwaysOnContextValue {
   audioSourceMode: AudioSourceMode;
   /** Persist a new audio source mode. Only takes effect on next start. */
   setAudioSourceMode: (mode: AudioSourceMode) => void;
+  /**
+   * Swap the active audio source mid-session. Tears down the current
+   * stream (mic, tab, or mixed AudioContext) and reopens via the new
+   * mode through the engine's stream opener — same path switchMicDevice
+   * uses, ~200ms gap. Also persists the new mode so the next start()
+   * picks up where the user left off. No-op when idle.
+   */
+  switchAudioSource: (mode: AudioSourceMode) => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   pause: () => Promise<void>;
@@ -1021,6 +1029,83 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  /**
+   * Hot-swap the audio source mode mid-session. Updates the locked ref
+   * the engine opener reads from, persists to localStorage, then calls
+   * engine.switchDevice() to trigger the full opener path — which now
+   * sees the new mode and reopens mic / tab / mic+tab accordingly.
+   *
+   * No special pause handling beyond what switchMicDevice already does;
+   * the engine teardown is the same regardless of which mode we land in.
+   * Gap is roughly the same as switchMicDevice (~few hundred ms).
+   */
+  const switchAudioSource = useCallback(
+    async (mode: AudioSourceMode) => {
+      // If not active, just persist for next start — same semantics as
+      // setAudioSourceMode would have given.
+      if (stateRef.current !== 'recording' && stateRef.current !== 'paused') {
+        setAudioSourceMode(mode);
+        setAudioSourceModeState(mode);
+        activeAudioSourceModeRef.current = mode;
+        return;
+      }
+      // Same mode — nothing to do.
+      if (activeAudioSourceModeRef.current === mode) {
+        return;
+      }
+      const engine = engineRef.current;
+      if (!engine) return;
+      setSwitchingDevice(true);
+      const wasPaused = stateRef.current === 'paused';
+      // Capture the previous mode so we can revert if the swap fails.
+      const previousMode = activeAudioSourceModeRef.current;
+      // Lock the new mode in BEFORE calling switchDevice — the engine
+      // opener reads activeAudioSourceModeRef inside its callback, so
+      // it has to be flipped first or the reopen happens with the old
+      // mode. Also persist + flip state so the UI chip reflects the
+      // new target immediately.
+      activeAudioSourceModeRef.current = mode;
+      setAudioSourceMode(mode);
+      setAudioSourceModeState(mode);
+      try {
+        if (wasPaused) {
+          await engine.resume();
+        }
+        // For mic-based modes we want to preserve the user's current
+        // mic deviceId; for tab-only the deviceId is irrelevant and the
+        // opener ignores it. Reading getActiveDeviceId() so a per-session
+        // mic override survives the source switch.
+        const currentDeviceId = engine.getActiveDeviceId();
+        const opened = await engine.switchDevice(currentDeviceId);
+        setActiveMicDeviceId(opened);
+        if (wasPaused) {
+          await engine.pause();
+        }
+        // Friendly use-case label for the toast — matches the new
+        // /record page framing so the user sees the same words they
+        // clicked, not the underlying mechanism.
+        const friendlyLabel =
+          mode === 'mic'
+            ? 'In-person (mic only)'
+            : mode === 'tab'
+              ? 'Online meeting (tab only)'
+              : 'Mixed (mic + tab)';
+        showToast.success(`Audio source switched to ${friendlyLabel}`);
+      } catch (err) {
+        // Roll back the locked mode + state so the UI and engine stay
+        // in sync with reality (we never opened the new source).
+        activeAudioSourceModeRef.current = previousMode;
+        setAudioSourceMode(previousMode);
+        setAudioSourceModeState(previousMode);
+        const message = err instanceof Error ? err.message : String(err);
+        setError(`Source swap failed: ${message}`);
+      } finally {
+        setSwitchingDevice(false);
+      }
+    },
+    [],
+  );
+
   // devicechange listener — fires on USB plug/unplug. Three behaviors:
   //   1. New USB device appears: if auto-prefer-USB is ON and we're
   //      recording, surface a "Switch?" toast. If idle, just notify so
@@ -1616,6 +1701,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     switchMicDevice,
     audioSourceMode,
     setAudioSourceMode: updateAudioSourceMode,
+    switchAudioSource,
     start,
     stop,
     pause,
@@ -1654,6 +1740,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     switchMicDevice,
     audioSourceMode,
     updateAudioSourceMode,
+    switchAudioSource,
     start,
     stop,
     pause,
