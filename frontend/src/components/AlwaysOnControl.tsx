@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Lightbulb,
   Mic,
   MonitorSpeaker,
   PanelTopOpen,
@@ -13,6 +14,7 @@ import {
   Sparkles,
   Square,
   UploadCloud,
+  X,
 } from 'lucide-react';
 import { useAlwaysOn, type AlwaysOnSummarySlice } from '../contexts/AlwaysOnContext';
 import AlwaysOnPopout, { isDocumentPictureInPictureSupported } from './AlwaysOnPopout';
@@ -105,6 +107,79 @@ function formatDuration(seconds: number): string {
   return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
+/**
+ * Persisted flag — once the user clicks "Got it" on the audio-source
+ * onboarding hint, we never show it again. Keyed under the existing
+ * `meetingops.*` namespace alongside other UI prefs.
+ */
+const AUDIO_SOURCE_HINT_DISMISSED_KEY = 'meetingops.alwayson.audioSourceHintDismissed';
+
+function readAudioSourceHintDismissed(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    return window.localStorage.getItem(AUDIO_SOURCE_HINT_DISMISSED_KEY) === '1';
+  } catch {
+    // Storage disabled (private window, quota, etc.) — treat as dismissed
+    // so we don't loop on a banner the user can't dismiss.
+    return true;
+  }
+}
+
+function writeAudioSourceHintDismissed(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(AUDIO_SOURCE_HINT_DISMISSED_KEY, '1');
+  } catch {
+    // best-effort; banner will re-show next session but that's harmless
+  }
+}
+
+interface AudioSourceHintBannerProps {
+  onDismiss: () => void;
+}
+
+/**
+ * First-time onboarding hint. Sits above the AudioSourcePicker and tells
+ * the user that the default "Mic" only captures their own voice — they
+ * need "Tab audio" or "Mic + Tab" to include remote callers' voices
+ * from Zoom/Meet/Teams. Dismissible; once dismissed, never shown again.
+ */
+function AudioSourceHintBanner({ onDismiss }: AudioSourceHintBannerProps) {
+  return (
+    <div
+      role="region"
+      aria-label="Audio source tip"
+      className="mt-5 flex items-start gap-3 rounded-lg border border-sky-500/40 bg-gradient-to-br from-sky-500/10 to-fuchsia-500/10 px-4 py-3 text-sm text-zinc-100"
+    >
+      <Lightbulb className="mt-0.5 h-5 w-5 flex-shrink-0 text-sky-300" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold text-white">New: Capture meeting audio</div>
+        <p className="mt-1 text-[13px] leading-5 text-zinc-300">
+          Pick <span className="font-medium text-sky-200">Tab audio</span> or{' '}
+          <span className="font-medium text-sky-200">Mic + Tab</span> below to include what others say in
+          Zoom, Meet, or Teams calls. The default{' '}
+          <span className="font-medium text-zinc-200">Mic</span> only captures your voice.
+        </p>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-100 transition hover:bg-sky-500/20"
+        >
+          Got it
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss tip"
+        className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-800/60 hover:text-zinc-100"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
 interface AudioSourcePickerProps {
   value: AudioSourceMode;
   onChange: (mode: AudioSourceMode) => void;
@@ -186,6 +261,16 @@ export default function AlwaysOnControl() {
   const alwaysOn = useAlwaysOn();
   const [popoutRequestKey, setPopoutRequestKey] = useState(0);
   const [expandedSliceIds, setExpandedSliceIds] = useState<Set<string>>(new Set());
+  // First-time onboarding hint for the audio-source picker. Lazy-init
+  // from localStorage so SSR-style guards still work and we only touch
+  // storage once on mount.
+  const [audioSourceHintDismissed, setAudioSourceHintDismissed] = useState<boolean>(
+    () => readAudioSourceHintDismissed(),
+  );
+  const dismissAudioSourceHint = () => {
+    writeAudioSourceHintDismissed();
+    setAudioSourceHintDismissed(true);
+  };
   const pipSupported = isDocumentPictureInPictureSupported();
   const isActive = alwaysOn.state === 'recording' || alwaysOn.state === 'paused' || alwaysOn.state === 'stopping';
   const transcriptText = useMemo(
@@ -375,6 +460,14 @@ export default function AlwaysOnControl() {
           </button>
         </div>
       </div>
+
+      {/* First-time onboarding hint for the audio-source picker. Hidden
+          once dismissed (localStorage). Also suppressed in privacy mode
+          since local-only users may have different routing concerns and
+          we want to keep that surface focused. */}
+      {!audioSourceHintDismissed && !alwaysOn.localOnly && (
+        <AudioSourceHintBanner onDismiss={dismissAudioSourceHint} />
+      )}
 
       {/* Audio source picker. Lets the user passively listen to a tab
           (e.g. the meeting window in a separate Chrome tab) instead of
