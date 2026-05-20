@@ -97,6 +97,20 @@ MIN_CHUNK_FRAMES = MIN_CHUNK_MS // VAD_FRAME_MS
 INTERNAL_API_BASE = os.getenv("ROOM_RECORDER_API_BASE", "http://localhost:9050")
 PROVENANCE_TAG = "room-server-usb-mic"
 
+# Shared secret for backend-to-backend loopback auth. The chunks endpoints
+# accept this token in an ``X-Internal-Service-Token`` header instead of a
+# user JWT. Empty/unset == feature disabled, and chunk POSTs will 401 at
+# the dual-auth dependency. We log loudly at recorder-start so a missing
+# env var fails visibly instead of silently dropping audio.
+INTERNAL_SERVICE_TOKEN_ENV = "INTERNAL_SERVICE_TOKEN"
+INTERNAL_TOKEN_HEADER = "X-Internal-Service-Token"
+
+
+def _read_internal_token() -> str:
+    """Read INTERNAL_SERVICE_TOKEN from env. Returns empty string when
+    unset. Callers should check the return and refuse to start if empty."""
+    return (os.getenv(INTERNAL_SERVICE_TOKEN_ENV) or "").strip()
+
 
 # === Active recorder registry ===========================================
 # Maps room_id (UUID) -> RoomRecorder. Module-level so any uvicorn worker
@@ -234,11 +248,15 @@ class RoomRecorder:
         self.source_device_path = source_device_path
         self.session_pk = session_pk
         self.session_public_id = session_public_id
-        # Phase 1: no internal token plumbing yet. The chunks endpoint is
-        # auth'd; in production the recorder will need either a service
-        # API key or a shared-secret header. For now we surface this as a
-        # known limitation in the design doc and wire it up in CR-005.
-        self.internal_token = internal_token
+        # CR-005: shared-secret backend-internal auth. Pulled from the
+        # process env at construction time (not at module import) so a
+        # test can override per-instance without monkey-patching globals.
+        # Empty string == feature disabled; we'll skip the POST entirely
+        # and log a clear error so it surfaces in ops dashboards instead
+        # of being lost to a generic 401.
+        self.internal_token = (
+            internal_token if internal_token is not None else _read_internal_token()
+        )
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._task: Optional[asyncio.Task] = None
@@ -306,6 +324,18 @@ class RoomRecorder:
         """Spawn arecord and start the VAD loop. Idempotent."""
         if self.is_running:
             return
+        if not self.internal_token:
+            # Visible at recorder-start so an admin sees the misconfig in
+            # the same log line that announces the recorder coming up,
+            # instead of having to correlate a 401 with the env var name.
+            logger.error(
+                "RoomRecorder room=%s: %s env var is unset/empty. Audio "
+                "chunks will be skipped at POST time. Set the env var on "
+                "the backend container before relying on Conference Room "
+                "mode.",
+                self.room_id,
+                INTERNAL_SERVICE_TOKEN_ENV,
+            )
         cmd = _build_arecord_cmd(self.source_device_path)
         logger.info(
             "Starting RoomRecorder room=%s source=%s cmd=%s",
@@ -466,6 +496,19 @@ class RoomRecorder:
         the recorder ever runs in transcript-only mode, which Phase 1
         doesn't).
         """
+        if not self.internal_token:
+            # Fail-fast (per-chunk). The token is required for the loopback
+            # POST to clear the dual-auth dependency; without it every
+            # chunk would 401 and the audio would silently disappear.
+            logger.error(
+                "RoomRecorder room=%s: %s env var is unset/empty; chunk "
+                "POST skipped. Audio will not be persisted. Set the env "
+                "var on the backend container and recreate.",
+                self.room_id,
+                INTERNAL_SERVICE_TOKEN_ENV,
+            )
+            return
+
         url = (
             f"{INTERNAL_API_BASE}/api/recordings/sessions/"
             f"{self.session_public_id}/chunks"
@@ -474,9 +517,11 @@ class RoomRecorder:
             "X-MeetingOps-Org": self.organization_slug,
             "X-Room-Recorder": "1",
             "X-Room-Recorder-Provenance": PROVENANCE_TAG,
+            # Backend-internal shared secret. Accepted by the chunks
+            # endpoints' dual-auth dependency in place of a user JWT.
+            # Never logged in full; never returned to clients.
+            INTERNAL_TOKEN_HEADER: self.internal_token,
         }
-        if self.internal_token:
-            headers["Authorization"] = f"Bearer {self.internal_token}"
         async with httpx.AsyncClient(timeout=120) as client:
             with wav_path.open("rb") as f:
                 files = {"chunk": (wav_path.name, f, "audio/wav")}

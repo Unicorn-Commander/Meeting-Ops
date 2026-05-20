@@ -15,15 +15,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from auth.dependencies import get_current_organization, get_current_user
-from auth.models import User
-from auth.organization import ActiveOrganization
+from auth.internal import InternalServiceCaller, get_internal_or_user
+from auth.models import Organization, User
+from auth.organization import ActiveOrganization, resolve_active_organization
 from database.database import get_db
 from database.models import AudioFile, RecordingSession, Transcription
 from services.summary_slices import (
@@ -152,6 +153,45 @@ def _find_session(db: Session, session_id: str, org_id: int) -> Optional[Recordi
         return query.filter(RecordingSession.id == int(session_id)).first()
     except (TypeError, ValueError):
         return None
+
+
+def _find_session_by_id(db: Session, session_id: str) -> Optional[RecordingSession]:
+    """Org-agnostic session lookup. Internal-service callers (room_recorder)
+    own a single session and own the trust to write to it regardless of org;
+    they cannot present an org context the way a user can, so we look up by
+    session id alone and derive the org from the row itself."""
+    query = db.query(RecordingSession)
+    session = query.filter(RecordingSession.session_id == session_id).first()
+    if session:
+        return session
+    try:
+        return query.filter(RecordingSession.id == int(session_id)).first()
+    except (TypeError, ValueError):
+        return None
+
+
+def _synthetic_org_for_internal_caller(
+    db: Session, session: RecordingSession
+) -> ActiveOrganization:
+    """Build an ``ActiveOrganization`` from the session row so the rest of
+    the chunks endpoint body (which expects a populated ``active_org``)
+    stays unchanged for internal-service callers. The role is set to
+    ``"system"`` so any future permission check that inspects it can
+    distinguish loopback writes from real user roles."""
+    org = (
+        db.query(Organization)
+        .filter(Organization.id == session.organization_id)
+        .first()
+    )
+    if not org:
+        # Session has an org_id that doesn't resolve — treat as a corrupt
+        # row rather than a 200, and don't fall through into the user
+        # branch.
+        raise HTTPException(
+            status_code=500,
+            detail="Session organization could not be resolved for internal write.",
+        )
+    return ActiveOrganization(organization=org, membership=None, role="system")
 
 
 def _session_payload(session: RecordingSession) -> dict[str, Any]:
@@ -363,7 +403,7 @@ def _append_transcription(
 def _record_audio_file(
     db: Session,
     session: RecordingSession,
-    current_user: User,
+    current_user: Optional[User],
     active_org: ActiveOrganization,
     path: Path,
     upload: UploadFile,
@@ -372,7 +412,7 @@ def _record_audio_file(
         db.add(AudioFile(
             file_id=str(uuid.uuid4()),
             session_id=session.session_id or str(session.id),
-            user_id=current_user.id,
+            user_id=current_user.id if current_user is not None else None,
             filename=Path(upload.filename or path.name).name,
             file_path=str(path),
             file_size=path.stat().st_size,
@@ -499,15 +539,35 @@ async def start_always_on(
 
 @router.post("/sessions/{session_id}/chunks")
 async def upload_always_on_chunk(
+    request: Request,
     session_id: str,
     chunk: UploadFile = File(...),
     elapsed_seconds: Optional[float] = Form(None),
     skip_diarization: bool = Form(False),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    caller: Any = Depends(get_internal_or_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    session = _find_session(db, session_id, active_org.organization.id)
+    # Dual-auth: real user OR room_recorder loopback. Internal callers
+    # write to a session they already own by ID (the recorder spawned it
+    # via the rooms API). We resolve org context from the session row
+    # itself so the rest of this endpoint body doesn't have to branch.
+    if isinstance(caller, InternalServiceCaller):
+        session = _find_session_by_id(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        active_org = _synthetic_org_for_internal_caller(db, session)
+        current_user = None  # type: ignore[assignment]
+        logger.info(
+            "[internal] chunks(audio) POST session_id=%s provenance=%s",
+            session_id,
+            caller.provenance or "unknown",
+        )
+    else:
+        if not getattr(caller, "is_active", False):
+            raise HTTPException(status_code=403, detail="Inactive user")
+        current_user = caller
+        active_org = resolve_active_organization(db, request, current_user)
+        session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     if getattr(session, "mode", "upload") != "always_on":
@@ -575,10 +635,10 @@ async def upload_always_on_chunk(
 
 @router.post("/sessions/{session_id}/chunks-text")
 async def append_client_text_chunk(
+    request: Request,
     session_id: str,
     payload: ClientTextChunkRequest,
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
+    caller: Any = Depends(get_internal_or_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Persist a transcript chunk that was produced by the browser STT.
@@ -598,7 +658,27 @@ async def append_client_text_chunk(
     if not text:
         raise HTTPException(status_code=400, detail="Empty transcript text.")
 
-    session = _find_session(db, session_id, active_org.organization.id)
+    # Dual-auth: real user OR room_recorder loopback. Internal callers
+    # write to a session they already own by ID; org context is derived
+    # from the session row itself instead of the request headers.
+    if isinstance(caller, InternalServiceCaller):
+        session = _find_session_by_id(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        active_org = _synthetic_org_for_internal_caller(db, session)
+        current_user = None  # type: ignore[assignment]
+        logger.info(
+            "[internal] chunks-text POST session_id=%s provenance=%s payload_provenance=%s",
+            session_id,
+            caller.provenance or "unknown",
+            payload.provenance,
+        )
+    else:
+        if not getattr(caller, "is_active", False):
+            raise HTTPException(status_code=403, detail="Inactive user")
+        current_user = caller
+        active_org = resolve_active_organization(db, request, current_user)
+        session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     if getattr(session, "mode", "upload") != "always_on":
