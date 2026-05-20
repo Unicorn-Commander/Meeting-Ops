@@ -15,7 +15,9 @@ pyjwt==2.8.0
 # Audio processing
 PyAudio==0.2.14
 soundfile==0.12.1
-webrtcvad==2.0.10
+# webrtcvad-wheels is the maintained fork that drops the pkg_resources
+# import setuptools 81+ removed; otherwise drop-in (`import webrtcvad`).
+webrtcvad-wheels==2.0.14
 numpy==1.26.4
 
 # AI/ML (minimal for now)

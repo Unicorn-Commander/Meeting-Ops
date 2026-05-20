@@ -28,6 +28,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Make the entrypoint executable. The script runs `alembic upgrade head`
+# before exec'ing uvicorn so alembic is the canonical schema source and
+# new tables never get raced in by create_all without their FK/index
+# additions.
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Create directories for data and NPU kernels
 RUN mkdir -p /app/data /app/recordings /app/whisper_onnx_cache /app/npu_kernels
 
@@ -44,5 +50,5 @@ ENV XILINX_XRT=/opt/xilinx/xrt
 # Expose port
 EXPOSE 9050
 
-# Run the application
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9050"]
+# Run the application via the alembic-first entrypoint.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
