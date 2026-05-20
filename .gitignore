@@ -157,3 +157,4 @@ deploy/bigboy/*.bak
 !deploy/bigboy/.env.bigboy.example
 
 !deploy/bigboy/STATUS.md
+deploy/bigboy/docker-compose.bigboy.yml.bak.*

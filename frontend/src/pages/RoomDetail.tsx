@@ -39,6 +39,7 @@ import RoomLevelMeter from '../components/rooms/RoomLevelMeter';
 import RoomLiveTranscript from '../components/rooms/RoomLiveTranscript';
 import RoomLiveSummary from '../components/rooms/RoomLiveSummary';
 import { getLocalOnly } from '../services/privacyMode';
+import { isAdminRole } from '../utils/roles';
 
 type TabId = 'live' | 'sessions' | 'settings';
 
@@ -51,10 +52,6 @@ const RETENTION_PRESETS: Array<{ label: string; days: number | null }> = [
   { label: 'Unlimited', days: null },
 ];
 
-function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
-  if (isSuperuser) return true;
-  return role === 'admin' || role === 'superuser';
-}
 
 function formatElapsed(startIso: string): string {
   const start = new Date(startIso).getTime();

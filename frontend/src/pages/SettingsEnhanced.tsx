@@ -3,6 +3,7 @@ import { ExternalLink } from 'lucide-react';
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
+import { isAdminRole } from '../utils/roles';
 import SettingsLayout, {
   SaveStatus,
 } from '../components/settings/SettingsLayout';
@@ -19,10 +20,6 @@ import {
 // Same admin shape as the router — superuser OR per-org admin. Used to
 // hide adminOnly settings sections from regular users (Aaron: "hide it
 // entirely, don't show with a disabled gray state").
-function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
-  if (isSuperuser) return true;
-  return role === 'admin' || role === 'superuser';
-}
 
 const AudioSettings = lazy(() => import('../components/settings/AudioSettings'));
 const AISettings = lazy(() => import('../components/settings/AISettings'));

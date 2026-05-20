@@ -3,6 +3,7 @@ import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X } from 'luc
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
+import { isAdminRole } from '../utils/roles';
 
 interface SpeakerSummary {
   id: number;
@@ -36,10 +37,6 @@ interface SpeakerDetail extends SpeakerSummary {
   session_count: number;
 }
 
-const isAdminRole = (role?: string, isSuperuser?: boolean): boolean => {
-  if (isSuperuser) return true;
-  return role === 'admin' || role === 'superuser';
-};
 
 export const SpeakerLibrary: React.FC = () => {
   const { user } = useAuth();

@@ -20,19 +20,8 @@ import Rooms from './pages/Rooms';
 import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck } from 'lucide-react';
+import { isAdminRole } from './utils/roles';
 
-/**
- * Admin detection used across the layout. Mirrors the pattern from
- * SpeakerLibrary / RoomDetail so a single shape covers superusers
- * (system-wide) plus per-org admin/superuser roles. Crucially we read
- * `activeOrganization.role` not user.role, so a user who is admin in
- * one org and member in another sees admin nav only when the admin
- * org is currently selected — exactly what Aaron asked for.
- */
-function isAdminRole(role?: string, isSuperuser?: boolean): boolean {
-  if (isSuperuser) return true;
-  return role === 'admin' || role === 'superuser';
-}
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {

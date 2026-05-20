@@ -301,7 +301,7 @@ function Step2({
         <SourceOption
           icon={<Network className="h-5 w-5" />}
           title="Network audio stream"
-          description="RTP / SRT / Icecast push from a PC or audio interface in the room."
+          description="Chunk-based capture from a remote PC or audio interface in the room."
           selected={false}
           badge="Coming in Phase 2"
           disabled
