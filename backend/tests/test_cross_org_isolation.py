@@ -448,6 +448,10 @@ HTTP_PATHS = [
     "recordings.search",
     "recordings.summary_slices_get_other_org",
     "recordings.summary_slices_post_other_org",
+    # 025_session_attachments + move-org additions:
+    "attachments.list_other_org",
+    "attachments.upload_other_org",
+    "attachments.download_other_org",
 ]
 
 
@@ -579,6 +583,46 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
         assert positive.json(), (
             "Search harness is broken — org A cannot find its own meetings, "
             "so the negative assertion above is meaningless."
+        )
+
+    elif path_under_test == "attachments.list_other_org":
+        # Listing attachments on org B's session from org A's headers
+        # MUST 404 — the session is invisible across orgs.
+        response = client.get(
+            f"/api/simple/recording-sessions/{org_b_session}/attachments",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: org A could list attachments on org B's session "
+            f"{org_b_session}; status={response.status_code}"
+        )
+
+    elif path_under_test == "attachments.upload_other_org":
+        # Posting an attachment to org B's session from org A's headers
+        # MUST 404 — the session is invisible across orgs.
+        response = client.post(
+            f"/api/simple/recording-sessions/{org_b_session}/attachments",
+            headers=headers_a,
+            files={"file": ("evil.txt", b"hi", "text/plain")},
+            data={"attachment_type": "notes"},
+        )
+        assert response.status_code == 404, (
+            f"Leak: org A could upload an attachment to org B's session "
+            f"{org_b_session}; status={response.status_code}"
+        )
+
+    elif path_under_test == "attachments.download_other_org":
+        # Downloading an arbitrary attachment id on org B's session from
+        # org A's headers MUST 404 (the session is invisible). The
+        # arbitrary id makes this test resilient to the writer's
+        # actual key format.
+        response = client.get(
+            f"/api/simple/recording-sessions/{org_b_session}/attachments/00000000-0000-0000-0000-000000000000/download",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: org A could probe attachment download on org B's session "
+            f"{org_b_session}; status={response.status_code}"
         )
 
     else:  # pragma: no cover

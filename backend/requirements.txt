@@ -103,3 +103,6 @@ email-validator==2.2.0
 # Optional router deps (previously skipped at startup)
 aiohttp==3.10.11
 netifaces==0.11.0
+
+# Session attachments object storage (Garage S3) — 025_session_attachments
+boto3==1.35.21

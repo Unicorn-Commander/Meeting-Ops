@@ -168,6 +168,16 @@ _load_router(
 _load_router(app, "session_emails", "api.session_emails")
 _load_router(app, "session_participants", "api.sessions_participants")
 _load_router(app, "action_items", "api.action_items")
+# Per-session file attachments: Granola notes, external transcripts,
+# slide decks, photos, etc. `router` is the CRUD; `counts_router` is the
+# cheap per-session paperclip-icon lookup for the Sessions list page.
+_load_router(app, "session_attachments", "api.session_attachments")
+_load_router(
+    app,
+    "session_attachment_counts",
+    "api.session_attachments",
+    router_attr="counts_router",
+)
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")

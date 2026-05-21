@@ -611,3 +611,80 @@ class TtsJob(Base):
     job_completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class SessionAttachment(Base):
+    """File attached to a recording session.
+
+    Created by 025_session_attachments. Stores related-but-not-primary
+    artifacts the user wants to keep alongside the session: a coworker's
+    Granola notes, an external vendor transcript, a slide deck, a PDF
+    agenda, a photo of a whiteboard, etc.
+
+    Storage is pluggable — `storage_backend` selects how `storage_key`
+    is resolved at download time:
+
+      'garage'  → S3 PutObject on the meeting-ops-attachments bucket,
+                  key = "{org_id}/{session_id}/{uuid}/{filename}"
+      'local'   → file on disk under RECORDINGS_DIR/attachments/{key}
+
+    Cascade deletes ride the session row; storage-side cleanup happens
+    in the API DELETE handler. Org scoping is enforced application-side
+    via the `_resolve_session` helper pattern (all attachment endpoints
+    re-verify the session belongs to the active org before any read or
+    write of this table).
+    """
+
+    __tablename__ = "session_attachments"
+    __table_args__ = (
+        Index("ix_session_attachments_session", "session_id"),
+        Index("ix_session_attachments_organization", "organization_id"),
+        Index(
+            "ix_session_attachments_org_session",
+            "organization_id",
+            "session_id",
+        ),
+    )
+
+    # UUID PK lets the API surface attachments with a string id that's
+    # safe to embed in URLs without leaking row counts (the integer
+    # pk pattern on action_items reveals "we have ~N items" — fine for
+    # action items, but attachments may include third-party material we
+    # don't want to leak count of).
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    uploaded_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    filename = Column(String(500), nullable=False)
+    mime_type = Column(String(200), nullable=True)
+    size_bytes = Column(BigInteger, nullable=False)
+    # Free-form short tag the UI uses to filter and pick an icon.
+    # Common values: 'transcript', 'notes', 'document', 'audio', 'image',
+    # 'video', 'other'. Intentionally not a CHECK so adding new types
+    # doesn't need a migration.
+    attachment_type = Column(String(50), nullable=False)
+    # Free-form user description ("Granola notes from Mike",
+    # "Otter transcript v2").
+    source_label = Column(String(200), nullable=True)
+    notes = Column(Text, nullable=True)
+    # 'garage' | 'local' | 'forgejo' (forgejo reserved for future).
+    storage_backend = Column(String(20), nullable=False)
+    storage_key = Column(String(500), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )

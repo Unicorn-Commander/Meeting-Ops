@@ -27,6 +27,7 @@ import { SpeakerTimeline } from '../components/SpeakerTimeline';
 import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
+import SessionAttachments from '../components/SessionAttachments';
 import { config } from '../config';
 import {
   deleteLocalSession,
@@ -1816,26 +1817,6 @@ export const SessionDetails: React.FC = () => {
                 <Mail className="w-4 h-4" />
                 Email
               </button>
-              {/* Re-process button — re-runs transcribe/diarize/summarize against
-                  the existing audio. Lets users change STT engine, speaker
-                  count, summary template etc. without re-uploading.
-                  Hidden for local-only sessions (no audio file leaves the
-                  device, no server pipeline to re-run). */}
-              {session.audio_file && !session.is_local && (
-                <button
-                  onClick={() => {
-                    setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
-                    setReprocessError(null);
-                    setShowReprocessModal(true);
-                  }}
-                  disabled={reprocessing}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2 text-sm"
-                  title="Re-run transcription with different options"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Re-process
-                </button>
-              )}
               
               {/* Generate Emails Button */}
               <button
@@ -2925,6 +2906,12 @@ export const SessionDetails: React.FC = () => {
                 </button>
               </div>
             </div>
+
+            {/* Attachments — Granola notes, external transcripts, slide
+                decks, photos of a whiteboard, etc. Pluggable storage
+                (Garage when configured, else local disk) handled in
+                services/attachment_storage.py on the backend. */}
+            <SessionAttachments sessionPublicId={sessionId} />
 
             {/* Processing Metadata */}
             {session.metadata && (

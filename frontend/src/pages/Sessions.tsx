@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
   Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
   ArrowUp, ArrowDown, ArrowUpDown, Briefcase, AlertTriangle,
-  Lock as LockIcon,
+  Lock as LockIcon, Paperclip,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
@@ -503,6 +503,11 @@ export const Sessions: React.FC = () => {
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
   // All tags used across the org's sessions; powers the filter chip bar.
   const [orgTags, setOrgTags] = useState<string[]>([]);
+  // session_pk (as string) -> attachment count. Used by the list cards to
+  // show a paperclip icon when a session has any attachments. Fetched
+  // once per active-org swap from the dedicated counts endpoint so we
+  // don't pay N round-trips against /attachments per card.
+  const [attachmentCounts, setAttachmentCounts] = useState<Record<string, number>>({});
   // Loading is only true on the very first mount when nothing is cached.
   // Subsequent polls + filter changes don't toggle this — they update
   // the list in place.
@@ -836,10 +841,25 @@ export const Sessions: React.FC = () => {
       if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
 
       const tagsParam = selectedTags.length > 0 ? `?tags=${selectedTags.map(encodeURIComponent).join(',')}` : '';
-      const [serverRes, localList] = await Promise.allSettled([
+      const [serverRes, localList, attachCountsRes] = await Promise.allSettled([
         fetch(`${config.apiBaseUrl}/api/simple/recording-sessions${tagsParam}`, { headers }),
         listLocalSessions(),
+        // Per-session attachment count for the paperclip icon. Org-scoped
+        // by the active-org header; safe to skip on failure (the rest of
+        // the card still renders, the icon just doesn't show).
+        fetch(`${config.apiBaseUrl}/api/simple/recording-sessions-attachment-counts`, { headers }),
       ]);
+
+      if (attachCountsRes.status === 'fulfilled' && attachCountsRes.value.ok) {
+        try {
+          const counts = await attachCountsRes.value.json();
+          if (counts && typeof counts === 'object') {
+            setAttachmentCounts(counts as Record<string, number>);
+          }
+        } catch {
+          // ignore malformed payload — non-critical
+        }
+      }
 
       let serverSessions: Session[] = [];
       if (serverRes.status === 'fulfilled' && serverRes.value.ok) {
@@ -1601,6 +1621,25 @@ export const Sessions: React.FC = () => {
                           </span>
                         )}
                         <span>{session.title || session.name}</span>
+                        {(() => {
+                          // Paperclip icon when the session has attachments
+                          // (Granola notes, external transcripts, etc.).
+                          // Counts are pre-fetched into attachmentCounts keyed
+                          // by integer pk-as-string. Local sessions never have
+                          // server-side attachments so we skip the lookup.
+                          if (session.is_local) return null;
+                          const n = attachmentCounts[String(session.id)] || 0;
+                          if (n <= 0) return null;
+                          return (
+                            <span
+                              title={`${n} attachment${n === 1 ? '' : 's'}`}
+                              className="inline-flex items-center gap-1 rounded-full border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-200"
+                            >
+                              <Paperclip className="w-3 h-3" />
+                              {n}
+                            </span>
+                          );
+                        })()}
                       </h3>
                       {session.title && session.name !== session.title && (
                         <p className="text-gray-500 text-xs mt-0.5">Original: {session.name}</p>
