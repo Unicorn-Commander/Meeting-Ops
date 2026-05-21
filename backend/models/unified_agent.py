@@ -117,9 +117,9 @@ Be concise, accurate, and focus on actionable insights.""")
         
         default_agent = cls(
             name="Meeting Assistant",
-            description="AI assistant for meeting transcription and analysis using Granite 3.3 8B",
+            description="AI assistant for meeting transcription, summarization, and analysis using the configured LLM provider.",
             personality="Professional, concise, and actionable",
-            system_prompt="""You are a professional meeting assistant powered by Granite 3.3 8B.
+            system_prompt="""You are a professional meeting assistant.
 
 Analyze meeting transcripts and provide structured insights:
 
