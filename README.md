@@ -22,6 +22,10 @@
 
 ---
 
+## Release Notes
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full per-version release history. Latest tag: **v0.7.4** (2026-05-21).
+
 ## What It Does
 
 Meeting-Ops is a self-hosted meeting intelligence appliance. Plug in a USB mic, hit record, and it handles everything: real-time transcription with speaker identification, live AI-generated summaries and action items, full-text search across all meetings, and export to PDF/DOCX. It runs entirely on local hardware — no cloud APIs, no subscriptions, no data leaving your network.

@@ -218,3 +218,17 @@ Always invoke compose from `/home/muut/Production/UC-Meeting-Ops/`, not from `/s
 ### Always pass --env-file
 
 Compose without `--env-file deploy/bigboy/.env.bigboy` will silently fall back to a partial environment and may boot containers with wrong config. The env file is required — make it part of every `docker compose` invocation.
+
+## Versioning + CHANGELOG
+
+This project uses [Semantic Versioning](https://semver.org/). Current series: v0.7.x.
+
+`CHANGELOG.md` at repo root tracks every release in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. Update CHANGELOG.md alongside `frontend/package.json` version bump on every release.
+
+Workflow:
+1. Make changes, commit normally.
+2. When tagging a release: bump `frontend/package.json` version, update CHANGELOG.md (move `[Unreleased]` content to the new version section with date).
+3. Annotated tag with the same release notes as the CHANGELOG entry: `git tag -a vX.Y.Z -m '<release notes>'`.
+4. Push branch + tag: `git push origin main && git push origin vX.Y.Z`.
+
+Tags ship to canonical Forgejo: `git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops`.
