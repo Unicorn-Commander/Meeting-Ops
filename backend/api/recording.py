@@ -277,11 +277,21 @@ def _offset_segments(
     return segments
 
 
-def _speaker_for_segment(seg: dict[str, Any], diar_segments: list[dict[str, Any]]) -> Optional[str]:
+def _speaker_for_segment(
+    seg: dict[str, Any], diar_segments: list[dict[str, Any]]
+) -> tuple[Optional[str], Optional[list[float]]]:
+    """Pick the diarization turn that overlaps `seg` the most.
+
+    Returns (speaker_label, embedding). The embedding is the per-turn
+    voiceprint from speaker-svc (return_embeddings=true) — preserving it
+    onto the transcript segment is what lets identify_speakers match the
+    speaker to enrolled voices downstream.
+    """
     start = float(seg.get("start") or 0)
     end = float(seg.get("end") or 0)
     best_label: Optional[str] = None
     best_overlap = 0.0
+    best_embedding: Optional[list[float]] = None
     for diar in diar_segments:
         diar_start = float(diar.get("start") or 0)
         diar_end = float(diar.get("end") or 0)
@@ -289,7 +299,8 @@ def _speaker_for_segment(seg: dict[str, Any], diar_segments: list[dict[str, Any]
         if overlap > best_overlap:
             best_overlap = overlap
             best_label = diar.get("speaker")
-    return best_label
+            best_embedding = diar.get("embedding")
+    return best_label, best_embedding
 
 
 async def _diarize_chunk(
@@ -316,9 +327,15 @@ async def _diarize_chunk(
                 "end": float(diar.get("end") or 0) + offset_seconds,
             })
         for seg in segments:
-            label = _speaker_for_segment(seg, diar_segments)
+            label, embedding = _speaker_for_segment(seg, diar_segments)
             if label:
                 seg["speaker"] = label
+                # Preserve the per-segment embedding so identify_speakers
+                # can match against enrolled voices. The chunked always-on
+                # pipeline runs diarization per chunk, so the embedding
+                # already lines up with this segment's local time range.
+                if embedding:
+                    seg["embedding"] = embedding
     except Exception as exc:  # noqa: BLE001
         logger.warning("Always-on diarization failed for session %s: %s", session.id, exc)
 

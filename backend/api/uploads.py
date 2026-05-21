@@ -1014,6 +1014,50 @@ async def _transcribe_audio(
     return result
 
 
+def _embedding_for_utterance(
+    utt_start: float,
+    utt_end: float,
+    utt_label: Optional[str],
+    diar_sorted: list[dict],
+) -> Optional[list[float]]:
+    """Return the per-segment embedding that best represents this utterance.
+
+    The diarizer attaches a 256-d embedding to each turn (`return_embeddings=true`
+    in the speaker-svc call). When we collapse word-aligned turns into
+    utterances we lose the 1:1 segment->embedding mapping; restore it by
+    picking the diarization turn with the same speaker label that overlaps
+    the utterance time-range the most. Fall back to longest matching-label
+    turn anywhere in the recording if no time overlap (rare — only happens
+    when the speaker dict points at a single tiny turn).
+    """
+    if not utt_label or not diar_sorted:
+        return None
+    best_emb: Optional[list[float]] = None
+    best_overlap = 0.0
+    best_label_dur = 0.0
+    best_label_emb: Optional[list[float]] = None
+    for d in diar_sorted:
+        if d.get("speaker") != utt_label:
+            continue
+        d_start = float(d.get("start") or 0)
+        d_end = float(d.get("end") or 0)
+        emb = d.get("embedding")
+        if not emb:
+            continue
+        overlap = max(0.0, min(utt_end, d_end) - max(utt_start, d_start))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_emb = emb
+        # Track longest same-label turn as a fallback if there's no overlap
+        # at all (shouldn't happen for well-aligned data but keeps the
+        # function robust for edge cases like single-word utterances).
+        dur = d_end - d_start
+        if dur > best_label_dur:
+            best_label_dur = dur
+            best_label_emb = emb
+    return best_emb if best_emb is not None else best_label_emb
+
+
 def _build_segments_from_words(
     words: list[dict],
     diar_segments: list[dict],
@@ -1025,6 +1069,13 @@ def _build_segments_from_words(
     labeled words left-to-right, starting a new utterance whenever the
     speaker label changes (or there's a gap > 0.8s of silence). Each
     utterance carries the joined text + start/end of its first/last word.
+
+    Embeddings: when the diarization turns carry per-segment embeddings
+    (speaker-svc /diarize?return_embeddings=true), we attach the embedding
+    of the diarization turn that maximally overlaps the utterance. This
+    preserves the data identify_speakers() needs to match enrolled
+    voices — without it the by-label embedding lookup falls through with
+    reason=no_embedding and no auto-links get created.
     """
     if not words or not diar_segments:
         return []
@@ -1049,7 +1100,7 @@ def _build_segments_from_words(
                 best_label = lab
         return best_label
 
-    utterances: list[dict] = []
+    raw_utterances: list[dict] = []
     cur_speaker: Optional[str] = None
     cur_words: list[dict] = []
     cur_start = 0.0
@@ -1072,7 +1123,7 @@ def _build_segments_from_words(
         gap_break = (w_start - last_end) > SILENCE_GAP and cur_words
         if new_speaker or gap_break:
             if cur_words:
-                utterances.append({
+                raw_utterances.append({
                     "start": cur_start,
                     "end": last_end,
                     "speaker": cur_speaker,
@@ -1085,14 +1136,28 @@ def _build_segments_from_words(
         last_end = w_end
 
     if cur_words:
-        utterances.append({
+        raw_utterances.append({
             "start": cur_start,
             "end": last_end,
             "speaker": cur_speaker,
             "text": " ".join(x.get("word", "") for x in cur_words).strip(),
         })
 
-    return utterances
+    # Attach per-utterance embeddings (picked from the matching diar turn
+    # with the most overlap). Skip if no diar turn carried embeddings.
+    has_any_emb = any(d.get("embedding") for d in diar_sorted)
+    if not has_any_emb:
+        return raw_utterances
+    for u in raw_utterances:
+        emb = _embedding_for_utterance(
+            float(u.get("start") or 0),
+            float(u.get("end") or 0),
+            u.get("speaker"),
+            diar_sorted,
+        )
+        if emb is not None:
+            u["embedding"] = emb
+    return raw_utterances
 
 
 def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: list[dict]) -> None:
@@ -1169,15 +1234,20 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
     # --- Path 2: under-segmentation fallback --------------------------------
     segments = transcript.get("segments") or []
     if len(segments) <= max(1, len(diar_segments) // 10):
-        new_segments = [
-            {
+        new_segments = []
+        for d in diar_segments:
+            seg_dict = {
                 "start": float(d.get("start") or 0),
                 "end": float(d.get("end") or 0),
                 "speaker": d.get("speaker"),
                 "text": "",
             }
-            for d in diar_segments
-        ]
+            # Preserve per-segment embeddings so identify_speakers can
+            # match enrolled voices. The diarizer (speaker-svc with
+            # return_embeddings=true) attaches a 256-d float list per turn.
+            if d.get("embedding"):
+                seg_dict["embedding"] = d["embedding"]
+            new_segments.append(seg_dict)
         speakers_ordered: list[str] = []
         seen: set[str] = set()
         for d in new_segments:
@@ -1241,9 +1311,12 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
     # since both lists are usually <500 items.
     diar_sorted = sorted(diar_segments, key=lambda s: float(s.get("start") or 0))
 
-    def _label_for(seg_start: float, seg_end: float) -> Optional[str]:
+    def _label_and_embedding_for(
+        seg_start: float, seg_end: float
+    ) -> tuple[Optional[str], Optional[list[float]]]:
         best_label: Optional[str] = None
         best_overlap = 0.0
+        best_embedding: Optional[list[float]] = None
         for d in diar_sorted:
             d_start = float(d.get("start") or 0)
             d_end = float(d.get("end") or 0)
@@ -1255,20 +1328,31 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_label = d.get("speaker")
-        return best_label
+                best_embedding = d.get("embedding")
+        return best_label, best_embedding
+
+    def _label_for(seg_start: float, seg_end: float) -> Optional[str]:
+        return _label_and_embedding_for(seg_start, seg_end)[0]
 
     for seg in segments:
         start = float(seg.get("start") or 0)
         end = float(seg.get("end") or 0)
-        label = _label_for(start, end)
+        label, embedding = _label_and_embedding_for(start, end)
         if label:
             seg["speaker"] = label
+            # Preserve per-segment embeddings so identify_speakers can
+            # match enrolled voices. Without this the by-label embedding
+            # lookup falls through with reason=no_embedding and no
+            # auto-links get created.
+            if embedding:
+                seg["embedding"] = embedding
 
     transcript["segments"] = segments
     transcript["diarization_backend"] = (
         diar_sorted[0].get("backend") if diar_sorted else None
     )
     session.transcript_diarized = transcript
+    flag_modified(session, "transcript_diarized")
 
     # Also rewrite the per-segment Transcription rows so list/detail views
     # render speaker labels even when they don't go through transcript_diarized.

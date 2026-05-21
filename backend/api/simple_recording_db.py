@@ -988,82 +988,146 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             return
         
         logger.info(f"Starting guaranteed processing for session {session_id}")
-        
-        # Step 1: Transcribe with timeout protection
+
+        # Step 1: Transcribe + diarize via the canonical provider stack so
+        # per-segment embeddings get preserved end-to-end. The legacy
+        # real_whisper_service.transcribe_file path returns segments
+        # without embeddings, so identify_speakers below would skip every
+        # SPEAKER_xx label with reason=no_embedding and never auto-link
+        # enrolled voices. The canonical stack (Parakeet STT + speaker-svc
+        # diarize with return_embeddings=true + word-level alignment in
+        # _assign_speakers_from_diarization) keeps the 256-d ECAPA embedding
+        # on each utterance so identify_speakers can match Aaron's voice
+        # automatically.
         transcription_result = None
         try:
-            logger.info(f"Starting transcription for {audio_file}")
-            
-            # Add timeout to prevent hanging
-            transcription_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    real_whisper_service.transcribe_file,
-                    audio_file,
-                    diarize=True
-                ),
-                timeout=300  # 5 minute timeout
+            logger.info(f"Starting canonical transcribe+diarize for {audio_file}")
+
+            from api.uploads import _assign_speakers_from_diarization
+            from services.providers.registry import get_provider_registry
+
+            registry = get_provider_registry(db)
+
+            # 1a. Transcribe via STT provider (default: Parakeet 1.1B on midboy2)
+            stt_provider = registry.get_stt(session.organization_id)
+            stt_result = await asyncio.wait_for(
+                stt_provider.transcribe(audio_file, language="en"),
+                timeout=600  # 10 minute timeout for long always-on sessions
             )
-            
-            if transcription_result and "segments" in transcription_result:
-                # Save full diarized transcript
+
+            if not stt_result or not stt_result.get("segments"):
+                logger.warning("Canonical STT returned no segments; falling back to legacy whisper")
+                transcription_result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        real_whisper_service.transcribe_file,
+                        audio_file,
+                        diarize=True
+                    ),
+                    timeout=300
+                )
+            else:
+                # Build the unified transcription_result shape downstream
+                # code (vocabulary, summarizer, action items, metadata)
+                # expects: {"text", "segments", "language", ...}.
+                transcription_result = {
+                    "text": stt_result.get("text", ""),
+                    "segments": stt_result.get("segments", []),
+                    "language": stt_result.get("language", "en"),
+                    "model": stt_result.get("model", "parakeet-tdt-1.1b"),
+                    "duration": stt_result.get("duration", 0.0),
+                    "audio_duration": stt_result.get("duration", 0.0),
+                    "rtf": stt_result.get("rtf"),
+                    "npu_accelerated": False,
+                }
+
+            if transcription_result and transcription_result.get("segments"):
+                # Persist transcription FIRST so _assign_speakers_from_diarization
+                # has segments to label and so the word_timestamps land in
+                # processing_metadata where _build_segments_from_words can
+                # find them for Path 1 (word-level alignment).
                 session.transcript_diarized = transcription_result
-                
-                # Save simple text transcript (just the text without speakers)
                 simple_text = " ".join([s.get("text", "") for s in transcription_result.get("segments", [])])
                 session.transcript_simple = simple_text
-                
-                # Legacy field for backward compatibility
                 session.transcript = json.dumps(transcription_result)
-                
-                # Save individual segments with error handling
-                segment_count = 0
-                for segment in transcription_result.get("segments", []):
+
+                # Stash word timestamps from the STT call (Parakeet emits
+                # these natively) so _build_segments_from_words can do
+                # word-level diarization alignment downstream.
+                if stt_result and stt_result.get("words"):
+                    pm = dict(session.processing_metadata or {})
+                    pm["word_timestamps"] = stt_result["words"]
+                    pm["has_word_timestamps"] = True
+                    session.processing_metadata = pm
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(session, "processing_metadata")
+
+                # 1b. Diarize via speaker-svc with return_embeddings=true so
+                # each turn carries a 256-d ECAPA embedding for identify_speakers.
+                diar_segments = []
+                try:
+                    diar_provider = registry.get_diarization(session.organization_id)
+                    diar_segments = await asyncio.wait_for(
+                        diar_provider.diarize(audio_file),
+                        timeout=600
+                    )
+                    logger.info(
+                        f"Canonical diarize: {len(diar_segments)} turns, "
+                        f"embeddings={'yes' if (diar_segments and diar_segments[0].get('embedding')) else 'no'}"
+                    )
+                except Exception as exc:
+                    logger.warning(f"Diarization step failed (non-fatal): {exc}")
+                    diar_segments = []
+
+                if diar_segments:
+                    # _assign_speakers_from_diarization writes labels + embeddings
+                    # onto session.transcript_diarized.segments AND refreshes the
+                    # Transcription rows. After this, identify_speakers (called in
+                    # Step 6a below) can match enrolled voices automatically.
                     try:
-                        # Convert NumPy types to Python native types to avoid database errors
-                        start_time = segment.get("start", 0)
-                        end_time = segment.get("end", 0)
-                        confidence = segment.get("confidence", 0.95)
-                        
-                        # Convert NumPy float64 to Python float
-                        if hasattr(start_time, 'item'):  # NumPy type
-                            start_time = float(start_time.item())
-                        else:
-                            start_time = float(start_time)
-                            
-                        if hasattr(end_time, 'item'):  # NumPy type
-                            end_time = float(end_time.item())
-                        else:
-                            end_time = float(end_time)
-                            
-                        if hasattr(confidence, 'item'):  # NumPy type
-                            confidence = float(confidence.item())
-                        else:
-                            confidence = float(confidence)
-                        
-                        trans = Transcription(
-                            session_id=session.id,  # Use integer to match database schema
-                            text=segment.get("text", ""),
-                            speaker=segment.get("speaker"),
-                            start_time=start_time,
-                            end_time=end_time,
-                            confidence=confidence
-                        )
-                        db.add(trans)
-                        segment_count += 1
-                    except Exception as e:
-                        logger.warning(f"Failed to save segment: {e}")
-                        continue
-                
-                logger.info(f"Saved {segment_count} transcription segments")
+                        _assign_speakers_from_diarization(session, diar_segments)
+                    except Exception as exc:
+                        logger.warning(f"Speaker merge step failed (non-fatal): {exc}")
+
+                    # Re-read segments after merge — _assign_speakers_from_diarization
+                    # rewrites the segments list (Path 1 produces utterances) and
+                    # rewrites Transcription rows itself.
+                    transcription_result = session.transcript_diarized or transcription_result
+                else:
+                    # No diarization → save segments straight to Transcription rows
+                    # so list/detail views render text without speaker labels.
+                    segment_count = 0
+                    for segment in transcription_result.get("segments", []):
+                        try:
+                            trans = Transcription(
+                                session_id=session.id,
+                                text=segment.get("text", ""),
+                                speaker=segment.get("speaker"),
+                                start_time=float(segment.get("start", 0) or 0),
+                                end_time=float(segment.get("end", 0) or 0),
+                                confidence=float(segment.get("confidence", 0.95) or 0.95),
+                            )
+                            db.add(trans)
+                            segment_count += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to save segment: {e}")
+                            continue
+                    logger.info(f"Saved {segment_count} transcription segments (no diarization)")
+
+                segments_after = (session.transcript_diarized or {}).get("segments", []) if isinstance(session.transcript_diarized, dict) else []
+                emb_count = sum(1 for s in segments_after if s.get("embedding"))
+                logger.info(
+                    f"Step 1 complete: {len(segments_after)} segments, "
+                    f"{emb_count} carry embeddings for identify_speakers"
+                )
             else:
                 logger.warning("No transcription segments generated")
                 session.transcript = json.dumps({"text": "Transcription failed", "segments": []})
-                
+
         except asyncio.TimeoutError:
             logger.error(f"Transcription timed out for session {session_id}")
             session.transcript = json.dumps({"text": "Transcription timed out", "segments": []})
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
+            logger.error(f"Transcription error: {e}", exc_info=True)
             session.transcript = json.dumps({"text": f"Transcription error: {str(e)}", "segments": []})
         
         # Step 1.5: Apply vocabulary replacements to transcript
@@ -1200,14 +1264,26 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                     speakers.add(segment["speaker"])
             speaker_count = len(speakers)
         
-        # Update metadata
+        # Update metadata. Pull the actual STT model name + npu flag from
+        # transcription_result so always-on sessions reflect whether they
+        # ran through Parakeet (canonical) or the legacy NPU whisper fallback.
         metadata = session.processing_metadata or {}
+        transcription_model = (
+            (transcription_result or {}).get("model")
+            if isinstance(transcription_result, dict)
+            else None
+        ) or "parakeet-tdt-1.1b"
+        npu_accelerated = bool(
+            (transcription_result or {}).get("npu_accelerated", False)
+            if isinstance(transcription_result, dict)
+            else False
+        )
         metadata.update({
             "word_count": word_count,
             "speaker_count": speaker_count,
-            "npu_accelerated": True,  # We always use NPU for transcription
+            "npu_accelerated": npu_accelerated,
             "processing_time_ms": int(processing_duration * 1000) if processing_duration > 0 else 0,
-            "transcription_model": "whisper-large-v3",
+            "transcription_model": transcription_model,
             "ai_model": "granite3.3:8b",
             "processing_completed_at": datetime.now(timezone.utc).isoformat()
         })
