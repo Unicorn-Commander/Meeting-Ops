@@ -178,6 +178,8 @@ _load_router(
     "api.session_attachments",
     router_attr="counts_router",
 )
+# Move-session-between-orgs: org reassignment with cascade + Qdrant re-tag.
+_load_router(app, "session_move_org", "api.session_move_org")
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")

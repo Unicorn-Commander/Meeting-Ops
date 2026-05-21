@@ -452,6 +452,7 @@ HTTP_PATHS = [
     "attachments.list_other_org",
     "attachments.upload_other_org",
     "attachments.download_other_org",
+    "move_org.cross_org_target_blocked",
 ]
 
 
@@ -623,6 +624,23 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
         assert response.status_code == 404, (
             f"Leak: org A could probe attachment download on org B's session "
             f"{org_b_session}; status={response.status_code}"
+        )
+
+    elif path_under_test == "move_org.cross_org_target_blocked":
+        # Move-org: A's caller is admin in A but not a member of B.
+        # An attempt to move an A-session into B must be 403 (the
+        # target-membership check fires), NOT 200. This pins the
+        # contract: just because you can read a session doesn't mean
+        # you can shove it into someone else's org.
+        response = client.post(
+            f"/api/simple/recording-sessions/{two_orgs['sess_a_public_id']}/move-org",
+            headers=headers_a,
+            json={"target_organization_id": two_orgs["org_b_id"]},
+        )
+        assert response.status_code == 403, (
+            f"Leak: org A's admin (not a member of org B) could move a "
+            f"session into org B; status={response.status_code}, "
+            f"body={response.text[:300]}"
         )
 
     else:  # pragma: no cover

@@ -28,6 +28,7 @@ import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
+import MoveSessionOrgModal from '../components/MoveSessionOrgModal';
 import { config } from '../config';
 import {
   deleteLocalSession,
@@ -211,6 +212,7 @@ export const SessionDetails: React.FC = () => {
   const [showReprocessModal, setShowReprocessModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
+  const [showMoveOrgModal, setShowMoveOrgModal] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   // Speaker link + org speaker library — fetched once per session so the
   // inline SpeakerLabelEditor popover can render assign/merge targets
@@ -1817,6 +1819,40 @@ export const SessionDetails: React.FC = () => {
                 <Mail className="w-4 h-4" />
                 Email
               </button>
+              {/* Move-to-org button — reassigns the entire session record
+                  (audio, transcripts, attachments, chat, search index)
+                  to a different org the user belongs to. Hidden for
+                  local-only sessions (nothing to move on the server). */}
+              {!session.is_local && (
+                <button
+                  onClick={() => setShowMoveOrgModal(true)}
+                  className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 flex items-center gap-2 text-sm"
+                  title="Move this session to a different organization"
+                >
+                  <Briefcase className="w-4 h-4" />
+                  Move
+                </button>
+              )}
+              {/* Re-process button — re-runs transcribe/diarize/summarize against
+                  the existing audio. Lets users change STT engine, speaker
+                  count, summary template etc. without re-uploading.
+                  Hidden for local-only sessions (no audio file leaves the
+                  device, no server pipeline to re-run). */}
+              {session.audio_file && !session.is_local && (
+                <button
+                  onClick={() => {
+                    setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
+                    setReprocessError(null);
+                    setShowReprocessModal(true);
+                  }}
+                  disabled={reprocessing}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                  title="Re-run transcription with different options"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Re-process
+                </button>
+              )}
               
               {/* Generate Emails Button */}
               <button
@@ -3264,6 +3300,37 @@ export const SessionDetails: React.FC = () => {
         sessionId={session.id || sessionId || ''}
         isOpen={showEmailModal}
         onClose={() => setShowEmailModal(false)}
+      />
+
+      {/* Move-session-org modal — opens when the user clicks Move from
+          the action row. On success: switches the active org to the new
+          home (so the session is still visible in the same view) and
+          shows a toast with the move summary + any orphaned speaker
+          links the user may want to clean up. */}
+      <MoveSessionOrgModal
+        open={showMoveOrgModal}
+        sessionPublicId={sessionId || ''}
+        sessionName={session.name || session.title || 'this session'}
+        onClose={() => setShowMoveOrgModal(false)}
+        onMoved={(resp) => {
+          setShowMoveOrgModal(false);
+          const orphans = resp.orphaned_speaker_links?.length || 0;
+          const orphanNote = orphans > 0
+            ? ` ${orphans} speaker link${orphans === 1 ? '' : 's'} may need re-linking in the new org.`
+            : '';
+          // Best-effort toast. AppRouterSimplified mounts a ToastContainer
+          // at the root; if window has a global flash helper we use it,
+          // else fall back to alert() so the user gets feedback.
+          const msg = `Session moved.${orphanNote}`;
+          try {
+            window.dispatchEvent(new CustomEvent('app-toast', { detail: { kind: 'success', message: msg } }));
+          } catch {
+            // ignore
+          }
+          // Navigate back to /sessions so the list re-renders in the
+          // newly-active org context.
+          navigate('/sessions');
+        }}
       />
 
       {/* Re-process modal */}
