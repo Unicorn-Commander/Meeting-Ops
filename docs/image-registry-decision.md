@@ -29,17 +29,17 @@ This is fine for a one-off; it's annoying by the 3rd time.
 
 ### Option 1 — Forgejo container registry (RECOMMENDED)
 
-**What it is.** Forgejo ships an OCI-compatible container registry as part of its built-in Packages feature. Our existing `unicorn-forgejo` container at `git.magicunicorn.dev` exposes it at `/v2/`.
+**What it is.** Forgejo ships an OCI-compatible container registry as part of its built-in Packages feature. Our existing `unicorn-forgejo` container at `git.unicorncommander.ai` exposes it at `/v2/`.
 
 **Status today.**
-- Probed `https://git.magicunicorn.dev/v2/` → returns `HTTP 401` (= registry online, auth required — correct OCI behavior)
+- Probed `https://git.unicorncommander.ai/v2/` → returns `HTTP 401` (= registry online, auth required — correct OCI behavior)
 - Storage path: `/data/gitea/packages` inside the container (4KB used, no images yet)
 - No `[packages]` block in app.ini → Forgejo defaults apply (ENABLED, no size cap)
 
 **Pros.**
 - Zero new infrastructure — already running, already TLS-terminated, already in DNS
 - Auth via existing Forgejo Personal Access Tokens (scope: `write:package` / `read:package`)
-- Per-org namespacing: `git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:latest`
+- Per-org namespacing: `git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:latest`
 - Garbage collection + UI for browsing tags built in
 - Pulls work over Tailscale (Forgejo is reachable on the tailnet too)
 - Audit trail: package downloads logged
@@ -47,14 +47,14 @@ This is fine for a one-off; it's annoying by the 3rd time.
 **Cons.**
 - Forgejo on bigboy = single point of failure for image pulls (acceptable; bigboy goes down means everything is sad anyway)
 - Storage on bigboy disk (not Garage) — fine at our scale, would matter at 100+ images
-- Public DNS (`git.magicunicorn.dev`) so we should keep images on private repos or use tailnet-only DNS for pulls
+- Public DNS (`git.unicorncommander.ai`) so we should keep images on private repos or use tailnet-only DNS for pulls
 
 **Effort.** ~15 minutes:
 1. Create Forgejo PAT with `write:package` scope (web UI)
-2. `docker login git.magicunicorn.dev -u aaron -p <pat>` on bigboy AND midboy2
-3. `docker tag meet-speaker-svc:local git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:v$(date +%Y%m%d)`
-4. `docker push git.magicunicorn.dev/...`
-5. On midboy2: `docker pull git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:v...`
+2. `docker login git.unicorncommander.ai -u aaron -p <pat>` on bigboy AND midboy2
+3. `docker tag meet-speaker-svc:local git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:v$(date +%Y%m%d)`
+4. `docker push git.unicorncommander.ai/...`
+5. On midboy2: `docker pull git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:v...`
 6. Update midboy2's compose to reference the registry tag instead of `meet-speaker-svc:local`
 
 ### Option 2 — Garage-backed standalone registry
@@ -107,25 +107,25 @@ If Forgejo's storage on bigboy ever becomes a problem (>50GB of images), revisit
 
 ```bash
 # 1. One-time setup on bigboy
-docker login git.magicunicorn.dev -u aaron
+docker login git.unicorncommander.ai -u aaron
 #   → use a Forgejo PAT with scope: write:package, read:package
 #   → save creds to ~/.docker/config.json (chmod 600)
 
 # 2. One-time setup on midboy2 (read-only pulls)
-ssh midboy2 'docker login git.magicunicorn.dev -u aaron'
+ssh midboy2 'docker login git.unicorncommander.ai -u aaron'
 #   → use a separate PAT with scope: read:package
 
 # 3. Per-deploy on bigboy
 TAG=v$(date +%Y%m%d-%H%M)
 docker tag meet-speaker-svc:local \
-  git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:$TAG
+  git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:$TAG
 docker tag meet-speaker-svc:local \
-  git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:latest
-docker push git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:$TAG
-docker push git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:latest
+  git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:latest
+docker push git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:$TAG
+docker push git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:latest
 
 # 4. Per-deploy on midboy2
-ssh midboy2 'docker pull git.magicunicorn.dev/unicorncommander/uc-meeting-ops-speaker-svc:latest'
+ssh midboy2 'docker pull git.unicorncommander.ai/unicorncommander/uc-meeting-ops-speaker-svc:latest'
 # update midboy2 compose to reference the registry tag, then:
 ssh midboy2 'cd /path/to/midboy2/compose && docker compose up -d --force-recreate speaker-svc'
 ```
@@ -138,6 +138,6 @@ ssh midboy2 'cd /path/to/midboy2/compose && docker compose up -d --force-recreat
 
 ## Open questions
 
-- Should we use `git.magicunicorn.dev` (public Cloudflare-fronted) or a tailnet-only Forgejo DNS for pulls? Public is simpler; tailnet-only is more paranoid. Default to public until there's a real reason to lock it down.
-- Should non-meeting-ops services use the same registry? Yes — single registry per org is cleaner. Reserve `git.magicunicorn.dev/unicorncommander/*` for org images.
+- Should we use `git.unicorncommander.ai` (public Cloudflare-fronted) or a tailnet-only Forgejo DNS for pulls? Public is simpler; tailnet-only is more paranoid. Default to public until there's a real reason to lock it down.
+- Should non-meeting-ops services use the same registry? Yes — single registry per org is cleaner. Reserve `git.unicorncommander.ai/unicorncommander/*` for org images.
 - Garbage collection cadence? Forgejo defaults are reasonable; revisit only if `/data/gitea/packages` grows beyond ~50GB.
