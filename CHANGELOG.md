@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- meeting-ops.magicunicorn.dev (hyphenated) as alias for canonical meetingops.magicunicorn.dev. Cloudflare CNAME (proxied) + Traefik 308 redirect via redirectregex middleware. Cookies/sessions stay on canonical; URL works either way.
+
 ## [0.7.4] - 2026-05-21
 
 ### Changed
