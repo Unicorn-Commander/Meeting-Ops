@@ -13,7 +13,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
@@ -35,8 +35,18 @@ router = APIRouter(prefix="/api/simple/recording-sessions", tags=["session-email
 
 class EmailAttendeesRequest(BaseModel):
     # When speaker_ids is provided, send to those SpeakerProfile emails (existing
-    # behavior). When omitted/empty, fall back to session.participants[*].email.
+    # behavior). When omitted/empty AND additional_recipients is also empty,
+    # fall back to session.participants[*].email.
     speaker_ids: Optional[List[int]] = Field(default=None, max_length=64)
+    # Arbitrary external email addresses — people who were NOT identified
+    # as speakers in this meeting. Each one gets a fresh (or reused)
+    # SessionCollaborator row + magic-link token granting read access to
+    # ONLY this session.
+    additional_recipients: List[EmailStr] = Field(
+        default_factory=list,
+        max_length=64,
+        description="Free-form external email addresses to also send to",
+    )
     include: List[str] = Field(
         default_factory=lambda: ["link"],
         description="Which artifacts to include: link, summary_pdf, transcript_pdf",
@@ -245,10 +255,16 @@ async def email_attendees(
     if not (is_admin or is_creator or getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Not permitted to email attendees for this session")
 
-    # Build the recipient list. If the caller named speaker_ids, that wins
-    # (existing UI flow from the EmailAttendeesModal). If not, fall back to
-    # session.participants so the new "send to the people who were here"
-    # button on SessionDetails just works without a separate picker.
+    # Build the recipient list. The handler supports three input modes,
+    # which can combine in a single send:
+    #   1. speaker_ids — named speakers identified in the meeting (existing
+    #      EmailAttendeesModal flow). Looks up SpeakerProfile.email.
+    #   2. additional_recipients — free-form external email addresses for
+    #      people NOT identified as attendees. Each gets a session-scoped
+    #      magic link.
+    #   3. Neither provided — fall back to session.participants[*].email,
+    #      preserving the "send to the people who were here" button on
+    #      SessionDetails.
     recipients: List[dict] = []
     if payload.speaker_ids:
         speakers = (
@@ -260,7 +276,10 @@ async def email_attendees(
             .all()
         )
         if not speakers:
-            raise HTTPException(status_code=404, detail="No matching speakers")
+            # Only 404 here if neither input source produced anything; the
+            # caller may still have valid additional_recipients.
+            if not payload.additional_recipients:
+                raise HTTPException(status_code=404, detail="No matching speakers")
         for sp in speakers:
             recipients.append({
                 "ref": f"speaker:{sp.id}",
@@ -268,7 +287,26 @@ async def email_attendees(
                 "name": sp.display_name,
                 "email": (sp.email or "").strip(),
             })
-    else:
+
+    if payload.additional_recipients:
+        # Dedupe against already-collected speaker emails so we don't double-send
+        # to someone who's both a named speaker and was re-typed into the
+        # external-recipients box.
+        existing_emails = {(r.get("email") or "").lower() for r in recipients if r.get("email")}
+        for raw_email in payload.additional_recipients:
+            email = str(raw_email).strip()
+            if not email or email.lower() in existing_emails:
+                continue
+            existing_emails.add(email.lower())
+            recipients.append({
+                "ref": f"external:{email.lower()}",
+                "name": None,
+                "email": email,
+            })
+
+    if not recipients and not payload.speaker_ids:
+        # Neither speaker_ids nor additional_recipients supplied — try the
+        # participants fallback.
         raw = session.participants if isinstance(session.participants, list) else []
         for p in raw:
             if not isinstance(p, dict):
@@ -282,8 +320,17 @@ async def email_attendees(
         if not recipients:
             raise HTTPException(
                 status_code=400,
-                detail="No recipients: session has no participants and no speaker_ids passed",
+                detail="No recipients: session has no participants and no speaker_ids or additional_recipients passed",
             )
+
+    if not recipients:
+        # speaker_ids was passed but resolved to zero usable rows AND no
+        # additional_recipients — refuse explicitly so the UI shows a useful
+        # error rather than a silent 200 with sent=0.
+        raise HTTPException(
+            status_code=400,
+            detail="No recipients to send to",
+        )
 
     include = [s.lower() for s in (payload.include or ["link"])]
     attachments = _build_attachments(db, session, include) or None
@@ -305,6 +352,8 @@ async def email_attendees(
                 failure["speaker_id"] = r["speaker_id"]
             elif "participant_id" in r:
                 failure["participant_id"] = r["participant_id"]
+            elif r.get("ref", "").startswith("external:"):
+                failure["external"] = True
             failures.append(failure)
             continue
         link = _resolve_link_for_email(db, session, current_user, email) if "link" in include else None
@@ -325,11 +374,20 @@ async def email_attendees(
                 failure["speaker_id"] = r["speaker_id"]
             elif "participant_id" in r:
                 failure["participant_id"] = r["participant_id"]
+            elif r.get("ref", "").startswith("external:"):
+                failure["external"] = True
             failures.append(failure)
 
+    sources = []
+    if payload.speaker_ids:
+        sources.append("speakers")
+    if payload.additional_recipients:
+        sources.append("external")
+    if not sources:
+        sources.append("participants")
     logger.info(
         "email-attendees: session=%s sent=%d skipped=%d failed=%d (source=%s)",
         session.id, sent, skipped, len(failures),
-        "speakers" if payload.speaker_ids else "participants",
+        "+".join(sources),
     )
     return EmailAttendeesResponse(sent=sent, skipped=skipped, failures=failures)

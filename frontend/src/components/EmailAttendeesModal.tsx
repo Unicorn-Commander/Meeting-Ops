@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Mail, RefreshCw, Send, AlertCircle, Check } from 'lucide-react';
+import { X, Mail, RefreshCw, Send, AlertCircle, Check, Plus } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 
@@ -23,8 +23,19 @@ interface Props {
 interface SendResult {
   sent: number;
   skipped: number;
-  failures: Array<{ speaker_id: number; name?: string; email?: string; reason: string }>;
+  failures: Array<{
+    speaker_id?: number;
+    participant_id?: number | string;
+    external?: boolean;
+    name?: string;
+    email?: string;
+    reason: string;
+  }>;
 }
+
+// Client-side sanity check. The server uses pydantic EmailStr for the
+// strict validation; this just keeps obvious typos out of the chip list.
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClose }) => {
   const { activeOrganization } = useOrg();
@@ -40,6 +51,13 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
   const [includeTranscript, setIncludeTranscript] = useState(false);
   const [customMessage, setCustomMessage] = useState('');
 
+  // Free-form external recipients (people NOT identified as speakers in
+  // this meeting). Each one gets a session-scoped magic link from the
+  // backend.
+  const [externalRecipients, setExternalRecipients] = useState<string[]>([]);
+  const [externalDraft, setExternalDraft] = useState('');
+  const [externalError, setExternalError] = useState<string | null>(null);
+
   const orgHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = {};
     if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
@@ -48,6 +66,11 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
 
   useEffect(() => {
     if (!isOpen) return;
+    // Reset external-recipient state every time the modal opens so old
+    // chips from a previous meeting don't carry over.
+    setExternalRecipients([]);
+    setExternalDraft('');
+    setExternalError(null);
     let cancelled = false;
     (async () => {
       setLoading(true);
@@ -107,9 +130,52 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
     });
   };
 
+  // Set of speaker emails already in the named-attendee picker. We use it
+  // to short-circuit duplicates if the user types one of those addresses
+  // into the external-recipients box. The backend dedupes too, but doing
+  // it here keeps the UI honest.
+  const speakerEmailSet = useMemo(() => {
+    const out = new Set<string>();
+    for (const s of namedSpeakers) {
+      const e = (s.email || '').trim().toLowerCase();
+      if (e) out.add(e);
+    }
+    return out;
+  }, [namedSpeakers]);
+
+  const addExternalRecipient = () => {
+    const raw = externalDraft.trim();
+    if (!raw) {
+      setExternalError(null);
+      return;
+    }
+    if (!EMAIL_REGEX.test(raw)) {
+      setExternalError('That doesn’t look like an email address.');
+      return;
+    }
+    const norm = raw.toLowerCase();
+    if (externalRecipients.some((e) => e.toLowerCase() === norm)) {
+      setExternalError('Already added.');
+      return;
+    }
+    if (speakerEmailSet.has(norm)) {
+      setExternalError('That address is already in the speaker list above.');
+      return;
+    }
+    setExternalRecipients((cur) => [...cur, raw]);
+    setExternalDraft('');
+    setExternalError(null);
+  };
+
+  const removeExternalRecipient = (email: string) => {
+    setExternalRecipients((cur) => cur.filter((e) => e !== email));
+  };
+
+  const totalRecipientCount = selected.size + externalRecipients.length;
+
   const handleSend = async () => {
-    if (selected.size === 0) {
-      setError('Pick at least one attendee.');
+    if (totalRecipientCount === 0) {
+      setError('Add at least one recipient — a speaker or an external email.');
       return;
     }
     const include: string[] = [];
@@ -131,6 +197,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify({
             speaker_ids: Array.from(selected),
+            additional_recipients: externalRecipients,
             include,
             message: customMessage.trim() || undefined,
           }),
@@ -155,9 +222,9 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
       <div className="w-full max-w-2xl rounded-lg border border-gray-700 bg-gray-950 shadow-2xl">
         <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-white">Email this meeting</h2>
+            <h2 className="text-lg font-semibold text-white">Share via email</h2>
             <p className="mt-0.5 text-xs text-gray-400">
-              Pick attendees and what to send. Magic-link recipients can view the meeting without an account.
+              Send the meeting to identified speakers or anyone else by email. Magic-link recipients can view the meeting without an account.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
@@ -188,11 +255,18 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
               </div>
               {result.failures.length > 0 && (
                 <ul className="ml-5 list-disc text-xs text-amber-300">
-                  {result.failures.map((f, idx) => (
-                    <li key={idx}>
-                      <span className="font-medium">{f.name || f.email || `speaker ${f.speaker_id}`}</span>: {f.reason}
-                    </li>
-                  ))}
+                  {result.failures.map((f, idx) => {
+                    const label =
+                      f.name ||
+                      f.email ||
+                      (f.speaker_id ? `speaker ${f.speaker_id}` : null) ||
+                      (f.external ? 'external recipient' : `recipient ${idx + 1}`);
+                    return (
+                      <li key={idx}>
+                        <span className="font-medium">{label}</span>: {f.reason}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -202,13 +276,13 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
             <>
               <div>
                 <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
-                  Attendees
+                  Speakers identified in this meeting
                 </p>
                 <div className="space-y-1.5">
                   {namedSpeakers.length === 0 && (
                     <p className="text-xs text-gray-500">
-                      No named attendees on this meeting yet. Click a speaker label in the
-                      transcript to rename + enroll them first, then return here.
+                      No named speakers on this meeting yet. Click a speaker label in the
+                      transcript to rename + enroll them, or just add other recipients below.
                     </p>
                   )}
                   {namedSpeakers.map((s) => {
@@ -245,6 +319,71 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                     </p>
                   )}
                 </div>
+              </div>
+
+              <div>
+                <p className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">
+                  Other recipients
+                </p>
+                <p className="mb-2 text-[11px] text-gray-500">
+                  Send the meeting to people who weren’t identified as speakers. They’ll get a
+                  magic link that opens this meeting only.
+                </p>
+                {externalRecipients.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {externalRecipients.map((email) => (
+                      <span
+                        key={email}
+                        className="inline-flex items-center gap-1 rounded-full border border-purple-700 bg-purple-900/30 px-2.5 py-1 text-xs text-purple-100"
+                      >
+                        <Mail className="h-3 w-3" />
+                        {email}
+                        <button
+                          type="button"
+                          aria-label={`Remove ${email}`}
+                          onClick={() => removeExternalRecipient(email)}
+                          className="ml-0.5 rounded p-0.5 text-purple-200 hover:bg-purple-800/40 hover:text-white"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    inputMode="email"
+                    autoComplete="email"
+                    value={externalDraft}
+                    onChange={(e) => {
+                      setExternalDraft(e.target.value);
+                      if (externalError) setExternalError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',' || e.key === 'Tab') {
+                        if (externalDraft.trim()) {
+                          e.preventDefault();
+                          addExternalRecipient();
+                        }
+                      }
+                    }}
+                    placeholder="email@example.com"
+                    className="flex-1 rounded border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={addExternalRecipient}
+                    disabled={!externalDraft.trim()}
+                    className="inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add
+                  </button>
+                </div>
+                {externalError && (
+                  <p className="mt-1 text-[11px] text-amber-300">{externalError}</p>
+                )}
               </div>
 
               <div className="rounded-lg border border-gray-800 bg-gray-900 p-3">
@@ -303,7 +442,11 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
           <span className="text-xs text-gray-500">
             {result
               ? 'Send another batch by closing and reopening this dialog.'
-              : `${selected.size} attendee${selected.size === 1 ? '' : 's'} selected`}
+              : `${totalRecipientCount} recipient${totalRecipientCount === 1 ? '' : 's'} selected${
+                  externalRecipients.length
+                    ? ` (${selected.size} speaker${selected.size === 1 ? '' : 's'} + ${externalRecipients.length} external)`
+                    : ''
+                }`}
           </span>
           <div className="flex gap-2">
             <button
@@ -315,7 +458,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
             {!result && (
               <button
                 onClick={handleSend}
-                disabled={sending || selected.size === 0}
+                disabled={sending || totalRecipientCount === 0}
                 className="inline-flex items-center gap-2 rounded bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-50"
               >
                 {sending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
