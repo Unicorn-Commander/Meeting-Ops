@@ -255,15 +255,22 @@ def test_auto_trigger_below_threshold_returns_none(slice_world, fake_llm, monkey
         db.close()
 
 
-def test_auto_trigger_noop_for_non_room_session(slice_world, fake_llm):
-    """Auto-trigger is a hard no-op for sessions without a room_id —
-    even with a huge transcript. The browser still owns those slices."""
+def test_auto_trigger_fires_for_browser_always_on_session(slice_world, fake_llm):
+    """Browser always-on sessions (room_id=None) DO auto-trigger server-
+    side slices now. Previously they rolled in the browser with Qwen 3
+    0.6B, which choked on incremental summarization with previous-
+    summary context (slice stack repeated early content). Moved onto
+    the server's Qwen 3.6 35B-A3B-Vision path 2026-05-21.
+
+    Note the ``triggered_by`` discriminator: ``auto-words`` for browser
+    always-on, ``room-recorder`` for room sessions — analytics can still
+    see the split, the LLM model is the same."""
     import asyncio
 
     from database.database import SessionLocal
     from services import summary_slices as ss
 
-    transcript = " ".join(f"word{i}" for i in range(2000))
+    transcript = " ".join(f"word{i}" for i in range(40))
     db = SessionLocal()
     try:
         session = _seed_session(
@@ -276,10 +283,23 @@ def test_auto_trigger_noop_for_non_room_session(slice_world, fake_llm):
         result = asyncio.run(
             ss.maybe_auto_trigger_slice(db, session, trigger_words=10)
         )
-        assert result is None
-        # And no slice persisted either.
-        slices = (session.processing_metadata or {}).get("summary_slices")
-        assert not slices
+        assert result is not None, (
+            "Browser always-on session must auto-trigger now that the "
+            "room_id gate is removed."
+        )
+        assert result["triggered_by"] == "auto-words", (
+            f"Expected triggered_by='auto-words' for browser always-on, "
+            f"got {result['triggered_by']!r}"
+        )
+        assert result["word_range_start"] == 0
+        assert result["word_range_end"] == 40
+        db.commit()
+
+        # Slice persisted on processing_metadata just like room sessions.
+        db.refresh(session)
+        slices = (session.processing_metadata or {}).get("summary_slices") or []
+        assert len(slices) == 1
+        assert slices[0]["id"] == result["id"]
     finally:
         db.close()
 

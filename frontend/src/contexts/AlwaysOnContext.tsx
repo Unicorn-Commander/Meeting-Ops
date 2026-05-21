@@ -62,6 +62,10 @@ import {
   isLocalSessionId,
   type LocalTranscriptChunk,
 } from '../services/localSessionStore';
+import {
+  createFullAudioRecorder,
+  type FullAudioRecorderHandle,
+} from '../utils/fullAudioRecorder';
 
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
@@ -364,6 +368,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const autoDebounceRef = useRef<number | null>(null);
   const lastAutoFireRef = useRef<number>(Date.now());
   const summarizingRef = useRef(false);
+  // Parallel full-session MediaRecorder. Lives alongside the VAD engine so
+  // the server can re-run STT + diarization + speaker id + a quality final
+  // summary against the contiguous audio after the meeting ends. NULL in
+  // privacy mode (we never instantiate the recorder so audio cannot leak).
+  const fullAudioRecorderRef = useRef<FullAudioRecorderHandle | null>(null);
+  // Slice polling — replaces the in-browser Qwen 3 0.6B slice rolling for
+  // standard-mode (server) sessions. Privacy mode keeps the legacy local
+  // slice path (see triggerSummarize below).
+  const sliceFetchAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
@@ -685,6 +698,23 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     if (!response.ok) {
       const detail = await response.text();
       throw new Error(detail || 'Failed to finalize always-on session.');
+    }
+    // Kick off the server-side reprocess pipeline if we uploaded full
+    // audio chunks during the session. The endpoint is idempotent +
+    // skips itself when no chunks landed (privacy mode would never reach
+    // this branch anyway because activeLocalOnlyRef.current short-circuits
+    // above). We fire-and-forget — the user can navigate to the session
+    // detail page to watch the reprocess banner; we don't want stop() to
+    // block on a server-side STT pipeline that takes 30+ seconds.
+    try {
+      await fetch(
+        `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize-audio`,
+        { method: 'POST' },
+      );
+    } catch (err) {
+      // Non-fatal — the live transcript stays as the canonical record.
+      // eslint-disable-next-line no-console
+      console.warn('[always-on] finalize-audio kick-off failed:', err);
     }
   }, []);
 
@@ -1284,6 +1314,36 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     try {
       await createSession();
       await ensureEngine().start();
+      // After the VAD engine boots we have an active MediaStream we can
+      // share with the parallel full-audio recorder. We deliberately do
+      // NOT spin up the recorder in local-only mode — that's the privacy
+      // contract: no audio bytes leave the device.
+      if (!useLocalOnly) {
+        const stream = engineRef.current?.getActiveStream?.() ?? activeMicStream;
+        const sessionIdForRecord = sessionRef.current;
+        if (stream && sessionIdForRecord && activeOrganization) {
+          const recorder = createFullAudioRecorder({
+            stream,
+            sessionId: sessionIdForRecord,
+            apiUrl: config.apiUrl,
+            orgSlug: activeOrganization.slug ?? null,
+            timesliceMs: 30_000,
+            maxRetries: 5,
+            initialBackoffMs: 1000,
+            onChunkFailed: (idx, err) => {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[always-on] Full-audio chunk ${idx} dropped after retries:`,
+                err.message,
+              );
+            },
+          });
+          if (recorder) {
+            fullAudioRecorderRef.current = recorder;
+            recorder.start();
+          }
+        }
+      }
       setState('recording');
       setStatusText('Listening');
     } catch (err) {
@@ -1329,6 +1389,23 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const slicesSnapshot = [...summary.slices];
 
     try {
+      // Tear down the full-audio recorder FIRST so it flushes the last
+      // chunk into the upload queue before we drain. The recorder owns its
+      // own internal sequential queue; stop() resolves once that's empty.
+      const recorder = fullAudioRecorderRef.current;
+      fullAudioRecorderRef.current = null;
+      if (recorder) {
+        try {
+          await recorder.flush();
+        } catch {
+          /* flush is best-effort */
+        }
+        try {
+          await recorder.stop();
+        } catch {
+          /* stop is best-effort — gap in audio is acceptable */
+        }
+      }
       await engineRef.current?.stop();
       engineRef.current = null;
       await uploadQueueRef.current;
@@ -1406,7 +1483,166 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
   const transcriptWordCount = useMemo(() => countWords(transcriptText), [transcriptText]);
 
+  // === Server-side slice polling (standard mode) =====================
+  //
+  // Standard-mode browser always-on sessions now read their slice stack
+  // from the server (Qwen 3.6 35B-A3B-Vision quality) instead of running
+  // Qwen 3 0.6B INT8 in the browser. Privacy mode keeps the legacy local
+  // path below — server polling never fires when activeLocalOnlyRef is
+  // true.
+  //
+  // We mirror the RoomLiveSummary polling pattern: GET every 5s while
+  // recording, plus one refresh on session change so a reviewer landing
+  // on a paused/stopped session sees the persisted slices.
+  const refreshServerSlices = useCallback(async (sessionId: string): Promise<void> => {
+    if (activeLocalOnlyRef.current) return;
+    sliceFetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    sliceFetchAbortRef.current = controller;
+
+    try {
+      const headers: Record<string, string> = {};
+      try {
+        const token = window.localStorage?.getItem('access_token');
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+      } catch {
+        /* ignore */
+      }
+      if (activeOrganization?.slug) {
+        headers['X-MeetingOps-Org'] = activeOrganization.slug;
+      }
+      const resp = await fetch(
+        `${config.apiUrl}/api/recordings/sessions/${sessionId}/summary-slices`,
+        {
+          method: 'GET',
+          signal: controller.signal,
+          headers,
+          credentials: 'include',
+        },
+      );
+      if (!resp.ok) {
+        // Network blips self-heal on the next tick. We only surface
+        // real failures (the user-visible error banner is reserved for
+        // genuine issues).
+        return;
+      }
+      const data = (await resp.json()) as {
+        slices?: Array<{
+          id: string;
+          text: string;
+          word_count?: number;
+          word_range_start?: number;
+          word_range_end?: number;
+          model?: string;
+          provider?: string;
+          created_at?: string;
+          triggered_by?: string;
+        }>;
+      };
+      const rawSlices = Array.isArray(data.slices) ? data.slices : [];
+      if (rawSlices.length === 0) return;
+      const normalized: AlwaysOnSummarySlice[] = rawSlices.map((s) => ({
+        id: String(s.id || ''),
+        text: String(s.text || ''),
+        createdAt: s.created_at || new Date().toISOString(),
+        transcriptStart: Number(s.word_range_start || 0),
+        transcriptEnd: Number(s.word_range_end || s.word_count || 0),
+        model: String(s.model || 'server-llm'),
+        modelLabel: String(s.model || 'Server LLM'),
+        durationMs: 0,
+      }));
+      const latest = normalized[normalized.length - 1];
+      setSummary({
+        slices: normalized,
+        currentDraft: '',
+        lastWordCountAtSummary: latest?.transcriptEnd ?? 0,
+        text: latest?.text ?? '',
+        paragraphs: latest ? paragraphsFromText(latest.text) : [],
+        updatedAt: latest?.createdAt,
+      });
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      // eslint-disable-next-line no-console
+      console.debug('[always-on] slice refresh failed', err);
+    }
+  }, [activeOrganization]);
+
+  // Poll the server-rolled slice stack every 5s while recording. Skipped
+  // in privacy mode (no server traffic) and when there's no active
+  // session id. Also runs once on session change so a reviewer landing
+  // on a paused session sees the latest persisted slices.
+  useEffect(() => {
+    if (!currentSessionId) return;
+    if (activeLocalOnlyRef.current) return;
+    if (currentSessionId.startsWith('local-')) return;
+    // Initial fetch on mount / session swap.
+    void refreshServerSlices(currentSessionId);
+    if (state !== 'recording' && state !== 'paused') return;
+    const tick = window.setInterval(() => {
+      void refreshServerSlices(currentSessionId);
+    }, 5_000);
+    return () => window.clearInterval(tick);
+  }, [currentSessionId, state, refreshServerSlices]);
+
   const triggerSummarize = useCallback(async () => {
+    // Standard mode: ask the server to roll a slice now. POST returns
+    // the new slice; the polling loop above will reconcile if the server
+    // happened to auto-trigger one in the meantime.
+    if (!activeLocalOnlyRef.current) {
+      const sessionId = sessionRef.current;
+      if (!sessionId) return;
+      if (summarizingRef.current) return;
+      summarizingRef.current = true;
+      setSummarizing(true);
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        try {
+          const token = window.localStorage?.getItem('access_token');
+          if (token) headers['Authorization'] = `Bearer ${token}`;
+        } catch {
+          /* ignore */
+        }
+        if (activeOrganization?.slug) {
+          headers['X-MeetingOps-Org'] = activeOrganization.slug;
+        }
+        const resp = await fetch(
+          `${config.apiUrl}/api/recordings/sessions/${sessionId}/summary-slices`,
+          {
+            method: 'POST',
+            headers,
+            credentials: 'include',
+          },
+        );
+        if (resp.status === 422) {
+          // No new transcript since the last slice — not really an error.
+          // The polling loop will eventually pick up new slices when
+          // there's enough new content.
+          return;
+        }
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => '');
+          throw new Error(detail || `Summarize failed (${resp.status})`);
+        }
+        // Refresh once to surface the new slice immediately rather than
+        // waiting for the 5s poll tick.
+        await refreshServerSlices(sessionId);
+        lastAutoFireRef.current = Date.now();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+      } finally {
+        summarizingRef.current = false;
+        setSummarizing(false);
+      }
+      return;
+    }
+
+    // Privacy mode (local-only) — keeps the legacy browser Qwen 3 0.6B
+    // path. The server is forbidden in this mode, so we have no other
+    // choice. The slice quality is lower but at least nothing leaves the
+    // device.
     if (!transcriptText || summarizingRef.current) return;
     const wordCountAtStart = transcriptWordCount;
 
@@ -1499,11 +1735,24 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setSummarizing(false);
       setModelLoadProgress(null);
     }
-  }, [summary.slices, transcriptText, transcriptWordCount]);
+  }, [
+    activeOrganization,
+    refreshServerSlices,
+    summary.slices,
+    transcriptText,
+    transcriptWordCount,
+  ]);
 
+  // Client-side auto-trigger — runs ONLY in privacy/local-only mode.
+  // Standard mode delegates to the server's word-count threshold (set
+  // via ROOM_SLICE_TRIGGER_WORDS env, default 500 words) and reads
+  // slices via the 5s polling loop above. Without this gate, both
+  // surfaces would race to fire slices and the user would see double
+  // entries.
   useEffect(() => {
     if (state !== 'recording') return;
     if (!autoConfig.enabled) return;
+    if (!activeLocalOnly) return; // server-side trigger handles standard mode
 
     const spec = thresholdSpec(autoConfig.threshold);
     if (spec.kind === 'words') {
@@ -1531,6 +1780,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       }
     };
   }, [
+    activeLocalOnly,
     autoConfig.enabled,
     autoConfig.threshold,
     state,
@@ -1544,6 +1794,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const spec = thresholdSpec(autoConfig.threshold);
     if (spec.kind !== 'time') return;
     if (!autoConfig.enabled) return;
+    if (!activeLocalOnly) return; // server-side trigger handles standard mode
     const tick = window.setInterval(() => {
       const sinceLast = Date.now() - lastAutoFireRef.current;
       if (sinceLast < spec.value) return;
@@ -1558,12 +1809,23 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       }, 500);
     }, 5_000);
     return () => window.clearInterval(tick);
-  }, [autoConfig.enabled, autoConfig.threshold, state, transcriptWordCount, triggerSummarize]);
+  }, [
+    activeLocalOnly,
+    autoConfig.enabled,
+    autoConfig.threshold,
+    state,
+    transcriptWordCount,
+    triggerSummarize,
+  ]);
 
   useEffect(() => () => {
     summarizeAbortRef.current?.abort();
     transcriptSocketRef.current?.close();
     engineRef.current?.stop().catch(() => undefined);
+    fullAudioRecorderRef.current?.stop().catch(() => undefined);
+    fullAudioRecorderRef.current = null;
+    sliceFetchAbortRef.current?.abort();
+    sliceFetchAbortRef.current = null;
     if (autoDebounceRef.current) {
       window.clearTimeout(autoDebounceRef.current);
       autoDebounceRef.current = null;
@@ -1603,6 +1865,19 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summarizeAbortRef.current?.abort();
 
     try {
+      // Stop the full-audio recorder BEFORE the VAD engine so we drain
+      // its upload queue ahead of the delete request — otherwise a chunk
+      // could land on the server immediately after we deleted the session
+      // row and recreate the per-session directory.
+      const recorder = fullAudioRecorderRef.current;
+      fullAudioRecorderRef.current = null;
+      if (recorder) {
+        try {
+          await recorder.stop();
+        } catch {
+          /* tear-down errors are non-fatal during discard */
+        }
+      }
       // Stop the engine BEFORE we touch the backend — otherwise an
       // in-flight chunk-upload can race the delete and recreate a row.
       await engineRef.current?.stop().catch(() => undefined);

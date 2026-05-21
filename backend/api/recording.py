@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -457,13 +457,15 @@ async def _broadcast_segments(session: RecordingSession, segments: list[dict[str
 async def _maybe_persist_slice_after_chunk(
     db: Session, session: RecordingSession
 ) -> None:
-    """Server-roll a summary slice for room sessions when the transcript
-    grows past the trigger threshold.
+    """Server-roll a summary slice when the transcript grows past the
+    trigger threshold.
 
-    The trigger function itself decides whether to fire (no-op when
-    ``session.room_id`` is null). On success it persists the slice and
-    broadcasts on the same websocket the transcript stream uses, so
-    multiple viewers see the new slice without polling delay.
+    Fires for ALL session types as of 2026-05-21 (browser always-on
+    used to roll its own slices with Qwen 3 0.6B in the browser, which
+    couldn't sustain incremental summarization with previous-summary
+    context). On success it persists the slice and broadcasts on the
+    same websocket the transcript stream uses, so multiple viewers see
+    the new slice without polling delay.
 
     Failures are logged inside the trigger helper and never raised — a
     transient LLM outage must not block chunk ingest.
@@ -635,11 +637,11 @@ async def upload_always_on_chunk(
 
     await _broadcast_segments(session, segments)
 
-    # Room sessions roll their summary slices server-side so multi-viewer
-    # + after-the-fact playback works. Always-on browser sessions skip
-    # this branch (their slices still live in client state). Failures
-    # are logged and swallowed inside the helper — never block chunk
-    # ingest on an LLM hiccup.
+    # Roll a server-side summary slice when the transcript has grown
+    # past the trigger threshold. Fires for room sessions AND browser
+    # always-on as of 2026-05-21 — see services.summary_slices for the
+    # rationale. Failures are logged and swallowed inside the helper —
+    # never block chunk ingest on an LLM hiccup.
     await _maybe_persist_slice_after_chunk(db, session)
 
     return {
@@ -753,8 +755,8 @@ async def append_client_text_chunk(
 
     await _broadcast_segments(session, [segment])
 
-    # Same room-slice hook as /chunks above — server-rolled slices for
-    # room sessions, no-op for browser always-on sessions.
+    # Same auto-slice hook as /chunks above — fires for room sessions
+    # AND browser always-on as of 2026-05-21.
     await _maybe_persist_slice_after_chunk(db, session)
 
     total_words = len((session.transcript_simple or "").split())
@@ -1144,4 +1146,592 @@ async def create_summary_slice(
     return {
         "slice": _serialize_slice(slice_obj),
         "session_id": session.session_id or str(session.id),
+    }
+
+
+# === Full session audio capture + server-side reprocess ==================
+#
+# The /chunks-text path (above) only delivers BROWSER-produced transcript
+# text. That's great for low-latency live transcript + zero server STT
+# cost, but it leaves the server unable to:
+#   * run diarization (needs the audio)
+#   * fingerprint-match enrolled speakers (needs per-segment embeddings)
+#   * produce a high-quality final summary (browser STT is INT8 + Parakeet
+#     0.6B, server-side is fp16 + Parakeet 1.1B)
+#
+# These endpoints let the browser stream the full session audio to disk in
+# parallel with the existing chunks-text path, then re-run the upload
+# pipeline against the reassembled WAV when the session ends. The browser
+# /chunks-text path stays unchanged — it provides the live transcript
+# the user sees during the meeting; the server-side reprocess overwrites
+# the transcript + diarization + summary with higher-quality output on
+# finalize.
+#
+# Privacy mode skips audio upload entirely (the browser never POSTs to
+# /audio-chunks), so local-only sessions retain the same "nothing leaves
+# the device" guarantee they already had.
+
+
+def _audio_chunks_dir(org_slug: str, session_id: str) -> Path:
+    """Where browser-streamed audio chunks land before reassembly."""
+    return _session_dir(org_slug, session_id) / "full_audio"
+
+
+@router.post("/sessions/{session_id}/audio-chunks")
+async def append_audio_chunk(
+    request: Request,
+    session_id: str,
+    chunk_index: int = Form(...),
+    chunk: UploadFile = File(...),
+    caller: Any = Depends(get_internal_or_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Receive a chunk of session audio for server-side reprocess.
+
+    Each chunk is a continuous WebM/Opus (or whatever the browser's
+    MediaRecorder produces) blob ~30s long. Stored under
+    ``ALWAYS_ON_DIR/<org-slug>/<session-id>/full_audio/<idx>.<ext>``.
+
+    Idempotent — re-uploading the same ``chunk_index`` overwrites. That's
+    on purpose: the frontend uses exponential-backoff retry with capped
+    retries, and a network hiccup that ACKed late shouldn't double-write
+    the audio. The per-index file naming also keeps ffmpeg's concat
+    step deterministic (no surprise interleaving when retries lag).
+
+    Org-scoped via the same ``_find_session`` / ``_find_session_by_id``
+    pattern ``chunks-text`` uses. Internal-service callers (room_recorder
+    loopback) can also POST here — the room recorder doesn't currently
+    use this path, but plumbing dual-auth in from day one means we don't
+    have to retrofit when it grows audio export.
+    """
+    if isinstance(caller, InternalServiceCaller):
+        session = _find_session_by_id(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        active_org = _synthetic_org_for_internal_caller(db, session)
+        logger.info(
+            "[internal] audio-chunks POST session_id=%s idx=%s provenance=%s",
+            session_id,
+            chunk_index,
+            caller.provenance or "unknown",
+        )
+    else:
+        if not getattr(caller, "is_active", False):
+            raise HTTPException(status_code=403, detail="Inactive user")
+        current_user = caller
+        active_org = resolve_active_organization(db, request, current_user)
+        session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if getattr(session, "mode", "upload") != "always_on":
+        raise HTTPException(status_code=409, detail="Session is not an always-on session.")
+    # We accept chunks while recording OR after stop — the frontend may
+    # ship a few trailing chunks just after stop while finalize-audio
+    # waits. We refuse on completed/cancelled.
+    if session.status in {"completed", "cancelled", "error"}:
+        raise HTTPException(status_code=409, detail=f"Session is {session.status}.")
+
+    if chunk_index < 0:
+        raise HTTPException(status_code=400, detail="chunk_index must be >= 0.")
+
+    body = await chunk.read()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty audio chunk.")
+
+    ext = _safe_ext(chunk)
+    out_dir = _audio_chunks_dir(
+        active_org.organization.slug, session.session_id or str(session.id)
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Zero-padded index so a simple sort matches arrival order. 6 digits
+    # is enough for 12+ hours of 30s chunks per session.
+    out_path = out_dir / f"{chunk_index:06d}{ext}"
+    out_path.write_bytes(body)
+
+    metadata = dict(session.processing_metadata or {})
+    audio_state = dict(metadata.get("full_audio") or {})
+    chunks_state = dict(audio_state.get("chunks") or {})
+    chunks_state[str(chunk_index)] = {
+        "filename": out_path.name,
+        "size": out_path.stat().st_size,
+        "content_type": chunk.content_type or "audio/webm",
+        "received_at": _now().isoformat(),
+    }
+    audio_state["chunks"] = chunks_state
+    audio_state["last_chunk_at"] = _now().isoformat()
+    metadata["full_audio"] = audio_state
+    session.processing_metadata = metadata
+    flag_modified(session, "processing_metadata")
+    db.commit()
+
+    return {
+        "ok": True,
+        "session_id": session.session_id or str(session.id),
+        "chunk_index": chunk_index,
+        "size": out_path.stat().st_size,
+        "chunks_received": len(chunks_state),
+    }
+
+
+async def _reassemble_full_audio(
+    chunks_dir: Path, target_wav: Path
+) -> tuple[float, str]:
+    """Concatenate all chunk files under ``chunks_dir`` into a single WAV.
+
+    Uses ffmpeg's concat demuxer for the streams that share a codec
+    (WebM/Opus from the same MediaRecorder instance) and falls back to a
+    decode+re-encode pass when ffmpeg's concat refuses. Returns the
+    output WAV duration in seconds + the source codec name.
+
+    Why decode-then-mux: WebM containers from MediaRecorder don't always
+    share segment boundaries, so a pure concat can leave un-decodable
+    metadata at chunk boundaries. The decode pass normalizes to
+    16 kHz mono PCM WAV, which is what every downstream STT provider
+    we ship wants anyway.
+    """
+    # Sort by filename — naming is zero-padded chunk_index so lexicographic
+    # order matches arrival order.
+    chunks = sorted(p for p in chunks_dir.iterdir() if p.is_file())
+    if not chunks:
+        raise RuntimeError("No audio chunks to reassemble.")
+
+    concat_list = chunks_dir / "concat.txt"
+    # ffmpeg concat demuxer file format: one `file '<path>'` per line.
+    # Paths are quoted; we use absolute paths so the demuxer doesn't need
+    # to resolve relative to the concat.txt directory.
+    concat_list.write_text(
+        "\n".join(f"file '{p.resolve()}'" for p in chunks) + "\n",
+        encoding="utf-8",
+    )
+
+    # Single ffmpeg call: concat -> decode -> re-encode as 16 kHz mono PCM.
+    # -safe 0 lets us point at absolute paths in the list file.
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
+        "-vn",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        str(target_wav),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not target_wav.exists() or target_wav.stat().st_size == 0:
+        detail = stderr.decode(errors="ignore")[-800:] if stderr else ""
+        raise RuntimeError(f"Audio reassembly failed. ffmpeg stderr: {detail}")
+
+    # Duration probe (ffprobe is part of the ffmpeg package shipped in our
+    # backend container). We don't fail the reassembly on a missing probe
+    # — duration is informational.
+    duration_sec = 0.0
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(target_wav),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await probe.communicate()
+        if out:
+            duration_sec = float(out.decode(errors="ignore").strip() or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ffprobe failed (non-fatal): %s", exc)
+
+    # Source codec hint — we use the first chunk's extension since they
+    # should all share a codec from the same MediaRecorder instance.
+    source_codec = chunks[0].suffix.lstrip(".") or "webm"
+    return duration_sec, source_codec
+
+
+async def _run_session_reprocess(session_pk: int) -> None:
+    """Background task that re-runs the full upload pipeline against the
+    reassembled session audio.
+
+    Stages, mirroring api.uploads.run_upload_pipeline:
+      1. Reassemble audio chunks into ``recordings/sessions/<id>/audio.wav``
+      2. Parakeet 1.1B fp16 transcription via ``_transcribe_audio``
+      3. Diarization with ``return_embeddings=true`` (org's configured
+         provider; speaker-svc on bigboy by default)
+      4. ``identify_speakers`` against the org's enrolled SpeakerProfile
+         centroids (writes ``SpeakerSessionLink.source='auto'``)
+      5. Final summary via ``_summarize_session`` (Qwen 3.6 35B-A3B-Vision
+         on the org's configured LLM)
+
+    Status is tracked in ``processing_metadata['reprocess_status']``:
+        - in_progress  : pipeline running
+        - complete     : success; transcript_simple/diarized + summary updated
+        - failed       : error stored under ``reprocess_error``
+
+    The original /chunks-text live transcript is overwritten on success;
+    that's the whole point of reprocess. On failure we keep the live
+    transcript so the user never loses data.
+    """
+    # We need a fresh DB session for the background task — the request
+    # session is closed by FastAPI before the background runs.
+    from database.database import SessionLocal
+
+    def _set_status(state: str, **extra: Any) -> None:
+        """Update reprocess_status + extras under processing_metadata.full_audio.
+
+        Done in a fresh DB session each time so concurrent reads (the UI
+        polling SessionDetails) see the latest state. We keep the helper
+        sync because each call is bounded by a single small write.
+        """
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(RecordingSession)
+                .filter(RecordingSession.id == session_pk)
+                .first()
+            )
+            if row is None:
+                return
+            metadata = dict(row.processing_metadata or {})
+            audio_state = dict(metadata.get("full_audio") or {})
+            audio_state.update({"status": state, "updated_at": _now().isoformat()})
+            audio_state.update(extra)
+            metadata["full_audio"] = audio_state
+            metadata["reprocess_status"] = state
+            row.processing_metadata = metadata
+            flag_modified(row, "processing_metadata")
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Reprocess status update failed for session_pk=%s state=%s",
+                session_pk,
+                state,
+            )
+        finally:
+            db.close()
+
+    _set_status("in_progress", started_at=_now().isoformat())
+
+    db = SessionLocal()
+    try:
+        session = (
+            db.query(RecordingSession)
+            .filter(RecordingSession.id == session_pk)
+            .first()
+        )
+        if session is None:
+            return
+        org = (
+            db.query(Organization)
+            .filter(Organization.id == session.organization_id)
+            .first()
+        )
+        if org is None:
+            raise RuntimeError("Session organization not found.")
+
+        canonical_id = session.session_id or str(session.id)
+        chunks_dir = _audio_chunks_dir(org.slug, canonical_id)
+        # Park the reassembled WAV next to the chunk dir so cleanup is local
+        # to the per-session directory.
+        target_wav = _session_dir(org.slug, canonical_id) / "session.wav"
+
+        duration_sec, source_codec = await _reassemble_full_audio(chunks_dir, target_wav)
+        # Point session.audio_file at the reassembled WAV so identify_speakers
+        # has an absolute audio path to fall back on if it ever needs to
+        # re-extract embeddings (we already plumb per-segment embeddings,
+        # but the helper still checks audio_file.exists()).
+        session.audio_file = str(target_wav)
+        # Register the reassembled audio in audio_files so the existing
+        # /download/audio endpoint can serve it.
+        try:
+            db.add(AudioFile(
+                file_id=str(uuid.uuid4()),
+                session_id=canonical_id,
+                user_id=session.user_id,
+                filename=target_wav.name,
+                file_path=str(target_wav),
+                file_size=target_wav.stat().st_size,
+                file_format="wav",
+                mime_type="audio/wav",
+                organization_id=session.organization_id,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not register reassembled AudioFile for session=%s: %s",
+                session.id,
+                exc,
+            )
+        db.commit()
+
+        # Stage 2 — Parakeet 1.1B fp16 transcription. Reuses the same
+        # helper the upload pipeline uses; the org's STT provider defaults
+        # to Parakeet 1.1B at meet-parakeet-svc:8881.
+        from api.uploads import _transcribe_audio
+
+        result = await _transcribe_audio(
+            target_wav,
+            session.organization_id,
+            db,
+            language="en",
+        )
+        # Overwrite transcript_simple + transcript_diarized with the
+        # server-quality result. The browser STT path's segments were
+        # appended into transcript_diarized.segments as the meeting
+        # happened; we wipe them so the segments list is clean.
+        segments = [
+            {
+                "text": (seg.get("text") or "").strip(),
+                "speaker": seg.get("speaker"),
+                "start": float(seg.get("start") or 0),
+                "end": float(seg.get("end") or 0),
+                "confidence": float(seg.get("confidence") or 0.95),
+            }
+            for seg in (result.get("segments") or [])
+            if (seg.get("text") or "").strip()
+        ]
+        db.query(Transcription).filter(Transcription.session_id == session.id).delete()
+        db.commit()
+
+        diarized = {
+            "segments": segments,
+            "speakers": [],
+            "model": result.get("model", "parakeet-tdt-1.1b"),
+            "language": result.get("language", "en"),
+            "updated_at": _now().isoformat(),
+        }
+        session.transcript_diarized = diarized
+        flag_modified(session, "transcript_diarized")
+        session.transcript_simple = " ".join(
+            seg["text"] for seg in segments if seg.get("text")
+        ).strip()
+        session.transcript = json.dumps(diarized)
+        if duration_sec > 0:
+            session.duration = max(float(session.duration or 0), duration_sec)
+        for seg in segments:
+            db.add(Transcription(
+                session_id=session.id,
+                text=seg["text"],
+                speaker=seg.get("speaker"),
+                start_time=float(seg.get("start") or 0),
+                end_time=float(seg.get("end") or 0),
+                confidence=float(seg.get("confidence") or 0.95),
+            ))
+        db.commit()
+
+        # Stage 3 — Diarization with per-segment embeddings. Use the
+        # provider's diarize() (speaker-svc supports return_embeddings=true).
+        try:
+            from services.providers.registry import get_provider_registry
+
+            registry = get_provider_registry(db)
+            diar_provider = registry.get_diarization(session.organization_id)
+            diar_segments = await diar_provider.diarize(str(target_wav))
+            if diar_segments:
+                # Overlay diarization labels + embeddings onto the
+                # transcription segments using the same overlap rule as
+                # _diarize_chunk does for live chunks. Embeddings are
+                # preserved so identify_speakers() can match enrolled
+                # voices without re-embedding from audio.
+                for seg in segments:
+                    label, embedding = _speaker_for_segment(seg, diar_segments)
+                    if label:
+                        seg["speaker"] = label
+                    if embedding:
+                        seg["embedding"] = embedding
+                seen: list[str] = []
+                for seg in segments:
+                    spk = seg.get("speaker")
+                    if spk and spk not in seen:
+                        seen.append(spk)
+                diarized["segments"] = segments
+                diarized["speakers"] = seen
+                session.transcript_diarized = diarized
+                flag_modified(session, "transcript_diarized")
+                db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess diarization failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
+        # Stage 4 — Identify enrolled speakers. Best-effort — a transient
+        # speaker-svc outage shouldn't fail the whole reprocess.
+        try:
+            from services.speaker_service import identify_speakers
+
+            await asyncio.to_thread(identify_speakers, session, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess identify_speakers failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
+        # Stage 5 — Final summary. Overwrites session.summary +
+        # session.final_summary with the server-quality version that
+        # supersedes the browser-rolled live summary slices.
+        try:
+            from api.uploads import _summarize_session
+
+            await _summarize_session(db, session, template="standard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess summarize failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
+        # Pre-warm ai_insights so the side-panel doesn't trigger a fresh
+        # LLM call on first view of the reprocessed session.
+        try:
+            from api.ai_insights import _generate_ai_insights
+
+            transcriptions = (
+                db.query(Transcription)
+                .filter(Transcription.session_id == session.id)
+                .order_by(Transcription.start_time.asc())
+                .all()
+            )
+            full_text = (session.transcript_simple or "").strip()
+            if full_text:
+                insights = await _generate_ai_insights(
+                    full_text,
+                    transcriptions,
+                    session,
+                    db,
+                    session.organization_id,
+                )
+                session.ai_insights = insights.model_dump()
+                db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess ai_insights generation failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
+        _set_status(
+            "complete",
+            completed_at=_now().isoformat(),
+            audio_path=str(target_wav),
+            audio_duration_seconds=duration_sec,
+            source_codec=source_codec,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Reprocess pipeline failed for session_pk=%s", session_pk
+        )
+        _set_status(
+            "failed",
+            failed_at=_now().isoformat(),
+            error=str(exc)[:500],
+        )
+    finally:
+        db.close()
+
+
+@router.post("/sessions/{session_id}/finalize-audio")
+async def finalize_audio(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Mark all audio chunks delivered and kick off the reprocess pipeline.
+
+    Returns ``{ reprocessing_started: bool, ... }``. The frontend polls
+    ``GET /api/simple/recording-sessions/{id}`` (via SessionDetails) and
+    reads ``metadata.reprocess_status`` to render the progress banner.
+
+    Idempotent: if a reprocess is already in flight (in_progress), the
+    second call is a no-op and we return the current status. If the
+    session has zero audio chunks (e.g. privacy mode never uploaded), we
+    skip the reprocess and return ``reprocessing_started: false`` — the
+    live transcript stays as the final transcript.
+
+    Auth: user-only. Internal callers (room_recorder) don't currently
+    use this path; if we ever ship browser audio capture from a non-user
+    context we can flip this to dual-auth like /audio-chunks.
+    """
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if getattr(session, "mode", "upload") != "always_on":
+        raise HTTPException(status_code=409, detail="Session is not an always-on session.")
+
+    canonical_id = session.session_id or str(session.id)
+    chunks_dir = _audio_chunks_dir(active_org.organization.slug, canonical_id)
+
+    metadata = dict(session.processing_metadata or {})
+    audio_state = dict(metadata.get("full_audio") or {})
+
+    # No chunks delivered (privacy mode, or upload failed for every chunk).
+    # Bail with a friendly response — the live transcript stays canonical.
+    if not chunks_dir.exists() or not any(
+        p.is_file() for p in chunks_dir.iterdir() if not p.name.startswith("concat")
+    ):
+        audio_state.update({
+            "status": "skipped",
+            "skipped_reason": "no_chunks_uploaded",
+            "updated_at": _now().isoformat(),
+        })
+        metadata["full_audio"] = audio_state
+        metadata.setdefault("reprocess_status", None)
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+        db.commit()
+        return {
+            "reprocessing_started": False,
+            "reason": "no_chunks_uploaded",
+            "session_id": canonical_id,
+        }
+
+    # If a reprocess is already running, just return current state.
+    if audio_state.get("status") == "in_progress":
+        return {
+            "reprocessing_started": False,
+            "reason": "already_in_progress",
+            "session_id": canonical_id,
+            "status": "in_progress",
+        }
+
+    audio_state.update({
+        "status": "queued",
+        "queued_at": _now().isoformat(),
+        "finalize_chunks_received": len(audio_state.get("chunks") or {}),
+    })
+    metadata["full_audio"] = audio_state
+    metadata["reprocess_status"] = "queued"
+    session.processing_metadata = metadata
+    flag_modified(session, "processing_metadata")
+    db.commit()
+
+    # Background task — fire-and-forget. The frontend polls
+    # GET /api/simple/recording-sessions/{id} and reads
+    # metadata.reprocess_status to display progress.
+    session_pk = session.id
+    background_tasks.add_task(_run_session_reprocess, session_pk)
+
+    return {
+        "reprocessing_started": True,
+        "session_id": canonical_id,
+        "job_id": str(uuid.uuid4()),  # informational; status lives on the session row
+        "status": "queued",
     }

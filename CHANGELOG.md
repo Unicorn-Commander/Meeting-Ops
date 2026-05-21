@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - meeting-ops.magicunicorn.dev (hyphenated) as alias for canonical meetingops.magicunicorn.dev. Cloudflare CNAME (proxied) + Traefik 308 redirect via redirectregex middleware. Cookies/sessions stay on canonical; URL works either way.
+- **Browser always-on full audio capture + server-side reprocess**: parallel `MediaRecorder` track on the same MediaStream as the VAD engine produces continuous WebM/Opus (or MP4 on Safari) chunks every 30s; each chunk POSTs to new `/api/recordings/sessions/{id}/audio-chunks` with exponential-backoff retries (max 5). On session end, `/finalize-audio` reassembles via ffmpeg and kicks a BackgroundTasks pipeline: Parakeet 1.1B fp16 → pyannote diarization (`return_embeddings=true`) → `identify_speakers()` → Qwen 3.6 35B-A3B-Vision final summary. `processing_metadata.reprocess_status` drives a banner on SessionDetails (in_progress → complete). Privacy/local-only mode skips audio upload entirely — nothing leaves the device.
+  - 2 new HTTP cross-org leak cases (audio-chunks POST + finalize-audio POST → 404 across orgs).
+  - Dedicated unit/HTTP test file `test_audio_chunks_reprocess.py` for the wire contract (5 tests).
+
+### Fixed
+- **Live summary repeats early content**: `services/summary_slices.maybe_auto_trigger_slice` previously gated on `session.room_id` so only conference-room sessions got server-rolled slices; browser always-on used Qwen 3 0.6B INT8 in the browser, which couldn't sustain incremental summarization with previous-summary context. Gate removed — browser always-on sessions now share the same Qwen 3.6 35B-A3B-Vision server path with `triggered_by='auto-words'` (rooms keep `triggered_by='room-recorder'`). Frontend `AlwaysOnContext.triggerSummarize` now POSTs the manual slice + polls `GET /summary-slices` every 5s for standard sessions; privacy/local-only mode keeps the browser Qwen 3 0.6B path as the only option that respects the "nothing leaves the device" contract.
 
 ## [0.7.4] - 2026-05-21
 

@@ -31,10 +31,17 @@ A slice looks like::
 Triggers
 --------
 ``maybe_auto_trigger_slice`` is called from the always-on chunks endpoint
-after each chunk lands. If the session has a ``room_id`` and the transcript
-has grown by ``ROOM_SLICE_TRIGGER_WORDS`` (default 500) since the last
-slice, we generate a new one. Non-room sessions skip the auto-trigger
-entirely — the browser path still owns its own client-side rolling.
+after each chunk lands. When the transcript has grown by
+``ROOM_SLICE_TRIGGER_WORDS`` (default 500) since the last slice, we
+generate a new one — for both room sessions AND browser always-on sessions.
+
+History note: previously only room sessions auto-triggered (browser
+always-on did its own rolling client-side using Qwen 3 0.6B INT8 +
+previous-summary context). That tiny model choked on incremental
+summarization and the slice stack would repeat early content. We moved
+browser always-on onto the same server-side path so it gets Qwen 3.6
+35B-A3B-Vision quality — the gate that excluded ``session.room_id is None``
+was removed 2026-05-21.
 
 ``generate_slice`` is the single entry point for actually producing a
 slice (auto or manual). It calls the per-org LLM provider with the same
@@ -243,22 +250,32 @@ async def maybe_auto_trigger_slice(
 ) -> Optional[dict[str, Any]]:
     """Generate a slice if the transcript has grown past the trigger threshold.
 
-    Only fires for sessions with a non-null ``room_id`` — browser always-on
-    sessions still roll slices client-side. Failures are logged and
-    swallowed so a transient LLM hiccup never blocks chunk ingest.
+    Fires for ALL session types — conference-room recordings AND browser
+    always-on sessions. Previously gated on ``session.room_id`` because
+    browser always-on rolled its own slices client-side with Qwen 3 0.6B
+    INT8; that model was too small to do incremental summarization with
+    previous-summary context and the slice stack repeated early content.
+    Now both surfaces use the server's Qwen 3.6 35B-A3B-Vision provider
+    so the live summary stays coherent across a long session.
+
+    The ``triggered_by`` label distinguishes the source — ``room-recorder``
+    for room sessions, ``auto-words`` for browser always-on — so analytics
+    can still see the split.
+
+    Failures are logged and swallowed so a transient LLM hiccup never
+    blocks chunk ingest.
     """
-    if session.room_id is None:
-        return None
     transcript = session.transcript_simple or ""
     word_count_now = _count_words(transcript)
     last_word_end = _last_slice_word_end(session)
     if word_count_now - last_word_end < trigger_words:
         return None
+    triggered_by = "room-recorder" if session.room_id is not None else "auto-words"
     try:
         return await generate_slice(
             db,
             session,
-            triggered_by="room-recorder",
+            triggered_by=triggered_by,
         )
     except Exception:
         # Already logged inside generate_slice; we explicitly do NOT

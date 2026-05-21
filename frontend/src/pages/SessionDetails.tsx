@@ -137,6 +137,26 @@ interface Session {
     model_used?: string;
     last_progressive_summary?: string;
     total_progressive_summaries?: number;
+    // Server-side reprocess pipeline status. Populated for browser
+    // always-on sessions that uploaded full audio (so the server could
+    // run Parakeet 1.1B + diarization + speaker id + Qwen final summary
+    // on contiguous audio after the live transcript was captured).
+    // null/undefined for sessions before this feature OR for privacy-mode
+    // sessions that never uploaded audio.
+    reprocess_status?: 'queued' | 'in_progress' | 'complete' | 'failed' | 'skipped' | null;
+    full_audio?: {
+      status?: string;
+      started_at?: string;
+      completed_at?: string;
+      failed_at?: string;
+      queued_at?: string;
+      audio_path?: string;
+      audio_duration_seconds?: number;
+      source_codec?: string;
+      error?: string;
+      skipped_reason?: string;
+      finalize_chunks_received?: number;
+    };
   };
   generated_emails?: Array<{    // Generated follow-up emails
     subject: string;
@@ -481,6 +501,23 @@ export const SessionDetails: React.FC = () => {
       setLoading(false);
     }
   }, [sessionId]);
+
+  // Auto-refresh while the server-side reprocess is in flight so the
+  // page picks up the updated transcript + summary as soon as the
+  // pipeline finishes. We poll every 5s, which is the same cadence the
+  // live recording UI uses; we stop polling once the status leaves the
+  // active states (complete, failed, skipped, or null/missing).
+  useEffect(() => {
+    const status = session?.metadata?.reprocess_status;
+    if (status !== 'queued' && status !== 'in_progress') return;
+    const handle = window.setInterval(() => {
+      fetchSession();
+    }, 5_000);
+    return () => window.clearInterval(handle);
+    // Re-trigger whenever the reprocess_status changes — we want the
+    // interval to spin up only when the pipeline is actually live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.metadata?.reprocess_status]);
 
   // Load persisted chat history from server when chat panel is opened
   useEffect(() => {
@@ -2066,6 +2103,53 @@ export const SessionDetails: React.FC = () => {
 
             {/* Phase 3: speaker tagger — confirm/change diarized labels */}
             <SpeakerTagger sessionId={String(session.id || sessionId)} />
+
+            {/* Server-side reprocess status banner.
+               Browser always-on sessions stream full audio to the server in
+               parallel with the live transcript, then run Parakeet 1.1B fp16
+               + diarization + speaker identification + Qwen 3.6 35B-A3B-Vision
+               final summary against the contiguous audio. Status lives at
+               metadata.reprocess_status (set by /finalize-audio). */}
+            {(session.metadata?.reprocess_status === 'queued' || session.metadata?.reprocess_status === 'in_progress') && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+                <div className="flex-shrink-0 mt-0.5">
+                  <div className="h-5 w-5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-blue-900">
+                    Server is reprocessing with full audio
+                  </h3>
+                  <p className="text-sm text-blue-800 mt-1">
+                    Running higher-accuracy transcription, diarization, speaker matching,
+                    and final summary. The transcript and summary on this page will refresh
+                    when complete.
+                  </p>
+                </div>
+              </div>
+            )}
+            {session.metadata?.reprocess_status === 'failed' && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-red-900">
+                    Reprocess failed
+                  </h3>
+                  <p className="text-sm text-red-800 mt-1">
+                    {session.metadata?.full_audio?.error || 'Server-side reprocess did not complete; the live transcript is still available below.'}
+                  </p>
+                </div>
+              </div>
+            )}
+            {session.metadata?.reprocess_status === 'complete' && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-start gap-3 text-sm text-emerald-900">
+                <span className="font-semibold">Server-quality transcript + summary.</span>
+                <span className="text-emerald-700">
+                  Reprocessed from full audio
+                  {session.metadata?.full_audio?.audio_duration_seconds
+                    ? ` (${Math.round(session.metadata.full_audio.audio_duration_seconds)}s captured)`
+                    : ''}.
+                </span>
+              </div>
+            )}
 
             {/* AI Summary Section */}
             {(session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (

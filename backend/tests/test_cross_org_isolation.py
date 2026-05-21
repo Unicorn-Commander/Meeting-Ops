@@ -448,6 +448,11 @@ HTTP_PATHS = [
     "recordings.search",
     "recordings.summary_slices_get_other_org",
     "recordings.summary_slices_post_other_org",
+    # Full session audio capture: org A must NOT be able to attach audio
+    # chunks to org B's session, or kick the reprocess pipeline against
+    # someone else's session.
+    "recordings.audio_chunks_post_other_org",
+    "recordings.finalize_audio_post_other_org",
     # 025_session_attachments + move-org additions:
     "attachments.list_other_org",
     "attachments.upload_other_org",
@@ -554,6 +559,41 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
         )
         assert response.status_code == 404, (
             f"Leak: POST summary-slices for org B session as org A "
+            f"returned status {response.status_code}. Body: "
+            f"{response.text[:500]}"
+        )
+
+    elif path_under_test == "recordings.audio_chunks_post_other_org":
+        # POST /api/recordings/sessions/{org_b_id}/audio-chunks as org A
+        # must 404 — never accept full-session audio uploads against
+        # another tenant's session. A successful upload here would let
+        # org A write audio bytes under org B's session directory + have
+        # them appear in org B's reassembled WAV on finalize. Same
+        # existence-leak guardrail as the chunks-text path.
+        response = client.post(
+            f"/api/recordings/sessions/{org_b_session}/audio-chunks",
+            headers=headers_a,
+            files={"chunk": ("evil.webm", b"\x00\x00\x00", "audio/webm")},
+            data={"chunk_index": "0"},
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST audio-chunks for org B session as org A "
+            f"returned status {response.status_code}. Body: "
+            f"{response.text[:500]}"
+        )
+
+    elif path_under_test == "recordings.finalize_audio_post_other_org":
+        # POST /api/recordings/sessions/{org_b_id}/finalize-audio as
+        # org A must 404 — kicking the reprocess pipeline against another
+        # tenant's session would re-transcribe + re-summarize their
+        # audio under org A's caller context (and could mutate their
+        # processing_metadata.reprocess_status).
+        response = client.post(
+            f"/api/recordings/sessions/{org_b_session}/finalize-audio",
+            headers=headers_a,
+        )
+        assert response.status_code == 404, (
+            f"Leak: POST finalize-audio for org B session as org A "
             f"returned status {response.status_code}. Body: "
             f"{response.text[:500]}"
         )
