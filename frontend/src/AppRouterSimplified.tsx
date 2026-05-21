@@ -19,7 +19,8 @@ import { AgentDashboard } from './pages/admin/AgentDashboard';
 import Rooms from './pages/Rooms';
 import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
-import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck } from 'lucide-react';
+import Help from './pages/Help';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
 
@@ -113,6 +114,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
+    { path: '/help', label: 'Help', icon: HelpCircle },
   ];
   // Admin-only nav — entirely hidden for non-admin users. Even the
   // section heading goes away when isAdmin is false; an empty
@@ -396,6 +398,12 @@ export function AppRouterSimplified() {
       <Route path="/digests" element={
         <ProtectedRoute>
           <DigestsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/help" element={
+        <ProtectedRoute>
+          <Help />
         </ProtectedRoute>
       } />
 

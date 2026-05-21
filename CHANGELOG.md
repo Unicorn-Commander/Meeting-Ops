@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 2 new HTTP cross-org leak cases (audio-chunks POST + finalize-audio POST → 404 across orgs).
   - Dedicated unit/HTTP test file `test_audio_chunks_reprocess.py` for the wire contract (5 tests).
 
+### Documentation
+- Added `docs/compute-economics.md` (~290 lines) covering the browser-first architecture, unit-economics moat (10-100x lower per-user cost vs Otter / Granola / Fathom / Fireflies / Read.ai), competitor cost comparison with named services (AssemblyAI / Deepgram / OpenAI), proposed Free/Pro/Enterprise tier model (pricing TBD), deployment topology (magicunicorn.dev → unicorncommander.ai → enterprise), watch-outs (mobile, live browser quality, bandwidth), and the guiding principle for future architecture decisions (maximum browser-side compute, server only where quality genuinely requires it, third-party APIs only as a last resort).
+- Updated `README.md` with a top-of-file "Architecture: browser-first by design" section: text diagram of browser ↔ server completion flow, the moat framing, the proposed tier shape, and the deployment progression. Links to the full strategy doc.
+- Updated `CLAUDE.md` with the browser-first architecture principle near the project overview so future engineers default to browser-side compute when adding features.
+- Added in-app Help page at `/help` (`frontend/src/pages/Help.tsx`) with a user-facing explainer: "Your computer does the real-time work" / "Our servers run the quality pass when your meeting ends" / "Privacy mode keeps everything local" / "Why we built it this way." Wired into the sidebar nav and routing.
+
 ### Fixed
 - **Live summary repeats early content**: `services/summary_slices.maybe_auto_trigger_slice` previously gated on `session.room_id` so only conference-room sessions got server-rolled slices; browser always-on used Qwen 3 0.6B INT8 in the browser, which couldn't sustain incremental summarization with previous-summary context. Gate removed — browser always-on sessions now share the same Qwen 3.6 35B-A3B-Vision server path with `triggered_by='auto-words'` (rooms keep `triggered_by='room-recorder'`). Frontend `AlwaysOnContext.triggerSummarize` now POSTs the manual slice + polls `GET /summary-slices` every 5s for standard sessions; privacy/local-only mode keeps the browser Qwen 3 0.6B path as the only option that respects the "nothing leaves the device" contract.
 

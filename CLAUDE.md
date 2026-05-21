@@ -2,9 +2,17 @@
 Part of the Unicorn Commander Suite
 
 ## Project Overview
-Hardware appliance for AI-powered meeting recording and transcription. NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware for SMBs.
+Hardware appliance for AI-powered meeting recording and transcription. NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware for SMBs. Cloud build (v0.7.x) and on-prem appliance build ship from the same codebase via compose targets.
 
 **Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive
+
+## Architecture is browser-first by design
+
+Live STT and live summarization run in the user's browser (Parakeet 0.6B INT8 + Qwen 3 0.6B / Gemma 4 E2B via onnxruntime-web + transformers.js, cached in IndexedDB). The server only runs at meeting completion (Parakeet 1.1B fp16 + pyannote 3.1 + wespeaker embeddings + Qwen 3.6 35B-A3B-Vision), in a single 30-90 second pass per finished meeting. Privacy mode skips the server pass entirely; nothing leaves the device.
+
+This isn't an aesthetic choice — it's the moat. Our marginal cost per concurrent user-hour is $0 in compute (the user's CPU/GPU does it). Competitors pay AssemblyAI / Deepgram per audio-minute and OpenAI / Anthropic per token, per user, continuously. At scale we're 10-100x cheaper to run.
+
+**Default new features to browser-side compute.** Only fold a feature into the server completion pass if quality genuinely requires it. Only reach for a third-party API as a last resort, behind a feature flag, with the cost owner explicit. See `docs/compute-economics.md` for the full strategy doc + the decision tree for future architecture choices.
 
 ## Quick Start
 

@@ -28,9 +28,86 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full per-version release history. Lat
 
 ## What It Does
 
-Meeting-Ops is a self-hosted meeting intelligence appliance. Plug in a USB mic, hit record, and it handles everything: real-time transcription with speaker identification, live AI-generated summaries and action items, full-text search across all meetings, and export to PDF/DOCX. It runs entirely on local hardware — no cloud APIs, no subscriptions, no data leaving your network.
+Meeting-Ops is meeting intelligence. Hit record and it handles everything: real-time transcription, speaker identification, live AI-generated summaries and action items, full-text search across all meetings, and export to PDF/DOCX. It runs in two flavors: a cloud-hosted multi-tenant build (the v0.7.x line on `meetingops.magicunicorn.dev`) and an on-prem appliance build (Ryzen AI 780M + Vulkan), shipped from the same codebase via compose targets.
 
-### The Stack (All Local, All Vulkan-Accelerated)
+---
+
+## Architecture: browser-first by design
+
+The thing that makes Meeting-Ops different from every other meeting-AI product on the market isn't the model selection or the UI. It's that we don't run the per-minute compute. The user's browser does.
+
+### Two stacks, two jobs
+
+```
+┌──────────────────────── BROWSER (live work, free to us) ──────────────────────┐
+│                                                                                 │
+│   Mic   →  VAD  →  Parakeet 0.6B INT8       ──► live transcript                 │
+│           (Silero)   (onnxruntime-web, WebGPU/WASM)                            │
+│                                                                                 │
+│                   →  Qwen 3 0.6B / Gemma 4 E2B  ──► live rolling summary       │
+│                      (transformers.js / web-llm)                                │
+│                                                                                 │
+│                   MediaRecorder ──► 30s WebM/Opus chunks ─┐                    │
+│                                                            │                    │
+└────────────────────────────────────────────────────────────┼────────────────────┘
+                                                             │
+                              POST /audio-chunks (every 30s) │  bandwidth: ~28 MB/hr
+                                                             ▼
+┌──────────── SERVER (runs ONCE at meeting completion, ~30-90 sec) ─────────────┐
+│                                                                                │
+│   ffmpeg reassemble  →  Parakeet 1.1B fp16   ──► word-timestamped transcript  │
+│                          (midboy2 3060)                                        │
+│                                                                                │
+│                      →  pyannote 3.1 + wespeaker  ──► diarized + matched      │
+│                          (bigboy 3090 / RTX 6000)                              │
+│                                                                                │
+│                      →  Qwen 3.6 35B-A3B-Vision  ──► polished final summary   │
+│                          (midboy1 P40, np 4)         action items, attendees  │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The browser stack runs in the user's tab for the entire meeting. The server stack runs exactly once when the meeting ends, in 30-90 seconds, on idle ecosystem GPU.
+
+### Why this matters
+
+Every other meeting-AI product (Otter, Granola, Fathom, Fireflies, Read.ai) pays AssemblyAI/Deepgram per audio-minute and OpenAI/Anthropic per token, per user, continuously, for the whole meeting. That cost scales linearly with concurrent users.
+
+Our marginal cost per concurrent user-hour is zero. The user's CPU/GPU does it. Our marginal cost per completed meeting is ~30-90 GPU-seconds on hardware we already own. At 1000 concurrent users in hour-long meetings, competitors pay $500-1500/hr in live compute; we pay roughly $20 across when those meetings actually finish, on bare-metal GPU we already own.
+
+This is a real moat. Replicating it requires (a) shipping browser inference at all, (b) picking and validating browser-runnable models that don't embarrass you, and (c) accepting that live quality is "good enough for live" instead of "best possible for live." Most competitors won't make all three decisions; their existing positioning makes (c) particularly hard.
+
+### The free side benefit: privacy mode
+
+Because the browser stack is self-contained, turning the server step off is a feature flag. Audio bytes never leave the device. Privacy mode is a per-session toggle (orthogonal to pricing tier; anyone can enable it). Enterprise + HIPAA deployments default it on.
+
+### Proposed tier model (pricing decision pending)
+
+- **Free**: browser live + browser final (no diarization, no Qwen 3.6 summary)
+- **Pro**: + server reprocess on completion (Parakeet 1.1B + pyannote + Qwen 3.6)
+- **Enterprise**: + speaker library + retention + BYOK Brigade + HIPAA + dedicated/on-prem
+
+### Deployment topology
+
+- `meetingops.magicunicorn.dev` (canonical) / `meeting-ops.magicunicorn.dev` (hyphenated alias) — dev + beta tier, where v0.x lives today.
+- `unicorncommander.ai` — production target. Stable releases only. Free + Pro launch here.
+- Enterprise — dedicated server or on-prem appliance per customer. HIPAA deployments (Legacy1, etc.) get their own instance.
+
+### Implementation status (2026-05-21)
+
+- Browser STT + LLM: live since v0.6.0
+- Server reprocess pipeline: live since v0.7.4 + 1 (`80b2da1`)
+- Privacy mode: live since v0.6.0
+- Tier gating + `unicorncommander.ai` production cutover: pending
+- Enterprise on-prem packaging: depends on `docs/appliance-extraction-design.md`
+
+**Full design + strategy doc**: [`docs/compute-economics.md`](./docs/compute-economics.md). Read this before adding any new server-side per-minute service; the architecture is the moat and we don't want to give it back by reaching for an external API when we could push the work to the browser or fold it into the completion pass.
+
+---
+
+### Appliance build stack (on-prem)
+
+The on-prem appliance build (`docs/appliance-extraction-design.md`) targets AMD Ryzen AI Phoenix hardware and runs the entire AI stack locally on the 780M iGPU via Vulkan. Same codebase, different compose target.
 
 | Component | Technology | What It Does |
 |-----------|-----------|--------------|
