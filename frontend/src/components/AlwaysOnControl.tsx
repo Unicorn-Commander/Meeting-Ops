@@ -13,6 +13,7 @@ import {
   Play,
   RefreshCw,
   RotateCw,
+  Smartphone,
   Sparkles,
   Square,
   Trash2,
@@ -1006,64 +1007,88 @@ export default function AlwaysOnControl() {
         </div>
       )}
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <label className="block text-sm font-medium text-zinc-300">Live summary</label>
-            <span className="text-xs text-zinc-500">
-              {alwaysOn.autoConfig.enabled
-                ? `Auto-updates ${thresholdLabel.toLowerCase()}`
-                : 'Manual mode'}
-              {' · '}
-              {alwaysOn.transcriptWordCount} words
-            </span>
+      {alwaysOn.isCaptureOnlyMode ? (
+        // Phase A mobile gate. Browser STT + LLM are skipped on phones
+        // and tablets — both panes would be empty anyway, so we render
+        // a friendly explainer in their place. Recording duration,
+        // audio meter, and the stop button stay above; the full
+        // transcript and summary land in the session ~60s after stop
+        // via the server reprocess pass.
+        <div className="mt-5 rounded-lg border border-sky-500/30 bg-sky-500/5 p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
+              <Smartphone className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="text-sm font-medium text-sky-100">Capture-only mode</div>
+              <p className="mt-1 text-sm text-zinc-300">
+                Your device captures audio and uploads it as you record. The
+                full transcript and AI summary will be ready about a minute
+                after the meeting ends, on the session page.
+              </p>
+            </div>
           </div>
-
-          <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
-            {alwaysOn.summary.currentDraft && (
-              <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
-                <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-sky-300">
-                  <RefreshCw className="h-3 w-3 animate-spin" />
-                  Generating next slice
-                </div>
-                <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
-                  {alwaysOn.summary.currentDraft}
-                </div>
-              </div>
-            )}
-
-            {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
-              <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
+        </div>
+      ) : (
+        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <label className="block text-sm font-medium text-zinc-300">Live summary</label>
+              <span className="text-xs text-zinc-500">
                 {alwaysOn.autoConfig.enabled
-                  ? 'Live summary will appear once enough conversation has been captured.'
-                  : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
-              </div>
-            )}
+                  ? `Auto-updates ${thresholdLabel.toLowerCase()}`
+                  : 'Manual mode'}
+                {' · '}
+                {alwaysOn.transcriptWordCount} words
+              </span>
+            </div>
 
-            {orderedSlices.map((slice) => (
-              <SliceCard
-                key={slice.id}
-                slice={slice}
-                expanded={slice.id === latestSliceId ? !expandedSliceIds.has(slice.id) : expandedSliceIds.has(slice.id)}
-                onToggle={() => toggleSlice(slice.id)}
-                highlight={slice.id === latestSliceId}
-              />
-            ))}
+            <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
+              {alwaysOn.summary.currentDraft && (
+                <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
+                  <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-sky-300">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    Generating next slice
+                  </div>
+                  <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
+                    {alwaysOn.summary.currentDraft}
+                  </div>
+                </div>
+              )}
+
+              {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
+                <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
+                  {alwaysOn.autoConfig.enabled
+                    ? 'Live summary will appear once enough conversation has been captured.'
+                    : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
+                </div>
+              )}
+
+              {orderedSlices.map((slice) => (
+                <SliceCard
+                  key={slice.id}
+                  slice={slice}
+                  expanded={slice.id === latestSliceId ? !expandedSliceIds.has(slice.id) : expandedSliceIds.has(slice.id)}
+                  onToggle={() => toggleSlice(slice.id)}
+                  highlight={slice.id === latestSliceId}
+                />
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-transcript">
+              Live transcript
+            </label>
+            <textarea
+              id="always-on-transcript"
+              readOnly
+              value={transcriptText}
+              placeholder="No transcript yet."
+              className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+            />
           </div>
         </div>
-        <div>
-          <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-transcript">
-            Live transcript
-          </label>
-          <textarea
-            id="always-on-transcript"
-            readOnly
-            value={transcriptText}
-            placeholder="No transcript yet."
-            className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
-          />
-        </div>
-      </div>
+      )}
     </section>
   );
 }

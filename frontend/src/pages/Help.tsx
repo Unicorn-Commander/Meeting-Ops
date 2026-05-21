@@ -10,6 +10,7 @@ import {
   Mic,
   Brain,
   Lock,
+  Smartphone,
 } from 'lucide-react';
 
 /**
@@ -128,6 +129,38 @@ export default function Help() {
             real money to run and would mean your audio leaves your machine
             constantly. Instead, we do it once at the end. The output is
             higher quality and the architecture stays sustainable.
+          </p>
+        </section>
+
+        <section className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Smartphone className="h-5 w-5 text-sky-400" />
+            <h2 className="text-lg font-semibold text-zinc-100">
+              On mobile (phones and tablets)
+            </h2>
+          </div>
+          <p className="text-zinc-300">
+            On mobile devices, Meeting-Ops runs in capture-only mode. Your
+            phone records the audio and uploads it as you talk. About a
+            minute after the meeting ends, the server produces a full
+            transcript and AI summary that lands in your sessions list,
+            ready to read.
+          </p>
+          <p className="text-zinc-300">
+            We don't do the live transcript and live summary in mobile
+            browsers right now. Today's phone browsers don't reliably have
+            the compute or memory headroom for the on-device speech and
+            language models the laptop version uses, and pretending
+            otherwise would give you stalled captions and a hot phone. So
+            we skip the live work and let the server polish pass do it
+            once, well, at the end.
+          </p>
+          <p className="text-zinc-300">
+            Native iOS and Android apps are on the roadmap, with on-device
+            live captions sized for phone silicon. Server-side live
+            captions for mobile browsers will arrive as part of a paid
+            tier later. For now, mobile is a great way to capture
+            meetings, the quality output happens after you tap Stop.
           </p>
         </section>
 

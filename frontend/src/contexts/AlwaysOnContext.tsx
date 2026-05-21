@@ -66,6 +66,12 @@ import {
   createFullAudioRecorder,
   type FullAudioRecorderHandle,
 } from '../utils/fullAudioRecorder';
+import {
+  detectDevice,
+  shouldRunBrowserInference,
+  shouldShowCaptureOnlyBanner,
+  type DeviceCapability,
+} from '../utils/deviceDetection';
 
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
@@ -237,6 +243,21 @@ export interface AlwaysOnContextValue {
    * the collision modal (whether they decide to abort or proceed).
    */
   clearStartBlocked: () => void;
+  /**
+   * Result of the one-shot device-capability probe (see
+   * `utils/deviceDetection.ts`). Stable across the lifetime of the
+   * provider — UI components read it to decide whether to render the
+   * live-transcript/summary panes or the capture-only banner.
+   */
+  deviceCapability: DeviceCapability;
+  /**
+   * True when this device is a phone or tablet. In capture-only mode
+   * we deliberately skip browser-side Parakeet 0.6B + Qwen 3 0.6B /
+   * Gemma 4 E2B loads, MediaRecorder still captures audio and uploads
+   * chunks, and the server reprocess pass produces the full transcript
+   * + summary at meeting completion.
+   */
+  isCaptureOnlyMode: boolean;
 }
 
 const AlwaysOnContext = createContext<AlwaysOnContextValue | null>(null);
@@ -302,6 +323,17 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const sttReadyRef = useRef(false);
   const sttBrowserFailedRef = useRef(false);
   const sttLoadAbortRef = useRef<AbortController | null>(null);
+
+  // Phase A mobile gate. detectDevice() is a one-shot synchronous probe
+  // — no async adapter requests, no permission prompts — so a useMemo
+  // is safe. On phones / tablets we hard-skip Parakeet 0.6B + the
+  // browser LLM loads downstream and the UI swaps to a capture-only
+  // banner. Audio capture (fullAudioRecorder chunked upload) and the
+  // server-side slice polling stay running, so the server reprocess
+  // pass still produces a full transcript + summary at completion.
+  const deviceCapability = useMemo(() => detectDevice(), []);
+  const isCaptureOnlyMode = shouldShowCaptureOnlyBanner(deviceCapability);
+  const allowBrowserInference = shouldRunBrowserInference(deviceCapability);
 
   // Privacy mode: toggle persisted in localStorage. Locked-in per-session
   // at start() time so a mid-meeting setting flip doesn't half-upload.
@@ -497,6 +529,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   // the model is ready, then auto-switches to browser. This is the same
   // idea as inBrowserLLM's lazy load.
   useEffect(() => {
+    // Phase A mobile gate. On phones / tablets we never attempt to
+    // load Parakeet 0.6B INT8 — the WASM fallback is sub-realtime on
+    // iOS Safari and the model weights blow past the mobile origin
+    // storage cap. Audio still captures + uploads via the chunked
+    // MediaRecorder path, and the server reprocess pass at completion
+    // produces the full transcript. The label tells anyone debugging
+    // why STT isn't initializing.
+    if (!allowBrowserInference) {
+      setSttReady(false);
+      setSttLoadProgress(null);
+      setSttLoadLabel('Skipped on mobile');
+      sttLoadAbortRef.current?.abort();
+      sttLoadAbortRef.current = null;
+      return;
+    }
     if (sttMode !== 'browser-parakeet') {
       // We can't actually unload the model from another tab; this just
       // tells our local context to stop trying.
@@ -553,7 +600,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         sttLoadAbortRef.current = null;
       }
     };
-  }, [sttMode]);
+  }, [sttMode, allowBrowserInference]);
 
   useEffect(() => {
     if (state !== 'recording' && state !== 'paused') return;
@@ -1643,6 +1690,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // path. The server is forbidden in this mode, so we have no other
     // choice. The slice quality is lower but at least nothing leaves the
     // device.
+    //
+    // Phase A mobile gate: even if a user somehow enters local-only on
+    // mobile (privacyMode.localOnly toggled on AND WebGPU advertised by
+    // iOS 17+), we refuse to fire the browser LLM. The slice queue
+    // stays empty until they're on a desktop — capture-only is the
+    // contract on mobile.
+    if (!allowBrowserInference) {
+      return;
+    }
     if (!transcriptText || summarizingRef.current) return;
     const wordCountAtStart = transcriptWordCount;
 
@@ -1741,6 +1797,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summary.slices,
     transcriptText,
     transcriptWordCount,
+    allowBrowserInference,
   ]);
 
   // Client-side auto-trigger — runs ONLY in privacy/local-only mode.
@@ -1987,6 +2044,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sessionStartedAt,
     startBlockedByRecord,
     clearStartBlocked,
+    deviceCapability,
+    isCaptureOnlyMode,
   }), [
     state,
     vadActive,
@@ -2026,6 +2085,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     sessionStartedAt,
     startBlockedByRecord,
     clearStartBlocked,
+    deviceCapability,
+    isCaptureOnlyMode,
   ]);
 
   return (

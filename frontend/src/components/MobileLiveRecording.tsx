@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Mic, Square, ChevronUp, X, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
+import { Mic, Square, ChevronUp, X, AlertCircle, Loader2, CheckCircle2, Smartphone } from 'lucide-react';
 import { useUploads } from '../contexts/UploadsContext';
 import {
   buildRecordingFilename,
@@ -419,6 +419,26 @@ export default function MobileLiveRecording() {
         ref={transcriptScrollRef}
         className="flex-1 overflow-y-auto px-4 pb-40 pt-2 space-y-2 text-sm leading-relaxed"
       >
+        {/* Phase A mobile gate explainer. The live-transcript and
+            live-summary panes are intentionally absent on mobile —
+            phones can't run Parakeet 0.6B or the in-browser LLM well
+            enough to be honest about it. We frame this as a deliberate
+            mode, not a missing feature. */}
+        <div className="rounded-xl bg-sky-500/5 border border-sky-500/30 p-4 text-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
+              <Smartphone className="h-4 w-4" />
+            </div>
+            <div>
+              <div className="font-medium text-sky-100 mb-1">Capture-only mode</div>
+              <div className="text-zinc-300">
+                Your device captures audio and uploads it as you record.
+                The full transcript and AI summary will be ready about a
+                minute after the meeting ends, on the session page.
+              </div>
+            </div>
+          </div>
+        </div>
         {transcript.length === 0 ? (
           <div className="rounded-xl bg-zinc-900/60 border border-zinc-800 p-4 text-zinc-400 text-sm">
             <div className="font-medium text-zinc-200 mb-1">{state === 'recording' ? 'Listening…' : 'No transcript yet'}</div>
