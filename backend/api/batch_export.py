@@ -24,6 +24,13 @@ class ExportOptions(BaseModel):
     includeTimestamps: bool = True
     includeSpeakers: bool = True
     includeInsights: bool = False
+    # ``includeTranscript`` gates whether ``export_to_markdown`` appends the
+    # full diarized transcript after the summary sections. Pydantic v2
+    # silently drops kwargs the model doesn't declare, so leaving this off
+    # made every ``ExportOptions(includeTranscript=...)`` call quietly lose
+    # the value and then crash with AttributeError at access time (the
+    # silent-fail mode behind the Markdown export button).
+    includeTranscript: bool = False
     mergeFiles: bool = False
     emailTo: Optional[str] = None
     scheduleTime: Optional[str] = None

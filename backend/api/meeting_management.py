@@ -18,8 +18,9 @@ import tempfile
 from database.database import get_db, SessionLocal
 from database.models import RecordingSession, Transcription
 from sqlalchemy.orm import Session
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_organization
 from auth.models import User
+from auth.organization import ActiveOrganization
 import logging
 
 logger = logging.getLogger(__name__)
@@ -313,48 +314,78 @@ async def update_transcript(
 @router.get("/recording-sessions/{session_id}/export")
 async def export_session(
     session_id: str,
-    format: str = Query(default="txt", pattern="^(txt|json|pdf|docx|srt)$"),
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    format: str = Query(default="txt", pattern="^(txt|md|markdown|json|pdf|docx|srt)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    """Export session in various formats"""
+    """Export session in various formats.
+
+    Org-scoped via ``_get_session_for_export``: the caller's active
+    organization must own the session row. Per-user filtering was the legacy
+    pre-multi-org behavior and 404'd every valid session once the
+    ``organization_id`` column became canonical.
+
+    Supported formats:
+      - ``txt``       — plain transcript
+      - ``md`` / ``markdown`` — GitHub-flavored markdown summary
+      - ``json``      — structured session + transcript payload
+      - ``srt``       — subtitle file
+      - ``pdf``       — PDF summary (delegated to batch_export)
+      - ``docx``      — DOCX summary (delegated to batch_export)
+    """
     try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
+        # Org-scoped lookup. Accepts either int PK or UUID string session_id.
+        from api.batch_export import _get_session_for_export
+        session = _get_session_for_export(db, active_org.organization.id, session_id)
+
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Get transcripts
+
+        # Get transcripts (legacy Transcription rows — many sessions instead
+        # carry diarized JSON on the session row itself; both paths are
+        # tolerated below).
         transcripts = db.query(Transcription).filter(
-            Transcription.session_id == session_id
+            Transcription.session_id == session.id
         ).order_by(Transcription.start_time).all()
-        
+
         if format == "txt":
             content = f"Meeting: {session.name}\n"
             content += f"Date: {session.created_at}\n"
             content += f"Duration: {session.duration} seconds\n\n"
             content += "Transcript:\n"
             content += "-" * 50 + "\n"
-            
+
             for t in transcripts:
                 speaker = t.speaker or f"Speaker {t.speaker_id or 1}"
                 content += f"\n[{speaker}]: {t.text}\n"
-            
+
             return StreamingResponse(
                 iter([content.encode()]),
                 media_type="text/plain",
                 headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.txt"}
             )
-            
+
+        elif format in ("md", "markdown"):
+            # Delegate to batch_export.export_to_markdown so we share the
+            # GitHub-flavored renderer used everywhere else. ExportOptions
+            # defaults already match the summary-only behavior expected by
+            # the SessionDetails markdown button.
+            from api.batch_export import export_to_markdown, ExportOptions
+            options = ExportOptions(includeTranscript=False)
+            content = export_to_markdown(session, options)
+            return StreamingResponse(
+                iter([content.encode("utf-8")]),
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.md"}
+            )
+
         elif format == "json":
             data = {
                 "session": {
                     "id": session.id,
                     "name": session.name,
-                    "date": session.created_at.isoformat(),
+                    "date": session.created_at.isoformat() if session.created_at else None,
                     "duration": session.duration
                 },
                 "transcript": [
@@ -368,13 +399,13 @@ async def export_session(
                     for t in transcripts
                 ]
             }
-            
+
             return StreamingResponse(
                 iter([json.dumps(data, indent=2).encode()]),
                 media_type="application/json",
                 headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.json"}
             )
-            
+
         elif format == "srt":
             content = ""
             for i, t in enumerate(transcripts, 1):
@@ -384,17 +415,34 @@ async def export_session(
                 content += f"{i}\n"
                 content += f"{start} --> {end}\n"
                 content += f"[{speaker}] {t.text}\n\n"
-            
+
             return StreamingResponse(
                 iter([content.encode()]),
                 media_type="text/plain",
                 headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.srt"}
             )
-            
-        # For PDF and DOCX, would need additional libraries
-        else:
+
+        elif format == "pdf":
+            from api.batch_export import export_to_pdf, ExportOptions
+            pdf_bytes = export_to_pdf(session, ExportOptions())
+            return StreamingResponse(
+                iter([pdf_bytes]),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.pdf"}
+            )
+
+        elif format == "docx":
+            from api.batch_export import export_to_docx, ExportOptions
+            docx_bytes = export_to_docx(session, ExportOptions())
+            return StreamingResponse(
+                iter([docx_bytes]),
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={"Content-Disposition": f"attachment; filename=transcript-{session_id}.docx"}
+            )
+
+        else:  # pragma: no cover — regex above pins the allowed values
             raise HTTPException(status_code=501, detail=f"Export format {format} not yet implemented")
-            
+
     except HTTPException:
         raise
     except Exception as e:
