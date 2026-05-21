@@ -234,9 +234,15 @@ def resolve_active_organization(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Organization not found",
             )
-    elif len(current_user.organizations) == 1:
+    elif current_user.organizations:
+        # User has at least one org membership. Pick the first as the implicit
+        # active org when the frontend does not send an explicit slug. This
+        # prevents 403s for users whose memberships do not include the platform
+        # default (e.g. GFL/shafen-khan users). The frontend can override by
+        # passing the X-Organization or ?org= selector.
         organization = current_user.organizations[0].organization
     else:
+        # User has no memberships yet; auto-provision into the platform default.
         organization = ensure_default_organization(db)
 
     membership = (
