@@ -18,7 +18,7 @@ class LiteLLMProvider:
         self,
         api_key: str,
         endpoint: str = "",
-        model: str = "gemma-4-26b-moe",
+        model: str = "Qwen3.6-35B-A3B-Vision",
         thinking: bool = False,
     ):
         self.api_key = api_key
