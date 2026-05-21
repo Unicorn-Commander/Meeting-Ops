@@ -26,25 +26,68 @@
  *     codec drift across users in the same org is a non-issue.
  */
 
-const MIME_CANDIDATES = [
+// Non-Safari MIME order: prefer WebM/Opus (Chrome/Edge/Firefox native).
+const MIME_CANDIDATES_NON_SAFARI = [
   // Chrome / Firefox / Edge default. Opus is open + small.
   'audio/webm;codecs=opus',
   'audio/webm',
-  // Safari path. AAC in MP4 container is the only thing Safari's
-  // MediaRecorder produces.
+  // Safari (and the occasional Chromium that ships AAC) fallback.
   'audio/mp4;codecs=mp4a.40.2',
   'audio/mp4',
   // Older Firefox sometimes only advertises ogg.
   'audio/ogg;codecs=opus',
 ];
 
+// Safari MIME order: ALWAYS prefer audio/mp4 (AAC) even on Safari 18.4+
+// which now advertises WebM/Opus support. The MP4 path has been the
+// stable production codec on iOS for years; the new WebM emitter still
+// has edge cases around backgrounding + AirPods reconnects we don't
+// want to inherit on a phone demo. Server-side ffmpeg reassembly takes
+// either, so the user-visible behavior is identical.
+const MIME_CANDIDATES_SAFARI = [
+  'audio/mp4;codecs=mp4a.40.2',
+  'audio/mp4',
+  'audio/aac',
+  // Fallbacks for Safari 18.4+ that exposes opus. We probe these last
+  // on iOS/macOS Safari so we keep MP4 as the default unless mp4 is
+  // genuinely unavailable.
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/ogg;codecs=opus',
+];
+
+/** Detect WebKit-family browsers (Safari macOS + iOS, plus all iOS
+ * Chrome/Firefox/Edge which are required by App Store policy to wrap
+ * WKWebView). We treat them all as Safari for MIME selection because
+ * they all use the same MediaRecorder backend.
+ *
+ * We avoid relying on `navigator.userAgent` Safari sniffing alone
+ * because Chrome on iOS also matches; instead we check for the
+ * combination that distinguishes WebKit from Blink: no `chrome` global
+ * and either iOS UA or macOS-Safari UA. */
+function isWebKitFamily(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  // All iOS browsers are WebKit under the hood (App Store rule until
+  // EU/UK browser-engine choice rolls out broadly; the WebKit code
+  // path is still the default everywhere as of 2026-Q2).
+  const isIOS = /iPhone|iPad|iPod/.test(ua)
+    || (/Macintosh/.test(ua) && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1);
+  if (isIOS) return true;
+  // Desktop Safari: UA contains "Safari" but NOT "Chrome"/"Chromium"/"Edg".
+  const isDesktopSafari = /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua);
+  return isDesktopSafari;
+}
+
 /** Pick the first MIME type the current browser will actually record in.
  * Returns an empty string when the browser exposes no MediaRecorder at
  * all (jsdom in tests, very old Safari) — callers should refuse to start
- * in that case rather than guess. */
+ * in that case rather than guess. Safari/iOS get an MP4-first probe
+ * order; everyone else gets WebM-first. */
 export function pickRecordableMime(): string {
   if (typeof MediaRecorder === 'undefined') return '';
-  for (const mime of MIME_CANDIDATES) {
+  const candidates = isWebKitFamily() ? MIME_CANDIDATES_SAFARI : MIME_CANDIDATES_NON_SAFARI;
+  for (const mime of candidates) {
     try {
       if (MediaRecorder.isTypeSupported(mime)) return mime;
     } catch {
@@ -151,7 +194,13 @@ export function createFullAudioRecorder(
     const form = new FormData();
     // Browser-side extension hint for the server's _safe_ext switch. We
     // base it on the recorder MIME; server stores under chunk_index.<ext>.
-    const ext = mime.includes('mp4') ? 'mp4' : mime.includes('ogg') ? 'ogg' : 'webm';
+    const ext = mime.includes('mp4')
+      ? 'mp4'
+      : mime.includes('aac')
+        ? 'aac'
+        : mime.includes('ogg')
+          ? 'ogg'
+          : 'webm';
     form.append('chunk', blob, `audio-${indexAtCreation}.${ext}`);
     form.append('chunk_index', String(indexAtCreation));
 
