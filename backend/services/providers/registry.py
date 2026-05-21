@@ -93,7 +93,14 @@ class ProviderRegistry:
             "quality": "LLM_MODEL_QUALITY",
             "chat": "LLM_MODEL_CHAT",
         }.get(task, "LLM_MODEL_QUALITY")
-        model = os.getenv(env_key, "gemma-4-26b-moe")
+        # Default Meeting-Ops model is Qwen 3.6 35B-A3B (MoE, 3B active).
+        # Consolidated 2026-05-21 — previously Gemma 4 26B-A4B-MoE, which
+        # bled <think> blocks even with enable_thinking=false and
+        # mis-attributed action items in summarization benchmarks. Qwen 3.6
+        # honors enable_thinking=false cleanly, supports OpenAI-style
+        # tool_calls, and benchmarks 4x faster on final summarization with
+        # better quality. See backend/scripts/qwen36_consolidation_bench.py.
+        model = os.getenv(env_key, "Qwen3.6-35B-A3B-Vision")
         from .impl_llm import LiteLLMProvider
         return LiteLLMProvider(
             api_key=DEFAULT_LITELLM_API_KEY,
@@ -172,7 +179,13 @@ class ProviderRegistry:
                 "quality": "LLM_MODEL_QUALITY",
                 "chat": "LLM_MODEL_CHAT",
             }.get(task, "LLM_MODEL_QUALITY")
-            model = os.getenv(env_keys, "gemma-4-26b-moe")
+            # Layer-4 fallback. Aligned with default_llm() — Qwen 3.6
+            # 35B-A3B is the consolidated Meeting-Ops default as of
+            # 2026-05-21 (was gemma-4-26b-moe). In production the direct
+            # route (layer 3) usually wins before this fallback is reached,
+            # but this default matters for any org that explicitly chose
+            # provider_name=litellm without specifying model_name.
+            model = os.getenv(env_keys, "Qwen3.6-35B-A3B-Vision")
 
         overrides = settings.get("overrides", {})
         task_override = overrides.get(task, {})
