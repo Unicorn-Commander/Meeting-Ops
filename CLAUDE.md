@@ -6,6 +6,8 @@ Hardware appliance for AI-powered meeting recording and transcription. NPU accel
 
 **Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive
 
+**Latest release**: v0.8.1 tagged 2026-05-22; meeting_date editable, filename parser, Phase B/Bulk Import/Phase C-1 design docs, synthetic-WAV diarization probe
+
 ## Architecture is browser-first by design
 
 Live STT and live summarization run in the user's browser (Parakeet 0.6B INT8 + Qwen 3 0.6B / Gemma 4 E2B via onnxruntime-web + transformers.js, cached in IndexedDB). The server only runs at meeting completion (Parakeet 1.1B fp16 + pyannote 3.1 + wespeaker embeddings + Qwen 3.6 35B-A3B-Vision), in a single 30-90 second pass per finished meeting. Privacy mode skips the server pass entirely; nothing leaves the device.
@@ -13,6 +15,35 @@ Live STT and live summarization run in the user's browser (Parakeet 0.6B INT8 + 
 This isn't an aesthetic choice — it's the moat. Our marginal cost per concurrent user-hour is $0 in compute (the user's CPU/GPU does it). Competitors pay AssemblyAI / Deepgram per audio-minute and OpenAI / Anthropic per token, per user, continuously. At scale we're 10-100x cheaper to run.
 
 **Default new features to browser-side compute.** Only fold a feature into the server completion pass if quality genuinely requires it. Only reach for a third-party API as a last resort, behind a feature flag, with the cost owner explicit. See `docs/compute-economics.md` for the full strategy doc + the decision tree for future architecture choices.
+
+## Design docs
+
+Canonical index: `docs/README.md`. It groups every document in `docs/` by topic, includes line counts, and records shipped vs designed status.
+
+- `docs/compute-economics.md`: Browser-first compute model, pricing tiers, cost moat, and deployment topology.
+- `docs/POSTGRESQL_QDRANT_SETUP.md`: PostgreSQL plus Qdrant setup, SQLite migration, and semantic search operations.
+- `docs/WYOMING_PROTOCOL.md`: Wyoming Protocol reference for Home Assistant satellites, wake words, gestures, and remote activation.
+- `docs/always-on-recording-design.md`: Earlier continuous recording and silence-gap segmentation design.
+- `docs/companion-app-design.md`: Desktop companion app design for mic plus system-audio capture.
+- `docs/satellite-devices-design.md`: ESP32-S3 and Raspberry Pi satellite-device architecture.
+- `docs/phase-b-server-live-streaming.md`: Paid-tier server-live streaming design with Parakeet streaming and Qwen rolling summaries.
+- `docs/phase-c1-native-ios-design.md`: Native iOS, Core ML, SwiftUI, watchOS, FluidAudio, and Apple Foundation Models plan.
+- `docs/bulk-audio-import-design.md`: Bulk import pipeline for the 526-file backlog and `/import` workflow.
+- `docs/conference-room-design.md`: Conference Room mode, room entities, USB mic path, and satellite convergence.
+- `docs/brigade-integration-design.md`: Meeting-Ops to Brigade graph writer and 3D viewer integration.
+- `docs/appliance-extraction-design.md`: Appliance extraction into a separate enterprise on-prem repo via submodule.
+- `docs/screen-recording-design.md`: Personal screen plus audio recording MVP design.
+- `docs/image-registry-decision.md`: Forgejo container registry decision for canonical image distribution.
+
+## Active roadmap
+
+Mobile and native roadmap is locked as A → B → C-1 → C-2 → C-3:
+
+1. Phase A, mobile PWA capture-only: shipped in v0.8.0 plus v0.8.1 follow-up work. Mobile can capture and upload, with completion processing after stop.
+2. Phase B, server-live streaming for paid tiers: designed and queued. Adds live transcript and rolling summary for mobile, weak desktops, Chromebooks, and locked-down devices that cannot run the browser model stack.
+3. Phase C-1, native iOS: designed and queued. Native Swift plus SwiftUI app, Core ML STT, Apple Foundation Models where available, and watchOS-compatible architecture.
+4. Phase C-2, watchOS extension on top of C-1: future.
+5. Phase C-3, native Android plus NNAPI: future.
 
 ## Quick Start
 
@@ -229,7 +260,7 @@ Compose without `--env-file deploy/bigboy/.env.bigboy` will silently fall back t
 
 ## Versioning + CHANGELOG
 
-This project uses [Semantic Versioning](https://semver.org/). Current series: v0.7.x.
+This project uses [Semantic Versioning](https://semver.org/). Current series: v0.8.x.
 
 `CHANGELOG.md` at repo root tracks every release in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. Update CHANGELOG.md alongside `frontend/package.json` version bump on every release.
 
