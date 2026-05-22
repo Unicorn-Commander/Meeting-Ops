@@ -3,6 +3,9 @@
 Endpoints
 ---------
 GET  /health                — liveness, model status, GPU info
+GET  /healthz/synthetic     — full-pipeline probe: runs bundled 2-speaker WAV
+                              through pyannote + wespeaker, asserts num_speakers == 2.
+                              Returns 200 OK on pass, 503 on degraded.
 POST /embed                 — extract a 256-d wespeaker embedding from a clip
 POST /diarize               — diarize an audio file (Pyannote if token, else whole-clip fallback)
 POST /identify              — match a clip against a list of known embeddings (cosine sim)
@@ -14,9 +17,12 @@ in the multipart body (always supported).
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -24,6 +30,7 @@ import soundfile as sf
 import torch
 import torchaudio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("speaker-svc")
@@ -295,30 +302,22 @@ async def embed(
     )
 
 
-@app.post("/diarize", response_model=DiarizeResponse)
-async def diarize(
-    audio: Optional[UploadFile] = File(default=None),
-    audio_path: Optional[str] = Form(default=None),
-    return_embeddings: bool = Form(default=True),
-    num_speakers: Optional[int] = Form(default=None),
-    min_speakers: Optional[int] = Form(default=None),
-    max_speakers: Optional[int] = Form(default=None),
-    clustering_threshold: Optional[float] = Form(default=None),
-):
-    """Diarize. Uses Pyannote community-1 if HUGGINGFACE_TOKEN is set; otherwise
-    falls back to single-speaker pseudo-diarization (one segment for
-    the whole clip) so callers always get a usable response shape."""
-    if audio is None and not audio_path:
-        raise HTTPException(status_code=400, detail="provide audio or audio_path")
+def _run_diarization_on_wav(
+    wav: np.ndarray,
+    *,
+    return_embeddings: bool = True,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> DiarizeResponse:
+    """Core diarization path shared by /diarize and /healthz/synthetic.
 
-    raw: bytes | str
-    if audio_path:
-        raw = audio_path
-    else:
-        raw = await audio.read()
-    wav, _ = _read_audio(raw)
+    Takes an already-loaded mono float32 waveform at TARGET_SR (use
+    _read_audio() to get it). Returns the same DiarizeResponse shape /diarize
+    returns. Falls back to single-speaker when pyannote can't be loaded so
+    the caller always gets a usable response.
+    """
     duration = len(wav) / TARGET_SR
-
     pipeline = _load_diarizer()
     if pipeline is None:
         # Graceful degradation — one segment, one wespeaker embedding for the
@@ -332,26 +331,9 @@ async def diarize(
             duration_seconds=duration,
         )
 
-    # Pyannote path — write the resampled wav back to a temp file because
-    # pyannote pipelines expect a file path or a torchaudio waveform tuple.
+    # Pyannote path — pyannote pipelines expect a file path or a torchaudio
+    # waveform tuple.
     waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, T)
-
-    # Task #79 v2: per-request clustering threshold overrides are no longer
-    # supported. Calling pipeline.instantiate() per request appears to retain
-    # the previous parameter graph in pyannote 3.1/4.x and contributes to the
-    # VRAM accumulation that necessitates the 8h restart workaround. The
-    # threshold is now fixed at startup via PYANNOTE_CLUSTERING_THRESHOLD env
-    # var (default 0.72; midboy2 deploy sets 0.78). Callers who need a
-    # different value must redeploy the service with the new env value.
-    if clustering_threshold is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "per-request clustering_threshold override is no longer supported "
-                "(task #79 v2: prevents pyannote VRAM accumulation). "
-                "Set PYANNOTE_CLUSTERING_THRESHOLD env on the speaker-svc deploy."
-            ),
-        )
 
     diarize_kwargs: dict[str, int] = {}
     if num_speakers is not None:
@@ -362,7 +344,7 @@ async def diarize(
         if max_speakers is not None:
             diarize_kwargs["max_speakers"] = int(max_speakers)
     logger.info(
-        "/diarize duration=%.1fs hints=%s threshold=env-default",
+        "diarize duration=%.1fs hints=%s threshold=env-default",
         duration,
         diarize_kwargs or "auto",
     )
@@ -440,6 +422,54 @@ async def diarize(
     return response
 
 
+@app.post("/diarize", response_model=DiarizeResponse)
+async def diarize(
+    audio: Optional[UploadFile] = File(default=None),
+    audio_path: Optional[str] = Form(default=None),
+    return_embeddings: bool = Form(default=True),
+    num_speakers: Optional[int] = Form(default=None),
+    min_speakers: Optional[int] = Form(default=None),
+    max_speakers: Optional[int] = Form(default=None),
+    clustering_threshold: Optional[float] = Form(default=None),
+):
+    """Diarize. Uses Pyannote community-1 if HUGGINGFACE_TOKEN is set; otherwise
+    falls back to single-speaker pseudo-diarization (one segment for
+    the whole clip) so callers always get a usable response shape."""
+    if audio is None and not audio_path:
+        raise HTTPException(status_code=400, detail="provide audio or audio_path")
+
+    # Task #79 v2: per-request clustering threshold overrides are no longer
+    # supported. Calling pipeline.instantiate() per request appears to retain
+    # the previous parameter graph in pyannote 3.1/4.x and contributes to the
+    # VRAM accumulation that necessitates the 8h restart workaround. The
+    # threshold is now fixed at startup via PYANNOTE_CLUSTERING_THRESHOLD env
+    # var (default 0.72; midboy2 deploy sets 0.78). Callers who need a
+    # different value must redeploy the service with the new env value.
+    if clustering_threshold is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "per-request clustering_threshold override is no longer supported "
+                "(task #79 v2: prevents pyannote VRAM accumulation). "
+                "Set PYANNOTE_CLUSTERING_THRESHOLD env on the speaker-svc deploy."
+            ),
+        )
+
+    raw: bytes | str
+    if audio_path:
+        raw = audio_path
+    else:
+        raw = await audio.read()
+    wav, _ = _read_audio(raw)
+    return _run_diarization_on_wav(
+        wav,
+        return_embeddings=return_embeddings,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
+
+
 @app.post("/identify", response_model=IdentifyResponse)
 def identify(req: IdentifyRequest):
     """Score a query embedding against candidate enrolled-speaker embeddings.
@@ -470,6 +500,232 @@ def identify(req: IdentifyRequest):
     matches.sort(key=lambda m: m.similarity, reverse=True)
     best = matches[0] if matches else None
     return IdentifyResponse(matches=matches, best_match=best)
+
+
+# ---------- synthetic probe (task #105) ----------
+#
+# The standard /health endpoint only confirms the HTTP server is up and reports
+# whether models *can* be loaded. It does not exercise the full diarization
+# pipeline. A few days ago we hit a class of failure where pyannote returned
+# collapsed clusters (everyone-as-one-speaker) and the only fix was a container
+# restart at the SAME clustering threshold — i.e. pipeline-state degradation.
+# That class of failure is invisible to /health.
+#
+# /healthz/synthetic runs a bundled known-good 2-speaker WAV through the exact
+# same code path normal /diarize requests hit (_run_diarization_on_wav) and
+# asserts the result matches the ground truth in the sibling .meta.json. If
+# the pipeline degrades into a 1-speaker (or >2-speaker) result, the probe
+# returns 503 and Docker's healthcheck flags the container as unhealthy.
+
+FIXTURE_DIR = Path(__file__).parent / "test_fixtures"
+SYNTHETIC_FIXTURE_PATH = FIXTURE_DIR / "synthetic_2speaker.wav"
+SYNTHETIC_META_PATH = FIXTURE_DIR / "synthetic_2speaker.meta.json"
+
+
+def _load_synthetic_meta() -> dict:
+    """Read the fixture's ground-truth manifest. Cached per-process via lru-style
+    via module global to avoid disk reads on every probe."""
+    global _synthetic_meta_cache
+    try:
+        return _synthetic_meta_cache  # type: ignore[name-defined]
+    except NameError:
+        pass
+    if not SYNTHETIC_META_PATH.exists():
+        raise FileNotFoundError(f"synthetic meta missing at {SYNTHETIC_META_PATH}")
+    _synthetic_meta_cache = json.loads(SYNTHETIC_META_PATH.read_text())  # type: ignore[name-defined]
+    return _synthetic_meta_cache  # type: ignore[name-defined]
+
+
+def _centroid_cosine_distance(segments: list[DiarizeSegment]) -> Optional[float]:
+    """Compute cosine distance between the two cluster centroids, given a
+    diarization result with embeddings. Returns None when there are not
+    exactly 2 clusters or any embeddings are missing."""
+    by_speaker: dict[str, list[np.ndarray]] = {}
+    for seg in segments:
+        if seg.embedding is None:
+            continue
+        by_speaker.setdefault(seg.speaker, []).append(
+            np.asarray(seg.embedding, dtype="float32")
+        )
+    if len(by_speaker) != 2:
+        return None
+    centroids = [np.mean(np.stack(v), axis=0) for v in by_speaker.values()]
+    if any(v.size == 0 for v in centroids):
+        return None
+    sim = _cos(centroids[0], centroids[1])
+    return 1.0 - sim
+
+
+@app.get("/healthz/synthetic")
+async def healthz_synthetic():
+    """Full-pipeline probe.
+
+    Runs the bundled 2-speaker WAV (test_fixtures/synthetic_2speaker.wav)
+    through the actual diarization pipeline _run_diarization_on_wav() and
+    asserts the result matches the manifest in synthetic_2speaker.meta.json:
+
+      * num_speakers == expected_speaker_count (default 2)
+      * segments > 1 (single-cluster degeneracy guard)
+      * cosine distance between cluster centroids >= expected_min_embedding_distance
+
+    Returns 200 OK with { status: ok, ... } on pass.
+    Returns 503 Service Unavailable with { status: degraded, reason: "...", ... }
+    on any failure. Reason values: fixture_missing, fixture_unreadable,
+    diarization_threw, speaker_count_mismatch, segments_too_few,
+    embedding_distance_too_low.
+    """
+    start = time.monotonic()
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Step 1: load the fixture + manifest.
+    if not SYNTHETIC_FIXTURE_PATH.exists():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "fixture_missing",
+                "fixture_path": str(SYNTHETIC_FIXTURE_PATH),
+                "elapsed_ms": int((time.monotonic() - start) * 1000),
+                "checked_at": checked_at,
+            },
+        )
+    try:
+        expected = _load_synthetic_meta()
+        wav, _ = _read_audio(str(SYNTHETIC_FIXTURE_PATH))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "fixture_unreadable",
+                "error": f"{type(exc).__name__}: {exc}",
+                "elapsed_ms": int((time.monotonic() - start) * 1000),
+                "checked_at": checked_at,
+            },
+        )
+
+    expected_speaker_count = int(expected.get("expected_speaker_count", 2))
+    min_emb_distance = float(expected.get("expected_min_embedding_distance", 0.4))
+    fixture_name = expected.get("filename", SYNTHETIC_FIXTURE_PATH.name)
+
+    # Step 2: run the actual pipeline. ANY exception => degraded.
+    try:
+        result = _run_diarization_on_wav(wav, return_embeddings=True)
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.error(
+            "/healthz/synthetic diarization_threw type=%s err=%s elapsed_ms=%d",
+            type(exc).__name__, exc, elapsed_ms,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "diarization_threw",
+                "error": f"{type(exc).__name__}: {exc}",
+                "elapsed_ms": elapsed_ms,
+                "fixture": fixture_name,
+                "checked_at": checked_at,
+            },
+        )
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    speaker_count = result.num_speakers
+    segment_count = len(result.segments)
+
+    # Step 3: speaker count must match ground truth (catches collapsed-cluster
+    # everyone-as-one-speaker degeneracy, and over-splitting too).
+    if speaker_count != expected_speaker_count:
+        logger.error(
+            "/healthz/synthetic speaker_count_mismatch expected=%d actual=%d segments=%d elapsed_ms=%d",
+            expected_speaker_count, speaker_count, segment_count, elapsed_ms,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "speaker_count_mismatch",
+                "expected": expected_speaker_count,
+                "speaker_count_actual": speaker_count,
+                "segments": segment_count,
+                "elapsed_ms": elapsed_ms,
+                "fixture": fixture_name,
+                "backend": result.backend,
+                "checked_at": checked_at,
+            },
+        )
+
+    # Step 4: segments must be > 1. A 2-speaker WAV producing a single segment
+    # spanning the whole file would mean the segmenter degraded even if the
+    # cluster count came out by coincidence.
+    if segment_count < 2:
+        logger.error(
+            "/healthz/synthetic segments_too_few count=%d elapsed_ms=%d",
+            segment_count, elapsed_ms,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "segments_too_few",
+                "speaker_count_actual": speaker_count,
+                "segments": segment_count,
+                "elapsed_ms": elapsed_ms,
+                "fixture": fixture_name,
+                "backend": result.backend,
+                "checked_at": checked_at,
+            },
+        )
+
+    # Step 5: optional embedding-distance check. If embeddings are present,
+    # the two cluster centroids should be far apart for our synthetic fixture
+    # (male + female TTS voices land at ~0.97 cosine distance in practice).
+    # We require >= expected_min_embedding_distance (default 0.4) which is
+    # conservative — anything tighter would catch wespeaker degradation too.
+    distance: Optional[float] = _centroid_cosine_distance(result.segments)
+    if distance is not None and distance < min_emb_distance:
+        logger.error(
+            "/healthz/synthetic embedding_distance_too_low distance=%.4f min=%.4f elapsed_ms=%d",
+            distance, min_emb_distance, elapsed_ms,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "reason": "embedding_distance_too_low",
+                "embedding_distance": round(distance, 4),
+                "embedding_distance_required": min_emb_distance,
+                "speaker_count_actual": speaker_count,
+                "segments": segment_count,
+                "elapsed_ms": elapsed_ms,
+                "fixture": fixture_name,
+                "backend": result.backend,
+                "checked_at": checked_at,
+            },
+        )
+
+    # All checks passed.
+    logger.info(
+        "/healthz/synthetic ok speaker_count=%d segments=%d distance=%s elapsed_ms=%d backend=%s",
+        speaker_count,
+        segment_count,
+        f"{distance:.4f}" if distance is not None else "n/a",
+        elapsed_ms,
+        result.backend,
+    )
+    payload: dict[str, object] = {
+        "status": "ok",
+        "speaker_count": speaker_count,
+        "segments": segment_count,
+        "elapsed_ms": elapsed_ms,
+        "fixture": fixture_name,
+        "backend": result.backend,
+        "checked_at": checked_at,
+    }
+    if distance is not None:
+        payload["embedding_distance"] = round(distance, 4)
+        payload["embedding_distance_required"] = min_emb_distance
+    return payload
 
 
 @app.on_event("startup")

@@ -62,3 +62,69 @@ curl -X POST -H 'Content-Type: application/json' http://meet-speaker-svc:8889/id
 All embeddings are 192-d float32 and ship as JSON arrays. The DB column is
 `embedding_dim INT` + `embedding BYTEA` so swapping in a wider model later
 (e.g. ECAPA-XL at 256-d, or WavLM at 768-d) is a config change, not a schema change.
+
+## Health probes
+
+| Endpoint | What it checks | Used by |
+|---|---|---|
+| `GET /health` | HTTP server is up, reports cuda + model-load status | bootstrap / quick liveness checks |
+| `GET /healthz/synthetic` | Full diarization pipeline: loads bundled 2-speaker WAV, runs it through `_run_diarization_on_wav()`, asserts `num_speakers == 2`, segments > 1, and cosine distance between cluster centroids >= 0.4 | Docker healthcheck + on-call alerting |
+
+The synthetic probe (task #105) catches the pipeline-state-degradation class
+of failure where pyannote returns collapsed clusters (everyone-as-one-speaker)
+and only a container restart at the same clustering threshold fixes it. The
+plain `/health` is HTTP-up-only and can't see this.
+
+Test fixture lives at `test_fixtures/synthetic_2speaker.wav` with a sibling
+`.meta.json` describing ground truth. Bundled inside the image, no network
+required at probe time.
+
+Sample passing response:
+
+```json
+{
+  "status": "ok",
+  "speaker_count": 2,
+  "segments": 3,
+  "elapsed_ms": 412,
+  "fixture": "synthetic_2speaker.wav",
+  "backend": "pyannote-community-1",
+  "embedding_distance": 0.9772,
+  "embedding_distance_required": 0.4,
+  "checked_at": "2026-05-22T07:00:00Z"
+}
+```
+
+Sample degraded response:
+
+```json
+{
+  "status": "degraded",
+  "reason": "speaker_count_mismatch",
+  "expected": 2,
+  "speaker_count_actual": 1,
+  "segments": 1,
+  "fixture": "synthetic_2speaker.wav",
+  "backend": "pyannote-community-1",
+  "elapsed_ms": 380,
+  "checked_at": "2026-05-22T07:05:00Z"
+}
+```
+
+Possible `reason` values: `fixture_missing`, `fixture_unreadable`,
+`diarization_threw`, `speaker_count_mismatch`, `segments_too_few`,
+`embedding_distance_too_low`.
+
+## Tests
+
+```bash
+# From inside this directory
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt fastapi pytest httpx python-multipart
+pytest tests/ -v
+```
+
+The unit tests do not touch the real pyannote models — they monkey-patch
+`_run_diarization_on_wav` at the boundary and exercise the probe's branching.
+End-to-end probe verification happens out-of-process via the Docker
+healthcheck once the container is deployed.

@@ -32,6 +32,8 @@ meeting_sessions.db
 *.flac
 recordings/
 audio_files/
+# Bundled test fixtures (small, ground-truth-described, intentionally shipped)
+!services/speaker-svc/test_fixtures/*.wav
 
 # ML Models (large files)
 *.onnx

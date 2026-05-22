@@ -36,7 +36,14 @@ COPY . .
 
 EXPOSE 8889
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
-    CMD curl -fsS http://localhost:8889/health || exit 1
+# Healthcheck runs /healthz/synthetic — the full-pipeline probe that loads the
+# bundled 2-speaker fixture, diarizes it, and asserts speaker_count == 2. This
+# catches pipeline-state degradation that /health (HTTP-up only) misses. See
+# task #105 for context. start-period is 2m so model cold-load on first probe
+# doesn't trip the healthcheck; subsequent probes run on warm models in <60s.
+# Compose-level overrides on individual deploys may extend interval/start-period
+# if the host needs more headroom.
+HEALTHCHECK --interval=5m --timeout=60s --retries=2 --start-period=120s \
+    CMD curl -fsS http://localhost:8889/healthz/synthetic || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8889", "--workers", "1"]
