@@ -262,6 +262,75 @@ class BrigadeClient:
                     ok=False, mode="error", detail=str(exc)[:200]
                 )
 
+    async def fetch_entity_context(
+        self,
+        *,
+        entity_name: str,
+        include_relationships: bool = True,
+        include_related: bool = True,
+        max_depth: int = 1,
+    ) -> Optional[dict[str, Any]]:
+        """Phase 2 read path. Fetches a single entity + its 1-hop
+        neighborhood from Brigade's knowledge graph.
+
+        Returns the raw JSON dict from
+        ``GET /api/v1/knowledge/context/{entity_name}`` (shape:
+        ``{entity, relationships, related_entities, context_text?}``)
+        or None when the entity isn't found / Brigade is in log-only
+        mode / a transient HTTP error occurs.
+
+        Never raises — the caller can branch on ``None`` to render the
+        "not synced yet" state without try/except plumbing. Read-path
+        failures aren't pipeline-breaking; they're rendering hints.
+        """
+        if not self.is_live:
+            logger.info(
+                "brigade_client noop fetch_entity_context name=%s", entity_name
+            )
+            return None
+
+        # Brigade's context endpoint expects the unescaped name in the
+        # path; httpx URL-escapes correctly so spaces / punctuation in
+        # the entity name don't blow up routing.
+        url = (
+            f"{self._base_url}/api/v1/knowledge/context/{entity_name}"
+            f"?include_relationships={'true' if include_relationships else 'false'}"
+            f"&include_related={'true' if include_related else 'false'}"
+            f"&max_depth={max(1, min(int(max_depth), 5))}"
+        )
+        try:
+            async with self._client_ctx() as client:
+                resp = await client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "brigade_client fetch_entity_context non-json body "
+                        "name=%s err=%s",
+                        entity_name,
+                        exc,
+                    )
+                    return None
+            if resp.status_code == 404:
+                # Entity exists in our Postgres mirror but not (yet) in
+                # Brigade. The caller renders the "not_synced_yet" state.
+                return None
+            logger.warning(
+                "brigade_client fetch_entity_context HTTP %s name=%s body=%s",
+                resp.status_code,
+                entity_name,
+                resp.text[:200],
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "brigade_client fetch_entity_context exc name=%s: %s",
+                entity_name,
+                exc,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

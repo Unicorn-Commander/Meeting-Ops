@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Play, Pause, Download, Share2, Flag,
@@ -6,8 +6,17 @@ import {
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
-  Briefcase, Edit2, Check, X, Trash2,
+  Briefcase, Edit2, Check, X, Trash2, Network, ChevronDown,
 } from 'lucide-react';
+
+// Brigade Phase 2: lazy-load the 3D graph viewer so the Three.js
+// footprint (~500KB+ via react-force-graph-3d -> 3d-force-graph ->
+// three) only ships to the browser when the user expands the
+// Knowledge graph section. Without this, every SessionDetails
+// pageload would pay the cost of a feature the user may never open.
+const BrigadeGraphViewer = React.lazy(
+  () => import('../components/BrigadeGraphViewer'),
+);
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { LoadingSpinner } from '../components/LoadingSpinner';
@@ -251,6 +260,11 @@ export const SessionDetails: React.FC = () => {
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [showMoveOrgModal, setShowMoveOrgModal] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  // Brigade Phase 2: collapsed by default so the Three.js bundle isn't
+  // fetched until the user opens the section. SessionDetails is the
+  // primary landing page for completed meetings; many users won't ever
+  // need the graph view, and we don't want to pay the cost for them.
+  const [showBrigadeGraph, setShowBrigadeGraph] = useState(false);
   // Speaker link + org speaker library — fetched once per session so the
   // inline SpeakerLabelEditor popover can render assign/merge targets
   // without making the user open the side-panel SpeakerTagger.
@@ -2461,6 +2475,54 @@ export const SessionDetails: React.FC = () => {
                 )}
               </div>
             )}
+
+            {/* Brigade Phase 2: inline 3D knowledge-graph viewer.
+                Collapsed by default so we don't ship the Three.js
+                bundle on every SessionDetails page load — the user
+                opts in by expanding the section. The existing Phase 1
+                "View in Brigade graph" indigo banner stays as the
+                full-screen alternative for users who prefer
+                Brigade's native UI. */}
+            <div className="bg-white rounded-lg shadow-sm">
+              <button
+                type="button"
+                onClick={() => setShowBrigadeGraph((v) => !v)}
+                className="w-full flex items-center justify-between p-6 text-left"
+                aria-expanded={showBrigadeGraph}
+              >
+                <div className="flex items-start gap-3">
+                  <Network className="w-5 h-5 text-indigo-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <h2 className="text-lg font-semibold flex items-center gap-2">
+                      Knowledge graph
+                    </h2>
+                    <p className="text-sm text-gray-600 mt-1">
+                      Shows how this meeting connects to other people,
+                      topics, and decisions in your Brigade knowledge
+                      graph.
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={`w-5 h-5 text-gray-500 transition-transform flex-shrink-0 ${
+                    showBrigadeGraph ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+              {showBrigadeGraph && (
+                <div className="px-6 pb-6">
+                  <Suspense
+                    fallback={
+                      <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-sm text-slate-600">
+                        Loading 3D graph viewer...
+                      </div>
+                    }
+                  >
+                    <BrigadeGraphViewer sessionId={session.id || sessionId || ''} />
+                  </Suspense>
+                </div>
+              )}
+            </div>
 
             {/* Listen-to-summary + podcast recap (Phase 4c-2 — VibeVoice TTS) */}
             {(session.final_summary || session.summary || session.transcript_simple || session.transcript) && (

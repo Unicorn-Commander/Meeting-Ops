@@ -38,6 +38,25 @@ from services.summary_slices import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["always-on-recording"])
 
+# Brigade integration Phase 2 — read-side router for the in-page 3D
+# graph viewer on SessionDetails. Lives alongside the always-on router
+# in this module but uses no prefix so the URL shape matches the
+# /api/sessions/{session_id}/... pattern the frontend already uses for
+# TTS + speaker-links + other per-session reads. Registered as a second
+# router in main.py via _load_router(..., router_attr='brigade_graph_router').
+brigade_graph_router = APIRouter(tags=["brigade-graph"])
+
+# In-process TTL cache for /api/sessions/{id}/brigade-graph responses.
+# The graph doesn't change often after a meeting completes (only on
+# reprocess re-runs which are minutes-scale events) so a 30s cache
+# absorbs the page-refresh / browser-tab-flip pattern without going
+# stale on real updates. Per-session key; the cache is process-local
+# (single uvicorn worker today; we'll move to redis when we add
+# replicas — see also _maybe_persist_slice_after_chunk for the same
+# single-worker assumption).
+_BRIGADE_GRAPH_CACHE_TTL_SECONDS = 30
+_brigade_graph_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
 RECORDINGS_DIR = Path(os.getenv("RECORDINGS_DIR", "/app/recordings"))
 ALWAYS_ON_DIR = RECORDINGS_DIR / "always_on"
 
@@ -2091,3 +2110,254 @@ async def post_full_audio(
         "bytes_received": len(body),
         "source": "full_audio_fallback",
     }
+
+
+# =====================================================================
+# Brigade Phase 2 — read endpoint for the in-page 3D graph viewer.
+# =====================================================================
+
+
+def _brigade_graph_cache_get(key: str) -> Optional[dict[str, Any]]:
+    """TTL-bounded cache lookup. Drops the row on read when expired so
+    the dict never grows unboundedly."""
+    import time
+
+    row = _brigade_graph_cache.get(key)
+    if not row:
+        return None
+    expires_at, payload = row
+    if time.monotonic() > expires_at:
+        _brigade_graph_cache.pop(key, None)
+        return None
+    return payload
+
+
+def _brigade_graph_cache_put(key: str, payload: dict[str, Any]) -> None:
+    import time
+
+    _brigade_graph_cache[key] = (
+        time.monotonic() + _BRIGADE_GRAPH_CACHE_TTL_SECONDS,
+        payload,
+    )
+
+
+def _shape_brigade_graph(
+    brigade_response: dict[str, Any],
+    *,
+    focus_node_id: str,
+) -> dict[str, Any]:
+    """Convert Brigade's /knowledge/context/{name} shape to the
+    {nodes, links} shape react-force-graph-3d consumes.
+
+    Brigade's context endpoint returns:
+        {
+          entity: {name, type, created_at, created_by, graph},
+          relationships: [{from:{name,type}, relationship, to:{name,type},
+                           confidence, learned_at, source_agent, graph}],
+          related_entities: [{name, type, distance, graph}],
+          context_text: "...",
+        }
+
+    We map every distinct entity (the focus + each related_entities row
+    AND every endpoint of relationships) into one node, keyed by entity
+    name. Brigade uses the entity ``name`` as the canonical ID across
+    nodes + edges so we use it as the node ``id`` directly. The
+    ``label`` field carries Brigade's ``type`` (Meeting / Speaker /
+    ActionItem / Topic / Decision / Concept / Person / ...) so the
+    frontend can color-code without re-resolving the type.
+
+    Edges keep Brigade's ``relationship`` string as ``type`` (e.g.
+    HAS_SPEAKER, ASSIGNED_TO) for hover labels.
+    """
+    nodes_by_id: dict[str, dict[str, Any]] = {}
+    links: list[dict[str, Any]] = []
+
+    def _add_node(raw: dict[str, Any], *, is_focus: bool = False) -> Optional[str]:
+        name = raw.get("name")
+        if not name:
+            return None
+        if name in nodes_by_id:
+            return name
+        # Drop graph metadata fields we don't need on the wire (graph
+        # name leaks routing internals; created_by is server-side).
+        properties = {
+            k: v
+            for k, v in raw.items()
+            if k not in {"name", "type", "graph"}
+        }
+        nodes_by_id[name] = {
+            "id": name,
+            "label": raw.get("type") or "Concept",
+            "name": name,
+            "is_focus": is_focus,
+            "properties": properties,
+        }
+        return name
+
+    entity = brigade_response.get("entity") or {}
+    _add_node(entity, is_focus=True)
+
+    for rel in brigade_response.get("relationships") or []:
+        from_raw = rel.get("from") or {}
+        to_raw = rel.get("to") or {}
+        from_id = _add_node(from_raw)
+        to_id = _add_node(to_raw)
+        if not from_id or not to_id:
+            continue
+        links.append(
+            {
+                "source": from_id,
+                "target": to_id,
+                "type": rel.get("relationship") or "RELATED_TO",
+                "properties": {
+                    k: v
+                    for k, v in rel.items()
+                    if k not in {"from", "to", "relationship", "graph"}
+                    and v is not None
+                },
+            }
+        )
+
+    # related_entities may include nodes not touched by any relationship
+    # (e.g. distance>1 hops the writer doesn't actually create edges
+    # for). We surface them as floating nodes so the viewer can hint
+    # at the larger graph context. Today depth=1 means this is rare.
+    for related in brigade_response.get("related_entities") or []:
+        _add_node(related)
+
+    return {
+        "nodes": list(nodes_by_id.values()),
+        "links": links,
+        "focus": focus_node_id,
+    }
+
+
+@brigade_graph_router.get("/api/sessions/{session_id}/brigade-graph")
+async def get_brigade_graph(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Phase 2 read endpoint: returns the current session's :Meeting
+    node + its 1-hop neighborhood (Speaker / ActionItem / Topic /
+    Decision) from Brigade's FalkorDB store, shaped for
+    react-force-graph-3d.
+
+    Response shape:
+        {
+          "nodes": [{id, label, name, is_focus, properties}],
+          "links": [{source, target, type, properties}],
+          "graph_url": "https://brigade.../knowledge?graph=...&focus=...",
+          "focus": "<meeting_node_id>",          # when synced
+          "reason": "not_synced_yet" | "live_failed" | None,
+          "synced_at": "<iso>" | None,
+        }
+
+    States:
+      * Synced + Brigade reachable:    nodes + links populated, reason=None.
+      * Not yet synced (column NULL): empty arrays + reason='not_synced_yet'.
+      * Synced but Brigade down/404:  empty arrays + reason='live_failed'.
+
+    Auth: user-scoped via the same path as the rest of the session
+    detail API. Cross-org returns 404 (no existence leak). The
+    response cache is keyed by (org_id, session_pk, synced_node_id)
+    so a re-sync after a reprocess invalidates implicitly because the
+    cache key includes the stamped node id.
+    """
+    # Local imports keep cold-start fast — this endpoint isn't on the
+    # critical recording path.
+    from services.brigade_client import BrigadeClient
+    from services.brigade_writer import build_brigade_graph_url
+
+    # 1. Resolve session within the active org. Cross-org returns 404.
+    session_query = db.query(RecordingSession).filter(
+        RecordingSession.organization_id == active_org.organization.id
+    )
+    session = session_query.filter(
+        RecordingSession.session_id == session_id
+    ).first()
+    if not session:
+        try:
+            session = session_query.filter(
+                RecordingSession.id == int(session_id)
+            ).first()
+        except (TypeError, ValueError):
+            session = None
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2. Not-synced-yet: short-circuit with the empty payload. This is
+    #    the expected state for new sessions or any deployment where
+    #    BRIGADE_API_KEY isn't configured (writer ran in no-op mode and
+    #    never stamped brigade_graph_node_id).
+    node_id = getattr(session, "brigade_graph_node_id", None)
+    synced_at = getattr(session, "brigade_synced_at", None)
+    synced_at_iso = synced_at.isoformat() if synced_at else None
+    if not node_id:
+        return {
+            "nodes": [],
+            "links": [],
+            "graph_url": None,
+            "focus": None,
+            "reason": "not_synced_yet",
+            "synced_at": None,
+        }
+
+    # 3. Cache key includes org + session pk + node id + synced_at so a
+    #    Brigade re-write (which bumps brigade_synced_at) implicitly
+    #    invalidates without us tracking versions.
+    cache_key = (
+        f"{active_org.organization.id}:{session.id}:{node_id}:{synced_at_iso}"
+    )
+    cached = _brigade_graph_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # 4. Live read. brigade_client returns None on noop / 404 / network
+    #    error — we surface that to the frontend as 'live_failed' so it
+    #    can render the empty-state with a retry button instead of a
+    #    500. We do NOT cache the failure path so the next page load
+    #    retries.
+    graph_url = None
+    try:
+        graph_url = build_brigade_graph_url(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("brigade_graph build_url failed session=%s: %s", session.id, exc)
+        graph_url = None
+
+    brigade_client = BrigadeClient()
+    try:
+        raw = await brigade_client.fetch_entity_context(
+            entity_name=node_id,
+            include_relationships=True,
+            include_related=True,
+            max_depth=1,
+        )
+    finally:
+        await brigade_client.aclose()
+
+    if raw is None:
+        # Either Brigade is unreachable, the API key isn't set in this
+        # env, or the entity was deleted upstream. Don't cache —
+        # next request retries.
+        return {
+            "nodes": [],
+            "links": [],
+            "graph_url": graph_url,
+            "focus": node_id,
+            "reason": "live_failed",
+            "synced_at": synced_at_iso,
+        }
+
+    shaped = _shape_brigade_graph(raw, focus_node_id=node_id)
+    payload: dict[str, Any] = {
+        "nodes": shaped["nodes"],
+        "links": shaped["links"],
+        "graph_url": graph_url,
+        "focus": node_id,
+        "reason": None,
+        "synced_at": synced_at_iso,
+    }
+    _brigade_graph_cache_put(cache_key, payload)
+    return payload

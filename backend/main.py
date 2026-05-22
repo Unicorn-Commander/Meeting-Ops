@@ -236,6 +236,14 @@ _load_router(app, "auth", "auth.routes", required=True)
 _load_router(app, "session_tags", "api.sessions_tags")
 _load_router(app, "recording", "api.simple_recording_db", required=True)
 _load_router(app, "always_on_recordings", "api.recording", required=True)
+# Brigade Phase 2 read endpoint — lives in api.recording but as a
+# second router (no prefix) so the URL is /api/sessions/{id}/brigade-graph.
+_load_router(
+    app,
+    "brigade_graph",
+    "api.recording",
+    router_attr="brigade_graph_router",
+)
 _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
 # Per-meeting permissions (collaborators + magic-link share). Two
 # routers in one module: `router` carries the auth'd per-session
