@@ -14,6 +14,9 @@ alembic==1.13.1
 redis==5.0.1
 redis[hiredis]==5.0.1
 
+# Task Queue (Bulk Import Arq worker — B-import.4)
+arq>=0.26
+
 # Authentication & Security
 bcrypt==4.2.1
 python-jose[cryptography]==3.3.0

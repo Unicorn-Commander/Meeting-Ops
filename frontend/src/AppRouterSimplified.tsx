@@ -23,6 +23,7 @@ import Help from './pages/Help';
 import LocalSessions from './pages/LocalSessions';
 import Import from './pages/Import';
 import StreamingTest from './pages/StreamingTest';
+import AdminBulkImport from './pages/AdminBulkImport';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 import { listLocalSessions } from './services/localSessionStore';
@@ -155,6 +156,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/rooms', label: 'Rooms', icon: DoorOpen },
     { path: '/speakers', label: 'Speakers', icon: '🗣️' },
     { path: '/admin/agents', label: 'Agents', icon: '🤖' },
+    { path: '/admin/bulk-import', label: 'Bulk Import', icon: FolderUp },
   ];
 
   const formatTime = (seconds: number) => {
@@ -438,6 +440,12 @@ export function AppRouterSimplified() {
       <Route path="/admin/agents-old" element={
         <AdminRoute>
           <AgentConfiguration />
+        </AdminRoute>
+      } />
+
+      <Route path="/admin/bulk-import" element={
+        <AdminRoute>
+          <AdminBulkImport />
         </AdminRoute>
       } />
 

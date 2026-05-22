@@ -110,8 +110,8 @@ async def lifespan(app: FastAPI):
         logger.warning(f"TTS render queue initialization failed: {e}")
 
     try:
-        from services.bulk_import_queue import start_bulk_import_queue
-        await start_bulk_import_queue()
+        from workers.bulk_import_worker import start_arq_worker
+        await start_arq_worker()
         logger.info("Bulk import queue initialized")
     except Exception as e:
         logger.warning(f"Bulk import queue initialization failed: {e}")
@@ -189,8 +189,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"TTS render queue shutdown failed: {e}")
     try:
-        from services.bulk_import_queue import stop_bulk_import_queue
-        await stop_bulk_import_queue()
+        from workers.bulk_import_worker import stop_arq_worker
+        await stop_arq_worker()
     except Exception as e:
         logger.warning(f"Bulk import queue shutdown failed: {e}")
     if audio_monitor_task and not audio_monitor_task.done():
@@ -320,6 +320,9 @@ _load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
 # any other bulk import workflow). Per-file pipeline runs in the
 # BulkImportPipelineQueue worker pool started by the lifespan hook above.
 _load_router(app, "bulk_import", "api.imports")
+_load_router(app, "bulk_import_admin", "api.admin_imports")
+
+
 
 # === PHASE 4C-2 ROUTERS ===
 _load_router(app, "tts", "api.tts")

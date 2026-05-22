@@ -738,3 +738,151 @@ async def start_bulk_import_queue() -> None:
 
 async def stop_bulk_import_queue() -> None:
     await bulk_import_queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper: standalone _do_process_file for Arq worker
+# ---------------------------------------------------------------------------
+
+
+async def _do_process_file(file_id: uuid.UUID) -> None:
+    """Standalone version of BulkImportPipelineQueue._do_process_file.
+
+    Delegates to the queue instance so the pipeline logic lives in one
+    place. The Arq worker calls this module-level function instead of
+    the bound method.
+    """
+    await bulk_import_queue._do_process_file(file_id)
+
+
+# ---------------------------------------------------------------------------
+# Pause / Resume helpers (B-import.4)
+# ---------------------------------------------------------------------------
+
+
+async def pause_job(job_id: uuid.UUID) -> bool:
+    """Set bulk_import_jobs.status=paused. Worker checks this between
+    files and stops dequeuing. In-flight files finish naturally."""
+    db = SessionLocal()
+    try:
+        job = (
+            db.query(BulkImportJob)
+            .filter(BulkImportJob.id == job_id)
+            .first()
+        )
+        if not job:
+            return False
+        if job.status not in ("queued", "processing"):
+            return False
+        job.status = "paused"
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+async def resume_job(job_id: uuid.UUID) -> bool:
+    """Flip status back to processing, re-enqueue remaining queued files."""
+    db = SessionLocal()
+    try:
+        job = (
+            db.query(BulkImportJob)
+            .filter(BulkImportJob.id == job_id)
+            .first()
+        )
+        if not job:
+            return False
+        if job.status != "paused":
+            return False
+        job.status = "processing"
+        # Re-enqueue any files that are still queued.
+        queued_files = (
+            db.query(BulkImportFile)
+            .filter(
+                BulkImportFile.job_id == job_id,
+                BulkImportFile.status == "queued",
+            )
+            .all()
+        )
+        for f in queued_files:
+            try:
+                await bulk_import_queue.submit(f.id)
+            except Exception:
+                pass
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+async def admin_cancel_job(job_id: uuid.UUID) -> bool:
+    """Admin bypass: cancel any job regardless of ownership."""
+    db = SessionLocal()
+    try:
+        job = (
+            db.query(BulkImportJob)
+            .filter(BulkImportJob.id == job_id)
+            .first()
+        )
+        if not job:
+            return False
+        if job.status in ("complete", "cancelled", "failed"):
+            return True  # already terminal
+        now = _now()
+        job.cancelled_at = now
+        job.status = "cancelled"
+        queued = (
+            db.query(BulkImportFile)
+            .filter(
+                BulkImportFile.job_id == job_id,
+                BulkImportFile.status.in_(("queued", "uploading")),
+            )
+            .all()
+        )
+        for f in queued:
+            f.status = "skipped"
+            f.error_message = "cancelled before processing"
+            f.finished_at = now
+            job.skipped = (job.skipped or 0) + 1
+        in_flight = (
+            db.query(BulkImportFile)
+            .filter(
+                BulkImportFile.job_id == job_id,
+                BulkImportFile.status == "processing",
+            )
+            .count()
+        )
+        if in_flight == 0:
+            job.finished_at = job.finished_at or now
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+async def list_all_jobs(
+    status_filter: Optional[str] = None,
+    user_id: Optional[int] = None,
+    created_after: Optional[datetime] = None,
+    created_before: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[BulkImportJob]:
+    """List ALL bulk_import_jobs across orgs (admin only)."""
+    db = SessionLocal()
+    try:
+        q = db.query(BulkImportJob)
+        if status_filter:
+            q = q.filter(BulkImportJob.status == status_filter)
+        if user_id:
+            q = q.filter(BulkImportJob.user_id == user_id)
+        if created_after:
+            q = q.filter(BulkImportJob.created_at >= created_after)
+        if created_before:
+            q = q.filter(BulkImportJob.created_at <= created_before)
+        q = q.order_by(BulkImportJob.created_at.desc())
+        q = q.limit(limit).offset(offset)
+        return q.all()
+    finally:
+        db.close()
+
