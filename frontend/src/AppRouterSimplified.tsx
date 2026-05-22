@@ -21,8 +21,9 @@ import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
 import Help from './pages/Help';
 import LocalSessions from './pages/LocalSessions';
+import Import from './pages/Import';
 import StreamingTest from './pages/StreamingTest';
-import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock } from 'lucide-react';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 import { listLocalSessions } from './services/localSessionStore';
 
@@ -137,6 +138,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
+    { path: '/import', label: 'Bulk Import', icon: FolderUp },
     ...(hasLocalSessions
       ? [{ path: '/local-sessions', label: 'Local Sessions', icon: Lock } as NavItem]
       : []),
@@ -356,6 +358,11 @@ export function AppRouterSimplified() {
       <Route path="/sessions" element={
         <ProtectedRoute>
           <Sessions />
+        </ProtectedRoute>
+      } />
+      <Route path="/import" element={
+        <ProtectedRoute>
+          <Import />
         </ProtectedRoute>
       } />
 

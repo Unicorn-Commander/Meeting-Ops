@@ -696,3 +696,146 @@ class SessionAttachment(Base):
         default=lambda: datetime.now(timezone.utc),
         server_default=func.now(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk audio import — Phase 1 (alembic 029_bulk_import).
+#
+# Two tables that back the new /import page: a BulkImportJob row per
+# drag-and-drop session, with N BulkImportFile rows under it (one per
+# uploaded audio file). The job tracks aggregate counts + lifecycle
+# timestamps that drive the progress UI; each file row tracks per-row
+# state through the SHA-256 dedup -> parse -> create-session -> upload
+# -> reprocess pipeline run by BulkImportPipelineQueue.
+#
+# UUID PKs on both so file_id/job_id appear cleanly in URLs. relationship
+# is back-populated so worker code can walk job.files / file.job without
+# extra queries. cascade='all, delete-orphan' so deleting a job tears
+# down its file rows (matches the FK ondelete=CASCADE in the migration).
+# session_id_when_created stays nullable + non-FK on purpose — the file
+# row is the historical import record and must outlive the session it
+# created if that session is later deleted.
+# ---------------------------------------------------------------------------
+
+from sqlalchemy.orm import relationship  # noqa: E402  # local re-import
+
+
+class BulkImportJob(Base):
+    """One drag-and-drop bulk import session.
+
+    Status transitions: queued -> processing -> (complete | cancelled | failed).
+    The worker pool flips status to processing when it picks up the first
+    file; the API flips it to cancelled on POST /cancel. complete is set
+    by the worker when it observes total_files == succeeded + failed +
+    skipped and the cancelled_at flag is unset.
+    """
+
+    __tablename__ = "bulk_import_jobs"
+    __table_args__ = (
+        Index(
+            "ix_bulk_import_jobs_user_status",
+            "user_id",
+            "status",
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status = Column(
+        String(32),
+        nullable=False,
+        default="queued",
+        server_default="queued",
+    )
+    total_files = Column(Integer, nullable=False, default=0, server_default="0")
+    succeeded = Column(Integer, nullable=False, default=0, server_default="0")
+    failed = Column(Integer, nullable=False, default=0, server_default="0")
+    skipped = Column(Integer, nullable=False, default=0, server_default="0")
+    cancelled_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+
+    files = relationship(
+        "BulkImportFile",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+
+class BulkImportFile(Base):
+    """One uploaded audio file within a bulk import job.
+
+    Per-row status transitions: queued -> uploading -> processing ->
+    (complete | failed | skipped). 'uploading' covers the API receiving
+    bytes; 'processing' covers the worker pool running the SHA-256 +
+    parse + session-create + reprocess pipeline. 'skipped' is the
+    duplicate-detection terminal state — file_sha256 matched an
+    existing recording_sessions row for the same org and we never spent
+    GPU time on it.
+
+    session_id_when_created points at the RecordingSession row this
+    file produced (UUID matching recording_sessions.session_id). NULL
+    for skipped/failed rows. Intentionally non-FK so the file row
+    survives session deletion.
+    """
+
+    __tablename__ = "bulk_import_files"
+    __table_args__ = (
+        Index(
+            "ix_bulk_import_files_job_status",
+            "job_id",
+            "status",
+        ),
+        Index(
+            "ix_bulk_import_files_sha256",
+            "file_sha256",
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("bulk_import_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_filename = Column(Text, nullable=False)
+    file_sha256 = Column(String(64), nullable=True)
+    parsed_title = Column(Text, nullable=True)
+    parsed_date = Column(Date, nullable=True)
+    parsed_time = Column(Time, nullable=True)
+    parsed_source = Column(String(32), nullable=True)
+    parsed_confidence = Column(Float, nullable=True)
+    status = Column(
+        String(32),
+        nullable=False,
+        default="queued",
+        server_default="queued",
+    )
+    session_id_when_created = Column(UUID(as_uuid=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+    bytes_total = Column(BigInteger, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+
+    job = relationship("BulkImportJob", back_populates="files")

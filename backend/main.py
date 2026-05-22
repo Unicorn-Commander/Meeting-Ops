@@ -105,6 +105,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"TTS render queue initialization failed: {e}")
 
+    try:
+        from services.bulk_import_queue import start_bulk_import_queue
+        await start_bulk_import_queue()
+        logger.info("Bulk import queue initialized")
+    except Exception as e:
+        logger.warning(f"Bulk import queue initialization failed: {e}")
+
     logger.info(f"Routers loaded: {len(loaded_routers)}, failed: {len(failed_routers)}")
 
     yield
@@ -120,6 +127,11 @@ async def lifespan(app: FastAPI):
         await tts_queue.stop()
     except Exception as e:
         logger.warning(f"TTS render queue shutdown failed: {e}")
+    try:
+        from services.bulk_import_queue import stop_bulk_import_queue
+        await stop_bulk_import_queue()
+    except Exception as e:
+        logger.warning(f"Bulk import queue shutdown failed: {e}")
     if audio_monitor_task and not audio_monitor_task.done():
         audio_monitor_task.cancel()
         try:
@@ -224,6 +236,12 @@ _load_router(app, "speakers", "api.speakers")
 # === PHASE 4A ROUTERS ===
 _load_router(app, "uploads", "api.uploads")
 _load_router(app, "upload_websocket", "api.uploads", router_attr="ws_router")
+
+# === BULK AUDIO IMPORT (B-import.1) ===
+# Powers the /import page that ingests Aaron 526-file audio archive (and
+# any other bulk import workflow). Per-file pipeline runs in the
+# BulkImportPipelineQueue worker pool started by the lifespan hook above.
+_load_router(app, "bulk_import", "api.imports")
 
 # === PHASE 4C-2 ROUTERS ===
 _load_router(app, "tts", "api.tts")

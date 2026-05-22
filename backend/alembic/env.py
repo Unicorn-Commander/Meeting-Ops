@@ -14,6 +14,8 @@ from database.models import (  # noqa: F401
     SatelliteDevice,
     SessionCollaborator,
     ActionItem,
+    BulkImportJob,
+    BulkImportFile,
 )
 from database.models_rooms import (  # noqa: F401
     ConferenceRoom,
