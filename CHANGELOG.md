@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-22
+
 ### Added
 - **Bulk Import B-import.2: polished /import preview-table UX**: stage-based flow (Pick > Preview > Confirm > Progress > Completion). Folder drop-zone (webkitdirectory) accepts up to 1000 audio files at once with MIME validation; non-audio files rejected with toast. Preview table per-row controls: editable parsed title + meeting date + meeting time + participant hint + confidence indicator (green >=0.9, yellow >=0.5, red <0.5). Bulk-edit toolbar: apply participant to selected rows, set-all dates, deselect-low-confidence one-click. Confirm screen surfaces audio total + expected processing time + Garage bucket + GPU host. Progress stage shows per-file status with linked-session button on complete + per-failure retry button. Completion summary with "Retry failed" + "Go to sessions" deep-link. Backend: new POST /api/import/jobs/{id}/files/{file_id}/retry endpoint + ?bulk_import_job_id query filter on /api/simple/recording-sessions. Polish phase for Aaron's 526-file Mac Notes archive at /Volumes/media/audio-from-notes-voicememos-2026-05-20.
 - **Brigade Phase 1.5: write from live/browser-only sessions**: extends the Phase 1 writer to also fire when a browser/live session is finalized via /sessions/{id}/finalize (not just the /finalize-audio reprocess path). write_meeting_to_brigade now gracefully handles missing speakers (no diarization in browser path), missing action items, missing topic/decision extraction; always writes at minimum a Meeting node + summary text. New completion_mode parameter ('reprocess' or 'live') stored on the Meeting node for analytics. Hook fires fire-and-forget at /finalize so user-facing flow is never affected. 5 new tests on top of the existing Phase 1 suite cover the live-completion path, the completion_mode tag, and failure swallowing.
@@ -218,7 +220,8 @@ See git tag annotations directly: git tag -l v0.5.0 -n100.
 ### Added
 - Initial versioned release.
 
-[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.9.1...HEAD
+[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v1.0.0...HEAD
+[1.0.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v1.0.0
 [0.9.1]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.9.1
 [0.9.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.9.0
 [0.8.2]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.2
