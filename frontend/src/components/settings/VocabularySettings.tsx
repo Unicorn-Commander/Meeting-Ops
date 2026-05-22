@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { config } from '../../config';
-import { SectionProps } from './SettingsContext';
+import type { SectionProps } from './SettingsContext';
 
 interface VocabTerm {
   id: string;

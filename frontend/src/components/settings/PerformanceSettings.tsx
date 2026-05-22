@@ -1,5 +1,6 @@
 import { Cpu } from 'lucide-react';
-import { SectionProps, useSettingsContext } from './SettingsContext';
+import { useSettingsContext } from './SettingsContext';
+import type { SectionProps } from './SettingsContext';
 
 export default function PerformanceSettings(_props: SectionProps) {
   const { settings, setSettings } = useSettingsContext();

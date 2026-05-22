@@ -4,17 +4,18 @@ import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import { isAdminRole } from '../utils/roles';
-import SettingsLayout, {
-  SaveStatus,
-} from '../components/settings/SettingsLayout';
+import SettingsLayout from '../components/settings/SettingsLayout';
+import type { SaveStatus } from '../components/settings/SettingsLayout';
 import {
   ALL_SECTIONS,
   APPLIANCE_ONLY_SECTIONS,
-  HostCapabilities,
   SettingsProvider,
-  SettingsState,
   SETTINGS_STORAGE_KEY,
   loadStoredSettings,
+} from '../components/settings/SettingsContext';
+import type {
+  HostCapabilities,
+  SettingsState,
 } from '../components/settings/SettingsContext';
 
 // Same admin shape as the router — superuser OR per-org admin. Used to

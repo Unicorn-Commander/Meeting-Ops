@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Lock, Mic, RefreshCw } from 'lucide-react';
 import { config } from '../../config';
-import { SectionProps, useSettingsContext } from './SettingsContext';
+import { useSettingsContext } from './SettingsContext';
+import type { SectionProps } from './SettingsContext';
 import { useAudioDevices, deviceFriendlyName } from '../../hooks/useAudioDevices';
 import {
   isUsbAudioDevice,

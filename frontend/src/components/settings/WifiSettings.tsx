@@ -1,4 +1,5 @@
-import { SectionProps, useSettingsContext } from './SettingsContext';
+import { useSettingsContext } from './SettingsContext';
+import type { SectionProps } from './SettingsContext';
 
 export default function WifiSettings(_props: SectionProps) {
   const { settings, setSettings } = useSettingsContext();

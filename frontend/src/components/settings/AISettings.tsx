@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { config } from '../../config';
-import { SectionProps, useSettingsContext } from './SettingsContext';
+import { useSettingsContext } from './SettingsContext';
+import type { SectionProps } from './SettingsContext';
 
 interface AvailableModel {
   model_id: string;
