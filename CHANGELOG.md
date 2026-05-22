@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **Phase B.4: tier gate on server-live WebSocket**: the `/ws/sessions/{session_id}/live` endpoint now enforces `tier_features.server_live` via the User.tier infrastructure shipped in v0.8.2 (alembic 028 + `backend/auth/tier.py`). Free-tier users attempting to connect get a JSON `{"type": "error", "reason": "tier_insufficient"}` frame followed by close code 4003. Pro / Enterprise users (and superusers via `get_user_tier()`'s is_superuser override) proceed to the existing ready / partial / final flow. Frontend `/streaming-test` page reads `useTierFeatures()` and renders an upgrade nudge instead of the connect button when `server_live` is false. 5 backend tests cover free / pro / enterprise / superuser-bypass / unauth-regression. Closes the gate that makes server-live a real paid feature; combined with the existing capture-only fallback for free mobile users in v0.8.0, free tier is now a coherent product.
+
 ## [0.9.0] - 2026-05-22
 
 ### Added

@@ -1,4 +1,4 @@
-"""Phase B.2 server-live streaming WebSocket endpoint.
+"""Phase B.2 server-live streaming WebSocket endpoint (tier-gated in B.4).
 
 This module implements the meet-backend side of the Phase B server-live
 audio pipeline described in `docs/phase-b-server-live-streaming.md`.
@@ -9,6 +9,12 @@ B.2 ships:
     of the buffered audio to ``meet-parakeet-stream-svc`` on midboy2,
   - emission of partial / final transcript frames back to the WS client,
   - control-frame ``end`` triggers one last flush + a final transcript.
+
+B.4 layers on top:
+  - tier gate on the ``server_live`` capability. Free-tier users get a
+    JSON ``{"type": "error", "reason": "tier_insufficient", ...}`` frame
+    followed by close code 4003 (RFC 6455 application-specific range).
+    Pro / Enterprise / superuser-overridden proceed normally.
 
 This is **near-streaming**: chunked offline transcription over short
 windows. True NeMo streaming (draft + finalize tokens) lands in B.3.
@@ -27,6 +33,19 @@ oauth2-proxy in front of meet-backend forwards ``X-Auth-Request-Email`` /
 including the HTTP upgrade that initiates a WebSocket. We inspect those
 headers off ``websocket.headers``, look up the user, and reject with close
 code 4001 if no user matches.
+
+Tier gate (B.4)
+---------------
+After the user is resolved (DB row, not just email), we check
+``get_tier_features(user)['server_live']``. If False:
+
+  - ``await websocket.accept()`` so we can send a clean payload,
+  - emit ``{"type": "error", "reason": "tier_insufficient", ...}``,
+  - close with code 4003, reason "tier_insufficient".
+
+``get_user_tier()`` (in ``auth/tier.py``) treats ``is_superuser=True``
+as enterprise regardless of the tier column, so support/dev accounts
+keep server-live access without per-tier toggling.
 
 Frame protocol (canonical as of B.2 reconciliation 2026-05-22)
 --------------------------------------------------------------
@@ -77,6 +96,12 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy.orm import Session
+
+from auth.models import User
+from auth.service import AuthService
+from auth.tier import get_tier_features, get_user_tier
+from database.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +162,42 @@ def _resolve_ws_user_email(websocket: WebSocket) -> Optional[str]:
         if value:
             return value
     return None
+
+
+def _resolve_ws_user(websocket: WebSocket) -> Optional[User]:
+    """Resolve a DB User from oauth2-proxy headers on the WS upgrade.
+
+    Returns None if no email-shaped header is present OR if the email
+    doesn't map to an active User row. Looks the user up directly so the
+    caller has access to the tier/is_superuser columns for the B.4 gate.
+
+    We open + close our own ``SessionLocal()`` since ``Depends(get_db)``
+    doesn't compose cleanly with WebSocket handlers (Starlette doesn't
+    run dependencies that yield for a WS upgrade). The session is closed
+    before we return — we hold the User object, not the session, for the
+    rest of the WS lifecycle.
+
+    Overridable for tests via ``app.dependency_overrides`` on the module-
+    level callable (see ``test_streaming_tier_gate.py``).
+    """
+    email = _resolve_ws_user_email(websocket)
+    if not email:
+        return None
+
+    db: Session = SessionLocal()
+    try:
+        # Lookup is case-insensitive on email; mirror service.get_user_by_email.
+        user = AuthService.get_user_by_email(db, email)
+        if user and user.is_active:
+            # Detach: we want to read attributes after the session closes.
+            db.expunge(user)
+            return user
+        return None
+    except Exception:
+        logger.exception("[B.4 WS] user lookup failed email=%s", email)
+        return None
+    finally:
+        db.close()
 
 
 @dataclass
@@ -380,8 +441,8 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
     Upstream forwarding uses a single per-connection httpx.AsyncClient with
     HTTP keep-alive so we're not paying TCP setup on every flush.
     """
-    user_email = _resolve_ws_user_email(websocket)
-    if not user_email:
+    user = _resolve_ws_user(websocket)
+    if user is None:
         logger.warning(
             "[B.2 WS] unauthenticated connection attempt session_id=%s "
             "headers_present=%s",
@@ -391,10 +452,34 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4001)
         return
 
+    user_email = user.email
+    user_tier = get_user_tier(user)
+    features = get_tier_features(user)
+
+    # B.4 tier gate. Accept the upgrade so we can send a clean JSON error
+    # frame, then close with the application-specific 4003 code.
+    if not features.get("server_live"):
+        logger.info(
+            "[B.4 WS] tier_insufficient session_id=%s user=%s tier=%s",
+            session_id, user_email, user_tier,
+        )
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "reason": "tier_insufficient",
+            "current_tier": user_tier,
+            "required_feature": "server_live",
+            "upgrade_hint": (
+                "Pro or Enterprise tier required for live streaming"
+            ),
+        })
+        await websocket.close(code=4003, reason="tier_insufficient")
+        return
+
     await websocket.accept()
     logger.info(
-        "[B.2 WS] connected session_id=%s user=%s upstream=%s",
-        session_id, user_email, PARAKEET_STREAM_URL,
+        "[B.2 WS] connected session_id=%s user=%s tier=%s upstream=%s",
+        session_id, user_email, user_tier, PARAKEET_STREAM_URL,
     )
 
     await websocket.send_json({
@@ -405,6 +490,7 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         "phase": "B.2",
         "upstream": PARAKEET_STREAM_URL,
         "flush_audio_seconds": FLUSH_AUDIO_SECONDS,
+        "tier": user_tier,
     })
 
     state = _SessionState(session_id=session_id, user_email=user_email)

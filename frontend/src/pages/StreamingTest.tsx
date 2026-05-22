@@ -16,6 +16,13 @@
  * Real Parakeet integration ships in Phase B.2 (this file). True NeMo
  * native streaming with draft+finalize tokens is Phase B.3.
  *
+ * B.4 gating: this page reads `useTierFeatures().features.server_live`
+ * and renders a friendly upgrade nudge in place of the connect UI when
+ * the user is on the free tier. Pro / Enterprise / superuser-overridden
+ * users see the original full UI. The backend WS endpoint also gates
+ * (defense in depth): a free user that somehow reaches this page on a
+ * stale bundle still gets close code 4003 from the server.
+ *
  * Wire format (canonical as of B.2 reconciliation 2026-05-22):
  *   bytes 0-3   uint32 BE  sequence_number
  *   bytes 4-11  uint64 BE  client_timestamp_us
@@ -28,6 +35,8 @@
  * design rationale.
  */
 import { useEffect, useRef, useState } from 'react';
+import { Lock } from 'lucide-react';
+import { useTierFeatures } from '../hooks/useTierFeatures';
 
 type WSState = 'idle' | 'connecting' | 'open' | 'closing' | 'closed';
 type MicState = 'idle' | 'requesting' | 'recording' | 'error';
@@ -80,6 +89,7 @@ function buildFrame(seq: number, isFinal: boolean, payload: Int16Array | Uint8Ar
 }
 
 export default function StreamingTest() {
+  const { tier, features } = useTierFeatures();
   const [log, setLog] = useState<string[]>([]);
   const [state, setState] = useState<WSState>('idle');
   const [micState, setMicState] = useState<MicState>('idle');
@@ -354,6 +364,88 @@ export default function StreamingTest() {
 
   const connected = state === 'open';
   const micRecording = micState === 'recording';
+
+  // B.4 tier gate. Render an upgrade nudge for users without the
+  // `server_live` capability (free tier). Defense in depth: the backend
+  // WS endpoint also rejects free-tier connects with close code 4003,
+  // so this UI nudge isn't load-bearing for the security model — it's
+  // a friendlier experience than "connect → instant disconnect".
+  if (!features.server_live) {
+    return (
+      <div style={{ padding: 24, color: '#e7e7e7', maxWidth: 720 }}>
+        <div
+          style={{
+            background: '#0a0a0a',
+            border: '1px solid #1f1f1f',
+            borderRadius: 8,
+            padding: 32,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 14,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 56,
+              height: 56,
+              borderRadius: '50%',
+              background: '#1a1a1a',
+              border: '1px solid #2a2a2a',
+            }}
+            aria-hidden
+          >
+            <Lock size={28} color="#facc15" />
+          </div>
+          <h1 style={{ margin: 0, fontSize: 22 }}>
+            Server-live streaming is a Pro feature
+          </h1>
+          <p style={{ margin: 0, opacity: 0.85, lineHeight: 1.55 }}>
+            Your current tier is <strong>{tier}</strong>. Live streaming
+            requires Pro or Enterprise.
+          </p>
+          <p style={{ margin: 0, opacity: 0.7, lineHeight: 1.55 }}>
+            Once you upgrade, this page will let you test live
+            transcription against the server-side Parakeet 0.6B v3
+            model running on midboy2.
+          </p>
+          <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
+            <button
+              disabled
+              title="Server-live streaming requires Pro or Enterprise"
+              style={{
+                padding: '8px 16px',
+                borderRadius: 6,
+                border: '1px solid #2a2a2a',
+                background: '#141414',
+                color: '#666',
+                cursor: 'not-allowed',
+              }}
+            >
+              Connect
+            </button>
+            <a
+              href="mailto:hello@magicunicorn.tech?subject=Pro%20tier%20for%20Meeting-Ops%20live%20streaming"
+              style={{
+                padding: '8px 16px',
+                borderRadius: 6,
+                border: '1px solid #facc15',
+                background: 'transparent',
+                color: '#facc15',
+                textDecoration: 'none',
+                fontSize: 14,
+              }}
+            >
+              Contact us about Pro
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ padding: 24, color: '#e7e7e7', maxWidth: 1080 }}>
