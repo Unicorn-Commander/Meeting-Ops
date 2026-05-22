@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useOrg } from './contexts/OrgContext';
@@ -20,8 +20,10 @@ import Rooms from './pages/Rooms';
 import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
 import Help from './pages/Help';
-import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle } from 'lucide-react';
+import LocalSessions from './pages/LocalSessions';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
+import { listLocalSessions } from './services/localSessionStore';
 
 
 // Layout wrapper with simplified navigation
@@ -103,6 +105,29 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     label: string;
     icon: string | React.ComponentType<{ className?: string }>;
   };
+
+  // Local Sessions entry only shows up once the user has at least one
+  // privacy-mode session persisted in IndexedDB. Probe once on mount
+  // and again whenever the auth user changes (re-login on the same
+  // device should pick up the rows). The probe is best-effort —
+  // failures leave hasLocalSessions=false so the entry just doesn't
+  // appear.
+  const [hasLocalSessions, setHasLocalSessions] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sessions = await listLocalSessions();
+        if (!cancelled) setHasLocalSessions(sessions.length > 0);
+      } catch {
+        if (!cancelled) setHasLocalSessions(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
   // Workspace-level nav — visible to everyone. Aaron's directive is
   // that admin items move OUT of the main list and into their own
   // section, so Speakers / Rooms (the multi-tenant configuration
@@ -111,6 +136,9 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
+    ...(hasLocalSessions
+      ? [{ path: '/local-sessions', label: 'Local Sessions', icon: Lock } as NavItem]
+      : []),
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
@@ -333,6 +361,22 @@ export function AppRouterSimplified() {
       <Route path="/sessions/:id" element={
         <ProtectedRoute>
           <SessionDetails />
+        </ProtectedRoute>
+      } />
+
+      {/* Privacy-mode session surface — IndexedDB-only, no server
+          calls. Auth-gated like the other user routes so an
+          unauthenticated tab redirects to OIDC sign-in first; the
+          content itself isn't server-scoped because it never left
+          the device. */}
+      <Route path="/local-sessions" element={
+        <ProtectedRoute>
+          <LocalSessions />
+        </ProtectedRoute>
+      } />
+      <Route path="/local-sessions/:id" element={
+        <ProtectedRoute>
+          <LocalSessions />
         </ProtectedRoute>
       } />
 

@@ -179,11 +179,49 @@ export default function Help() {
           </p>
           <p className="text-zinc-300">
             Privacy mode is per-session — you can turn it on for sensitive
-            meetings and leave it off for everything else. Quality is slightly
-            lower because you don't get the polished server pass, but for
-            anything you don't want touching our servers, it's exact and
-            verifiable: the audio simply isn't uploaded.
+            meetings and leave it off for everything else. The audio bytes
+            simply aren't uploaded, which is exact and verifiable. When you
+            tap Stop, your browser runs a full-quality transcription and
+            summary pass over the recorded audio so what you get matches the
+            server-side pipeline in shape, just without the audio ever
+            leaving the device.
           </p>
+          <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4 text-sm text-zinc-300">
+            <div className="flex items-start gap-3">
+              <Lock className="mt-0.5 h-4 w-4 flex-shrink-0 text-purple-300" />
+              <div>
+                <div className="font-medium text-purple-200">
+                  What runs after you tap Stop in privacy mode
+                </div>
+                <ul className="mt-2 space-y-1.5 text-zinc-400">
+                  <li>
+                    <span className="text-zinc-200">Full-audio transcription</span> with
+                    Parakeet 0.6B INT8 against the recording your browser
+                    held in IndexedDB during the session. Catches everything,
+                    not just what the live captions caught.
+                  </li>
+                  <li>
+                    <span className="text-zinc-200">Final summary</span> from Qwen 3 0.6B
+                    (or Gemma 4 E2B) over that full transcript. Same prompt
+                    shape as the server pipeline — Decisions, Action Items,
+                    Metrics, Risks.
+                  </li>
+                  <li>
+                    <span className="text-zinc-200">Local Sessions view</span> at{' '}
+                    <code className="rounded bg-zinc-900 px-1 py-0.5 text-zinc-300">/local-sessions</code>{' '}
+                    lists every privacy-mode session you've recorded on this
+                    device. The sidebar entry shows up after your first one.
+                  </li>
+                  <li>
+                    <span className="text-zinc-200">Export</span> as Markdown or JSON.
+                    Markdown is the readable artefact; JSON optionally
+                    includes the audio as base64 if you need to move the
+                    session between machines.
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
           <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm text-zinc-300">
             <div className="flex items-start gap-3">
               <Lock className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" />

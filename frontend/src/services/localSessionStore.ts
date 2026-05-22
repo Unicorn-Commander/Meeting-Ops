@@ -28,6 +28,21 @@ export interface LocalSummarySlice {
   createdAt: string;
 }
 
+/**
+ * Status of the full-quality Parakeet pass over the assembled IDB blob.
+ *  - `not_run`: privacy mode never reached the stop-time pass (live
+ *    rollup only). Pre-Phase A.6 records also report this.
+ *  - `running`: Parakeet/LLM pass is in flight (set transiently so a
+ *    reload during the pass surfaces a "still working" hint).
+ *  - `complete`: both Parakeet and the LLM final-summary pass over the
+ *    full transcript succeeded. `transcriptFull` + `finalSummary` are
+ *    the high-quality artefacts.
+ *  - `failed`: at least one half of the pass blew up. `parakeetPassError`
+ *    has the human-readable reason; the live-slice rollup in
+ *    `finalSummary` is what got saved.
+ */
+export type LocalParakeetPassStatus = 'not_run' | 'running' | 'complete' | 'failed';
+
 export interface LocalSession {
   id: string;
   title: string;
@@ -40,6 +55,22 @@ export interface LocalSession {
   slices: LocalSummarySlice[];
   finalSummary: string | null;
   wordCount: number;
+  /**
+   * High-quality transcript produced by Parakeet 0.6B INT8 over the
+   * assembled IndexedDB audio blob at session stop. Distinct from
+   * `transcript[]` which is the live-chunk feed (gappy, VAD-bounded).
+   * `null` when the full-quality pass didn't run or failed.
+   */
+  transcriptFull?: string | null;
+  /** Set at session stop based on whether the full-quality pass ran. */
+  parakeetPassStatus?: LocalParakeetPassStatus;
+  /** Human-readable reason when `parakeetPassStatus === 'failed'`. */
+  parakeetPassError?: string | null;
+  /** MIME type of the assembled audio blob in `localAudioStore`, if any. */
+  audioMimeType?: string | null;
+  /** Byte count of the assembled audio blob. Cheap to read here so the
+   *  list/detail UI can render size without re-assembling the chunks. */
+  audioBytes?: number | null;
 }
 
 function uuid(): string {
@@ -218,6 +249,59 @@ export async function endSession(
   }));
 }
 
+/**
+ * Mark a session as "full-quality Parakeet pass running". Used so a
+ * tab reload mid-pass shows a "still working" hint in the list rather
+ * than presenting the live-quality summary as final.
+ */
+export async function markParakeetPassRunning(sessionId: string): Promise<void> {
+  await updateSession(sessionId, (session) => ({
+    ...session,
+    parakeetPassStatus: 'running',
+    parakeetPassError: null,
+  }));
+}
+
+/**
+ * Persist the full-quality Parakeet transcript + re-derived final
+ * summary into the existing local session row. Idempotent — caller
+ * can re-invoke if it wants to overwrite. We deliberately keep the
+ * live-slice transcript[] feed AND the gap-free Parakeet pass so the
+ * detail view can show both ("live captions" vs "full audio pass").
+ */
+export async function saveParakeetPass(
+  sessionId: string,
+  transcriptFull: string,
+  finalSummary: string,
+  audio: { mimeType: string | null; bytes: number | null } | null = null,
+): Promise<void> {
+  await updateSession(sessionId, (session) => ({
+    ...session,
+    transcriptFull: transcriptFull.trim() || null,
+    finalSummary: finalSummary.trim() || session.finalSummary,
+    parakeetPassStatus: 'complete',
+    parakeetPassError: null,
+    audioMimeType: audio?.mimeType ?? session.audioMimeType ?? null,
+    audioBytes: audio?.bytes ?? session.audioBytes ?? null,
+  }));
+}
+
+/**
+ * Record a failed full-quality pass. The live-slice rollup the caller
+ * already saved via endSession() stays as the user-visible summary; we
+ * just attach the diagnostic for the detail view to show.
+ */
+export async function markParakeetPassFailed(
+  sessionId: string,
+  reason: string,
+): Promise<void> {
+  await updateSession(sessionId, (session) => ({
+    ...session,
+    parakeetPassStatus: 'failed',
+    parakeetPassError: reason.slice(0, 500),
+  }));
+}
+
 export async function updateLocalSessionMeta(
   sessionId: string,
   patch: Partial<Pick<LocalSession, 'title' | 'participants' | 'tags'>>,
@@ -255,13 +339,53 @@ export async function exportLocalSession(id: string): Promise<Blob | null> {
   return new Blob([md], { type: 'text/markdown;charset=utf-8' });
 }
 
+/**
+ * JSON export. Caller decides whether to include the assembled audio
+ * as base64 (default off — a 1-hour meeting is ~50MB encoded). When
+ * `audioBase64` is supplied we embed it under `audio.base64` alongside
+ * the MIME type so a future import can round-trip.
+ */
+export async function exportLocalSessionJson(
+  id: string,
+  audioBase64: string | null = null,
+): Promise<Blob | null> {
+  const session = await getLocalSession(id);
+  if (!session) return null;
+  const payload = {
+    schema: 'meetingops.local-session.v1',
+    exported_at: nowIso(),
+    session,
+    audio: audioBase64
+      ? {
+          mime_type: session.audioMimeType ?? 'application/octet-stream',
+          base64: audioBase64,
+          bytes: session.audioBytes ?? null,
+        }
+      : null,
+  };
+  return new Blob([JSON.stringify(payload, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  });
+}
+
+/** URL-safe slug for filenames built from a session title. */
+export function slugifyTitle(title: string): string {
+  return (
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'meeting'
+  );
+}
+
 function buildSessionMarkdown(session: LocalSession): string {
   const lines: string[] = [];
   lines.push(`# ${session.title}`);
   lines.push('');
   lines.push(`- Started: ${session.startedAt}`);
   if (session.endedAt) lines.push(`- Ended: ${session.endedAt}`);
-  lines.push(`- Duration: ${session.durationSeconds.toFixed(1)}s`);
+  lines.push(`- Duration: ${formatDuration(session.durationSeconds)}`);
   lines.push(`- Word count: ${session.wordCount}`);
   if (session.participants.length) {
     lines.push(`- Participants: ${session.participants.join(', ')}`);
@@ -269,19 +393,37 @@ function buildSessionMarkdown(session: LocalSession): string {
   if (session.tags.length) {
     lines.push(`- Tags: ${session.tags.join(', ')}`);
   }
+  if (session.parakeetPassStatus) {
+    const qualityLabel =
+      session.parakeetPassStatus === 'complete'
+        ? 'full-audio Parakeet pass'
+        : session.parakeetPassStatus === 'failed'
+          ? 'live-quality (full-audio pass failed)'
+          : session.parakeetPassStatus === 'running'
+            ? 'live-quality (full-audio pass still running)'
+            : 'live-quality only';
+    lines.push(`- Quality: ${qualityLabel}`);
+  }
   lines.push('');
   lines.push('_Local-only session. Stored in browser IndexedDB; never sent to a server._');
   lines.push('');
 
   if (session.finalSummary) {
-    lines.push('## Final summary');
+    lines.push('## Summary');
     lines.push('');
     lines.push(session.finalSummary.trim());
     lines.push('');
   }
 
+  if (session.transcriptFull && session.transcriptFull.trim()) {
+    lines.push('## Full transcript (Parakeet 0.6B INT8, full-audio pass)');
+    lines.push('');
+    lines.push(session.transcriptFull.trim());
+    lines.push('');
+  }
+
   if (session.slices.length) {
-    lines.push('## Slice summaries');
+    lines.push('## Live slice summaries');
     lines.push('');
     for (const slice of session.slices) {
       lines.push(`### ${slice.createdAt} (model: ${slice.model})`);
@@ -292,7 +434,7 @@ function buildSessionMarkdown(session: LocalSession): string {
   }
 
   if (session.transcript.length) {
-    lines.push('## Transcript');
+    lines.push('## Live transcript (chunked, VAD-bounded)');
     lines.push('');
     for (const chunk of session.transcript) {
       const stamp = formatTimestamp(chunk.elapsedSeconds);
@@ -302,6 +444,17 @@ function buildSessionMarkdown(session: LocalSession): string {
   }
 
   return lines.join('\n');
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0s';
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function formatTimestamp(elapsed: number): string {

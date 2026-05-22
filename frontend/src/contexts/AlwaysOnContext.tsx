@@ -60,6 +60,9 @@ import {
   deleteLocalSession,
   endSession as endLocalSession,
   isLocalSessionId,
+  markParakeetPassFailed,
+  markParakeetPassRunning,
+  saveParakeetPass,
   type LocalTranscriptChunk,
 } from '../services/localSessionStore';
 import {
@@ -1512,14 +1515,27 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       await uploadQueueRef.current;
       if (sessionId) {
         if (wasLocalOnly) {
-          setStatusText('Generating final summary locally');
+          // Phase A.6: two-stage local pass at stop.
+          //  Stage 1 — live-slice roll-up (pre-A.6 behaviour) so we
+          //  always have *some* summary if the user closes the tab
+          //  mid-Stage-2 or the full-audio pass blows up.
+          //  Stage 2 — Parakeet 0.6B INT8 over the assembled IDB blob
+          //  to produce a high-quality transcript, then a second LLM
+          //  final-summary pass over that full transcript. Status is
+          //  written into the local session row at each step so the
+          //  Local Sessions UI can show "running" → "complete" / "failed".
+          setStatusText('Generating live-quality summary locally');
+          // Snapshot of the assembled audio blob — needed for Stage 2
+          // AND for marking the audio MIME / byte total on the session
+          // row. Computed once, reused.
+          let assembledForPass: Awaited<ReturnType<typeof localAudioStore.getAssembledBlob>> | null = null;
           // Mark the local audio session ended (privacy mode keeps it
           // in IndexedDB — user manages via the Local Sessions surface).
           if (deviceCapability.capabilityClass === 'desktop-capable'
             && localAudioStore.isAvailable()) {
             try {
-              const assembled = await localAudioStore.getAssembledBlob(sessionId);
-              await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
+              assembledForPass = await localAudioStore.getAssembledBlob(sessionId);
+              await localAudioStore.setSessionFinalized(sessionId, assembledForPass.sha256);
             } catch (err) {
               // No chunks (e.g. user stopped before first 30s) — just
               // log and continue. The slice rollup below handles the
@@ -1528,10 +1544,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               console.debug('[always-on] No local audio to finalize:', err);
             }
           }
-          let finalText: string | null = null;
-          // Concatenate slice texts oldest-first for the roll-up. If
-          // there are no slices, we still close the session — the user
-          // may have just talked for under one summary threshold.
+          let liveFinalText: string | null = null;
+          // Concatenate slice texts oldest-first for the live-slice
+          // roll-up. If there are no slices, we still close the session —
+          // the user may have just talked for under one summary threshold.
           if (slicesSnapshot.length > 0) {
             const joined = slicesSnapshot
               .map((s, i) => `Slice ${i + 1} (${s.createdAt}):\n${s.text.trim()}`)
@@ -1546,14 +1562,117 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               })) {
                 buffer += token;
               }
-              finalText = buffer.trim() || null;
+              liveFinalText = buffer.trim() || null;
             } catch (err) {
               // eslint-disable-next-line no-console
-              console.warn('[always-on] Local final summary failed:', err);
-              setError('Local final summary failed; slices are still saved.');
+              console.warn('[always-on] Local live-slice final summary failed:', err);
+              setError('Local live summary failed; slices are still saved.');
             }
           }
-          await endLocalSession(sessionId, finalText);
+          await endLocalSession(sessionId, liveFinalText);
+
+          // Stage 2 — full-quality Parakeet pass + LLM re-summary. Only
+          // attempted when we actually have an assembled blob AND the
+          // browser can run inference (desktop-capable, which is the
+          // same gate that allowed privacy-mode in the first place).
+          if (
+            assembledForPass
+            && assembledForPass.bytes > 0
+            && shouldRunBrowserInference(deviceCapability)
+          ) {
+            const assembled = assembledForPass;
+            await markParakeetPassRunning(sessionId).catch(() => undefined);
+            try {
+              // Parakeet load may not have happened yet if the user
+              // hadn't enabled browser STT for live captions. Force-load
+              // it now (idempotent — second await resolves immediately).
+              setStatusText('Loading local STT for full-audio pass');
+              await inBrowserSTT.load({
+                onProgress: (pct, label) => {
+                  // Surface progress as a percent + label so the user
+                  // sees movement during a 30-60s first-load. We reuse
+                  // statusText since this is a one-shot stop-time pass.
+                  const pctTxt = Math.round(pct * 100);
+                  setStatusText(
+                    label
+                      ? `Loading local STT: ${label} (${pctTxt}%)`
+                      : `Loading local STT (${pctTxt}%)`,
+                  );
+                },
+              });
+              const sttStarted = performance.now();
+              setStatusText('Running local STT on full audio');
+              const fullTranscriptRaw = await inBrowserSTT.transcribe(assembled.blob);
+              const fullTranscript = (fullTranscriptRaw || '').trim();
+              const sttElapsedSec = Math.max(
+                0,
+                Math.round((performance.now() - sttStarted) / 1000),
+              );
+              // eslint-disable-next-line no-console
+              console.info(
+                `[always-on] Local Parakeet pass: ${fullTranscript.length} chars in ${sttElapsedSec}s (RTF=${inBrowserSTT.getDiagnostics().lastRTF?.toFixed(3) ?? 'n/a'})`,
+              );
+
+              if (!fullTranscript) {
+                // Parakeet returned an empty transcript — likely a
+                // codec mismatch or silent audio. Fall back to the
+                // live-slice summary we already saved.
+                await markParakeetPassFailed(
+                  sessionId,
+                  'Local STT returned an empty transcript. Live-slice summary kept as final.',
+                );
+              } else {
+                setStatusText('Running local summary over full transcript');
+                const modelId = getStoredModelId();
+                const llmStarted = performance.now();
+                const finalController = new AbortController();
+                let llmBuffer = '';
+                for await (const token of inBrowserLLM.summarizeFinal(
+                  fullTranscript,
+                  modelId,
+                  { signal: finalController.signal, sessionId },
+                )) {
+                  llmBuffer += token;
+                }
+                const llmElapsedSec = Math.max(
+                  0,
+                  Math.round((performance.now() - llmStarted) / 1000),
+                );
+                const fullSummary = llmBuffer.trim();
+                // eslint-disable-next-line no-console
+                console.info(
+                  `[always-on] Local LLM full-summary: ${fullSummary.length} chars in ${llmElapsedSec}s`,
+                );
+                if (!fullSummary) {
+                  await markParakeetPassFailed(
+                    sessionId,
+                    'Local summary returned empty output. Live-slice summary kept as final.',
+                  );
+                } else {
+                  await saveParakeetPass(
+                    sessionId,
+                    fullTranscript,
+                    fullSummary,
+                    {
+                      mimeType: assembled.blob.type || null,
+                      bytes: assembled.bytes,
+                    },
+                  );
+                  setStatusText('Done. Session saved locally.');
+                }
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              // eslint-disable-next-line no-console
+              console.warn('[always-on] Full-audio local pass failed:', message);
+              await markParakeetPassFailed(sessionId, message).catch(() => undefined);
+              // Friendly toast — the live-slice summary is still
+              // saved, the user isn't left with nothing.
+              setError(
+                "Couldn't run full-quality local pass — saved live-quality summary instead.",
+              );
+            }
+          }
         } else {
           setStatusText('Generating final summary');
           // Phase A.5 — verify-then-confirm. When local persistence is

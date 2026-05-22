@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Privacy mode full-quality local pass (Phase A.6)**: at session stop in privacy mode, the browser now runs Parakeet 0.6B INT8 against the assembled IndexedDB audio blob for a high-quality full transcript, then runs Qwen 3 0.6B INT8 (or Gemma 4 E2B) for the final summary. Previous privacy summaries were live-slice rollups only; now they match server-quality privacy-respecting output. Results stored in new local-sessions IndexedDB store.
+- **Local Sessions view**: new /local-sessions page lists privacy-mode sessions persisted in IndexedDB. Sidebar entry appears once you have at least one local session. Detail view supports audio playback (from IDB), inline title/tag edits, and export-as-Markdown / export-as-JSON for moving data out of the browser. Local-only badge on every card. Truly zero-server-bytes architecture across capture, STT, summary, storage, and review.
+
 ## [0.8.0] - 2026-05-21
 
 ### Added
