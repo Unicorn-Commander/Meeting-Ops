@@ -25,7 +25,39 @@ function broadcastHydratedCacheClear(): void {
   }
 }
 
-interface User {
+export type Tier = 'free' | 'pro' | 'enterprise';
+
+export interface TierFeatures {
+  server_live: boolean;
+  diarization: boolean;
+  qwen36_summary: boolean;
+  speaker_library: boolean;
+  retention_controls: boolean;
+  brigade_byok: boolean;
+  hipaa: boolean;
+  max_sessions_per_month: number | null;
+  max_session_minutes: number | null;
+}
+
+/**
+ * Default capability dict matching backend `TIER_FEATURES.free` in
+ * `backend/auth/tier.py`. Used by `useTierFeatures()` as the fallback
+ * while `/api/auth/me` is in flight so disabled buttons don't flash
+ * "enabled" briefly on first paint.
+ */
+export const DEFAULT_TIER_FEATURES: TierFeatures = {
+  server_live: false,
+  diarization: false,
+  qwen36_summary: false,
+  speaker_library: false,
+  retention_controls: false,
+  brigade_byok: false,
+  hipaa: false,
+  max_sessions_per_month: 50,
+  max_session_minutes: 60,
+};
+
+export interface User {
   id: number;
   email: string;
   username: string;
@@ -37,6 +69,8 @@ interface User {
   created_at: string;
   organizations?: OrganizationMembership[];
   active_organization?: OrganizationMembership | null;
+  tier?: Tier;
+  tier_features?: TierFeatures;
 }
 
 interface AuthContextType {
@@ -48,6 +82,10 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
+  // Resolved tier + capability dict. Falls back to free + DEFAULT_TIER_FEATURES
+  // while /api/auth/me is in flight or for anonymous callers.
+  tier: Tier;
+  tierFeatures: TierFeatures;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -359,6 +397,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     };
   }, [token, refreshToken]);
 
+  const tier: Tier = user?.tier ?? 'free';
+  const tierFeatures: TierFeatures = user?.tier_features ?? DEFAULT_TIER_FEATURES;
+
   return (
     <AuthContext.Provider
       value={{
@@ -370,6 +411,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         isAuthenticated: !!user,
         isLoading,
         error,
+        tier,
+        tierFeatures,
       }}
     >
       {children}

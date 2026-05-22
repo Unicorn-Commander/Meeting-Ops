@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **User tier infrastructure**: new `users.tier` column (alembic 028) with values free / pro / enterprise. Aaron + Shafen backfilled to `enterprise` + `is_superuser=true`. New `backend/auth/tier.py` module with `TIER_FEATURES` dict, `get_user_tier()`, `get_tier_features()`, and `require_tier(min_tier)` FastAPI dependency. `/api/auth/me` response now includes `tier` and `tier_features` fields (the latter is a nested dict with per-capability booleans + quota numbers). Frontend `useTierFeatures()` hook + TS types added. Foundation for Phase B.4 server-live tier gating.
+
 ## [0.8.1] - 2026-05-22
 
 

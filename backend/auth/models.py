@@ -73,7 +73,14 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
     is_superuser = Column(Boolean, default=False)
-    
+
+    # Tier-based feature gating. One of 'free' / 'pro' / 'enterprise'.
+    # Source of truth for what each tier unlocks lives in
+    # backend/auth/tier.py (TIER_FEATURES dict). Backfilled by alembic
+    # 028 to set Aaron + Shafen to enterprise. New users default to
+    # 'free' until billing flips them.
+    tier = Column(String(32), nullable=False, default="free")
+
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

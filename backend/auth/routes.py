@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from auth.service import AuthService
 from auth.dependencies import get_current_organization, get_current_user, require_admin, require_permission
 from auth.models import Organization, User, UserOrganization
 from auth.config import auth_config
+from auth.tier import get_tier_features, get_user_tier
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
@@ -43,7 +44,13 @@ class UserResponse(BaseModel):
     role: Optional[str] = None  # Will be populated from organization role or superuser status
     organizations: list[dict] = []
     active_organization: Optional[dict] = None
-    
+    # Tier-based feature gating. `tier` is the resolved effective tier
+    # (is_superuser overrides to 'enterprise'); `tier_features` is the
+    # full capability dict from TIER_FEATURES so the frontend can render
+    # without a follow-up round trip. See backend/auth/tier.py.
+    tier: str = "free"
+    tier_features: dict[str, Any] = {}
+
     model_config = ConfigDict(from_attributes=True)
 
 class UserUpdate(BaseModel):
@@ -138,6 +145,8 @@ def _build_user_response(
         role=role,
         organizations=organizations,
         active_organization=active_organization,
+        tier=get_user_tier(user),
+        tier_features=get_tier_features(user),
     )
 
 # Routes
