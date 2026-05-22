@@ -1199,6 +1199,8 @@ rough order of "blocks B.1" → "blocks later phases."
 
 ### Q1 — Does parakeet-server today expose a streaming interface?
 
+**Resolved 2026-05-22**: New `meet-parakeet-stream-svc` container with Parakeet 0.6B v3 on midboy2 GPU 0. The existing 1.1B batch service on bigboy stays put as the canonical quality pass at session end. Long-term separation of live vs batch is the right architectural call; live and batch have fundamentally different latency/throughput profiles and tuning one breaks the other.
+
 The shipped `meet-parakeet-svc` containers on midboy2 + bigboy are
 configured for batch transcription. NeMo's Parakeet TDT family
 *supports* streaming with finalized + draft tokens via configurable
@@ -1221,6 +1223,8 @@ service.
 
 ### Q2 — What does Free see on mobile? Default tier for existing users?
 
+**Resolved 2026-05-22**: New users default to `tier='free'`. Aaron + Shafen set to `tier='enterprise'` + `is_superuser=true` (founder/admin) in the alembic migration via explicit UPDATE on their email rows. Tier and admin are orthogonal — admin bypasses tier gates entirely. Existing testers beyond Aaron + Shafen stay free until manually promoted.
+
 The shipped users were enrolled before tier was a concept. Two
 options for the migration:
 
@@ -1237,6 +1241,8 @@ team are `'pro'`, everyone else is `'free'`, and the gating is
 visibly real. Confirms Aaron's call.
 
 ### Q3 — Redis pub/sub vs sticky routing for WS scaling
+
+**Resolved 2026-05-22**: Sticky routing for B.1-B.4. The existing `/ws/audio-levels` endpoint runs in production today on `meetingops.magicunicorn.dev` without Redis pub/sub, proving the single-uvicorn-worker pattern works for our scale. Add Redis pub/sub only when we scale horizontally past one backend container instance.
 
 Right now we have one uvicorn worker per backend container. Phase B
 adds long-lived WS connections. Two scaling shapes:
@@ -1259,6 +1265,8 @@ The right time to do it is when we add a second backend replica, not
 before.
 
 ### Q4 — oauth2-proxy WS quirk in Cloudflare-Apex setups
+
+**Resolved 2026-05-22**: No new seam to test. `/ws/audio-levels` is already in production through Cloudflare → oauth2-proxy → Traefik → meet-backend (visible in oauth2-proxy logs as recently as today during the Shafen auth investigation). Same pattern for `/ws/sessions/{id}/live`. Smoke-test deferred until B.1 implementation since the integration path is proven.
 
 Section 4 covers the cookie flow. The known sharp edge from the
 GitHub issue #1347 in the oauth2-proxy tracker is: after a WS upgrade
