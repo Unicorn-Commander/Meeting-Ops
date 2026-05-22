@@ -1,3 +1,14 @@
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-pydantic==2.10.3
+# meet-parakeet-stream-svc — Phase B.2 add-ons on top of the meet-parakeet-svc base.
+#
+# The base image (meet-parakeet-svc:local) already provides:
+#   - fastapi, uvicorn, pydantic, python-multipart
+#   - numpy, soundfile, librosa, scipy
+#   - torch 2.4.1 + torchaudio (CUDA 12.4)
+#   - nemo_toolkit[asr] 2.4.1 (Parakeet TDT support)
+#   - Cython, pyarrow, huggingface_hub
+#
+# This file is the seam for stream-only deps that don't belong in the
+# batch container. Today the stream surface uses only the base stack,
+# so this file is intentionally empty — leaving it in place so the
+# Dockerfile's `pip install -r requirements-stream.txt` keeps working
+# the first time we need to add something.

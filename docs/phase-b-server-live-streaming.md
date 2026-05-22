@@ -278,15 +278,20 @@ on the same socket; FastAPI's `WebSocket` distinguishes via
 
 **Audio frame (binary):**
 
+Fixed 19-byte header (big-endian, struct format `>IQ4sHB`), followed
+by the raw audio payload:
+
 ```
-[ 1 byte header version = 0x01 ]
-[ 8 byte uint64 little-endian: sequence_number ]
-[ 8 byte uint64 little-endian: client_timestamp_ms ]
-[ 2 byte uint16 little-endian: payload_format ]
-   0x0001 = pcm16 (16kHz mono signed-LE)
-   0x0002 = opus
-   0x0003 = aac
-[ N bytes payload ]
+bytes 0-3    uint32 BE  sequence_number       (per-stream monotonic)
+bytes 4-11   uint64 BE  client_timestamp_us   (microseconds, NTP-like)
+bytes 12-15  4-char ASCII  payload_format
+               "PC16" = 16 kHz mono signed-LE PCM16
+               "OPUS" = OggOpus
+               "AACL" = AAC-LC
+bytes 16-17  uint16 BE  sample_rate / 100     (160 = 16000 Hz)
+byte 18      uint8       flags
+               bit 0: is_final (last frame in this segment)
+bytes 19..N  audio payload
 ```
 
 Sequence number increments per frame. The client picks the format
@@ -297,6 +302,21 @@ AudioWorklet to 16kHz mono pcm16, eliminating server-side decoding
 entirely. PCM16 at 16kHz mono is 32 kB/sec, which is well within any
 reasonable mobile uplink. We can fall back to Opus if AudioWorklet
 isn't available, but PCM is simpler on the server.
+
+**Framing decision (B.2 reconciliation, 2026-05-22):** the original
+draft of this doc specified a variable-length little-endian header
+with a leading version byte (`0x01`, then LE uint64 sequence, LE
+uint64 timestamp_ms, LE uint16 format, payload). Phase B.1 shipped a
+fixed 19-byte big-endian header that's smaller (19B vs 19B + version
+overhead in the variable layout), cheaper to parse (`struct.unpack`
+with a fixed format string vs read-version-then-branch), and trivially
+struct-pack/unpack-compatible from both Python and TypeScript. Both
+layouts carry the same information; the fixed BE form is simpler to
+implement correctly. B.2 standardised on the fixed BE form across
+`backend/api/streaming.py`, `services/parakeet-stream-svc/main.py`,
+and `frontend/src/pages/StreamingTest.tsx`. The variable LE form
+remains a future option if we ever need extension fields, but until
+then it's over-engineered for v1.
 
 **Control frame (text JSON):**
 
@@ -1355,15 +1375,21 @@ Quick reference for the WebSocket message shapes from Section 4.
 
 ### Binary frame layout
 
+Reconciled in Phase B.2 to the fixed 19-byte big-endian header that
+ships in `backend/api/streaming.py` (struct format `>IQ4sHB`) and
+`frontend/src/pages/StreamingTest.tsx`. See Section 4 for the
+rationale.
+
 ```
 Offset  Length  Field
-0       1       header_version (uint8) = 0x01
-1       8       sequence_number (uint64, little-endian)
-9       8       client_timestamp_ms (uint64, little-endian)
-17      2       payload_format (uint16, little-endian)
-                  0x0001 = pcm16 (16kHz mono signed-LE)
-                  0x0002 = opus
-                  0x0003 = aac
+0       4       sequence_number       (uint32, big-endian)
+4       8       client_timestamp_us   (uint64, big-endian; microseconds)
+12      4       payload_format        (4-char ASCII)
+                  "PC16" = 16 kHz mono signed-LE PCM16
+                  "OPUS" = OggOpus
+                  "AACL" = AAC-LC
+16      2       sample_rate / 100     (uint16, big-endian; 160 = 16 kHz)
+18      1       flags                 (uint8; bit 0 = is_final)
 19      N       payload bytes
 ```
 

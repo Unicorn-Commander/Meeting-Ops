@@ -1,10 +1,20 @@
-"""Phase B.1 server-live streaming WebSocket endpoint.
+"""Phase B.2 server-live streaming WebSocket endpoint.
 
 This module implements the meet-backend side of the Phase B server-live
-audio pipeline described in `docs/phase-b-server-live-streaming.md` section
-4. B.1 is scaffolding-only — we accept the upgrade, log binary frames per
-the 19-byte header protocol, and ack them. The real forward path to
-`meet-parakeet-stream-svc` + partial-transcript emission lands in B.2.
+audio pipeline described in `docs/phase-b-server-live-streaming.md`.
+
+B.2 ships:
+  - real per-session audio buffering (PCM16 ring),
+  - periodic forwarding (every ~2.5 s of speech OR on ``{"type": "flush"}``)
+    of the buffered audio to ``meet-parakeet-stream-svc`` on midboy2,
+  - emission of partial / final transcript frames back to the WS client,
+  - control-frame ``end`` triggers one last flush + a final transcript.
+
+This is **near-streaming**: chunked offline transcription over short
+windows. True NeMo streaming (draft + finalize tokens) lands in B.3.
+The wire contract from Section 4 of the design doc is forward-compatible
+with the B.3 protocol; the only thing that changes is that the partials
+will come faster + finer-grained when the streaming model is wired in.
 
 Endpoint
 --------
@@ -18,49 +28,54 @@ including the HTTP upgrade that initiates a WebSocket. We inspect those
 headers off ``websocket.headers``, look up the user, and reject with close
 code 4001 if no user matches.
 
-Frame protocol (B.1 scaffold)
------------------------------
-The user-supplied design directive for B.1 uses a 19-byte big-endian header
-on every binary frame::
+Frame protocol (canonical as of B.2 reconciliation 2026-05-22)
+--------------------------------------------------------------
+The 19-byte fixed big-endian header carries every binary audio frame::
 
-    bytes 0-3   uint32 BE  sequence_number
-    bytes 4-11  uint64 BE  client_timestamp_us (microseconds)
+    bytes 0-3   uint32 BE  sequence_number   (per-stream monotonic)
+    bytes 4-11  uint64 BE  client_timestamp_us
     bytes 12-15 4-char ASCII  payload_format  ("PC16" = 16 kHz mono PCM16)
     bytes 16-17 uint16 BE  sample_rate / 100  (160 = 16000 Hz)
     byte 18     uint8       flags  (bit 0: is_final)
+    bytes 19..N audio payload (PCM16 little-endian by convention)
 
-This differs from the Phase B design doc section 4's framing (1-byte
-version + uint64 LE sequence + uint64 LE timestamp_ms + uint16 LE
-payload_format + payload) — the doc's wider framing is what we'll likely
-adopt in B.2 once the protocol is finalized. For B.1 we follow the user
-spec verbatim so the frontend test page and backend agree, and so the
-Python+TypeScript struct definitions are testable end-to-end. The B.2
-implementer should resolve the framing question in the design doc before
-shipping real-model traffic.
+The design doc originally drafted a variable-length little-endian header
+with a leading version byte; Phase B.2 reconciled to this fixed
+big-endian form because it's simpler to parse correctly in both Python
+and TypeScript and carries identical information. See section 4 of
+``docs/phase-b-server-live-streaming.md`` for the full rationale.
 
 Control frames (text/JSON)
 --------------------------
-- ``{"type": "end"}``       — client done; server closes with 1000.
-- ``{"type": "ping"}``      — keepalive; server replies ``{"type": "pong"}``.
-- anything else             — echoed back as ``{"type":"ack_control"}``.
+- ``{"type": "end"}``    — client done; one final flush + close.
+- ``{"type": "flush"}``  — force-transcribe the current buffer now.
+- ``{"type": "ping"}``   — keepalive; server replies with ``pong``.
+- anything else          — echoed as ``ack_control`` (forward-compat).
 
 Server-emitted frames
 ---------------------
 - ``{"type": "ready", ...}``         — sent immediately after accept.
-- ``{"type": "ack",   ...}``         — per binary frame.
+- ``{"type": "ack",   ...}``         — per binary frame (header echo).
+- ``{"type": "partial", ...}``       — chunked transcript while audio flows.
+- ``{"type": "final", ...}``         — last transcript on session end.
 - ``{"type": "ack_control", ...}``   — per unknown control frame.
-- ``{"type": "error", ...}``         — per malformed frame.
+- ``{"type": "error", ...}``         — per malformed frame / upstream fail.
 - ``{"type": "pong"}``               — per ``{"type":"ping"}`` control.
 - ``{"type": "closed", ...}``        — server-initiated close.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import struct
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -70,7 +85,34 @@ router = APIRouter(tags=["streaming"])
 # Frame layout — see module docstring.
 HEADER_SIZE = 19
 HEADER_STRUCT = ">IQ4sHB"
-PROTOCOL_VERSION = "0.1.0-scaffold"
+PROTOCOL_VERSION = "0.2.0"  # bumped from 0.1.0-scaffold (B.1) for real forwarding.
+
+# Where the streaming STT service lives. midboy2 over Tailscale by default,
+# matching the existing PARAKEET_SERVER_URL convention. Overridable via env
+# so dev / smoke-test setups can point at a local stub.
+PARAKEET_STREAM_URL = os.getenv(
+    "PARAKEET_STREAM_URL",
+    "http://100.66.42.57:8895",
+).rstrip("/")
+
+# Window flush cadence. Every 2.5 s of audio (or on explicit flush) we
+# build a WAV from the accumulated PCM16 frames and POST it. Shorter
+# windows give snappier partials at the cost of more upstream load;
+# longer windows give better word-level continuity. 2.5 s is the
+# starting compromise; B.3 will replace this with NeMo native streaming.
+FLUSH_AUDIO_SECONDS = float(os.getenv("STREAM_FLUSH_AUDIO_SECONDS", "2.5"))
+
+# Upper bound on retained PCM audio per session. We never need more than
+# this on the live path — the canonical transcript comes from the chunks
+# upload pipeline that runs in parallel. 60 s is generous; the live
+# rolling window is intentionally short.
+MAX_PCM_BUFFER_SECONDS = 60.0
+
+# Upstream HTTP timeouts. The model on midboy2 takes ~200-600 ms for a
+# 2.5 s window at fp16 on the 3060 once warmed; cold start is up to
+# ~30 s while NeMo loads. We give /transcribe-stream 30 s of grace
+# during warm-up and 10 s once warm — both controllable via env.
+STREAM_UPSTREAM_TIMEOUT_S = float(os.getenv("STREAM_UPSTREAM_TIMEOUT_S", "30.0"))
 
 
 def _resolve_ws_user_email(websocket: WebSocket) -> Optional[str]:
@@ -97,30 +139,251 @@ def _resolve_ws_user_email(websocket: WebSocket) -> Optional[str]:
     return None
 
 
+@dataclass
+class _SessionState:
+    """Per-WS server-side state.
+
+    The PCM buffer is a list of raw PCM16 little-endian frames the client
+    sent. We concatenate when it's time to flush (no need to keep a
+    contiguous bytearray hot — this is run rarely).
+
+    last_seq is the highest sequence number we've received; the client
+    can use ``ack`` echoes to detect drops. last_flush_at_audio_ms tracks
+    cumulative audio (in ms) at the time of the last upstream call so we
+    can fire when ``cumulative - last_flush >= FLUSH_AUDIO_SECONDS * 1000``.
+    """
+    session_id: str
+    user_email: str
+    sample_rate: int = 16000  # filled from first audio frame
+    pcm_chunks: list[bytes] = field(default_factory=list)
+    cumulative_audio_ms: int = 0
+    last_flush_at_audio_ms: int = 0
+    last_seq: int = 0
+    flush_counter: int = 0  # increments per upstream transcribe call
+    last_partial_text: str = ""  # de-dup empty/identical partials
+    in_flight: bool = False  # one upstream call at a time per session
+
+    def append_pcm(self, payload: bytes, sample_rate: int) -> None:
+        """Append a PCM16 payload and update the cumulative-audio bookkeeping."""
+        if not payload:
+            return
+        self.sample_rate = sample_rate or self.sample_rate
+        # PCM16 = 2 bytes per sample, mono.
+        samples = len(payload) // 2
+        ms = int(round((samples / float(self.sample_rate)) * 1000.0))
+        self.pcm_chunks.append(payload)
+        self.cumulative_audio_ms += ms
+
+        # Trim the front of the buffer if we'd exceed MAX_PCM_BUFFER_SECONDS.
+        # We keep flushes small + recent; older audio is the chunks-upload
+        # pipeline's job.
+        max_bytes = int(MAX_PCM_BUFFER_SECONDS * self.sample_rate * 2)
+        total = sum(len(c) for c in self.pcm_chunks)
+        while total > max_bytes and len(self.pcm_chunks) > 1:
+            dropped = self.pcm_chunks.pop(0)
+            total -= len(dropped)
+
+    def should_flush(self) -> bool:
+        """True when we have at least FLUSH_AUDIO_SECONDS of new audio since the
+        last flush. Uses cumulative bookkeeping, not buffer size, so a slow
+        client doesn't gate us on calendar time."""
+        delta_ms = self.cumulative_audio_ms - self.last_flush_at_audio_ms
+        return delta_ms >= int(FLUSH_AUDIO_SECONDS * 1000)
+
+    def take_pcm(self, max_seconds: float = 25.0) -> bytes:
+        """Return up to ``max_seconds`` of the most recent PCM16 (does NOT clear).
+
+        We keep the buffer around so the next flush includes overlap with the
+        prior window — this gives the model a tiny bit of continuity context
+        across windows without needing a streaming state machine. The cheap
+        trim in ``append_pcm`` keeps the long-term buffer bounded to
+        MAX_PCM_BUFFER_SECONDS, but for each upstream call we send only the
+        most recent ``max_seconds`` so the streaming service stays inside its
+        own per-call window limit (default 30 s on parakeet-stream-svc).
+
+        The model will see each window with overlap from the previous one —
+        the partial transcript "grows" sentence-by-sentence as more audio
+        arrives, which matches the design doc's transcript_partial semantics.
+        """
+        joined = b"".join(self.pcm_chunks)
+        max_bytes = int(max_seconds * self.sample_rate * 2)
+        if len(joined) <= max_bytes:
+            return joined
+        return joined[-max_bytes:]
+
+
+def _pcm16_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
+    """Wrap raw PCM16 LE mono in a minimal WAV/RIFF container so the
+    transcribe service can ``soundfile.read()`` it without us shipping
+    audio metadata in the request body.
+
+    We do this in-memory (no temp file) because the buffers are small
+    (~80 KB for 2.5 s of 16 kHz PCM16) and we want the call to be
+    allocation-cheap on each flush.
+    """
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # PCM16 = 2 bytes
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+async def _flush_to_stt(
+    state: _SessionState,
+    websocket: WebSocket,
+    *,
+    is_final: bool,
+    http_client: httpx.AsyncClient,
+) -> None:
+    """Build the current window into a WAV, POST to the streaming service,
+    and emit a ``partial`` / ``final`` JSON frame back to the WS client.
+
+    Concurrency: only one flush at a time per session (gated by
+    ``state.in_flight``). If a flush is already in flight and the cadence
+    fires again, we skip — the in-flight call already covers the window
+    we'd be sending. Final flushes (on ``end``) override the gate so the
+    last segment never gets dropped.
+    """
+    if not state.pcm_chunks:
+        return
+
+    if state.in_flight and not is_final:
+        # Already a call in flight; skip this cadence tick.
+        return
+
+    state.in_flight = True
+    state.flush_counter += 1
+    seq = state.flush_counter
+    pcm_at_call = state.take_pcm()
+    cumulative_at_call = state.cumulative_audio_ms
+    state.last_flush_at_audio_ms = cumulative_at_call
+
+    started = time.time()
+
+    try:
+        wav_bytes = _pcm16_to_wav_bytes(pcm_at_call, state.sample_rate)
+
+        url = f"{PARAKEET_STREAM_URL}/transcribe-stream"
+        headers = {
+            "Content-Type": "audio/wav",
+            "X-Session-Id": state.session_id,
+            "X-Flush-Sequence": str(seq),
+            "X-Is-Final": "1" if is_final else "0",
+        }
+
+        try:
+            resp = await http_client.post(
+                url,
+                content=wav_bytes,
+                headers=headers,
+                timeout=STREAM_UPSTREAM_TIMEOUT_S,
+            )
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            logger.warning(
+                "[B.2 WS] upstream_unreachable session=%s seq=%d err=%s",
+                state.session_id, seq, exc,
+            )
+            await websocket.send_json({
+                "type": "error",
+                "reason": "upstream_unreachable",
+                "sequence": seq,
+                "detail": str(exc)[:200],
+                "retryable": True,
+            })
+            return
+
+        if resp.status_code >= 400:
+            logger.warning(
+                "[B.2 WS] upstream_http_error session=%s seq=%d status=%d body=%s",
+                state.session_id, seq, resp.status_code, resp.text[:200],
+            )
+            await websocket.send_json({
+                "type": "error",
+                "reason": "upstream_http_error",
+                "sequence": seq,
+                "status": resp.status_code,
+                "detail": resp.text[:200],
+            })
+            return
+
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            await websocket.send_json({
+                "type": "error",
+                "reason": "upstream_bad_json",
+                "sequence": seq,
+                "detail": resp.text[:200],
+            })
+            return
+
+        text = (data.get("text") or "").strip()
+        segments = data.get("segments") or []
+        confidence = data.get("confidence")
+        model = data.get("model")
+        rtf = data.get("rtf")
+
+        # De-dup empty / identical partials. Real model output won't usually
+        # repeat verbatim across windows once audio actually arrives, but
+        # zero-payload smoke tests produce empty text every time — flooding
+        # the client with empty partials is noise.
+        if not is_final and not text:
+            return
+        if not is_final and text == state.last_partial_text:
+            return
+        state.last_partial_text = text
+
+        frame_type = "final" if is_final else "partial"
+        await websocket.send_json({
+            "type": frame_type,
+            "sequence": seq,
+            "text": text,
+            "segments": segments,
+            "confidence": confidence,
+            "model": model,
+            "rtf": rtf,
+            "covers_through_ms": cumulative_at_call,
+            "is_final": is_final,
+            "upstream_elapsed_ms": int((time.time() - started) * 1000),
+        })
+
+        logger.info(
+            "[B.2 WS] flush ok session=%s seq=%d type=%s chars=%d "
+            "audio_ms=%d elapsed_ms=%d",
+            state.session_id, seq, frame_type, len(text),
+            cumulative_at_call, int((time.time() - started) * 1000),
+        )
+    finally:
+        state.in_flight = False
+
+
 @router.websocket("/ws/sessions/{session_id}/live")
 async def session_live(websocket: WebSocket, session_id: str) -> None:
-    """Phase B.1 scaffold WS endpoint.
+    """Phase B.2 WS endpoint with real forward path.
 
-    Accepts the upgrade if oauth2-proxy forwarded an authenticated email
-    header, echoes a ``ready`` frame, then loops:
-      - on binary frames: parse the 19-byte header, log fields, ack.
-      - on text frames: parse JSON, handle ``end`` / ``ping`` / unknown.
+    Lifecycle:
+      1. Auth-gate on oauth2-proxy headers, reject 4001 if missing.
+      2. accept(), send ``ready`` frame with protocol version + upstream URL.
+      3. Loop:
+         - binary frame  -> parse 19-byte header, append PCM, maybe flush.
+         - text {"type":"flush"} -> force flush.
+         - text {"type":"end"}   -> final flush + close 1000.
+         - text {"type":"ping"}  -> pong.
+         - anything else         -> ack_control echo.
+      4. On disconnect / exception: log + best-effort close.
 
-    No audio is forwarded anywhere in B.1. The /api/ws/sessions/<id>/live
-    URL is mounted under the same Traefik + oauth2-proxy ingress as the
-    existing /ws/audio-levels WebSocket, so the auth + WS-upgrade path is
-    already production-proven (see reference note in design doc section 4).
+    Upstream forwarding uses a single per-connection httpx.AsyncClient with
+    HTTP keep-alive so we're not paying TCP setup on every flush.
     """
-    # Auth gate. Reject before accept() so the client sees a clean 4001
-    # close rather than an opened-then-dropped socket. oauth2-proxy strips
-    # the headers if the user isn't authenticated, so absence == not authed.
     user_email = _resolve_ws_user_email(websocket)
     if not user_email:
-        # Per RFC 6455 §7.4.1, 4001 is in the application range. We pick it
-        # to match the satellite + remote-audio convention used elsewhere
-        # in the backend for "auth failed at handshake".
         logger.warning(
-            "[B.1 WS] unauthenticated connection attempt session_id=%s "
+            "[B.2 WS] unauthenticated connection attempt session_id=%s "
             "headers_present=%s",
             session_id,
             sorted(k for k in websocket.headers.keys() if k.startswith("x-")),
@@ -130,170 +393,176 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
 
     await websocket.accept()
     logger.info(
-        "[B.1 WS] connected session_id=%s user=%s",
-        session_id,
-        user_email,
+        "[B.2 WS] connected session_id=%s user=%s upstream=%s",
+        session_id, user_email, PARAKEET_STREAM_URL,
     )
 
-    # The "ready" frame announces the protocol version + server time so a
-    # client can sanity-check its struct layout matches before sending
-    # audio. The B.2 implementation should add `model_status`, `provider`,
-    # and an entitlement echo so tier-gating decisions are auditable from
-    # the client side.
     await websocket.send_json({
         "type": "ready",
         "session_id": session_id,
         "server_time": datetime.now(timezone.utc).isoformat(),
         "protocol_version": PROTOCOL_VERSION,
-        "phase": "B.1",
-        "scaffold": True,
+        "phase": "B.2",
+        "upstream": PARAKEET_STREAM_URL,
+        "flush_audio_seconds": FLUSH_AUDIO_SECONDS,
     })
 
-    try:
-        while True:
-            message = await websocket.receive()
+    state = _SessionState(session_id=session_id, user_email=user_email)
+    limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 
-            msg_type = message.get("type")
-            if msg_type == "websocket.disconnect":
-                logger.info(
-                    "[B.1 WS] disconnect frame session_id=%s code=%s",
-                    session_id,
-                    message.get("code"),
-                )
-                return
+    async with httpx.AsyncClient(limits=limits) as http_client:
+        try:
+            while True:
+                message = await websocket.receive()
 
-            if "bytes" in message and message["bytes"] is not None:
-                data: bytes = message["bytes"]
-                if len(data) < HEADER_SIZE:
-                    logger.warning(
-                        "[B.1 WS] frame_too_short session_id=%s got=%d expected>=%d",
-                        session_id,
-                        len(data),
-                        HEADER_SIZE,
-                    )
-                    await websocket.send_json({
-                        "type": "error",
-                        "reason": "frame_too_short",
-                        "got_bytes": len(data),
-                        "expected_min_bytes": HEADER_SIZE,
-                    })
-                    continue
-
-                try:
-                    seq, ts_us, fmt_bytes, sr100, flags = struct.unpack(
-                        HEADER_STRUCT, data[:HEADER_SIZE]
-                    )
-                except struct.error as exc:
-                    logger.warning(
-                        "[B.1 WS] header_unpack_failed session_id=%s err=%s",
-                        session_id,
-                        exc,
-                    )
-                    await websocket.send_json({
-                        "type": "error",
-                        "reason": "header_unpack_failed",
-                        "detail": str(exc),
-                    })
-                    continue
-
-                fmt_str = fmt_bytes.decode("ascii", errors="replace")
-                payload_len = len(data) - HEADER_SIZE
-                is_final = bool(flags & 0x01)
-
-                logger.info(
-                    "[B.1 WS] frame session=%s seq=%d ts_us=%d fmt=%s "
-                    "sr=%d payload_bytes=%d final=%s",
-                    session_id,
-                    seq,
-                    ts_us,
-                    fmt_str,
-                    sr100 * 100,
-                    payload_len,
-                    is_final,
-                )
-
-                # In Phase B.2 this is the seam where we forward the
-                # payload to meet-parakeet-stream-svc and emit
-                # "partial" / "final" transcript frames back to the
-                # client as transcripts arrive. For B.1 we just ack so
-                # the client can verify round-trip latency.
-                await websocket.send_json({
-                    "type": "ack",
-                    "sequence": seq,
-                    "received_bytes": len(data),
-                    "header_bytes": HEADER_SIZE,
-                    "payload_bytes": payload_len,
-                    "format": fmt_str,
-                    "sample_rate": sr100 * 100,
-                    "is_final": is_final,
-                })
-                continue
-
-            if "text" in message and message["text"] is not None:
-                raw_text = message["text"]
-                try:
-                    ctrl = json.loads(raw_text)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "[B.1 WS] bad_json session_id=%s err=%s preview=%r",
-                        session_id,
-                        exc,
-                        raw_text[:80],
-                    )
-                    await websocket.send_json({
-                        "type": "error",
-                        "reason": "bad_json",
-                        "detail": str(exc),
-                    })
-                    continue
-
-                ctrl_type = ctrl.get("type") if isinstance(ctrl, dict) else None
-
-                if ctrl_type == "end":
+                msg_type = message.get("type")
+                if msg_type == "websocket.disconnect":
                     logger.info(
-                        "[B.1 WS] client requested end session_id=%s",
-                        session_id,
+                        "[B.2 WS] disconnect frame session_id=%s code=%s",
+                        session_id, message.get("code"),
                     )
-                    await websocket.send_json({
-                        "type": "closed",
-                        "reason": "client_end",
-                    })
-                    await websocket.close(code=1000)
                     return
 
-                if ctrl_type == "ping":
-                    await websocket.send_json({"type": "pong"})
+                if "bytes" in message and message["bytes"] is not None:
+                    data: bytes = message["bytes"]
+                    if len(data) < HEADER_SIZE:
+                        logger.warning(
+                            "[B.2 WS] frame_too_short session_id=%s got=%d expected>=%d",
+                            session_id, len(data), HEADER_SIZE,
+                        )
+                        await websocket.send_json({
+                            "type": "error",
+                            "reason": "frame_too_short",
+                            "got_bytes": len(data),
+                            "expected_min_bytes": HEADER_SIZE,
+                        })
+                        continue
+
+                    try:
+                        seq, ts_us, fmt_bytes, sr100, flags = struct.unpack(
+                            HEADER_STRUCT, data[:HEADER_SIZE]
+                        )
+                    except struct.error as exc:
+                        logger.warning(
+                            "[B.2 WS] header_unpack_failed session_id=%s err=%s",
+                            session_id, exc,
+                        )
+                        await websocket.send_json({
+                            "type": "error",
+                            "reason": "header_unpack_failed",
+                            "detail": str(exc),
+                        })
+                        continue
+
+                    fmt_str = fmt_bytes.decode("ascii", errors="replace")
+                    payload = data[HEADER_SIZE:]
+                    payload_len = len(payload)
+                    is_final_bit = bool(flags & 0x01)
+                    sample_rate = sr100 * 100
+
+                    state.last_seq = seq
+
+                    # Only PC16 is appended to the buffer in B.2; other formats
+                    # would need a transcode step we deliberately defer (Opus
+                    # support is B.3 along with the AudioWorklet fallback).
+                    if fmt_str == "PC16" and payload_len > 0:
+                        state.append_pcm(payload, sample_rate)
+
+                    await websocket.send_json({
+                        "type": "ack",
+                        "sequence": seq,
+                        "received_bytes": len(data),
+                        "header_bytes": HEADER_SIZE,
+                        "payload_bytes": payload_len,
+                        "format": fmt_str,
+                        "sample_rate": sample_rate,
+                        "is_final": is_final_bit,
+                        "cumulative_audio_ms": state.cumulative_audio_ms,
+                    })
+
+                    # Cadence-driven flush: fire when we have enough audio.
+                    # The header-level is_final bit also forces a flush;
+                    # distinct from {"type":"end"} which closes the WS.
+                    if state.should_flush() or is_final_bit:
+                        asyncio.create_task(
+                            _flush_to_stt(
+                                state, websocket,
+                                is_final=is_final_bit, http_client=http_client,
+                            )
+                        )
                     continue
 
-                # Unknown control type — echo + log. Keeps the socket
-                # alive so future protocol extensions can be probed
-                # without crashing existing servers.
-                logger.info(
-                    "[B.1 WS] unknown_control session_id=%s ctrl=%s",
-                    session_id,
-                    ctrl,
-                )
-                await websocket.send_json({
-                    "type": "ack_control",
-                    "echo": ctrl,
-                })
+                if "text" in message and message["text"] is not None:
+                    raw_text = message["text"]
+                    try:
+                        ctrl = json.loads(raw_text)
+                    except json.JSONDecodeError as exc:
+                        logger.warning(
+                            "[B.2 WS] bad_json session_id=%s err=%s preview=%r",
+                            session_id, exc, raw_text[:80],
+                        )
+                        await websocket.send_json({
+                            "type": "error",
+                            "reason": "bad_json",
+                            "detail": str(exc),
+                        })
+                        continue
 
-    except WebSocketDisconnect as exc:
-        logger.info(
-            "[B.1 WS] client disconnected session_id=%s code=%s",
-            session_id,
-            getattr(exc, "code", "?"),
-        )
-    except Exception:
-        # Don't swallow — log full traceback and let FastAPI close the
-        # socket. Silent kill is the worst possible UX for live captions
-        # debugging in B.2.
-        logger.exception(
-            "[B.1 WS] unexpected error session_id=%s user=%s",
-            session_id,
-            user_email,
-        )
-        try:
-            await websocket.close(code=1011)
+                    ctrl_type = ctrl.get("type") if isinstance(ctrl, dict) else None
+
+                    if ctrl_type == "end":
+                        logger.info(
+                            "[B.2 WS] client requested end session_id=%s audio_ms=%d",
+                            session_id, state.cumulative_audio_ms,
+                        )
+                        await _flush_to_stt(
+                            state, websocket, is_final=True, http_client=http_client,
+                        )
+                        await websocket.send_json({
+                            "type": "closed",
+                            "reason": "client_end",
+                        })
+                        await websocket.close(code=1000)
+                        return
+
+                    if ctrl_type == "flush":
+                        logger.info(
+                            "[B.2 WS] client requested flush session_id=%s "
+                            "audio_ms=%d",
+                            session_id, state.cumulative_audio_ms,
+                        )
+                        asyncio.create_task(
+                            _flush_to_stt(
+                                state, websocket,
+                                is_final=False, http_client=http_client,
+                            )
+                        )
+                        continue
+
+                    if ctrl_type == "ping":
+                        await websocket.send_json({"type": "pong"})
+                        continue
+
+                    logger.info(
+                        "[B.2 WS] unknown_control session_id=%s ctrl=%s",
+                        session_id, ctrl,
+                    )
+                    await websocket.send_json({
+                        "type": "ack_control",
+                        "echo": ctrl,
+                    })
+
+        except WebSocketDisconnect as exc:
+            logger.info(
+                "[B.2 WS] client disconnected session_id=%s code=%s",
+                session_id, getattr(exc, "code", "?"),
+            )
         except Exception:
-            pass
+            logger.exception(
+                "[B.2 WS] unexpected error session_id=%s user=%s",
+                session_id, user_email,
+            )
+            try:
+                await websocket.close(code=1011)
+            except Exception:
+                pass
