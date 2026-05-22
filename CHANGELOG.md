@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.9.1] - 2026-05-22
+
 ### Added
 - **Bulk Import B-import.3: speaker auto-link from filename pattern**: when a bulk-imported file's parsed title matches the `Call with {Name}` pattern (which the bulk of Aaron's 526-file archive does), the pipeline now extracts the name via `extract_call_with_name()` in `backend/utils/filename_parser.py` (handles parenthetical suffixes like `Doug (Crash)` -> `Doug`) and resolves it via `find_speaker_by_name_hint()` in `backend/services/speaker_service.py` using rapidfuzz token_set_ratio at an 0.85 floor against enrolled speakers in the org. On match, creates a `SpeakerSessionLink` with `source='filename-hint'` and `raw_label='HINT'`. The existing post-reprocess `identify_speakers()` embedding-match (source='auto') runs later and adds its own link; both coexist. Cross-org isolation enforced in the lookup. New `backend/tests/test_bulk_import_speaker_link.py` covers happy path, fuzzy match (e.g., `Khan, Shafen` <-> `Shafen Khan`), parenthetical suffix stripping, cross-org isolation, unknown-name, non-call-pattern titles, and the Step 3.5 hook integration. 15 tests pass. Test harness gained a `RECORDINGS_DIR` env var (in conftest.py) pointing to a tempfile so bulk-import tests don't depend on the Docker-only `/app/recordings` path.
 - **Phase B.4: tier gate on server-live WebSocket**: the `/ws/sessions/{session_id}/live` endpoint now enforces `tier_features.server_live` via the User.tier infrastructure shipped in v0.8.2 (alembic 028 + `backend/auth/tier.py`). Free-tier users attempting to connect get a JSON `{"type": "error", "reason": "tier_insufficient"}` frame followed by close code 4003. Pro / Enterprise users (and superusers via `get_user_tier()`'s is_superuser override) proceed to the existing ready / partial / final flow. Frontend `/streaming-test` page reads `useTierFeatures()` and renders an upgrade nudge instead of the connect button when `server_live` is false. 5 backend tests cover free / pro / enterprise / superuser-bypass / unauth-regression. Closes the gate that makes server-live a real paid feature; combined with the existing capture-only fallback for free mobile users in v0.8.0, free tier is now a coherent product.
@@ -205,7 +207,8 @@ See git tag annotations directly: git tag -l v0.5.0 -n100.
 ### Added
 - Initial versioned release.
 
-[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.9.0...HEAD
+[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.9.1...HEAD
+[0.9.1]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.9.1
 [0.9.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.9.0
 [0.8.2]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.2
 [0.8.1]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.1
