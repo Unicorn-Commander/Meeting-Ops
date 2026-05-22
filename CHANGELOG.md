@@ -1,13 +1,14 @@
-# Changelog
-
-All notable changes to UC-Meeting-Ops are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-22
+
+
+### Changed
+- Phase B design doc Q1-Q4 open questions locked (`e6d85f2`): Q1 new `meet-parakeet-stream-svc` container running Parakeet 0.6B v3 on midboy2 GPU 0 (existing 1.1B batch on bigboy stays for post-meeting reprocess); Q2 new users default to `tier=free`, Aaron + Shafen set to `tier=enterprise` + `is_superuser=true` via alembic UPDATE on their email rows (tier and admin orthogonal); Q3 Traefik sticky routing for B.1-B.4, defer Redis pub/sub until we add a second backend replica (existing `/ws/audio-levels` proves the single-worker pattern works); Q4 no new seam to test for oauth2-proxy WS through Cloudflare, the existing `/ws/audio-levels` already routes the exact same way in production.
+- TS cleanup: settings components and SettingsEnhanced.tsx now use `import type` for `SectionProps` / `SaveStatus` / `HostCapabilities` / `SettingsState` (`ca3ca01` via Codex). The types existed and were exported; the warnings were value-level imports of type-only exports under `isolatedModules`. Vite production build is now warning-free.
+
 ### Documentation
+- Added `docs/phase-c1-native-ios-design.md` (~1386 lines) scoping the native iOS app with Core ML + watchOS extension. Stack: Swift + SwiftUI native (because watchOS apps must be Swift extensions of iOS bundles). Core ML conversion: use FluidInference/FluidAudio Swift Package (MIT) which already ships Parakeet 0.6B v3 as `.mlpackage` (110x RTF on M4 Pro, INT8 W8A8 ANE-optimized); LLM via runtime priority cascade (Apple Foundation Models 3B on iOS 26+ via Swift API, fallback to mlx-swift Qwen 3 0.6B / Gemma 4 E2B in 4-bit on iOS 17+, fallback to llama.cpp + Metal, fallback to capture-only). Native UX (AVAudioEngine + URLSession background uploads, MPRemoteCommandCenter lock-screen, INVoiceShortcut Siri, CoreSpotlight indexing, share-extension, widgets, Dynamic Island Live Activities), GRDB local DB, WS auth via Sec-WebSocket-Protocol bearer JWT (no cookie). watchOS extension via WatchConnectivity proxying through paired iPhone (B.1) + cellular direct upload (B.2). 5-phase plan (~8-10 weeks for v1 closed beta + 2-4 weeks App Store review). Phase C-1 in the committed mobile roadmap A->B->C-1->C-2->C-3.
 - Added `docs/bulk-audio-import-design.md` (~1054 lines) covering the /import page for bulk audio ingestion: UX flow (drop folder → preview table with parsed metadata + bulk-edit overrides → confirm → progress view → completion), job queue architecture (recommendation: in-process asyncio queue for v1 with Arq + Redis migration in v4, vs Celery rejected as sync-first), per-file pipeline (SHA-256 dedup → filename parse → session create → Garage write → reprocess enqueue), concurrency model (=2 default with per-org rate limit + adaptive throttle when Parakeet p95 climbs above 180s), progress UI with WebSocket primary + SSE/polling fallbacks, error handling + restart recovery + resume-after-cancel semantics, speaker auto-link from `Call with X` filename pattern (new `source='filename-hint'` value, embedding match wins), Garage S3 storage layout (`meeting-ops-audio` bucket, `{org_id}/{session_id}/{filename}` key format), security (per-file/per-job/per-org-per-day caps + MIME validation via ffprobe + filename sanitization), alembic 028 schema for `bulk_import_jobs` + `bulk_import_files` tables, and 4-phase implementation plan (~5 working days). Direct continuation of today's filename parser + meeting_date column work (`e447cf9`), targeting Aaron's 526-file backlog at `/Volumes/media/audio-from-notes-voicememos-2026-05-20`.
 
 ### Added
@@ -180,7 +181,8 @@ See git tag annotations directly: git tag -l v0.5.0 -n100.
 ### Added
 - Initial versioned release.
 
-[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.8.0...HEAD
+[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.8.1...HEAD
+[0.8.1]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.1
 [0.8.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.0
 [0.7.4]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.7.4
 [0.7.3]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.7.3
