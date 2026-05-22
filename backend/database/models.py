@@ -111,6 +111,20 @@ class RecordingSession(Base):
         ForeignKey("room_audio_sources.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Brigade integration Phase 1 (alembic 030_brigade_graph_node_id).
+    # `brigade_graph_node_id` is the canonical entity name we passed to
+    # Brigade's /knowledge/store/entity for this session's :Meeting node
+    # (today the writer derives the value as f"meeting_ops_meeting_{id}";
+    # stable across re-writes since Brigade's MERGE keys on .name).
+    # `brigade_synced_at` is the wall-clock of the last successful write
+    # and drives the "View in Brigade graph" link on SessionDetails plus
+    # the reconciliation job's "unsynced in the last 7 days" query.
+    # Both stay NULL for sessions that completed before Phase 1 landed
+    # OR for deployments without BRIGADE_API_KEY set (the writer no-ops).
+    brigade_graph_node_id = Column(String(64), nullable=True)
+    brigade_synced_at = Column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     def to_dict(self):
         return {

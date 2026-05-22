@@ -1673,6 +1673,29 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 exc,
             )
 
+        # Stage 6 — Brigade graph write. Best-effort fire-and-forget per
+        # docs/brigade-integration-design.md Phase 1: Meeting + Speakers
+        # + ActionItems + Topics + Decisions land as :Meeting /
+        # :Speaker / :ActionItem / :Topic / :Decision nodes plus the
+        # corresponding HAS_* / ASSIGNED_TO / DECIDED_BY edges in
+        # Brigade's FalkorDB store. Idempotent — re-running the
+        # reprocess pipeline updates the same graph nodes via Brigade's
+        # MERGE-based store_entity. Failures NEVER raise into this
+        # pipeline; the writer logs + swallows on every error path. If
+        # BRIGADE_API_KEY is unset the writer runs in log-only mode and
+        # returns success without making HTTP calls (dev environments
+        # without Brigade still complete reprocess cleanly).
+        try:
+            from services.brigade_writer import write_meeting_to_brigade
+
+            await write_meeting_to_brigade(session.id, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess brigade graph write failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
         _set_status(
             "complete",
             completed_at=_now().isoformat(),

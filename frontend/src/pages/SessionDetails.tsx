@@ -191,6 +191,15 @@ interface Session {
   tags?: string[];
   /** True for local-only (privacy-mode) sessions loaded from IndexedDB. */
   is_local?: boolean;
+  // Brigade integration Phase 1: set by the post-reprocess writer service
+  // when the session's :Meeting + speakers + action items + topics +
+  // decisions have been written to Brigade's FalkorDB. The frontend uses
+  // these to decide whether to render the "View in Brigade graph" link.
+  // null/undefined for sessions before Phase 1 OR for deployments where
+  // BRIGADE_API_KEY is unset (writer runs in log-only mode).
+  brigade_graph_node_id?: string | null;
+  brigade_synced_at?: string | null;
+  brigade_graph_url?: string | null;
 }
 
 interface Participant {
@@ -2281,6 +2290,38 @@ export const SessionDetails: React.FC = () => {
                     ? ` (${Math.round(session.metadata.full_audio.audio_duration_seconds)}s captured)`
                     : ''}.
                 </span>
+              </div>
+            )}
+
+            {/* Brigade integration Phase 1: when the post-reprocess
+                writer has pushed this session's :Meeting + speakers +
+                action items + topics + decisions into Brigade's
+                FalkorDB graph, surface a deep-link to the 3D viewer.
+                Backend stamps brigade_synced_at + brigade_graph_node_id
+                on success and the API echoes a pre-built
+                brigade_graph_url so we don't have to know the graph
+                name on the client. The full embedded viewer lands in
+                Phase 2 of the integration; for now this is a
+                lightweight "open in Brigade" affordance. */}
+            {session.brigade_graph_url && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
+                <div className="flex items-start gap-3">
+                  <span className="font-semibold text-indigo-900">
+                    This meeting is in the Brigade knowledge graph.
+                  </span>
+                  <span className="text-indigo-700">
+                    Speakers, action items, topics, and decisions are
+                    connected as a navigable graph.
+                  </span>
+                </div>
+                <a
+                  href={session.brigade_graph_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors whitespace-nowrap"
+                >
+                  View in Brigade graph
+                </a>
               </div>
             )}
 

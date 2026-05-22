@@ -133,6 +133,29 @@ class SessionResponse(BaseModel):
     meeting_time: Optional[str] = None
 
 
+def _brigade_graph_url_for_session(session: DBRecordingSession) -> Optional[str]:
+    """Build the per-session Brigade graph deep-link, or None when this
+    session has never been written to Brigade.
+
+    The frontend uses the presence of this URL to decide whether to
+    render the "View in Brigade graph" link on SessionDetails. We do
+    the URL construction server-side so the client doesn't need to
+    know the active tenancy mode (which depends on the
+    BRIGADE_TENANCY_MODE env var the backend already reads)."""
+    if not getattr(session, "brigade_graph_node_id", None):
+        return None
+    try:
+        from services.brigade_writer import build_brigade_graph_url
+
+        return build_brigade_graph_url(session)
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — the URL builder is pure but if env parsing flips
+        # an unexpected exception we'd rather show nothing than 500
+        # the entire session detail.
+        logger.debug("brigade graph url builder failed: %s", exc)
+        return None
+
+
 def _summary_preview(session: DBRecordingSession, max_chars: int = 220) -> Optional[str]:
     """Pull a short plain-text snippet of the AI summary for the list view.
 
@@ -716,6 +739,21 @@ async def get_session(
             # promoted by services.action_items_extractor. Status-aware so
             # the UI can flip done/doing/cancelled and have it stick.
             "action_items": _action_items_payload(db, session),
+            # Brigade integration Phase 1: surfaces the per-session
+            # Brigade graph deep-link to the frontend so SessionDetails
+            # can render the "View in Brigade graph" affordance only
+            # for sessions that have been synced. brigade_graph_node_id
+            # is the canonical entity name we passed to Brigade's
+            # store_entity; brigade_synced_at stamps the last
+            # successful write; brigade_graph_url is pre-built so the
+            # client doesn't need to know the tenancy mode.
+            "brigade_graph_node_id": getattr(session, "brigade_graph_node_id", None),
+            "brigade_synced_at": (
+                session.brigade_synced_at.isoformat()
+                if getattr(session, "brigade_synced_at", None)
+                else None
+            ),
+            "brigade_graph_url": _brigade_graph_url_for_session(session),
         }
         
     except HTTPException:
