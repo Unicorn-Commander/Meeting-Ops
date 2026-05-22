@@ -21,6 +21,7 @@ import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
 import Help from './pages/Help';
 import LocalSessions from './pages/LocalSessions';
+import StreamingTest from './pages/StreamingTest';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 import { listLocalSessions } from './services/localSessionStore';
@@ -449,6 +450,16 @@ export function AppRouterSimplified() {
         <ProtectedRoute>
           <Help />
         </ProtectedRoute>
+      } />
+
+      {/* Phase B.1 server-live streaming smoke test. Admin-only — exists to
+          prove the Cloudflare -> oauth2-proxy -> Traefik -> FastAPI WS
+          upgrade seam ahead of B.2 real-model integration. See
+          docs/phase-b-server-live-streaming.md. */}
+      <Route path="/streaming-test" element={
+        <AdminRoute>
+          <StreamingTest />
+        </AdminRoute>
       } />
 
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

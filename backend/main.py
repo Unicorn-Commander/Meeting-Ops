@@ -230,6 +230,13 @@ _load_router(app, "tts", "api.tts")
 _load_router(app, "tts_websocket", "api.tts", router_attr="ws_router")
 _load_router(app, "system_caps", "api.system_caps")
 
+# === PHASE B.1 ROUTERS (server-live streaming scaffolding) ===
+# /ws/sessions/{session_id}/live — auth via oauth2-proxy forward headers,
+# logs binary frames per the 19-byte header protocol in
+# docs/phase-b-server-live-streaming.md and acks them. Real Parakeet
+# forwarding is Phase B.2.
+_load_router(app, "streaming", "api.streaming")
+
 
 
 # === CORE API ENDPOINTS ===
