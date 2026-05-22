@@ -7,6 +7,14 @@
  * small chunk every ~30 seconds — and POSTs each chunk to
  * `/api/recordings/sessions/{id}/audio-chunks` as it lands.
  *
+ * Phase A.5 (desktop local-first): when the caller opts in, each chunk
+ * is also persisted to IndexedDB via `localAudioStore` BEFORE the
+ * upload queue picks it up. On stop, the caller can compute a SHA-256
+ * + byte total against the local copy and POST a verification payload
+ * to /finalize-audio; the server compares and either confirms (caller
+ * wipes local) or returns the delta (caller backfills specific chunks
+ * or POSTs the assembled blob to /full-audio).
+ *
  * Why we need both:
  *   * VAD chunks are speech-bounded slices. They're not contiguous
  *     (silence is discarded), so concatenating them loses real timing.
@@ -14,9 +22,11 @@
  *     timing, and is what the server-side Parakeet 1.1B fp16 + pyannote
  *     diarization pipeline needs to do proper speaker matching.
  *
- * Privacy mode: callers MUST not instantiate this recorder when the
- * session is in local-only mode. The audio bytes never leave the device
- * if you never start the parallel recorder.
+ * Privacy mode: callers MUST not call the server-upload codepath when
+ * the session is in local-only mode. The recorder still streams chunks
+ * into IndexedDB (so the user gets the same crash-recovery property
+ * desktop users expect), but `localOnly: true` disables the network
+ * fetch. The blob stays on the device for the local STT/LLM pipeline.
  *
  * Browser support:
  *   * Chrome / Edge / Firefox: WebM/Opus is universally supported.
@@ -25,6 +35,7 @@
  *     The server's reassembly step decodes any of these via ffmpeg, so
  *     codec drift across users in the same org is a non-issue.
  */
+import { localAudioStore } from '../services/localAudioStore';
 
 // Non-Safari MIME order: prefer WebM/Opus (Chrome/Edge/Firefox native).
 const MIME_CANDIDATES_NON_SAFARI = [
@@ -113,12 +124,31 @@ export interface FullAudioRecorderOptions {
   maxRetries?: number;
   /** Initial backoff between retries (ms). Doubles each retry. Default 1s. */
   initialBackoffMs?: number;
+  /**
+   * Persist each chunk to IndexedDB before queuing the server upload.
+   * Recommended on desktop browsers — gives crash recovery + the
+   * verification payload at stop. Default false; AlwaysOnContext flips
+   * this on when `capabilityClass === 'desktop-capable'`.
+   */
+  localPersistence?: boolean;
+  /**
+   * Local-only / privacy mode. When true the recorder STILL writes
+   * each chunk to IndexedDB (so the local STT/LLM pipeline has source
+   * audio + we keep crash recovery) but skips the server upload path
+   * entirely. No /audio-chunks POSTs, no retries, nothing leaves the
+   * device. Mutually compatible with localPersistence (privacy mode
+   * implies local persistence by definition).
+   */
+  localOnly?: boolean;
   /** Called once per uploaded chunk with the chunk_index that succeeded. */
   onChunkUploaded?: (chunkIndex: number) => void;
   /** Called when a chunk hits maxRetries and is dropped. Non-fatal — the
    *  session keeps recording, the dropped chunk just leaves a gap in the
    *  server-side reassembled audio. */
   onChunkFailed?: (chunkIndex: number, error: Error) => void;
+  /** Called once per chunk persisted to IndexedDB. Lets callers update
+   *  a "buffered locally" counter even when server upload is off. */
+  onChunkPersisted?: (chunkIndex: number, bytes: number) => void;
 }
 
 /** Public surface — what AlwaysOnContext holds onto. */
@@ -134,6 +164,12 @@ export interface FullAudioRecorderHandle {
   isRecording(): boolean;
   /** Number of chunks the recorder has produced (regardless of upload state). */
   chunksProduced(): number;
+  /** Bytes persisted locally so far. Cheap, in-memory counter — does
+   *  not query IndexedDB. Zero when localPersistence is off. */
+  localBytes(): number;
+  /** MIME the recorder picked. Useful for the /full-audio fallback so
+   *  the caller can label the blob correctly. */
+  mimeType(): string;
 }
 
 /**
@@ -158,11 +194,14 @@ export function createFullAudioRecorder(
   const timeslice = options.timesliceMs ?? 30_000;
   const maxRetries = options.maxRetries ?? 5;
   const initialBackoff = options.initialBackoffMs ?? 1000;
+  const localPersistence = options.localPersistence === true || options.localOnly === true;
+  const localOnly = options.localOnly === true;
 
   let recorder: MediaRecorder | null = null;
   let started = false;
   let stopped = false;
   let chunkIndex = 0;
+  let localBytesAccumulated = 0;
   // Sequential upload queue. We chain promises so chunks land on the server
   // in arrival order even when the network is flaky. The server is
   // idempotent on chunk_index either way, so out-of-order isn't unsafe —
@@ -187,10 +226,31 @@ export function createFullAudioRecorder(
     return headers;
   };
 
+  const persistLocally = async (indexAtCreation: number, blob: Blob): Promise<void> => {
+    if (!localPersistence) return;
+    if (!localAudioStore.isAvailable()) return;
+    try {
+      await localAudioStore.appendChunk(options.sessionId, indexAtCreation, blob, mime);
+      localBytesAccumulated += blob.size;
+      options.onChunkPersisted?.(indexAtCreation, blob.size);
+    } catch (err) {
+      // Best-effort. We don't surface an error here because the server
+      // upload (in non-privacy mode) is still the authoritative copy.
+      // In privacy mode a failure means the chunk is genuinely lost,
+      // but there's not much we can do at this layer beyond logging.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[full-audio] Local persist failed for chunk ${indexAtCreation}:`,
+        err,
+      );
+    }
+  };
+
   const uploadChunk = async (
     indexAtCreation: number,
     blob: Blob,
   ): Promise<void> => {
+    if (localOnly) return;
     const form = new FormData();
     // Browser-side extension hint for the server's _safe_ext switch. We
     // base it on the recorder MIME; server stores under chunk_index.<ext>.
@@ -258,7 +318,11 @@ export function createFullAudioRecorder(
   const queueUpload = (blob: Blob) => {
     const indexAtCreation = chunkIndex;
     chunkIndex += 1;
+    // Persist FIRST, then queue server upload. This ordering is what
+    // makes "browser tab crashes mid-upload" a recoverable case: the
+    // chunk is on disk before the network request even starts.
     uploadChain = uploadChain
+      .then(() => persistLocally(indexAtCreation, blob))
       .then(() => uploadChunk(indexAtCreation, blob))
       .catch((err) => {
         // Final safety net — uploadChunk swallows internally, but if
@@ -379,5 +443,131 @@ export function createFullAudioRecorder(
     chunksProduced(): number {
       return chunkIndex;
     },
+
+    localBytes(): number {
+      return localBytesAccumulated;
+    },
+
+    mimeType(): string {
+      return mime;
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Verification helpers — called by AlwaysOnContext at stop() time.
+// ---------------------------------------------------------------------------
+
+export interface FinalizeAudioVerificationResponse {
+  status?: 'complete' | 'incomplete' | string;
+  reprocessing_started?: boolean;
+  reason?: string;
+  session_id?: string;
+  server_bytes?: number;
+  server_chunks?: number[];
+  missing_chunks?: number[];
+  expected_chunks?: number;
+  job_id?: string;
+}
+
+export interface VerifyAudioInput {
+  apiUrl: string;
+  orgSlug: string | null;
+  sessionId: string;
+  clientChunkCount: number;
+  clientBytesTotal: number;
+  clientSha256: string;
+}
+
+/**
+ * POST a verification payload to /finalize-audio. The server reassembles
+ * the chunks it has on disk and compares to (count, bytes, sha). On
+ * match it returns `{status: 'complete'}` and queues the reprocess
+ * pipeline as usual. On mismatch it returns `{status: 'incomplete'}`
+ * with the missing chunk indices so the caller can backfill or fall
+ * back to /full-audio.
+ */
+export async function postFinalizeAudioWithVerification(
+  input: VerifyAudioInput,
+): Promise<FinalizeAudioVerificationResponse> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  try {
+    const token = window.localStorage?.getItem('access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } catch {
+    /* localStorage blocked — fall back to cookie auth */
+  }
+  if (input.orgSlug) headers['X-MeetingOps-Org'] = input.orgSlug;
+
+  const resp = await fetch(
+    `${input.apiUrl}/api/recordings/sessions/${input.sessionId}/finalize-audio`,
+    {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({
+        client_chunk_count: input.clientChunkCount,
+        client_bytes_total: input.clientBytesTotal,
+        client_sha256: input.clientSha256,
+      }),
+    },
+  );
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(
+      `finalize-audio ${resp.status}: ${detail.slice(0, 200) || 'request failed'}`,
+    );
+  }
+  return (await resp.json()) as FinalizeAudioVerificationResponse;
+}
+
+/**
+ * Upload an entire assembled audio blob to /full-audio. The server
+ * replaces any existing reassembled audio for the session and triggers
+ * the reprocess pipeline. Use as the bulletproof fallback when chunk
+ * verification says we can't repair via per-chunk backfill.
+ */
+export async function postFullAudio(input: {
+  apiUrl: string;
+  orgSlug: string | null;
+  sessionId: string;
+  blob: Blob;
+  mimeType: string;
+}): Promise<FinalizeAudioVerificationResponse> {
+  const headers: Record<string, string> = {};
+  try {
+    const token = window.localStorage?.getItem('access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } catch {
+    /* localStorage blocked — fall back to cookie auth */
+  }
+  if (input.orgSlug) headers['X-MeetingOps-Org'] = input.orgSlug;
+
+  const ext = input.mimeType.includes('mp4')
+    ? 'mp4'
+    : input.mimeType.includes('aac')
+      ? 'aac'
+      : input.mimeType.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+  const form = new FormData();
+  form.append('audio', input.blob, `full-audio.${ext}`);
+  const resp = await fetch(
+    `${input.apiUrl}/api/recordings/sessions/${input.sessionId}/full-audio`,
+    {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: form,
+    },
+  );
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(
+      `full-audio ${resp.status}: ${detail.slice(0, 200) || 'request failed'}`,
+    );
+  }
+  return (await resp.json()) as FinalizeAudioVerificationResponse;
 }

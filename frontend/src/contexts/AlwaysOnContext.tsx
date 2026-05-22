@@ -64,6 +64,8 @@ import {
 } from '../services/localSessionStore';
 import {
   createFullAudioRecorder,
+  postFinalizeAudioWithVerification,
+  postFullAudio,
   type FullAudioRecorderHandle,
 } from '../utils/fullAudioRecorder';
 import {
@@ -72,6 +74,10 @@ import {
   shouldShowCaptureOnlyBanner,
   type DeviceCapability,
 } from '../utils/deviceDetection';
+import {
+  localAudioStore,
+  type LocalAudioSessionMeta,
+} from '../services/localAudioStore';
 
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
@@ -258,6 +264,20 @@ export interface AlwaysOnContextValue {
    * + summary at meeting completion.
    */
   isCaptureOnlyMode: boolean;
+  /**
+   * Phase A.5 orphan sessions — recordings that started on this device
+   * but never finalized (browser crash, hard refresh, tab close mid-
+   * meeting). UI renders a banner offering Resume Upload / Discard.
+   * Empty on mobile + desktop-fallback (local persistence is off).
+   */
+  orphanSessions: LocalAudioSessionMeta[];
+  /** Session id currently being resumed via the orphan banner, or null. */
+  resumingOrphan: string | null;
+  /** Resume an orphan — verify against the server, backfill or full-
+   *  audio upload as needed, kick the reprocess pipeline. */
+  resumeOrphanSession: (sessionId: string) => Promise<void>;
+  /** Drop the local chunks for an orphan without uploading. */
+  discardOrphanSession: (sessionId: string) => Promise<void>;
 }
 
 const AlwaysOnContext = createContext<AlwaysOnContextValue | null>(null);
@@ -334,6 +354,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const deviceCapability = useMemo(() => detectDevice(), []);
   const isCaptureOnlyMode = shouldShowCaptureOnlyBanner(deviceCapability);
   const allowBrowserInference = shouldRunBrowserInference(deviceCapability);
+
+  // Phase A.5 orphan tracking. On desktop-capable browsers we open the
+  // local IndexedDB store at mount and check for sessions that started
+  // but never finalized (browser crash, tab close mid-meeting, hard
+  // refresh). The UI surfaces a banner that lets the user Resume Upload
+  // or Discard. List is refreshed after every stop() / discard() so
+  // it stays accurate without polling.
+  const [orphanSessions, setOrphanSessions] = useState<LocalAudioSessionMeta[]>([]);
+  const [resumingOrphan, setResumingOrphan] = useState<string | null>(null);
 
   // Privacy mode: toggle persisted in localStorage. Locked-in per-session
   // at start() time so a mid-meeting setting flip doesn't half-upload.
@@ -1362,33 +1391,58 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       await createSession();
       await ensureEngine().start();
       // After the VAD engine boots we have an active MediaStream we can
-      // share with the parallel full-audio recorder. We deliberately do
-      // NOT spin up the recorder in local-only mode — that's the privacy
-      // contract: no audio bytes leave the device.
-      if (!useLocalOnly) {
-        const stream = engineRef.current?.getActiveStream?.() ?? activeMicStream;
-        const sessionIdForRecord = sessionRef.current;
-        if (stream && sessionIdForRecord && activeOrganization) {
-          const recorder = createFullAudioRecorder({
-            stream,
-            sessionId: sessionIdForRecord,
-            apiUrl: config.apiUrl,
-            orgSlug: activeOrganization.slug ?? null,
-            timesliceMs: 30_000,
-            maxRetries: 5,
-            initialBackoffMs: 1000,
-            onChunkFailed: (idx, err) => {
-              // eslint-disable-next-line no-console
-              console.warn(
-                `[always-on] Full-audio chunk ${idx} dropped after retries:`,
-                err.message,
-              );
-            },
-          });
-          if (recorder) {
-            fullAudioRecorderRef.current = recorder;
-            recorder.start();
+      // share with the parallel full-audio recorder.
+      //
+      // Phase A.5 — local-first on desktop: we spin the recorder up in
+      // BOTH standard and privacy modes when the device is desktop-
+      // capable. Standard mode still streams chunks to the server AND
+      // persists each one to IndexedDB (so a crash mid-meeting can
+      // recover up to the last chunk). Privacy mode skips the server
+      // upload entirely (`localOnly: true`) but keeps writing to IDB
+      // so the local STT/LLM pipeline has source audio. Mobile +
+      // desktop-fallback get the server-only path (no local persist)
+      // — phones don't have the storage budget and fallback browsers
+      // (no WebGPU) shouldn't need it either.
+      const stream = engineRef.current?.getActiveStream?.() ?? activeMicStream;
+      const sessionIdForRecord = sessionRef.current;
+      const desktopLocalFirst =
+        deviceCapability.capabilityClass === 'desktop-capable'
+        && localAudioStore.isAvailable();
+      if (stream && sessionIdForRecord && (activeOrganization || useLocalOnly)) {
+        if (desktopLocalFirst) {
+          try {
+            await localAudioStore.createSessionMetadata(
+              sessionIdForRecord,
+              new Date().toISOString(),
+              useLocalOnly,
+            );
+          } catch (err) {
+            // Non-fatal — recorder still runs without metadata seeding.
+            // eslint-disable-next-line no-console
+            console.warn('[always-on] localAudioStore metadata seed failed:', err);
           }
+        }
+        const recorder = createFullAudioRecorder({
+          stream,
+          sessionId: sessionIdForRecord,
+          apiUrl: config.apiUrl,
+          orgSlug: activeOrganization?.slug ?? null,
+          timesliceMs: 30_000,
+          maxRetries: 5,
+          initialBackoffMs: 1000,
+          localPersistence: desktopLocalFirst,
+          localOnly: useLocalOnly,
+          onChunkFailed: (idx, err) => {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[always-on] Full-audio chunk ${idx} dropped after retries:`,
+              err.message,
+            );
+          },
+        });
+        if (recorder) {
+          fullAudioRecorderRef.current = recorder;
+          recorder.start();
         }
       }
       setState('recording');
@@ -1406,7 +1460,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setStatusText('Idle');
       setError(message);
     }
-  }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable]);
+  }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable, deviceCapability, activeOrganization, activeMicStream]);
 
   const pause = useCallback(async () => {
     if (stateRef.current !== 'recording') return;
@@ -1459,6 +1513,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       if (sessionId) {
         if (wasLocalOnly) {
           setStatusText('Generating final summary locally');
+          // Mark the local audio session ended (privacy mode keeps it
+          // in IndexedDB — user manages via the Local Sessions surface).
+          if (deviceCapability.capabilityClass === 'desktop-capable'
+            && localAudioStore.isAvailable()) {
+            try {
+              const assembled = await localAudioStore.getAssembledBlob(sessionId);
+              await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
+            } catch (err) {
+              // No chunks (e.g. user stopped before first 30s) — just
+              // log and continue. The slice rollup below handles the
+              // text-only case.
+              // eslint-disable-next-line no-console
+              console.debug('[always-on] No local audio to finalize:', err);
+            }
+          }
           let finalText: string | null = null;
           // Concatenate slice texts oldest-first for the roll-up. If
           // there are no slices, we still close the session — the user
@@ -1487,7 +1556,87 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           await endLocalSession(sessionId, finalText);
         } else {
           setStatusText('Generating final summary');
-          await finalizeSession(sessionId);
+          // Phase A.5 — verify-then-confirm. When local persistence is
+          // on we compute SHA-256 + byte count from IDB and POST those
+          // alongside the finalize call. Server compares to its on-disk
+          // chunk state; on match it returns status=complete and we
+          // wipe the local copy. On mismatch we POST the assembled
+          // blob to /full-audio as the bulletproof recovery path.
+          // Without local persistence (desktop-fallback, mobile), we
+          // fall back to the pre-A.5 finalize call.
+          const localFirstActive =
+            deviceCapability.capabilityClass === 'desktop-capable'
+            && localAudioStore.isAvailable();
+          let verificationOk = false;
+          if (localFirstActive) {
+            try {
+              const localMeta = await localAudioStore.getSessionMetadata(sessionId);
+              if (localMeta && localMeta.chunk_count > 0) {
+                const assembled = await localAudioStore.getAssembledBlob(sessionId);
+                await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
+                const verify = await postFinalizeAudioWithVerification({
+                  apiUrl: config.apiUrl,
+                  orgSlug: activeOrganization?.slug ?? null,
+                  sessionId,
+                  clientChunkCount: assembled.chunkCount,
+                  clientBytesTotal: assembled.bytes,
+                  clientSha256: assembled.sha256,
+                });
+                if (verify.status === 'complete' || verify.reprocessing_started) {
+                  verificationOk = true;
+                  // Server has it. Local copy is safe to drop; we
+                  // wipe asynchronously so stop() returns fast.
+                  void localAudioStore.wipeSession(sessionId).catch((err) => {
+                    // eslint-disable-next-line no-console
+                    console.warn('[always-on] local wipe failed (non-fatal):', err);
+                  });
+                } else if (verify.status === 'incomplete') {
+                  // Server is missing chunks. Fall back to the
+                  // assembled-blob path — simplest reliable recovery
+                  // surface; partial backfill is a v2.
+                  setStatusText('Recovering audio from local copy');
+                  const recovery = await postFullAudio({
+                    apiUrl: config.apiUrl,
+                    orgSlug: activeOrganization?.slug ?? null,
+                    sessionId,
+                    blob: assembled.blob,
+                    mimeType: fullAudioRecorderRef.current?.mimeType()
+                      ?? localMeta.mime_type
+                      ?? 'audio/webm',
+                  });
+                  if (recovery.reprocessing_started) {
+                    verificationOk = true;
+                    void localAudioStore.wipeSession(sessionId).catch(() => undefined);
+                  }
+                }
+              }
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn('[always-on] Local-first verify path failed:', err);
+              // Fall through to the legacy finalize path so the
+              // session still completes via server-side state.
+            }
+          }
+          if (!verificationOk) {
+            await finalizeSession(sessionId);
+          } else {
+            // Verification path already kicked the reprocess via the
+            // /finalize-audio response. We still need to mark the
+            // session row "complete" on the server so the legacy
+            // /finalize endpoint runs (transcript_simple finalization,
+            // duration, etc.). The pre-A.5 finalizeSession() helper
+            // hits both /finalize AND /finalize-audio; we just hit
+            // /finalize here.
+            try {
+              await fetch(
+                `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
+                { method: 'POST' },
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn('[always-on] /finalize kick-off failed:', err);
+            }
+          }
         }
       }
     } catch (err) {
@@ -1944,6 +2093,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       if (sessionId) {
         if (wasLocalOnly || isLocalSessionId(sessionId)) {
           await deleteLocalSession(sessionId);
+          // Privacy-mode session: also drop the local audio chunks
+          // from IDB. The user explicitly asked to discard, so we don't
+          // keep the audio around either.
+          if (localAudioStore.isAvailable()) {
+            await localAudioStore.wipeSession(sessionId).catch(() => undefined);
+          }
         } else {
           const res = await fetch(
             `${config.apiUrl}/api/recordings/sessions/${sessionId}`,
@@ -1952,6 +2107,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           if (!res.ok) {
             const detail = await res.text().catch(() => '');
             throw new Error(detail || `DELETE failed (${res.status})`);
+          }
+          // Server delete cascaded the chunks dir — also wipe our
+          // local mirror so we don't leak storage.
+          if (localAudioStore.isAvailable()) {
+            await localAudioStore.wipeSession(sessionId).catch(() => undefined);
           }
         }
       }
@@ -1983,6 +2143,121 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     startRef.current = start;
   }, [start]);
+
+  // ---------------------------------------------------------------
+  // Phase A.5 — Orphan session detection + resume.
+  // ---------------------------------------------------------------
+
+  /** Re-query IDB and refresh the orphan banner. Cheap; called on
+   *  mount and after every stop/discard so the banner stays accurate. */
+  const refreshOrphanSessions = useCallback(async () => {
+    if (deviceCapability.capabilityClass !== 'desktop-capable') return;
+    if (!localAudioStore.isAvailable()) return;
+    try {
+      await localAudioStore.init();
+      const orphans = await localAudioStore.getOrphanedSessions();
+      setOrphanSessions(orphans);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[always-on] orphan scan failed:', err);
+      setOrphanSessions([]);
+    }
+  }, [deviceCapability]);
+
+  // One-shot scan on mount. Captures the "browser crashed mid-meeting"
+  // case where the user reopens the tab and we have chunks sitting in
+  // IDB with no live session.
+  useEffect(() => {
+    void refreshOrphanSessions();
+  }, [refreshOrphanSessions]);
+
+  /** Resume Upload — re-runs the verification + recovery dance against
+   *  the server using the locally-buffered chunks. Idempotent; safe to
+   *  retry from a button click. */
+  const resumeOrphanSession = useCallback(async (sessionId: string) => {
+    if (!activeOrganization) {
+      setError('Pick an organization before resuming the upload.');
+      return;
+    }
+    if (!localAudioStore.isAvailable()) return;
+    setResumingOrphan(sessionId);
+    try {
+      const meta = await localAudioStore.getSessionMetadata(sessionId);
+      if (!meta || meta.chunk_count === 0) {
+        // Nothing to upload — just clean up.
+        await localAudioStore.wipeSession(sessionId);
+        await refreshOrphanSessions();
+        return;
+      }
+      const assembled = await localAudioStore.getAssembledBlob(sessionId);
+      await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
+      // Try verification first — server may already have most of
+      // the chunks if the crash happened after upload but before
+      // we wiped the local copy.
+      const verify = await postFinalizeAudioWithVerification({
+        apiUrl: config.apiUrl,
+        orgSlug: activeOrganization.slug ?? null,
+        sessionId,
+        clientChunkCount: assembled.chunkCount,
+        clientBytesTotal: assembled.bytes,
+        clientSha256: assembled.sha256,
+      });
+      if (verify.status === 'complete' || verify.reprocessing_started) {
+        await localAudioStore.wipeSession(sessionId);
+      } else {
+        // Server is missing chunks. POST the assembled blob via
+        // /full-audio for guaranteed recovery.
+        const recovery = await postFullAudio({
+          apiUrl: config.apiUrl,
+          orgSlug: activeOrganization.slug ?? null,
+          sessionId,
+          blob: assembled.blob,
+          mimeType: meta.mime_type || 'audio/webm',
+        });
+        if (recovery.reprocessing_started) {
+          await localAudioStore.wipeSession(sessionId);
+        }
+      }
+      // Also kick the legacy /finalize so transcript_simple +
+      // duration are finalized server-side. Best-effort.
+      try {
+        await fetch(
+          `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
+          { method: 'POST' },
+        );
+      } catch {
+        /* non-fatal */
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(`Resume upload failed: ${message.slice(0, 200)}`);
+    } finally {
+      setResumingOrphan(null);
+      await refreshOrphanSessions();
+    }
+  }, [activeOrganization, refreshOrphanSessions]);
+
+  /** Discard an orphan — drop the local chunks without uploading. We
+   *  do NOT touch the server-side row (the user can clean that up
+   *  through the Sessions list if they want). */
+  const discardOrphanSession = useCallback(async (sessionId: string) => {
+    if (!localAudioStore.isAvailable()) return;
+    try {
+      await localAudioStore.wipeSession(sessionId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(`Discard orphan failed: ${message.slice(0, 200)}`);
+    } finally {
+      await refreshOrphanSessions();
+    }
+  }, [refreshOrphanSessions]);
+
+  // Refresh after stop/discard so the banner clears once the chunks
+  // are wiped from IDB. We piggyback on the state transition rather
+  // than wiring it into the stop body so the helper stays self-contained.
+  useEffect(() => {
+    if (state === 'idle') void refreshOrphanSessions();
+  }, [state, refreshOrphanSessions]);
 
   /**
    * Stop the current session normally (so it's saved + finalized) and
@@ -2046,6 +2321,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     clearStartBlocked,
     deviceCapability,
     isCaptureOnlyMode,
+    orphanSessions,
+    resumingOrphan,
+    resumeOrphanSession,
+    discardOrphanSession,
   }), [
     state,
     vadActive,
@@ -2087,6 +2366,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     clearStartBlocked,
     deviceCapability,
     isCaptureOnlyMode,
+    orphanSessions,
+    resumingOrphan,
+    resumeOrphanSession,
+    discardOrphanSession,
   ]);
 
   return (

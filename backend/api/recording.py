@@ -1646,19 +1646,91 @@ async def _run_session_reprocess(session_pk: int) -> None:
         db.close()
 
 
+class FinalizeAudioVerification(BaseModel):
+    """Optional verification payload Phase A.5 desktop clients POST
+    alongside finalize-audio. When all three fields match what the
+    server has on disk, we proceed with the reprocess as usual and the
+    client wipes its IndexedDB mirror. Mismatch returns a delta so the
+    client can backfill the missing chunks or fall back to /full-audio.
+    """
+
+    client_chunk_count: int = Field(..., ge=0)
+    client_bytes_total: int = Field(..., ge=0)
+    client_sha256: str = Field(..., min_length=64, max_length=64)
+
+
+def _list_chunk_files(chunks_dir: Path) -> list[Path]:
+    """All chunk files in arrival order (sorted by filename, which is
+    the zero-padded chunk_index produced by audio-chunks). Excludes
+    the ffmpeg concat list + any reassembled WAV that may sit next to
+    the chunks during reprocess."""
+    if not chunks_dir.exists():
+        return []
+    return sorted(
+        p
+        for p in chunks_dir.iterdir()
+        if p.is_file() and not p.name.startswith("concat") and p.suffix != ".wav"
+    )
+
+
+def _chunk_seq_from_filename(path: Path) -> int | None:
+    """The append_audio_chunk handler writes chunks as ``000123.webm``.
+    Pull the integer prefix back out for the missing-chunks delta we
+    return to the client on a mismatch."""
+    try:
+        return int(path.stem)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _sha256_of_chunk_files(paths: list[Path]) -> str:
+    """SHA-256 of the concatenated raw chunk bytes, in arrival order.
+    Matches what the browser client computes before POSTing the
+    verification payload — the client concats blobs in order and
+    digests once. Async-friendly via to_thread for the read+update
+    loop (sizes are small per chunk but we don't want to block the
+    event loop on dozens of file reads)."""
+    import hashlib
+
+    def _digest() -> str:
+        hasher = hashlib.sha256()
+        for p in paths:
+            with p.open("rb") as f:
+                # 1MB read buffer — plenty for ~256KB chunks; uses small
+                # constant memory regardless of chunk count.
+                while True:
+                    block = f.read(1 << 20)
+                    if not block:
+                        break
+                    hasher.update(block)
+        return hasher.hexdigest()
+
+    return await asyncio.to_thread(_digest)
+
+
 @router.post("/sessions/{session_id}/finalize-audio")
 async def finalize_audio(
     session_id: str,
     background_tasks: BackgroundTasks,
+    verification: FinalizeAudioVerification | None = None,
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Mark all audio chunks delivered and kick off the reprocess pipeline.
 
-    Returns ``{ reprocessing_started: bool, ... }``. The frontend polls
-    ``GET /api/simple/recording-sessions/{id}`` (via SessionDetails) and
-    reads ``metadata.reprocess_status`` to render the progress banner.
+    Returns ``{ reprocessing_started: bool, status: 'complete'|'incomplete'|..., ... }``.
+
+    Phase A.5 verification: when the request body includes
+    ``client_chunk_count`` / ``client_bytes_total`` / ``client_sha256``
+    we recompute the server-side SHA-256 + total bytes from the chunk
+    files on disk and compare. On match we proceed with the reprocess
+    (``status='complete'``) and the client is free to wipe its
+    IndexedDB mirror. On mismatch we return ``status='incomplete'``
+    plus the list of chunk seq numbers actually received and (if the
+    client passed a count) the missing ones — the client can either
+    backfill those specific chunks via the existing /audio-chunks
+    endpoint or fall back to /full-audio for a bulletproof recovery.
 
     Idempotent: if a reprocess is already in flight (in_progress), the
     second call is a no-op and we return the current status. If the
@@ -1682,11 +1754,11 @@ async def finalize_audio(
     metadata = dict(session.processing_metadata or {})
     audio_state = dict(metadata.get("full_audio") or {})
 
+    chunk_files = _list_chunk_files(chunks_dir)
+
     # No chunks delivered (privacy mode, or upload failed for every chunk).
     # Bail with a friendly response — the live transcript stays canonical.
-    if not chunks_dir.exists() or not any(
-        p.is_file() for p in chunks_dir.iterdir() if not p.name.startswith("concat")
-    ):
+    if not chunk_files:
         audio_state.update({
             "status": "skipped",
             "skipped_reason": "no_chunks_uploaded",
@@ -1712,6 +1784,69 @@ async def finalize_audio(
             "status": "in_progress",
         }
 
+    # Phase A.5 verification path. We compute the server-side state
+    # (chunk count, total bytes, SHA-256 of concatenated chunk bytes)
+    # and compare to the client's claim. On mismatch we DO NOT queue
+    # the reprocess — the client gets the delta and decides whether to
+    # backfill or whole-file.
+    server_chunk_seqs: list[int] = sorted(
+        seq for p in chunk_files if (seq := _chunk_seq_from_filename(p)) is not None
+    )
+    server_bytes_total = sum(p.stat().st_size for p in chunk_files)
+    if verification is not None:
+        server_sha = await _sha256_of_chunk_files(chunk_files)
+        match_count = verification.client_chunk_count == len(chunk_files)
+        match_bytes = verification.client_bytes_total == server_bytes_total
+        match_sha = verification.client_sha256.lower() == server_sha.lower()
+        if not (match_count and match_bytes and match_sha):
+            missing: list[int] = []
+            if verification.client_chunk_count > 0:
+                expected = set(range(verification.client_chunk_count))
+                missing = sorted(expected - set(server_chunk_seqs))
+            audio_state.update({
+                "status": "incomplete",
+                "verification": {
+                    "matched": False,
+                    "match_count": match_count,
+                    "match_bytes": match_bytes,
+                    "match_sha": match_sha,
+                    "client_chunk_count": verification.client_chunk_count,
+                    "client_bytes_total": verification.client_bytes_total,
+                    "client_sha256": verification.client_sha256,
+                    "server_chunk_count": len(chunk_files),
+                    "server_bytes_total": server_bytes_total,
+                    "server_sha256": server_sha,
+                    "verified_at": _now().isoformat(),
+                },
+                "updated_at": _now().isoformat(),
+            })
+            metadata["full_audio"] = audio_state
+            session.processing_metadata = metadata
+            flag_modified(session, "processing_metadata")
+            db.commit()
+            return {
+                "reprocessing_started": False,
+                "status": "incomplete",
+                "session_id": canonical_id,
+                "server_bytes": server_bytes_total,
+                "server_chunks": server_chunk_seqs,
+                "missing_chunks": missing,
+                "expected_chunks": verification.client_chunk_count,
+                "server_sha256": server_sha,
+            }
+        # Match — fall through to the queue path and stamp the
+        # verification record so the audit trail is preserved.
+        audio_state["verification"] = {
+            "matched": True,
+            "client_chunk_count": verification.client_chunk_count,
+            "client_bytes_total": verification.client_bytes_total,
+            "client_sha256": verification.client_sha256,
+            "server_chunk_count": len(chunk_files),
+            "server_bytes_total": server_bytes_total,
+            "server_sha256": server_sha,
+            "verified_at": _now().isoformat(),
+        }
+
     audio_state.update({
         "status": "queued",
         "queued_at": _now().isoformat(),
@@ -1731,7 +1866,126 @@ async def finalize_audio(
 
     return {
         "reprocessing_started": True,
+        "status": "complete",
         "session_id": canonical_id,
         "job_id": str(uuid.uuid4()),  # informational; status lives on the session row
+    }
+
+
+@router.post("/sessions/{session_id}/full-audio")
+async def post_full_audio(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    audio: UploadFile = File(...),
+    caller: Any = Depends(get_internal_or_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Whole-file recovery upload. Replaces any existing reassembled
+    chunk state for the session with a single client-assembled blob,
+    then triggers the same reprocess pipeline /finalize-audio runs.
+
+    Use case: chunked upload landed with gaps the server couldn't
+    repair via per-chunk backfill, or the client's IndexedDB mirror
+    holds bytes the server never saw (browser crashed before the last
+    few chunks could upload). The desktop frontend computes a fresh
+    SHA-256 from the IDB mirror, hits /finalize-audio for verification,
+    and on mismatch falls back to this endpoint for guaranteed
+    recovery.
+
+    Wire shape mirrors /audio-chunks: multipart/form-data with a single
+    file field. We label the blob ``000000.<ext>`` (zero-padded so the
+    concat step still sees it as "first chunk") and clear the existing
+    chunks dir before writing, so a single full-audio call is a clean
+    state reset.
+
+    Auth: dual-auth like /audio-chunks — internal services (room
+    recorder loopback) can also POST here even though we don't ship
+    that path today. Mirroring the chunks endpoint's auth means a
+    future internal-only crash recovery path doesn't need an auth
+    retrofit.
+    """
+    if isinstance(caller, InternalServiceCaller):
+        session = _find_session_by_id(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        active_org = _synthetic_org_for_internal_caller(db, session)
+        logger.info(
+            "[internal] full-audio POST session_id=%s provenance=%s",
+            session_id,
+            caller.provenance or "unknown",
+        )
+    else:
+        if not getattr(caller, "is_active", False):
+            raise HTTPException(status_code=403, detail="Inactive user")
+        current_user = caller
+        active_org = resolve_active_organization(db, request, current_user)
+        session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if getattr(session, "mode", "upload") != "always_on":
+        raise HTTPException(status_code=409, detail="Session is not an always-on session.")
+    if session.status in {"completed", "cancelled", "error"}:
+        raise HTTPException(status_code=409, detail=f"Session is {session.status}.")
+
+    body = await audio.read()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty audio body.")
+
+    canonical_id = session.session_id or str(session.id)
+    chunks_dir = _audio_chunks_dir(active_org.organization.slug, canonical_id)
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear any existing chunk files BEFORE writing the new whole-file
+    # blob — otherwise ffmpeg's concat step would mix the old chunks
+    # in front of the recovery audio. We keep the dir itself so file
+    # permissions stay stable.
+    for existing in chunks_dir.iterdir():
+        if existing.is_file():
+            try:
+                existing.unlink()
+            except OSError:
+                logger.warning(
+                    "full-audio could not clear existing chunk file: %s", existing
+                )
+
+    ext = _safe_ext(audio)
+    out_path = chunks_dir / f"000000{ext}"
+    out_path.write_bytes(body)
+
+    metadata = dict(session.processing_metadata or {})
+    audio_state = dict(metadata.get("full_audio") or {})
+    audio_state.update({
         "status": "queued",
+        "source": "full_audio_fallback",
+        "queued_at": _now().isoformat(),
+        "full_audio_bytes": len(body),
+        "full_audio_received_at": _now().isoformat(),
+        # Reset the per-chunk arrival map — the single recovery blob
+        # is the whole truth now.
+        "chunks": {
+            "0": {
+                "filename": out_path.name,
+                "size": out_path.stat().st_size,
+                "content_type": audio.content_type or "application/octet-stream",
+                "received_at": _now().isoformat(),
+                "via": "full_audio_fallback",
+            },
+        },
+    })
+    metadata["full_audio"] = audio_state
+    metadata["reprocess_status"] = "queued"
+    session.processing_metadata = metadata
+    flag_modified(session, "processing_metadata")
+    db.commit()
+
+    session_pk = session.id
+    background_tasks.add_task(_run_session_reprocess, session_pk)
+
+    return {
+        "reprocessing_started": True,
+        "status": "complete",
+        "session_id": canonical_id,
+        "bytes_received": len(body),
+        "source": "full_audio_fallback",
     }

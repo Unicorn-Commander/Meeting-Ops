@@ -697,6 +697,79 @@ export default function AlwaysOnControl() {
         </div>
       )}
 
+      {/* Phase A.5 — orphan-session banner. On desktop-capable browsers
+          we mirror every audio chunk into IndexedDB. If a tab crashed
+          mid-meeting (or the user hard-refreshed), we'll have chunks
+          sitting locally with no live session to claim them. The banner
+          offers Resume Upload (verify + backfill or full-audio fallback)
+          or Discard (drop the local copy). Hidden when no orphans are
+          pending or while a recording is active. */}
+      {alwaysOn.orphanSessions.length > 0 && alwaysOn.state === 'idle' && (
+        <div className="mb-4 space-y-2">
+          {alwaysOn.orphanSessions.map((orphan) => {
+            const startedAgo = relativeTime(orphan.started_at);
+            const sizeMb = (orphan.total_bytes / (1024 * 1024)).toFixed(1);
+            const orphanAge = Date.now() - new Date(orphan.started_at).getTime();
+            const olderThan24h = orphanAge > 24 * 60 * 60 * 1000;
+            const isResuming = alwaysOn.resumingOrphan === orphan.session_id;
+            return (
+              <div
+                key={orphan.session_id}
+                className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-100"
+              >
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="font-medium">
+                      Found unfinished recording from {startedAgo}
+                    </div>
+                    <div className="text-xs text-amber-200/80">
+                      {orphan.chunk_count} chunks, {sizeMb} MB
+                      {olderThan24h ? ' · over 24 hours old' : ''}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={isResuming}
+                      onClick={() => {
+                        if (olderThan24h
+                          && !window.confirm(
+                            'This recording is over 24 hours old. Resume upload anyway?',
+                          )) {
+                          return;
+                        }
+                        void alwaysOn.resumeOrphanSession(orphan.session_id);
+                      }}
+                      className="inline-flex items-center gap-1 rounded-md border border-amber-400/50 bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-500/30 disabled:opacity-50"
+                    >
+                      {isResuming ? (
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <UploadCloud className="h-3 w-3" />
+                      )}
+                      {isResuming ? 'Resuming...' : 'Resume Upload'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isResuming}
+                      onClick={() => {
+                        if (window.confirm('Discard this local recording? This cannot be undone.')) {
+                          void alwaysOn.discardOrphanSession(orphan.session_id);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      Discard
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex items-center gap-3">
