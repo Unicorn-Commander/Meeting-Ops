@@ -365,6 +365,10 @@ async def list_sessions(
             "null the sort falls back to started_at."
         ),
     ),
+    bulk_import_job_id: Optional[str] = Query(
+        None,
+        description="Filter sessions created by this bulk import job (UUID)",
+    ),
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
 
@@ -373,7 +377,6 @@ async def list_sessions(
         wanted = [t.strip() for t in tags.split(",") if t.strip()]
         if wanted:
             query = query.filter(DBRecordingSession.tags.contains(wanted))
-    bulk_import_job_id: Optional[str] = Query(None, description="Filter sessions created by this bulk import job (UUID)"),
     # Hide empty always-on sessions: when the user clicks Start always-on
     # but never produces audio (mic blocked, browser bug, accidental click),
     # the start endpoint still creates a session row. Without filtering, the
@@ -398,7 +401,11 @@ async def list_sessions(
                 query = query.filter(DBRecordingSession.session_id.in_(session_ids))
             else:
                 query = query.filter(False)
-        except _uuid.ValueError:
+        except ValueError:
+            # Malformed bulk_import_job_id - silently ignore the filter
+            # rather than 400'ing. The list view still returns the org's
+            # sessions; the caller passed garbage and gets the unfiltered
+            # view back, which is the safer fail-open shape here.
             pass
     sort_key = sort if sort in _VALID_SORT_KEYS else "created_at_desc"
     if sort_key in ("meeting_date_desc", "meeting_date_asc"):

@@ -576,12 +576,18 @@ class BulkImportPipelineQueue:
             # session_id_when_created stores the UUID session_id (public
             # identifier) — matches what the API surfaces in URLs.
             file_row.session_id_when_created = uuid.UUID(session_session_id)
+            # Snapshot parsed_title to a local before commit + close. After
+            # the session closes the ORM expires attributes on the
+            # detached instance, so a later attribute read raises
+            # DetachedInstanceError (the earlier B-import.3 implementation
+            # relied on the attribute already being loaded, which is not
+            # guaranteed by SQLAlchemy 2.x).
+            parsed_title = file_row.parsed_title
             db.commit()
         finally:
             db.close()
 
         # ---- Step 3.5: speaker auto-link from filename hint (B-import.3) ----
-        parsed_title = file_row.parsed_title  # detached but attribute is loaded
         name_hint: Optional[str] = None
         if parsed_title:
             from utils.filename_parser import extract_call_with_name
