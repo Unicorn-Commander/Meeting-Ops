@@ -7,6 +7,11 @@ _db_fd, _db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 
+# Point RECORDINGS_DIR to a writable temp dir so bulk-import integration
+# tests can create fake audio files without hitting the Docker-only path.
+_rec_dir = tempfile.mkdtemp(prefix="meeting_ops_recordings_")
+os.environ["RECORDINGS_DIR"] = _rec_dir
+
 # Ensure backend root is on sys.path
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend_dir not in sys.path:

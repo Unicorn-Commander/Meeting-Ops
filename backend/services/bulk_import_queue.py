@@ -64,7 +64,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from database.database import SessionLocal
-from database.models import BulkImportFile, BulkImportJob, RecordingSession
+from database.models import (
+    BulkImportFile,
+    BulkImportJob,
+    RecordingSession,
+    SpeakerSessionLink,
+)
+from services.speaker_service import find_speaker_by_name_hint
 
 logger = logging.getLogger(__name__)
 
@@ -573,6 +579,36 @@ class BulkImportPipelineQueue:
             db.commit()
         finally:
             db.close()
+
+        # ---- Step 3.5: speaker auto-link from filename hint (B-import.3) ----
+        parsed_title = file_row.parsed_title  # detached but attribute is loaded
+        name_hint: Optional[str] = None
+        if parsed_title:
+            from utils.filename_parser import extract_call_with_name
+            name_hint = extract_call_with_name(parsed_title)
+        if name_hint:
+            db = SessionLocal()
+            try:
+                speaker = find_speaker_by_name_hint(
+                    db, org_id, name_hint,
+                )
+                if speaker:
+                    link = SpeakerSessionLink(
+                        speaker_id=speaker.id,
+                        session_id=session_pk,
+                        organization_id=org_id,
+                        raw_label="HINT",
+                        source="filename-hint",
+                    )
+                    db.add(link)
+                    db.commit()
+                    logger.info(
+                        "[bulk-import] filename-hint speaker link session=%s "
+                        "speaker=%s name_hint=%r",
+                        session_pk, speaker.id, name_hint,
+                    )
+            finally:
+                db.close()
 
         # ---- Garage upload (best-effort) ----
         garage_key = f"{org_id}/{job_id}/{file_id}.{_safe_ext(original_filename)}"

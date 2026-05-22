@@ -18,6 +18,7 @@ import os
 from typing import Optional
 
 import numpy as np
+from rapidfuzz import fuzz as rapidfuzz_fuzz
 from sqlalchemy.orm import Session
 
 from database.models import (
@@ -80,6 +81,60 @@ def list_org_speakers(db: Session, organization_id: int) -> list[SpeakerProfile]
         .order_by(SpeakerProfile.display_name.asc())
         .all()
     )
+
+
+def find_speaker_by_name_hint(
+    db: Session,
+    org_id: int,
+    name_hint: str,
+    *,
+    fuzzy: bool = True,
+    confidence_floor: float = 0.85,
+) -> Optional[SpeakerProfile]:
+    """Find an enrolled speaker whose ``display_name`` matches *name_hint*.
+
+    Tries exact case-insensitive match first.  When *fuzzy* is ``True``
+    (default) and no exact match is found, falls back to
+    ``rapidfuzz.fuzz.token_set_ratio`` against all enrolled speakers in the
+    org, returning the highest-scoring match above *confidence_floor*.
+
+    Cross-org isolation is inherent — the query is scoped to *org_id*.
+    """
+    if not name_hint:
+        return None
+
+    query = (
+        db.query(SpeakerProfile)
+        .filter(SpeakerProfile.organization_id == org_id)
+    )
+    speakers: list[SpeakerProfile] = query.all()
+    if not speakers:
+        return None
+
+    # Exact case-insensitive match first.
+    hint_lower = name_hint.lower().strip()
+    for sp in speakers:
+        if sp.display_name and sp.display_name.lower().strip() == hint_lower:
+            return sp
+
+    if not fuzzy:
+        return None
+
+    # Fuzzy match — token_set_ratio is robust to word order and partial
+    # matches (e.g. "Khan, Shafen" ↔ "Shafen Khan").
+    best: Optional[SpeakerProfile] = None
+    best_score = 0.0
+    for sp in speakers:
+        if not sp.display_name:
+            continue
+        score = rapidfuzz_fuzz.token_set_ratio(name_hint, sp.display_name) / 100.0
+        if score > best_score:
+            best_score = score
+            best = sp
+
+    if best and best_score >= confidence_floor:
+        return best
+    return None
 
 
 def get_speaker(db: Session, organization_id: int, speaker_id: int) -> Optional[SpeakerProfile]:

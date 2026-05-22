@@ -245,6 +245,28 @@ def parse_filename(filename: str) -> ParsedFilename:
     )
 
 
+# Regex for the "Call with {Name}" pattern used by speaker auto-link (B-import.3).
+_CALL_WITH_RE = re.compile(r"^\s*Call\s+with\s+(.+?)\s*$", re.IGNORECASE)
+
+
+def extract_call_with_name(title: Optional[str]) -> Optional[str]:
+    """If *title* matches ``Call with {Name}`` (case-insensitive), return the
+    cleaned name. Handles parenthetical suffixes like ``Doug (Crash)`` by
+    stripping the parenthetical for matching purposes, returning ``Doug``.
+    Returns ``None`` for any other format or a falsy input.
+    """
+    if not title:
+        return None
+    m = _CALL_WITH_RE.match(title)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    # Strip a trailing parenthetical like " (Crash)" so 'Doug (Crash)'
+    # matches an enrolled speaker whose display_name is 'Doug'.
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    return name or None
+
+
 if __name__ == "__main__":
     samples = [
         # Pattern 1 — real-world Mac Notes + Voice Memos export.
