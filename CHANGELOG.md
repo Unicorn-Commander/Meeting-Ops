@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-22
+
 ### Added
 - **Phase B.2 — real Parakeet 0.6B v3 in meet-parakeet-stream-svc + WS forwarding**: the B.1 stub container is replaced with a real NeMo + CUDA streaming-ASR service. `services/parakeet-stream-svc/Dockerfile` now layers on top of the already-built `meet-parakeet-svc:local` image (saves rebuilding the CUDA 12.4 + NeMo 2.4.1 + torch 2.4.1 + audio-tooling stack from scratch — the new image is just a `pip install` and a couple of file copies). At container start, NeMo loads `nvidia/parakeet-tdt-0.6b-v3` into VRAM at fp16 with `nvidia/parakeet-tdt-0.6b-v2` as fallback; model load takes ~47 s the first time (HF download) and ~10-15 s on warm volumes. `POST /transcribe-stream` accepts a WAV body (or raw PCM16) and returns `{text, segments, words, duration, model, rtf, confidence, sequence, is_final}` with real transcripts. Verified on midboy2 GPU 0 (RTX 3060): model resident ~1.7 GB, total GPU 0 usage ~5.1 GB combined with the existing 1.1B batch + speaker-svc containers (~6.9 GB headroom). 2.5 s window inference at RTF 0.08-0.12 (10x realtime).
 - **Phase B.2 — WS handler buffers + forwards to streaming service**: `backend/api/streaming.py` is upgraded from the B.1 ack-only scaffold to a real near-streaming forwarder. Each WS session keeps a 60 s ring buffer of PCM16, fires an upstream `POST /transcribe-stream` every 2.5 s of audio (or on `{"type":"flush"}`), and sends `{"type":"partial", text, sequence, covers_through_ms, ...}` JSON frames back to the client as transcripts arrive. The buffer is windowed to the most recent 25 s on each upstream call so it stays inside the streaming service's 30 s per-call cap regardless of how long the session has been running. `{"type":"end"}` triggers a synchronous final flush + `{"type":"final", ...}` frame before close-1000. Concurrency-safe: one upstream call in flight per session via `state.in_flight`. Connection-scoped `httpx.AsyncClient` with keep-alive limits avoids TCP setup on every flush. End-to-end test with the speaker-svc `synthetic_2speaker.wav` fixture (33.7 s, 2 Kokoro TTS speakers) returns 13 progressive partials + 1 final transcript that matches the ground-truth meta.json word-for-word ("…we need a stronger probe to catch it earlier in the future, before it impacts real user sessions"). True NeMo streaming with draft+finalize tokens is the B.3 enhancement; the wire contract is forward-compatible.
@@ -199,7 +201,8 @@ See git tag annotations directly: git tag -l v0.5.0 -n100.
 ### Added
 - Initial versioned release.
 
-[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.8.2...HEAD
+[unreleased]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/compare/v0.9.0...HEAD
+[0.9.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.9.0
 [0.8.2]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.2
 [0.8.1]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.1
 [0.8.0]: https://git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops/releases/tag/v0.8.0
