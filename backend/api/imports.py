@@ -467,3 +467,46 @@ async def cancel_job(
         .all()
     )
     return _serialize_job(job, files)
+
+@router.post("/jobs/{job_id}/files/{file_id}/retry", response_model=JobStatusResponse)
+async def retry_file(
+    job_id: uuid.UUID,
+    file_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> JobStatusResponse:
+    job = _get_job_for_user(db, job_id, current_user, active_org)
+    file_row = (
+        db.query(BulkImportFile)
+        .filter(BulkImportFile.id == file_id, BulkImportFile.job_id == job.id)
+        .first()
+    )
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File not found in this job.")
+    if file_row.status != "failed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot retry file with status '{file_row.status}'. Only 'failed' files can be retried.",
+        )
+    file_row.status = "queued"
+    file_row.error_message = None
+    file_row.started_at = None
+    file_row.finished_at = None
+    job.failed = max(0, (job.failed or 0) - 1)
+    if job.status in ("complete", "cancelled", "failed"):
+        job.status = "processing"
+        job.finished_at = None
+        job.cancelled_at = None
+    db.commit()
+    try:
+        await bulk_import_queue.submit(file_row.id)
+    except Exception as exc:
+        logger.warning("bulk-import: retry submit failed for file=%s: %s", file_id, exc)
+    files = (
+        db.query(BulkImportFile)
+        .filter(BulkImportFile.job_id == job.id)
+        .order_by(BulkImportFile.created_at.asc())
+        .all()
+    )
+    return _serialize_job(job, files)

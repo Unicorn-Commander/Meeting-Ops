@@ -373,6 +373,7 @@ async def list_sessions(
         wanted = [t.strip() for t in tags.split(",") if t.strip()]
         if wanted:
             query = query.filter(DBRecordingSession.tags.contains(wanted))
+    bulk_import_job_id: Optional[str] = Query(None, description="Filter sessions created by this bulk import job (UUID)"),
     # Hide empty always-on sessions: when the user clicks Start always-on
     # but never produces audio (mic blocked, browser bug, accidental click),
     # the start endpoint still creates a session row. Without filtering, the
@@ -386,6 +387,19 @@ async def list_sessions(
         )
     )
 
+    if bulk_import_job_id:
+        from database.models import BulkImportFile
+        import uuid as _uuid
+        try:
+            job_uuid = _uuid.UUID(bulk_import_job_id)
+            file_rows = db.query(BulkImportFile).filter(BulkImportFile.job_id == job_uuid, BulkImportFile.session_id_when_created.isnot(None)).all()
+            session_ids = [str(f.session_id_when_created) for f in file_rows if f.session_id_when_created]
+            if session_ids:
+                query = query.filter(DBRecordingSession.session_id.in_(session_ids))
+            else:
+                query = query.filter(False)
+        except _uuid.ValueError:
+            pass
     sort_key = sort if sort in _VALID_SORT_KEYS else "created_at_desc"
     if sort_key in ("meeting_date_desc", "meeting_date_asc"):
         # Coalesce so a null meeting_date falls back to started_at and
