@@ -1,5 +1,5 @@
 import { useCallback, useState, useRef, type RefObject } from 'react';
-import { showToast } from ./Toast';
+import { showToast } from './Toast';
 import { parseFilename } from '../utils/filenameParser';
 import { FolderUp, FileWarning, Check } from 'lucide-react';
 import type { StagedFile } from '../pages/Import';

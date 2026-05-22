@@ -1,20 +1,16 @@
 /**
- * Phase B.2 streaming WS smoke-test page.
+ * Phase B.2 streaming WS smoke-test page (Phase B.5 reconnect polish).
  *
  * Opens a WebSocket against `/ws/sessions/{uuid}/live`, can either:
  *   - send a dummy 1 KB PCM16-formatted binary chunk wrapped in the
- *     19-byte header (seam test — no transcription expected),
- *   - capture mic audio via getUserMedia + AudioWorklet (or
- *     ScriptProcessorNode fallback) and stream real PCM16 frames so
- *     the meet-backend forwards them to the new
+ *     19-byte header (seam test, no transcription expected),
+ *   - capture mic audio via getUserMedia + ScriptProcessorNode and
+ *     stream real PCM16 frames so the meet-backend forwards them to
  *     meet-parakeet-stream-svc on midboy2.
  *
  * Prints every frame in both directions plus a separate "live
  * transcript" pane that aggregates `partial` / `final` JSON frames so
  * you can read what the model heard.
- *
- * Real Parakeet integration ships in Phase B.2 (this file). True NeMo
- * native streaming with draft+finalize tokens is Phase B.3.
  *
  * B.4 gating: this page reads `useTierFeatures().features.server_live`
  * and renders a friendly upgrade nudge in place of the connect UI when
@@ -22,6 +18,14 @@
  * users see the original full UI. The backend WS endpoint also gates
  * (defense in depth): a free user that somehow reaches this page on a
  * stale bundle still gets close code 4003 from the server.
+ *
+ * B.5 polish: the WS uses `useReconnectingWebSocket` so an abnormal
+ * close (1006 network drop, 1011 server error) triggers exponential
+ * backoff reconnects (500 ms -> 30 s cap, 5 attempts) without losing
+ * the session context on the page. Clean closes (1000, 1001) and
+ * intentional 4xxx rejections (4001 unauth, 4003 tier_insufficient,
+ * 4429 rate_limited) do NOT reconnect. Reconnect status is surfaced in
+ * the log pane so we can watch the backoff ladder during a deploy.
  *
  * Wire format (canonical as of B.2 reconciliation 2026-05-22):
  *   bytes 0-3   uint32 BE  sequence_number
@@ -34,11 +38,11 @@
  * side and docs/phase-b-server-live-streaming.md section 4 for the
  * design rationale.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock } from 'lucide-react';
 import { useTierFeatures } from '../hooks/useTierFeatures';
+import { useReconnectingWebSocket } from '../hooks/useReconnectingWebSocket';
 
-type WSState = 'idle' | 'connecting' | 'open' | 'closing' | 'closed';
 type MicState = 'idle' | 'requesting' | 'recording' | 'error';
 
 const HEADER_BYTES = 19;
@@ -88,200 +92,35 @@ function buildFrame(seq: number, isFinal: boolean, payload: Int16Array | Uint8Ar
   return buf;
 }
 
-export default function StreamingTest() {
-  const { tier, features } = useTierFeatures();
-  const [log, setLog] = useState<string[]>([]);
-  const [state, setState] = useState<WSState>('idle');
-  const [micState, setMicState] = useState<MicState>('idle');
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const wsRef = useRef<WebSocket | null>(null);
-  const seqRef = useRef(0);
-  const sessionIdRef = useRef<string>('');
+/**
+ * Inner component instantiated only after the user clicks Connect.
+ * The session_id + URL are captured on mount so the
+ * `useReconnectingWebSocket` lifecycle contract holds (URL frozen on
+ * first mount). Disconnecting unmounts this component; a new Connect
+ * remounts with a fresh session id.
+ */
+interface ActiveStreamProps {
+  url: string;
+  sessionId: string;
+  onLog: (line: string) => void;
+  onPartialOrFinal: (entry: TranscriptEntry) => void;
+  onClose: () => void;
+}
 
-  // Mic capture refs
+function ActiveStream({ url, sessionId, onLog, onPartialOrFinal, onClose }: ActiveStreamProps) {
+  // Refs (mic capture + sequence counter).
+  const seqRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const micBufRef = useRef<Int16Array[]>([]);
 
-  const append = (line: string) => {
-    setLog(prev => {
-      const next = [...prev, `[${nowIso()}] ${line}`];
-      return next.length > 500 ? next.slice(next.length - 500) : next;
-    });
-  };
+  const [micState, setMicState] = useState<MicState>('idle');
+  // Disable reconnects when the user has clicked Disconnect / End.
+  const userTerminatedRef = useRef<boolean>(false);
 
-  const connect = () => {
-    if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) {
-      append('already connected/connecting; close first');
-      return;
-    }
-
-    const sessionId = (globalThis.crypto?.randomUUID?.() ?? `b2-${Date.now().toString(36)}`);
-    sessionIdRef.current = sessionId;
-    seqRef.current = 0;
-    setTranscript([]);
-
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/sessions/${sessionId}/live`;
-    append(`connecting -> ${url}`);
-    setState('connecting');
-
-    const ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-      append(`WS open (session_id=${sessionId})`);
-      setState('open');
-    };
-
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        append(`<- ${ev.data}`);
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'partial' || msg.type === 'final') {
-            setTranscript(prev => [
-              ...prev,
-              {
-                type: msg.type,
-                sequence: msg.sequence ?? 0,
-                text: msg.text ?? '',
-                ts: nowIso(),
-              },
-            ].slice(-200));
-          }
-        } catch {
-          // not JSON; ignore for transcript aggregation
-        }
-      } else if (ev.data instanceof ArrayBuffer) {
-        append(`<- binary ${ev.data.byteLength}B  ${bytesPreview(ev.data)}`);
-      } else {
-        append(`<- (unknown frame type: ${typeof ev.data})`);
-      }
-    };
-
-    ws.onerror = (ev) => {
-      append(`error ${ev.type}`);
-    };
-
-    ws.onclose = (ev) => {
-      append(`closed code=${ev.code} reason=${ev.reason || '(none)'} wasClean=${ev.wasClean}`);
-      setState('closed');
-      stopMic(); // make sure no orphan AudioContext after the socket dies
-    };
-
-    wsRef.current = ws;
-  };
-
-  const sendDummyChunk = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      append('cannot send: ws not open');
-      return;
-    }
-    seqRef.current += 1;
-    // Payload is left as zeros — this is a seam test, not an audio test.
-    const buf = buildFrame(seqRef.current, false, new Uint8Array(DUMMY_PAYLOAD_BYTES));
-    ws.send(buf);
-    append(`-> binary seq=${seqRef.current} ${buf.byteLength}B (header ${HEADER_BYTES} + payload ${DUMMY_PAYLOAD_BYTES})`);
-  };
-
-  const startMic = async () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      append('cannot start mic: ws not open');
-      return;
-    }
-    if (micState === 'recording' || micState === 'requesting') {
-      append('mic already starting/recording');
-      return;
-    }
-    try {
-      setMicState('requesting');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: MIC_TARGET_SR,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-      streamRef.current = stream;
-
-      // ScriptProcessorNode is deprecated but it's the path that works on
-      // every browser without shipping a separate worklet file. B.2's job
-      // is to prove the path end-to-end; B.3 will move to AudioWorklet +
-      // SharedArrayBuffer with COOP/COEP headers.
-      const ctxCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const audioCtx: AudioContext = new ctxCtor({ sampleRate: MIC_TARGET_SR });
-      audioCtxRef.current = audioCtx;
-      const source = audioCtx.createMediaStreamSource(stream);
-      sourceRef.current = source;
-      // 4096-sample chunks at the AudioContext's nominal rate. We rebuffer
-      // to MIC_FRAME_SAMPLES on the JS side before sending so frames stay
-      // a constant ~200 ms regardless of how the device delivers them.
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-
-      processor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        // Float32 -> PCM16 LE
-        const i16 = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          const s = Math.max(-1, Math.min(1, input[i]));
-          i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        micBufRef.current.push(i16);
-
-        // Aggregate to MIC_FRAME_SAMPLES then ship.
-        let totalSamples = micBufRef.current.reduce((n, b) => n + b.length, 0);
-        while (totalSamples >= MIC_FRAME_SAMPLES) {
-          const frame = new Int16Array(MIC_FRAME_SAMPLES);
-          let written = 0;
-          while (written < MIC_FRAME_SAMPLES && micBufRef.current.length > 0) {
-            const head = micBufRef.current[0];
-            const remaining = MIC_FRAME_SAMPLES - written;
-            if (head.length <= remaining) {
-              frame.set(head, written);
-              written += head.length;
-              micBufRef.current.shift();
-            } else {
-              frame.set(head.subarray(0, remaining), written);
-              micBufRef.current[0] = head.subarray(remaining);
-              written += remaining;
-            }
-          }
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            seqRef.current += 1;
-            const buf = buildFrame(seqRef.current, false, frame);
-            wsRef.current.send(buf);
-          }
-          totalSamples -= MIC_FRAME_SAMPLES;
-        }
-      };
-
-      source.connect(processor);
-      // Connect to destination is required for ScriptProcessor to fire in
-      // most browsers, but we don't want audible feedback — pipe through
-      // a gain node at 0 so the user doesn't hear themselves.
-      const sink = audioCtx.createGain();
-      sink.gain.value = 0;
-      processor.connect(sink);
-      sink.connect(audioCtx.destination);
-
-      setMicState('recording');
-      append(`mic started (${MIC_TARGET_SR} Hz mono, ~${MIC_FRAME_MS} ms frames)`);
-    } catch (err) {
-      console.error(err);
-      append(`mic error: ${(err as Error).message}`);
-      setMicState('error');
-      stopMic();
-    }
-  };
-
-  const stopMic = () => {
+  const stopMic = useCallback(() => {
     if (processorRef.current) {
       try { processorRef.current.disconnect(); } catch {}
       processorRef.current = null;
@@ -299,77 +138,319 @@ export default function StreamingTest() {
       streamRef.current = null;
     }
     micBufRef.current = [];
-    if (micState !== 'error') setMicState('idle');
+    setMicState(prev => (prev === 'error' ? prev : 'idle'));
+  }, []);
+
+  const ws = useReconnectingWebSocket({
+    url,
+    binaryType: 'arraybuffer',
+    onOpen: () => {
+      onLog(`WS open (session_id=${sessionId})`);
+    },
+    onMessage: (ev) => {
+      if (typeof ev.data === 'string') {
+        onLog(`<- ${ev.data}`);
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'partial' || msg.type === 'final') {
+            onPartialOrFinal({
+              type: msg.type,
+              sequence: msg.sequence ?? 0,
+              text: msg.text ?? '',
+              ts: nowIso(),
+            });
+          }
+          if (msg.type === 'server_shutdown') {
+            // Server is going down for a deploy. Stop mic so we don't
+            // hammer the next instance with stale frames during the
+            // reconnect window; the hook will reconnect after the
+            // reconnect_after_ms hint.
+            stopMic();
+            onLog(
+              `<- server_shutdown reason=${msg.reason ?? '(none)'} ` +
+              `reconnect_after_ms=${msg.reconnect_after_ms ?? '(none)'} ` +
+              `(mic stopped, awaiting reconnect)`
+            );
+          }
+        } catch {
+          // not JSON; ignore for transcript aggregation
+        }
+      } else if (ev.data instanceof ArrayBuffer) {
+        onLog(`<- binary ${ev.data.byteLength}B  ${bytesPreview(ev.data)}`);
+      } else {
+        onLog(`<- (unknown frame type: ${typeof ev.data})`);
+      }
+    },
+    onClose: (ev) => {
+      onLog(
+        `closed code=${ev.code} reason=${ev.reason || '(none)'} wasClean=${ev.wasClean}`
+      );
+      // Clean stop on any close. The hook decides whether to reconnect.
+      stopMic();
+    },
+    onError: (ev) => {
+      onLog(`WS error ${ev.type}`);
+    },
+    onReconnect: (attempt, delayMs) => {
+      onLog(`reconnecting attempt=${attempt} in ${delayMs}ms...`);
+    },
+    onGiveUp: () => {
+      onLog('reconnect gave up after maxRetries; staying disconnected');
+      onClose();
+    },
+  });
+
+  const readyStateLabel = (() => {
+    switch (ws.readyState) {
+      case 0: return 'connecting';
+      case 1: return 'open';
+      case 2: return 'closing';
+      case 3: return ws.gaveUp ? 'gave_up' : (ws.retries > 0 ? 'reconnecting' : 'closed');
+      default: return `state_${ws.readyState}`;
+    }
+  })();
+
+  const connected = ws.readyState === 1;
+  const micRecording = micState === 'recording';
+
+  const sendDummyChunk = () => {
+    if (!connected) {
+      onLog('cannot send: ws not open');
+      return;
+    }
+    seqRef.current += 1;
+    // Payload is left as zeros, this is a seam test, not an audio test.
+    const buf = buildFrame(seqRef.current, false, new Uint8Array(DUMMY_PAYLOAD_BYTES));
+    const ok = ws.send(buf);
+    if (ok) {
+      onLog(`-> binary seq=${seqRef.current} ${buf.byteLength}B (header ${HEADER_BYTES} + payload ${DUMMY_PAYLOAD_BYTES})`);
+    } else {
+      onLog('-> binary send failed (ws not open)');
+    }
+  };
+
+  const startMic = async () => {
+    if (!connected) {
+      onLog('cannot start mic: ws not open');
+      return;
+    }
+    if (micState === 'recording' || micState === 'requesting') {
+      onLog('mic already starting/recording');
+      return;
+    }
+    try {
+      setMicState('requesting');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: MIC_TARGET_SR,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      streamRef.current = stream;
+
+      // ScriptProcessorNode is deprecated but it's the path that works on
+      // every browser without shipping a separate worklet file. B.3 will
+      // move to AudioWorklet + SharedArrayBuffer with COOP/COEP headers.
+      const ctxCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const audioCtx: AudioContext = new ctxCtor({ sampleRate: MIC_TARGET_SR });
+      audioCtxRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      sourceRef.current = source;
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          const s = Math.max(-1, Math.min(1, input[i]));
+          i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        micBufRef.current.push(i16);
+
+        let totalSamples = micBufRef.current.reduce((n, b) => n + b.length, 0);
+        while (totalSamples >= MIC_FRAME_SAMPLES) {
+          const frame = new Int16Array(MIC_FRAME_SAMPLES);
+          let written = 0;
+          while (written < MIC_FRAME_SAMPLES && micBufRef.current.length > 0) {
+            const head = micBufRef.current[0];
+            const remaining = MIC_FRAME_SAMPLES - written;
+            if (head.length <= remaining) {
+              frame.set(head, written);
+              written += head.length;
+              micBufRef.current.shift();
+            } else {
+              frame.set(head.subarray(0, remaining), written);
+              micBufRef.current[0] = head.subarray(remaining);
+              written += remaining;
+            }
+          }
+          seqRef.current += 1;
+          const buf = buildFrame(seqRef.current, false, frame);
+          // Best-effort: only ship if the socket is OPEN. While the hook
+          // is reconnecting, we drop frames. The PCM ring buffer on the
+          // server is for the live transcript window only, so dropping
+          // a few seconds during a reconnect is the right behavior.
+          ws.send(buf);
+          totalSamples -= MIC_FRAME_SAMPLES;
+        }
+      };
+
+      source.connect(processor);
+      const sink = audioCtx.createGain();
+      sink.gain.value = 0;
+      processor.connect(sink);
+      sink.connect(audioCtx.destination);
+
+      setMicState('recording');
+      onLog(`mic started (${MIC_TARGET_SR} Hz mono, ~${MIC_FRAME_MS} ms frames)`);
+    } catch (err) {
+      console.error(err);
+      onLog(`mic error: ${(err as Error).message}`);
+      setMicState('error');
+      stopMic();
+    }
   };
 
   const sendFlush = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      append('cannot send: ws not open');
+    if (!ws.send(JSON.stringify({ type: 'flush' }))) {
+      onLog('cannot send: ws not open');
       return;
     }
-    const msg = JSON.stringify({ type: 'flush' });
-    ws.send(msg);
-    append(`-> ${msg}`);
+    onLog('-> {"type":"flush"}');
   };
 
   const sendPing = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      append('cannot send: ws not open');
+    if (!ws.send(JSON.stringify({ type: 'ping' }))) {
+      onLog('cannot send: ws not open');
       return;
     }
-    const msg = JSON.stringify({ type: 'ping' });
-    ws.send(msg);
-    append(`-> ${msg}`);
+    onLog('-> {"type":"ping"}');
   };
 
   const sendEnd = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      append('cannot send: ws not open');
+    userTerminatedRef.current = true;
+    stopMic();
+    if (!ws.send(JSON.stringify({ type: 'end' }))) {
+      onLog('cannot send: ws not open');
+      onClose();
       return;
     }
-    stopMic();
-    const msg = JSON.stringify({ type: 'end' });
-    ws.send(msg);
-    append(`-> ${msg}`);
-    setState('closing');
+    onLog('-> {"type":"end"}');
+    // The server will reply with {type:"closed"} + close 1000. The hook
+    // sees the clean close and won't reconnect. We still tear down the
+    // outer state here so a slow server doesn't keep the UI in limbo.
+    setTimeout(() => onClose(), 500);
   };
 
   const disconnect = () => {
-    const ws = wsRef.current;
+    userTerminatedRef.current = true;
     stopMic();
-    if (!ws) return;
-    if (ws.readyState <= WebSocket.OPEN) {
-      ws.close(1000, 'client disconnect');
-      append('-> client-initiated close 1000');
-      setState('closing');
+    ws.close(1000, 'client disconnect');
+    onLog('-> client-initiated close 1000');
+    onClose();
+  };
+
+  // Tear down mic if we unmount.
+  useEffect(() => {
+    return () => {
+      stopMic();
+    };
+  }, [stopMic]);
+
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <button onClick={sendDummyChunk} disabled={!connected}>
+          Send dummy chunk
+        </button>
+        <button onClick={startMic} disabled={!connected || micRecording}>
+          Start mic
+        </button>
+        <button onClick={stopMic} disabled={!micRecording}>
+          Stop mic
+        </button>
+        <button onClick={sendFlush} disabled={!connected}>
+          Send {'{"type":"flush"}'}
+        </button>
+        <button onClick={sendPing} disabled={!connected}>
+          Send {'{"type":"ping"}'}
+        </button>
+        <button onClick={sendEnd} disabled={!connected}>
+          Send {'{"type":"end"}'}
+        </button>
+        <button onClick={disconnect}>
+          Disconnect
+        </button>
+      </div>
+
+      <div style={{ marginBottom: 8, fontSize: 13, opacity: 0.8 }}>
+        ws: <strong>{readyStateLabel}</strong>
+        {' · '}
+        mic: <strong>{micState}</strong>
+        {' · '}
+        session_id: <code>{sessionId}</code>
+        {' · '}
+        seq: <code>{seqRef.current}</code>
+        {ws.retries > 0 && (
+          <>
+            {' · '}
+            retries: <strong style={{ color: ws.gaveUp ? '#ef4444' : '#facc15' }}>
+              {ws.retries}{ws.gaveUp ? ' (gave up)' : ''}
+            </strong>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+export default function StreamingTest() {
+  const { tier, features } = useTierFeatures();
+  const [log, setLog] = useState<string[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  // Active session info; when null, the connect UI shows. Setting this
+  // mounts ActiveStream which owns the WS lifecycle.
+  const [active, setActive] = useState<{ url: string; sessionId: string } | null>(null);
+
+  const append = useCallback((line: string) => {
+    setLog(prev => {
+      const next = [...prev, `[${nowIso()}] ${line}`];
+      return next.length > 500 ? next.slice(next.length - 500) : next;
+    });
+  }, []);
+
+  const handlePartialOrFinal = useCallback((entry: TranscriptEntry) => {
+    setTranscript(prev => [...prev, entry].slice(-200));
+  }, []);
+
+  const handleClose = useCallback(() => {
+    setActive(null);
+  }, []);
+
+  const connect = () => {
+    if (active) {
+      append('already connected; disconnect first');
+      return;
     }
+    const sessionId = (globalThis.crypto?.randomUUID?.() ?? `b2-${Date.now().toString(36)}`);
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws/sessions/${sessionId}/live`;
+    setTranscript([]);
+    append(`connecting -> ${url}`);
+    setActive({ url, sessionId });
   };
 
   const clearLog = () => setLog([]);
   const clearTranscript = () => setTranscript([]);
 
-  // Best-effort cleanup if the user navigates away.
-  useEffect(() => {
-    return () => {
-      stopMic();
-      const ws = wsRef.current;
-      if (ws && ws.readyState <= WebSocket.OPEN) {
-        try { ws.close(1001, 'page unload'); } catch {}
-      }
-    };
-  }, []);
-
-  const connected = state === 'open';
-  const micRecording = micState === 'recording';
-
   // B.4 tier gate. Render an upgrade nudge for users without the
   // `server_live` capability (free tier). Defense in depth: the backend
   // WS endpoint also rejects free-tier connects with close code 4003,
-  // so this UI nudge isn't load-bearing for the security model — it's
-  // a friendlier experience than "connect → instant disconnect".
+  // so this UI nudge isn't load-bearing for the security model, it's
+  // a friendlier experience than "connect, instant disconnect".
   if (!features.server_live) {
     return (
       <div style={{ padding: 24, color: '#e7e7e7', maxWidth: 720 }}>
@@ -449,7 +530,7 @@ export default function StreamingTest() {
 
   return (
     <div style={{ padding: 24, color: '#e7e7e7', maxWidth: 1080 }}>
-      <h1 style={{ marginTop: 0 }}>Streaming Test (Phase B.2)</h1>
+      <h1 style={{ marginTop: 0 }}>Streaming Test (Phase B.2 / B.5)</h1>
       <p style={{ opacity: 0.7, marginTop: 4 }}>
         Opens a WebSocket against{' '}
         <code>/ws/sessions/&lt;uuid&gt;/live</code> and either streams a
@@ -457,52 +538,33 @@ export default function StreamingTest() {
         (real STT). Backend forwards windowed audio to{' '}
         <code>meet-parakeet-stream-svc</code> on midboy2 every ~2.5 s
         and emits <code>partial</code> / <code>final</code> JSON frames
-        back. True NeMo native streaming lands in B.3; see{' '}
+        back. B.5 adds exponential-backoff reconnect on abnormal closes
+        via <code>useReconnectingWebSocket</code>. True NeMo native
+        streaming lands in B.3; see{' '}
         <code>docs/phase-b-server-live-streaming.md</code>.
       </p>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        <button onClick={connect} disabled={connected || state === 'connecting'}>
-          Connect
-        </button>
-        <button onClick={sendDummyChunk} disabled={!connected}>
-          Send dummy chunk
-        </button>
-        <button onClick={startMic} disabled={!connected || micRecording}>
-          Start mic
-        </button>
-        <button onClick={stopMic} disabled={!micRecording}>
-          Stop mic
-        </button>
-        <button onClick={sendFlush} disabled={!connected}>
-          Send {'{"type":"flush"}'}
-        </button>
-        <button onClick={sendPing} disabled={!connected}>
-          Send {'{"type":"ping"}'}
-        </button>
-        <button onClick={sendEnd} disabled={!connected}>
-          Send {'{"type":"end"}'}
-        </button>
-        <button onClick={disconnect} disabled={!connected}>
-          Disconnect
-        </button>
-      </div>
+      {/* Connect button is only visible when no active session. */}
+      {!active && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+          <button onClick={connect}>
+            Connect
+          </button>
+        </div>
+      )}
 
-      <div style={{ marginBottom: 8, fontSize: 13, opacity: 0.8 }}>
-        ws: <strong>{state}</strong>
-        {' · '}
-        mic: <strong>{micState}</strong>
-        {sessionIdRef.current && (
-          <>
-            {' · '}
-            session_id: <code>{sessionIdRef.current}</code>
-          </>
-        )}
-        {' · '}
-        seq: <code>{seqRef.current}</code>
-      </div>
+      {active && (
+        <ActiveStream
+          key={active.sessionId}
+          url={active.url}
+          sessionId={active.sessionId}
+          onLog={append}
+          onPartialOrFinal={handlePartialOrFinal}
+          onClose={handleClose}
+        />
+      )}
 
-      {/* Live transcript pane — populated from partial/final JSON frames. */}
+      {/* Live transcript pane, populated from partial/final JSON frames. */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
           <strong style={{ fontSize: 14 }}>Live transcript</strong>
@@ -527,7 +589,7 @@ export default function StreamingTest() {
         >
           {transcript.length === 0 ? (
             <span style={{ opacity: 0.4 }}>
-              (no partials yet — connect, start mic, and speak)
+              (no partials yet, connect, start mic, and speak)
             </span>
           ) : (
             transcript.map((e, i) => (
@@ -569,7 +631,7 @@ export default function StreamingTest() {
           wordBreak: 'break-all',
         }}
       >
-        {log.length === 0 ? '(no traffic yet — click Connect)' : log.join('\n')}
+        {log.length === 0 ? '(no traffic yet, click Connect)' : log.join('\n')}
       </pre>
     </div>
   );

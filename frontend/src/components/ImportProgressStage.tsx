@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { showToast } from ./Toast';
+import { showToast } from './Toast';
 import { RotateCw, XCircle, ExternalLink } from 'lucide-react';
 import type { JobStatusResponse, JobStatusFile } from '../pages/Import';
 

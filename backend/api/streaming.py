@@ -90,12 +90,14 @@ import logging
 import os
 import struct
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
 
 from auth.models import User
@@ -106,6 +108,93 @@ from database.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["streaming"])
+
+# ---------------------------------------------------------------------------
+# Phase B.5 Prometheus metrics
+# ---------------------------------------------------------------------------
+#
+# Exposed via /metrics in backend/main.py. Labels stay low-cardinality so
+# the Prometheus scrape doesn't blow up. We don't put session_id on any
+# label - it's per-connection unique. Tier values are bounded by
+# TIER_FEATURES (free/pro/enterprise), result values are enumerated below.
+
+ws_connections_total = Counter(
+    "meeting_ops_ws_connections_total",
+    "WebSocket connection attempts on /ws/sessions/{id}/live",
+    ["tier", "result"],  # tier=free/pro/enterprise/unknown,
+                          # result=accepted/tier_rejected/auth_rejected/rate_limited
+)
+
+ws_audio_frames_forwarded_total = Counter(
+    "meeting_ops_ws_audio_frames_forwarded_total",
+    "Audio frames forwarded to parakeet-stream-svc",
+)
+
+ws_partial_transcripts_emitted_total = Counter(
+    "meeting_ops_ws_partial_transcripts_emitted_total",
+    "Partial transcripts emitted back to clients",
+)
+
+ws_close_codes_total = Counter(
+    "meeting_ops_ws_close_codes_total",
+    "WebSocket close codes seen",
+    ["code"],
+)
+
+parakeet_stream_request_duration_seconds = Histogram(
+    "meeting_ops_parakeet_stream_request_duration_seconds",
+    "Round-trip time for parakeet-stream-svc /transcribe-stream calls",
+    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0],
+)
+
+
+# ---------------------------------------------------------------------------
+# Phase B.5 backpressure + rate limit state
+# ---------------------------------------------------------------------------
+#
+# Active sessions: registry of currently-open WS handlers, indexed by
+# session_id. Used by the SIGTERM drain hook in main.py to send a
+# "server_shutdown" frame + close-1001 to each active client before exit.
+# Also used by the per-org rate-limit logic to count concurrent live
+# sessions per org.
+
+active_sessions: dict[str, WebSocket] = {}
+# Per-org concurrent session count. Indexed by str(org_id) - org_id can be
+# None for users without an org assignment, in which case we use the
+# user email as the bucket so the limit still applies somewhere meaningful.
+_org_session_counts: dict[str, int] = defaultdict(int)
+# Slow-parakeet threshold. If a flush takes longer than this, we skip the
+# next N forwards to give the GPU breathing room.
+STREAM_SLOW_THRESHOLD_S = float(os.getenv("STREAM_SLOW_THRESHOLD_S", "2.0"))
+STREAM_SKIP_NEXT_ON_SLOW = int(os.getenv("STREAM_SKIP_NEXT_ON_SLOW", "2"))
+# Per-org concurrent live-session cap. Excess connections get close 4429.
+STREAMING_MAX_SESSIONS_PER_ORG = int(
+    os.getenv("STREAMING_MAX_SESSIONS_PER_ORG", "5")
+)
+
+
+def _resolve_org_bucket(user: User) -> str:
+    """Pick a stable bucket key for per-org rate limiting.
+
+    Prefer the user's organization id if available (auth.models.User may
+    expose it via .organization_id, .org_id, .organizations[0].id, etc.,
+    depending on the schema). Fall back to the email so the limit still
+    has a meaningful unit even for users without an org.
+    """
+    for attr in ("organization_id", "org_id"):
+        val = getattr(user, attr, None)
+        if val:
+            return f"org:{val}"
+    orgs = getattr(user, "organizations", None)
+    if orgs:
+        try:
+            first = orgs[0]
+            oid = getattr(first, "id", None) or getattr(first, "organization_id", None)
+            if oid:
+                return f"org:{oid}"
+        except (IndexError, TypeError, AttributeError):
+            pass
+    return f"user:{user.email}"
 
 # Frame layout — see module docstring.
 HEADER_SIZE = 19
@@ -212,9 +301,19 @@ class _SessionState:
     can use ``ack`` echoes to detect drops. last_flush_at_audio_ms tracks
     cumulative audio (in ms) at the time of the last upstream call so we
     can fire when ``cumulative - last_flush >= FLUSH_AUDIO_SECONDS * 1000``.
+
+    Phase B.5 additions:
+      - ``bytes_dropped_backpressure`` records how much PCM we dropped due
+        to the 60 s cap, exposed in close-frame diagnostics.
+      - ``skip_next_n`` counts down forwards to skip because the previous
+        flush exceeded ``STREAM_SLOW_THRESHOLD_S``. While > 0, ``should_flush``
+        keeps returning False until the GPU catches up.
+      - ``org_bucket`` is the key into ``_org_session_counts`` so we can
+        decrement on disconnect.
     """
     session_id: str
     user_email: str
+    org_bucket: str = ""
     sample_rate: int = 16000  # filled from first audio frame
     pcm_chunks: list[bytes] = field(default_factory=list)
     cumulative_audio_ms: int = 0
@@ -223,9 +322,17 @@ class _SessionState:
     flush_counter: int = 0  # increments per upstream transcribe call
     last_partial_text: str = ""  # de-dup empty/identical partials
     in_flight: bool = False  # one upstream call at a time per session
+    bytes_dropped_backpressure: int = 0  # cumulative PCM dropped due to 60s cap
+    skip_next_n: int = 0  # remaining flushes to skip after a slow upstream
 
     def append_pcm(self, payload: bytes, sample_rate: int) -> None:
-        """Append a PCM16 payload and update the cumulative-audio bookkeeping."""
+        """Append a PCM16 payload and update the cumulative-audio bookkeeping.
+
+        Phase B.5: enforces the 60 s cap as a hard ceiling. If the
+        incoming payload would push us over, we drop the oldest data and
+        log a structured warning so operators can see backpressure
+        kicking in.
+        """
         if not payload:
             return
         self.sample_rate = sample_rate or self.sample_rate
@@ -240,16 +347,47 @@ class _SessionState:
         # pipeline's job.
         max_bytes = int(MAX_PCM_BUFFER_SECONDS * self.sample_rate * 2)
         total = sum(len(c) for c in self.pcm_chunks)
+        dropped_this_call = 0
         while total > max_bytes and len(self.pcm_chunks) > 1:
             dropped = self.pcm_chunks.pop(0)
             total -= len(dropped)
+            dropped_this_call += len(dropped)
+
+        if dropped_this_call > 0:
+            self.bytes_dropped_backpressure += dropped_this_call
+            logger.warning(
+                "[streaming-backpressure] session=%s dropped %d bytes "
+                "(buffer exceeded %ds cap, total_dropped=%d)",
+                self.session_id, dropped_this_call,
+                int(MAX_PCM_BUFFER_SECONDS), self.bytes_dropped_backpressure,
+            )
 
     def should_flush(self) -> bool:
         """True when we have at least FLUSH_AUDIO_SECONDS of new audio since the
         last flush. Uses cumulative bookkeeping, not buffer size, so a slow
-        client doesn't gate us on calendar time."""
+        client doesn't gate us on calendar time.
+
+        Phase B.5: respects ``skip_next_n``. When the previous flush took
+        longer than ``STREAM_SLOW_THRESHOLD_S`` we decrement skip_next_n
+        instead of flushing, giving the GPU breathing room. We still
+        advance ``last_flush_at_audio_ms`` so we don't accumulate a
+        firehose of pending audio while we wait."""
         delta_ms = self.cumulative_audio_ms - self.last_flush_at_audio_ms
-        return delta_ms >= int(FLUSH_AUDIO_SECONDS * 1000)
+        if delta_ms < int(FLUSH_AUDIO_SECONDS * 1000):
+            return False
+        if self.skip_next_n > 0:
+            self.skip_next_n -= 1
+            # Advance the watermark so we don't run away with backlog -
+            # the trim-to-25 s window in take_pcm keeps the actual buffer
+            # bounded; this just keeps the cadence honest.
+            self.last_flush_at_audio_ms = self.cumulative_audio_ms
+            logger.info(
+                "[streaming-backpressure] session=%s skipping flush "
+                "(skip_next_n remaining=%d, audio_ms=%d)",
+                self.session_id, self.skip_next_n, self.cumulative_audio_ms,
+            )
+            return False
+        return True
 
     def take_pcm(self, max_seconds: float = 25.0) -> bytes:
         """Return up to ``max_seconds`` of the most recent PCM16 (does NOT clear).
@@ -324,6 +462,10 @@ async def _flush_to_stt(
     cumulative_at_call = state.cumulative_audio_ms
     state.last_flush_at_audio_ms = cumulative_at_call
 
+    # Metric: every flush call counts as one audio-frame forward to the
+    # upstream. Increment before the call so a hard crash mid-call still
+    # leaves a trace in the counter.
+    ws_audio_frames_forwarded_total.inc()
     started = time.time()
 
     try:
@@ -338,12 +480,13 @@ async def _flush_to_stt(
         }
 
         try:
-            resp = await http_client.post(
-                url,
-                content=wav_bytes,
-                headers=headers,
-                timeout=STREAM_UPSTREAM_TIMEOUT_S,
-            )
+            with parakeet_stream_request_duration_seconds.time():
+                resp = await http_client.post(
+                    url,
+                    content=wav_bytes,
+                    headers=headers,
+                    timeout=STREAM_UPSTREAM_TIMEOUT_S,
+                )
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
             logger.warning(
                 "[B.2 WS] upstream_unreachable session=%s seq=%d err=%s",
@@ -412,6 +555,8 @@ async def _flush_to_stt(
             "is_final": is_final,
             "upstream_elapsed_ms": int((time.time() - started) * 1000),
         })
+        # Phase B.5 metric: count emitted partial/final back to client.
+        ws_partial_transcripts_emitted_total.inc()
 
         logger.info(
             "[B.2 WS] flush ok session=%s seq=%d type=%s chars=%d "
@@ -420,6 +565,19 @@ async def _flush_to_stt(
             cumulative_at_call, int((time.time() - started) * 1000),
         )
     finally:
+        # Phase B.5 slow-upstream check. If this call took longer than the
+        # threshold, tell the next few cadence ticks to skip so the GPU
+        # has room to catch up. Final flushes don't trigger the skip;
+        # they're one-shot and we want the close path to complete cleanly.
+        elapsed = time.time() - started
+        if elapsed > STREAM_SLOW_THRESHOLD_S and not is_final:
+            state.skip_next_n = max(state.skip_next_n, STREAM_SKIP_NEXT_ON_SLOW)
+            logger.warning(
+                "[streaming-backpressure] session=%s slow upstream "
+                "elapsed=%.2fs threshold=%.2fs; skip_next_n=%d",
+                state.session_id, elapsed, STREAM_SLOW_THRESHOLD_S,
+                state.skip_next_n,
+            )
         state.in_flight = False
 
 
@@ -449,6 +607,10 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
             session_id,
             sorted(k for k in websocket.headers.keys() if k.startswith("x-")),
         )
+        # Phase B.5 metric: log the rejection. tier=unknown because we
+        # never resolved the user.
+        ws_connections_total.labels(tier="unknown", result="auth_rejected").inc()
+        ws_close_codes_total.labels(code="4001").inc()
         await websocket.close(code=4001)
         return
 
@@ -463,6 +625,8 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
             "[B.4 WS] tier_insufficient session_id=%s user=%s tier=%s",
             session_id, user_email, user_tier,
         )
+        ws_connections_total.labels(tier=user_tier, result="tier_rejected").inc()
+        ws_close_codes_total.labels(code="4003").inc()
         await websocket.accept()
         await websocket.send_json({
             "type": "error",
@@ -476,10 +640,46 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4003, reason="tier_insufficient")
         return
 
+    # Phase B.5 per-org rate limit. Bucket the user by org id (or email
+    # for orgless accounts) and reject with close 4429 if they already
+    # have ``STREAMING_MAX_SESSIONS_PER_ORG`` live sessions open. We
+    # check BEFORE accept so the rejected client gets a clean handshake-
+    # reject + close, mirroring the unauth 4001 path. We also still
+    # accept-and-send-JSON on the reject so clients that only listen on
+    # onmessage see a structured error frame.
+    org_bucket = _resolve_org_bucket(user)
+    if _org_session_counts[org_bucket] >= STREAMING_MAX_SESSIONS_PER_ORG:
+        logger.warning(
+            "[streaming-rate-limit] rate_limited session_id=%s user=%s "
+            "bucket=%s active=%d cap=%d",
+            session_id, user_email, org_bucket,
+            _org_session_counts[org_bucket], STREAMING_MAX_SESSIONS_PER_ORG,
+        )
+        ws_connections_total.labels(tier=user_tier, result="rate_limited").inc()
+        ws_close_codes_total.labels(code="4429").inc()
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "reason": "rate_limited",
+            "active_sessions": _org_session_counts[org_bucket],
+            "max_sessions_per_org": STREAMING_MAX_SESSIONS_PER_ORG,
+            "retryable": False,
+        })
+        await websocket.close(code=4429, reason="rate_limited")
+        return
+
     await websocket.accept()
+    ws_connections_total.labels(tier=user_tier, result="accepted").inc()
+    # Register this session for the SIGTERM drain hook + bump the
+    # per-org count. Both are torn down in the finally block below.
+    active_sessions[session_id] = websocket
+    _org_session_counts[org_bucket] += 1
+
     logger.info(
-        "[B.2 WS] connected session_id=%s user=%s tier=%s upstream=%s",
+        "[B.2 WS] connected session_id=%s user=%s tier=%s upstream=%s "
+        "bucket=%s org_active=%d",
         session_id, user_email, user_tier, PARAKEET_STREAM_URL,
+        org_bucket, _org_session_counts[org_bucket],
     )
 
     await websocket.send_json({
@@ -493,7 +693,11 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         "tier": user_tier,
     })
 
-    state = _SessionState(session_id=session_id, user_email=user_email)
+    state = _SessionState(
+        session_id=session_id,
+        user_email=user_email,
+        org_bucket=org_bucket,
+    )
     limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 
     async with httpx.AsyncClient(limits=limits) as http_client:
@@ -503,10 +707,12 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
 
                 msg_type = message.get("type")
                 if msg_type == "websocket.disconnect":
+                    code = message.get("code", 1006)
                     logger.info(
                         "[B.2 WS] disconnect frame session_id=%s code=%s",
-                        session_id, message.get("code"),
+                        session_id, code,
                     )
+                    ws_close_codes_total.labels(code=str(code)).inc()
                     return
 
                 if "bytes" in message and message["bytes"] is not None:
@@ -608,6 +814,7 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
                             "type": "closed",
                             "reason": "client_end",
                         })
+                        ws_close_codes_total.labels(code="1000").inc()
                         await websocket.close(code=1000)
                         return
 
@@ -639,16 +846,29 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
                     })
 
         except WebSocketDisconnect as exc:
+            code = getattr(exc, "code", 1006)
             logger.info(
                 "[B.2 WS] client disconnected session_id=%s code=%s",
-                session_id, getattr(exc, "code", "?"),
+                session_id, code,
             )
+            ws_close_codes_total.labels(code=str(code)).inc()
         except Exception:
             logger.exception(
                 "[B.2 WS] unexpected error session_id=%s user=%s",
                 session_id, user_email,
             )
+            ws_close_codes_total.labels(code="1011").inc()
             try:
                 await websocket.close(code=1011)
             except Exception:
                 pass
+        finally:
+            # Phase B.5: drop the session from the active registry + bring
+            # the per-org concurrent count back down. Both are guarded so
+            # a partial shutdown (raced with the drain hook below) doesn't
+            # crash us.
+            active_sessions.pop(session_id, None)
+            if _org_session_counts.get(org_bucket, 0) > 0:
+                _org_session_counts[org_bucket] -= 1
+                if _org_session_counts[org_bucket] <= 0:
+                    _org_session_counts.pop(org_bucket, None)

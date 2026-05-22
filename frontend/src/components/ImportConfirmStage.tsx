@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
-import { showToast } from ./Toast';
+import { showToast } from './Toast';
 import type { StagedFile, JobStatusResponse } from '../pages/Import';
 
 interface Props {

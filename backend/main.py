@@ -11,6 +11,10 @@ import logging
 import os
 from typing import List
 
+# Phase B.5: Prometheus /metrics ASGI app. Imported here so it's always
+# available, even if api.streaming fails to load (degraded mode).
+from prometheus_client import make_asgi_app
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,63 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down...")
+
+    # Phase B.5 streaming-drain: send a server_shutdown JSON frame + 1001
+    # close to every active WS session on /ws/sessions/{id}/live so the
+    # frontend can reconnect cleanly after the deploy lands. The
+    # useReconnectingWebSocket hook treats 1001 as a clean close and
+    # does NOT auto-reconnect; the explicit shutdown frame lets the
+    # client implement its own "reconnect_after_ms" hint. We give each
+    # close a short timeout so a wedged socket doesn't block teardown.
+    try:
+        from api.streaming import active_sessions as _active_streaming_sessions
+
+        # Snapshot the dict so iteration is safe even if a handler
+        # finishes mid-iteration and tries to pop itself.
+        snapshot = list(_active_streaming_sessions.items())
+        if snapshot:
+            logger.info(
+                "Streaming drain: closing %d active WS session(s) with "
+                "server_shutdown + close 1001",
+                len(snapshot),
+            )
+
+            async def _drain_one(sid, ws):
+                try:
+                    await asyncio.wait_for(
+                        ws.send_json({
+                            "type": "server_shutdown",
+                            "reason": "deployment",
+                            "reconnect_after_ms": 3000,
+                        }),
+                        timeout=1.0,
+                    )
+                except Exception as exc:
+                    logger.debug("drain send_json failed sid=%s err=%s", sid, exc)
+                try:
+                    await asyncio.wait_for(
+                        ws.close(code=1001, reason="going_away"),
+                        timeout=1.0,
+                    )
+                except Exception as exc:
+                    logger.debug("drain close failed sid=%s err=%s", sid, exc)
+
+            # Run all drains in parallel and cap the overall wait at 5 s.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(_drain_one(sid, ws) for sid, ws in snapshot),
+                        return_exceptions=True,
+                    ),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Streaming drain hit 5s timeout; proceeding with shutdown")
+    except Exception as e:
+        # api.streaming may have failed to import (optional router); log
+        # and continue without blocking the rest of shutdown.
+        logger.debug(f"Streaming drain skipped: {e}")
+
     try:
         from api.uploads import stop_upload_pipeline_queue
         await stop_upload_pipeline_queue()
@@ -158,6 +219,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# === Phase B.5: Prometheus /metrics endpoint ===
+# Mounted as an ASGI sub-app so prometheus_client owns the text-format
+# response + Content-Type header. Exposed unauthenticated by design:
+# scraped by the centerdeep Prometheus on the internal Tailscale net.
+# If you ever expose meeting-ops directly to the public internet, gate
+# this behind oauth2-proxy via the ingress config (we run behind it on
+# meetingops.magicunicorn.dev, so /metrics is already gated there).
+app.mount("/metrics", make_asgi_app())
 
 # === REQUIRED ROUTERS (fail fast if missing) ===
 _load_router(app, "auth", "auth.routes", required=True)
