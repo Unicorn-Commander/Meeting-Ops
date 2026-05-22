@@ -647,7 +647,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     if (!segments.length) return;
     const timestamp = new Date().toISOString();
     const normalized = segments
-      .map((segment) => {
+      .map((segment): LiveTranscriptSegment | null => {
         const text = String(segment.text || '').trim();
         if (!text) return null;
         const start = Number(segment.start ?? segment.start_time ?? 0);
@@ -660,9 +660,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           start: Number.isFinite(start) ? start : 0,
           end: Number.isFinite(end) ? end : 0,
           timestamp,
-        } satisfies LiveTranscriptSegment;
+        };
       })
-      .filter((segment): segment is LiveTranscriptSegment => Boolean(segment));
+      .filter((segment): segment is LiveTranscriptSegment => segment !== null);
 
     if (!normalized.length) return;
     setLiveTranscript((prev) => {
@@ -1714,14 +1714,18 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
                   // assembled-blob path — simplest reliable recovery
                   // surface; partial backfill is a v2.
                   setStatusText('Recovering audio from local copy');
+                  // Recorder ref was cleared at the top of stop(); we kept
+                  // this ?. for symmetry but TS narrows .current to null
+                  // after that assignment. localMeta + 'audio/webm' fallback
+                  // is fine in practice.
+                  const fallbackMimeType: string =
+                    localMeta.mime_type || 'audio/webm';
                   const recovery = await postFullAudio({
                     apiUrl: config.apiUrl,
                     orgSlug: activeOrganization?.slug ?? null,
                     sessionId,
                     blob: assembled.blob,
-                    mimeType: fullAudioRecorderRef.current?.mimeType()
-                      ?? localMeta.mime_type
-                      ?? 'audio/webm',
+                    mimeType: fallbackMimeType,
                   });
                   if (recovery.reprocessing_started) {
                     verificationOk = true;

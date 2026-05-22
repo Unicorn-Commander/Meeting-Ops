@@ -87,8 +87,10 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
  * Call this after apiFetch for non-critical endpoints.
  */
 export function isStaleSessionResponse(response: Response): boolean {
-  return response.status === 302 ||
-    response.headers.get('content-type')?.startsWith('text/html');
+  return (
+    response.status === 302 ||
+    response.headers.get('content-type')?.startsWith('text/html') === true
+  );
 }
 
 export { apiFetch };

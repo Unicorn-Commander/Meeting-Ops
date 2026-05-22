@@ -99,7 +99,9 @@ export default function ImportFilePickerStage({
         const entry = items[i].webkitGetAsEntry?.();
         if (entry) {
           promises.push(traverseEntry(entry, allFiles));
-        } else if (items[i].getAsFile) {
+        } else {
+          // getAsFile is always defined on DataTransferItem; check the
+          // return value, which can be null when the item isn't a File.
           const f = items[i].getAsFile();
           if (f) allFiles.push(f);
         }

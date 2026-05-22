@@ -34,14 +34,10 @@ export const TagChip: React.FC<TagChipProps> = ({
     return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
   })();
 
-  const Element: keyof JSX.IntrinsicElements = onClick ? 'button' : 'span';
-
-  return (
-    <Element
-      onClick={onClick}
-      title={title || tag}
-      className={`inline-flex items-center gap-1 rounded-full border ${palette} ${sizing} font-medium transition-colors max-w-[180px]`}
-    >
+  const className = `inline-flex items-center gap-1 rounded-full border ${palette} ${sizing} font-medium transition-colors max-w-[180px]`;
+  const resolvedTitle = title || tag;
+  const inner = (
+    <>
       <span className="truncate">{tag}</span>
       {onRemove && (
         <button
@@ -56,7 +52,19 @@ export const TagChip: React.FC<TagChipProps> = ({
           <X className="w-3 h-3" />
         </button>
       )}
-    </Element>
+    </>
+  );
+
+  // Render as a button when interactive, span otherwise — keeps a11y +
+  // semantics clean without dynamic JSX-element typing tricks.
+  return onClick ? (
+    <button type="button" onClick={onClick} title={resolvedTitle} className={className}>
+      {inner}
+    </button>
+  ) : (
+    <span title={resolvedTitle} className={className}>
+      {inner}
+    </span>
   );
 };
 

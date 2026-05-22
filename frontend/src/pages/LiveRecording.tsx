@@ -1106,7 +1106,7 @@ export default function LiveRecording() {
               {/* Status */}
               <div className="mt-6 text-center">
                 <div className="text-2xl font-semibold text-white">
-                  {isRecording ? 'Recording...' : (sessionData && !sessionData.isRecording ? 'Recording Complete' : 'Ready to Record')}
+                  {isRecording ? 'Recording...' : (sessionData?.isRecording === false ? 'Recording Complete' : 'Ready to Record')}
                 </div>
                 {isRecording && (
                   <div className="text-4xl font-mono text-zinc-300 mt-2">
@@ -1152,16 +1152,16 @@ export default function LiveRecording() {
                         <span className="text-sm font-medium text-zinc-200">Active Agent</span>
                       </div>
                       <div className="text-xs text-zinc-300">
-                        <div className="font-medium">{activeAgent.name}</div>
-                        <div className="text-zinc-400 mt-1">{activeAgent.description}</div>
+                        <div className="font-medium">{activeAgent?.name}</div>
+                        <div className="text-zinc-400 mt-1">{activeAgent?.description}</div>
                         <div className="flex items-center gap-1 mt-2">
                           <Target className="w-3 h-3 text-blue-400" />
-                          <span className="capitalize">{activeAgent.model_name}</span>
+                          <span className="capitalize">{activeAgent?.model_name}</span>
                         </div>
                       </div>
                     </div>
                   )}
-                  
+
                   {/* Progressive Interval Data */}
                   {progressiveData && (
                     <div className="p-3 rounded-xl bg-zinc-900/30 border border-zinc-700 max-w-xs">
@@ -1170,9 +1170,9 @@ export default function LiveRecording() {
                         <span className="text-xs font-medium text-zinc-300">Progressive Intervals</span>
                       </div>
                       <div className="text-xs text-zinc-400 space-y-1">
-                        <div>Last: {progressiveData.intervalUsed} words</div>
-                        <div>Next: {progressiveData.nextInterval} words</div>
-                        <div>Model: {progressiveData.modelSize}</div>
+                        <div>Last: {progressiveData?.intervalUsed} words</div>
+                        <div>Next: {progressiveData?.nextInterval} words</div>
+                        <div>Model: {progressiveData?.modelSize}</div>
                       </div>
                     </div>
                   )}
