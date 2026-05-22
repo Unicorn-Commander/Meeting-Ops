@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **Brigade Phase 1.5: write from live/browser-only sessions**: extends the Phase 1 writer to also fire when a browser/live session is finalized via /sessions/{id}/finalize (not just the /finalize-audio reprocess path). write_meeting_to_brigade now gracefully handles missing speakers (no diarization in browser path), missing action items, missing topic/decision extraction; always writes at minimum a Meeting node + summary text. New completion_mode parameter ('reprocess' or 'live') stored on the Meeting node for analytics. Hook fires fire-and-forget at /finalize so user-facing flow is never affected. 5 new tests on top of the existing Phase 1 suite cover the live-completion path, the completion_mode tag, and failure swallowing.
+
 ## [0.9.1] - 2026-05-22
 
 ### Added

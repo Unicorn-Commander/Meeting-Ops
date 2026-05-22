@@ -818,6 +818,7 @@ async def append_client_text_chunk(
 @router.post("/sessions/{session_id}/finalize")
 async def finalize_always_on_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
@@ -881,6 +882,37 @@ async def finalize_always_on_session(
             db.commit()
             db.refresh(session)
         logger.exception("Always-on finalize failed for session %s", session_id)
+
+    # Brigade Phase 1.5: write from live/browser-only sessions
+    # (the reprocess path already fires this in _run_session_reprocess)
+    logger.info("[brigade-1.5] live write fired session=%s", session.id)
+
+    async def _fire_brigade_live_write(session_pk: int):
+        try:
+            from services.brigade_client import BrigadeClient
+            from services.brigade_writer import write_meeting_to_brigade
+
+            brigade = BrigadeClient()
+            from database.database import SessionLocal
+
+            db_async = SessionLocal()
+            try:
+                await write_meeting_to_brigade(
+                    session_pk,
+                    db_async,
+                    client=brigade,
+                    completion_mode="live",
+                )
+            finally:
+                db_async.close()
+        except Exception as e:
+            logger.error(
+                "[brigade-1.5] live write failed session=%s: %s",
+                session_pk,
+                e,
+            )
+
+    background_tasks.add_task(_fire_brigade_live_write, session.id)
 
     return _session_payload(session)
 

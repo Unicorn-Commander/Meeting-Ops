@@ -2,11 +2,16 @@
 
 Public surface:
 
-  await write_meeting_to_brigade(session_id, db, client=None)
+  await write_meeting_to_brigade(session_id, db, client=None, completion_mode="reprocess")
 
-Called from ``api.recording._run_session_reprocess`` as a
-fire-and-forget background step after the existing Parakeet 1.1B +
-pyannote + Qwen 3.6 pipeline completes. The writer:
+Called from two paths:
+
+  * ``api.recording._run_session_reprocess`` (completion_mode="reprocess")
+    after the existing Parakeet 1.1B + pyannote + Qwen 3.6 pipeline.
+  * ``api.recording.finalize_always_on_session`` (completion_mode="live")
+    when a browser/live session is finalized without the reprocess pass.
+
+The writer:
 
   1. Resolves the active tenancy mode + graph name from env.
   2. Pulls the session + its action items + speaker links + summary
@@ -83,6 +88,12 @@ VALID_TENANCY_MODES = {
 DEFAULT_TENANCY_MODE = TENANCY_SHARED
 DEFAULT_SHARED_GRAPH_BASENAME = "meeting_ops_canonical"
 PER_ORG_GRAPH_PREFIX = "meeting_ops_org"
+
+# Completion mode values for the ``completion_mode`` Meeting node property.
+# ``reprocess`` = full Parakeet 1.1B + pyannote + Qwen 3.6 pipeline.
+# ``live`` = browser/live finalize without diarization or topic extraction.
+COMPLETION_MODE_REPROCESS = "reprocess"
+COMPLETION_MODE_LIVE = "live"
 
 # Conceptual entity_type labels we write to Brigade. These show up as
 # ``properties.entity_type`` on the FalkorDB :Entity node; Brigade's
@@ -355,6 +366,7 @@ async def write_meeting_to_brigade(
     db: Session,
     *,
     client: Optional[BrigadeClient] = None,
+    completion_mode: str = "reprocess",
 ) -> BrigadeWriteResult:
     """Orchestrate the per-session graph write.
 
@@ -364,6 +376,9 @@ async def write_meeting_to_brigade(
             so the call site controls transaction scope).
         client: Optional BrigadeClient; tests inject a stub. When
             None we build a default-config client and close it on exit.
+        completion_mode: ``"reprocess"`` (full reprocess pipeline) or
+            ``"live"`` (browser/live finalize without reprocess).
+            Stored on the Meeting node for analytics.
 
     Returns:
         BrigadeWriteResult with ok=True for both real writes and the
@@ -412,6 +427,7 @@ async def write_meeting_to_brigade(
                 org_id=org_id,
                 target=target,
                 client=active_client,
+                completion_mode=completion_mode,
             )
         finally:
             if owned_client:
@@ -437,6 +453,7 @@ async def _write_all(
     org_id: int,
     target: _GraphTarget,
     client: BrigadeClient,
+    completion_mode: str = "reprocess",
 ) -> BrigadeWriteResult:
     """Inner orchestrator. Splits out from the top-level so the catch
     in ``write_meeting_to_brigade`` stays simple."""
@@ -449,6 +466,7 @@ async def _write_all(
     meeting_props = _build_meeting_properties(session, org_id)
     meeting_props["graph_name"] = target.graph_name
     meeting_props["tenancy_mode"] = target.mode
+    meeting_props["completion_mode"] = completion_mode
 
     meeting_res = await client.upsert_entity(
         name=meeting_name,
@@ -671,4 +689,6 @@ __all__ = [
     "TENANCY_PER_ORG_GRAPH",
     "TENANCY_PER_ORG_INSTANCE",
     "DEFAULT_TENANCY_MODE",
+    "COMPLETION_MODE_REPROCESS",
+    "COMPLETION_MODE_LIVE",
 ]

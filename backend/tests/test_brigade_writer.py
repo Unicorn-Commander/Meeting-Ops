@@ -1,37 +1,57 @@
-"""Tests for the Brigade integration Phase 1 writer service.
+"""Tests for the Brigade integration Phase 1 + 1.5 writer service.
 
-7 tests covering the contract from docs/brigade-integration-design.md
-Phase 1:
+12 tests covering the contract from docs/brigade-integration-design.md
+Phases 1 & 1.5:
 
-  1. writer_fires_after_reprocess     — _run_session_reprocess calls
+Phase 1 (7 existing):
+
+   1. writer_fires_after_reprocess     — _run_session_reprocess calls
                                         write_meeting_to_brigade
                                         (mocked); we observe the call.
-  2. writes_meeting_speakers_actions  — happy path: a session with
+   2. writes_meeting_speakers_actions  — happy path: a session with
                                         speakers + action items + a
                                         summary produces the expected
                                         upsert_entity / upsert_edge
                                         calls in dependency order.
-  3. shared_tenancy_uses_canonical    — BRIGADE_TENANCY_MODE=shared
+   3. shared_tenancy_uses_canonical    — BRIGADE_TENANCY_MODE=shared
                                         sends every call with the same
                                         agent_id (meeting_ops_canonical).
-  4. per_org_graph_uses_org_id        — BRIGADE_TENANCY_MODE=per_org_graph
+   4. per_org_graph_uses_org_id        — BRIGADE_TENANCY_MODE=per_org_graph
                                         sends agent_id=meeting_ops_org_<id>
                                         for each call, scoped per org.
-  5. writer_swallows_brigade_errors   — even if every Brigade call
+   5. writer_swallows_brigade_errors   — even if every Brigade call
                                         raises, the writer returns
                                         without re-raising; the calling
                                         pipeline (reprocess) sees no
                                         exception.
-  6. idempotent_rerun_safe            — running the writer twice on
+   6. idempotent_rerun_safe            — running the writer twice on
                                         the same session is safe; both
                                         runs succeed, the stamp gets
                                         updated, no duplicate node names
                                         from the writer's point of view.
-  7. noop_when_no_api_key             — when neither BRIGADE_API_KEY
+   7. noop_when_no_api_key             — when neither BRIGADE_API_KEY
                                         nor BRIGADE_ADMIN_KEY is set,
                                         the client runs in log-only
                                         mode and the writer reports
                                         success without HTTP calls.
+
+Phase 1.5 (5 new — live/browser-only path):
+
+   8. meeting_only_no_speakers_actions — zero speakers + zero action
+                                        items produces only Meeting +
+                                        Topic + Decision nodes (no
+                                        Speaker/ActionItem/HAS_* edges).
+   9. completion_mode_live_stored      — completion_mode='live' is
+                                        stored on the Meeting node.
+  10. completion_mode_reprocess_stored — default/explicit 'reprocess'
+                                        still works (regression).
+  11. finalize_handler_fires_live      — POST /finalize queues a
+                                        background task that calls
+                                        write_meeting_to_brigade with
+                                        completion_mode='live'.
+  12. live_write_failure_swallowed     — when the background write
+                                        raises, /finalize still returns
+                                        200 to the caller.
 
 The Brigade HTTP client is mocked at module boundary by injecting an
 httpx.AsyncClient with a MockTransport (no network) OR by passing a
@@ -681,3 +701,318 @@ def test_noop_when_no_api_key(client, monkeypatch):
 
     assert result.ok is True
     assert result.mode == "noop"
+
+
+# ---------------------------------------------------------------------------
+# 8. Zero speakers + zero action items - Phase 1.5 resilience
+# ---------------------------------------------------------------------------
+
+
+def test_writes_meeting_only_no_speakers_no_actions(client, monkeypatch):
+    """A session with no SpeakerSessionLinks and no ActionItems still
+    produces a Meeting node + Topic/Decision nodes from summary text.
+    No Speaker/ActionItem entities and no HAS_SPEAKER/HAS_ACTION_ITEM
+    edges are emitted. This is the typical shape for browser/live
+    sessions that never ran diarization."""
+    from database.database import SessionLocal
+    from services.brigade_writer import (
+        ENTITY_TYPE_ACTION_ITEM,
+        ENTITY_TYPE_DECISION,
+        ENTITY_TYPE_MEETING,
+        ENTITY_TYPE_SPEAKER,
+        ENTITY_TYPE_TOPIC,
+        REL_HAS_ACTION_ITEM,
+        REL_HAS_DECISION,
+        REL_HAS_SPEAKER,
+        REL_HAS_TOPIC,
+        write_meeting_to_brigade,
+    )
+
+    monkeypatch.setenv("BRIGADE_TENANCY_MODE", "shared")
+
+    # Seed with neither speakers nor action items.
+    org_id, session_id = _seed_session_with_data(
+        with_speakers=False, with_actions=False
+    )
+    stub = _RecordingBrigadeClient()
+
+    db = SessionLocal()
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            write_meeting_to_brigade(session_id, db, client=stub)
+        )
+    finally:
+        db.close()
+
+    assert result.ok
+
+    entity_calls = [c for c in stub.calls if c.kind == "entity"]
+    edge_calls = [c for c in stub.calls if c.kind == "edge"]
+
+    entity_types = [c.payload["entity_type"] for c in entity_calls]
+    assert entity_types.count(ENTITY_TYPE_MEETING) == 1
+    assert entity_types.count(ENTITY_TYPE_SPEAKER) == 0
+    assert entity_types.count(ENTITY_TYPE_ACTION_ITEM) == 0
+    # Topics and decisions from summary still land.
+    assert entity_types.count(ENTITY_TYPE_TOPIC) == 2
+    assert entity_types.count(ENTITY_TYPE_DECISION) == 2
+
+    edge_rels = [c.payload["relationship"] for c in edge_calls]
+    assert REL_HAS_SPEAKER not in edge_rels
+    assert REL_HAS_ACTION_ITEM not in edge_rels
+    assert edge_rels.count(REL_HAS_TOPIC) == 2
+    assert edge_rels.count(REL_HAS_DECISION) == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. completion_mode="live" stored on Meeting node properties
+# ---------------------------------------------------------------------------
+
+
+def test_completion_mode_live_stored_on_meeting_node(client, monkeypatch):
+    """When completion_mode='live' is passed, the Meeting node's
+    properties dict contains completion_mode='live' so downstream
+    analytics can distinguish browser-only sessions."""
+    from database.database import SessionLocal
+    from services.brigade_writer import (
+        ENTITY_TYPE_MEETING,
+        write_meeting_to_brigade,
+    )
+
+    monkeypatch.setenv("BRIGADE_TENANCY_MODE", "shared")
+    org_id, session_id = _seed_session_with_data()
+    stub = _RecordingBrigadeClient()
+
+    db = SessionLocal()
+    try:
+        asyncio.get_event_loop().run_until_complete(
+            write_meeting_to_brigade(
+                session_id, db, client=stub, completion_mode="live"
+            )
+        )
+    finally:
+        db.close()
+
+    meeting_entities = [
+        c for c in stub.calls
+        if c.kind == "entity" and c.payload["entity_type"] == ENTITY_TYPE_MEETING
+    ]
+    assert len(meeting_entities) == 1
+    props = meeting_entities[0].payload["properties"]
+    assert props.get("completion_mode") == "live"
+
+
+# ---------------------------------------------------------------------------
+# 10. completion_mode="reprocess" regression — default still works
+# ---------------------------------------------------------------------------
+
+
+def test_completion_mode_reprocess_default(client, monkeypatch):
+    """The default completion_mode='reprocess' (or explicitly passed)
+    stores 'reprocess' on the Meeting node, keeping Phase 1 behaviour."""
+    from database.database import SessionLocal
+    from services.brigade_writer import (
+        ENTITY_TYPE_MEETING,
+        write_meeting_to_brigade,
+    )
+
+    monkeypatch.setenv("BRIGADE_TENANCY_MODE", "shared")
+    org_id, session_id = _seed_session_with_data()
+    stub = _RecordingBrigadeClient()
+
+    db = SessionLocal()
+    try:
+        # Default — no completion_mode kwarg.
+        asyncio.get_event_loop().run_until_complete(
+            write_meeting_to_brigade(session_id, db, client=stub)
+        )
+    finally:
+        db.close()
+
+    meeting_entities = [
+        c for c in stub.calls
+        if c.kind == "entity" and c.payload["entity_type"] == ENTITY_TYPE_MEETING
+    ]
+    assert len(meeting_entities) == 1
+    props = meeting_entities[0].payload["properties"]
+    assert props.get("completion_mode") == "reprocess"
+
+
+# ---------------------------------------------------------------------------
+# 11. /finalize endpoint fires the live brigade write (background task)
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_handler_fires_brigade_live_write(client, monkeypatch):
+    """POST /sessions/{session_id}/finalize fires write_meeting_to_brigade
+    with completion_mode='live' as a fire-and-forget background task.
+    We observe the call through a spy on the writer."""
+    import asyncio
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from auth.models import Organization, User
+
+    session_uuid: str | None = None
+
+    db = SessionLocal()
+    try:
+        # Use the existing default org from conftest so auth resolves.
+        default_org = (
+            db.query(Organization)
+            .filter(Organization.slug == "magic-unicorn")
+            .first()
+        )
+        assert default_org is not None
+
+        user = db.query(User).filter(User.username == "admin").first()
+
+        sess = RecordingSession(
+            session_id=str(uuid.uuid4()),
+            name="Brigade live test session",
+            title="Brigade live test session",
+            status="recording",
+            mode="always_on",
+            organization_id=default_org.id,
+            user_id=user.id if user else None,
+            transcript_simple="hello live brigade",
+            transcript="hello live brigade",
+            duration=120.0,
+            participants=[],
+            final_summary={
+                "executive": "Live session executive summary.",
+                "bullets": ["Quick sync on project X"],
+            },
+        )
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        session_uuid = sess.session_id
+        session_pk = sess.id
+    finally:
+        db.close()
+
+    assert session_uuid is not None
+
+    # Spy on write_meeting_to_brigade.
+    from services import brigade_writer as bw_mod
+
+    captured: list[dict] = []
+
+    async def _spy(session_pk_arg, db_arg, **kwargs):
+        captured.append({"session_pk": session_pk_arg, "kwargs": kwargs})
+        from services.brigade_client import BrigadeWriteResult
+        return BrigadeWriteResult(ok=True, mode="noop", detail="spy")
+
+    monkeypatch.setattr(bw_mod, "write_meeting_to_brigade", _spy)
+    monkeypatch.setenv("BRIGADE_API_KEY", "test-key-123")
+
+    # Login as admin.
+    creds = {"username": "admin", "password": "admin123"}
+    login_resp = client.post("/api/auth/login", data=creds)
+    assert login_resp.status_code == 200, f"Login failed: {login_resp.text}"
+    token = login_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Call the finalize endpoint.
+    resp = client.post(
+        f"/api/recordings/sessions/{session_uuid}/finalize",
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Finalize failed: {resp.text}"
+
+    # Allow the background task a moment to complete.
+    try:
+        asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.3))
+    except RuntimeError:
+        pass
+
+    assert len(captured) >= 1, (
+        f"write_meeting_to_brigade was never called; captured={captured}"
+    )
+    live_calls = [
+        c for c in captured
+        if c["kwargs"].get("completion_mode") == "live"
+    ]
+    assert len(live_calls) >= 1, (
+        f"No call with completion_mode='live'; all captured={captured}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Live write failure does not bubble up to the user response
+# ---------------------------------------------------------------------------
+
+
+def test_live_write_failure_swallowed_by_finalize(client, monkeypatch):
+    """When the background brigade write raises, the /finalize endpoint
+    still returns 200 to the caller. The exception is logged but never
+    reaches the response."""
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from auth.models import Organization, User
+
+    session_uuid: str | None = None
+
+    db = SessionLocal()
+    try:
+        default_org = (
+            db.query(Organization)
+            .filter(Organization.slug == "magic-unicorn")
+            .first()
+        )
+        assert default_org is not None
+
+        user = db.query(User).filter(User.username == "admin").first()
+
+        sess = RecordingSession(
+            session_id=str(uuid.uuid4()),
+            name="Brigade failure test session",
+            title="Brigade failure test session",
+            status="recording",
+            mode="always_on",
+            organization_id=default_org.id,
+            user_id=user.id if user else None,
+            transcript_simple="hello failure test",
+            transcript="hello failure test",
+            duration=120.0,
+            participants=[],
+            final_summary={
+                "executive": "Failure test executive summary.",
+                "bullets": ["Testing error swallowing"],
+            },
+        )
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        session_uuid = sess.session_id
+    finally:
+        db.close()
+
+    assert session_uuid is not None
+
+    # Make write_meeting_to_brigade raise (the background task catches it).
+    from services import brigade_writer as bw_mod
+
+    async def _exploding(_session_pk, _db, **kwargs):
+        raise RuntimeError("simulated brigade live write failure")
+
+    monkeypatch.setattr(bw_mod, "write_meeting_to_brigade", _exploding)
+    monkeypatch.setenv("BRIGADE_API_KEY", "test-key-123")
+
+    creds = {"username": "admin", "password": "admin123"}
+    login_resp = client.post("/api/auth/login", data=creds)
+    assert login_resp.status_code == 200
+    token = login_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # The endpoint must NOT raise despite the exploding writer.
+    resp = client.post(
+        f"/api/recordings/sessions/{session_uuid}/finalize",
+        headers=headers,
+    )
+    assert resp.status_code == 200, (
+        f"Finalize should still return 200 when brigade write fails: "
+        f"{resp.status_code} {resp.text}"
+    )
+    payload = resp.json()
+    assert payload.get("status") == "completed"
