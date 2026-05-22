@@ -74,6 +74,53 @@ class ClientTextChunkRequest(BaseModel):
     skip_diarization: bool = Field(default=False)
 
 
+class ParseFilenameRequest(BaseModel):
+    """Request body for POST /api/recordings/parse-filename."""
+
+    filename: str = Field(min_length=0, max_length=2048)
+
+
+class ParseFilenameResponse(BaseModel):
+    """Result of parsing a filename for meeting metadata."""
+
+    title: Optional[str] = None
+    meeting_date: Optional[str] = None  # ISO YYYY-MM-DD
+    meeting_time: Optional[str] = None  # HH:MM:SS (24h)
+    source: Optional[str] = None        # notes | downloads | generic | None
+    confidence: float = 0.0
+    raw_filename: str = ""
+
+
+@router.post(
+    "/parse-filename",
+    response_model=ParseFilenameResponse,
+    summary="Parse a filename into meeting metadata (title / date / time / source)",
+)
+async def parse_filename_endpoint(
+    request: ParseFilenameRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Expose the shared filename parser to clients.
+
+    Used by the single-file upload preview ("This looks like a meeting
+    from 2024-11-05 with Nate Ellison — use these values?") and the
+    upcoming /import page that ingests Aaron's 526-file Voice Memos
+    archive. Pure compute, no I/O, no DB write — auth-gated so we don't
+    accidentally turn it into an open-internet regex utility.
+    """
+    from utils.filename_parser import parse_filename
+
+    parsed = parse_filename(request.filename or "")
+    return ParseFilenameResponse(
+        title=parsed.title,
+        meeting_date=parsed.meeting_date.isoformat() if parsed.meeting_date else None,
+        meeting_time=parsed.meeting_time.isoformat() if parsed.meeting_time else None,
+        source=parsed.source,
+        confidence=parsed.confidence,
+        raw_filename=parsed.raw_filename,
+    )
+
+
 
 
 def _org_diarization_off(db: Session, organization_id: int) -> bool:

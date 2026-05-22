@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import {
   Plus, Upload, FileAudio,
   X, Loader2, Trash2,
-  Mic
+  Mic, Calendar, Sparkles
 } from 'lucide-react';
 import { config } from '../config';
 import { ProjectLinkPicker, type ProjectLink } from './ProjectLinkPicker';
@@ -13,6 +13,7 @@ import {
   type TranscriptionOptions,
 } from './TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
+import { parseFilename, type ParsedFilename } from '../utils/filenameParser';
 
 interface SessionCreatorProps {
   onClose: () => void;
@@ -34,6 +35,14 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
   const [creating, setCreating] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const { startUploads } = useUploads();
+  // Parsed metadata from the chosen audio filename. When confidence is
+  // > 0.5 we surface a preview card; user can accept to pre-fill or
+  // ignore. Backend re-parses at upload time and uses user overrides
+  // where provided, so a frontend hiccup here is purely cosmetic.
+  const [parsedFilename, setParsedFilename] = useState<ParsedFilename | null>(null);
+  const [applyParsedFields, setApplyParsedFields] = useState(true);
+  const [meetingDate, setMeetingDate] = useState<string>('');
+  const [meetingTime, setMeetingTime] = useState<string>('');
   const [projectLink, setProjectLink] = useState<ProjectLink>({
     project_app: null,
     project_id: null,
@@ -120,6 +129,26 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
     }
 
     setAudioFile(file);
+
+    // Run the shared filename parser. The {notes|downloads}__YYYY-MM-DD_
+    // HHMMSS__title shape from Mac Notes + Voice Memos gives us a high-
+    // confidence pre-fill in one step. Generic patterns 2-5 cover Zoom /
+    // Granola / arbitrary user filenames at lower confidence; we only
+    // show the preview card when confidence > 0.5 to avoid bothering the
+    // user with no-signal "we parsed nothing" notices.
+    const parsed = parseFilename(file.name);
+    setParsedFilename(parsed);
+    if (parsed.confidence > 0.5) {
+      // Default to accepting. User can uncheck before submitting.
+      setApplyParsedFields(true);
+      if (parsed.title && !sessionName.trim()) {
+        setSessionName(parsed.title);
+      }
+      setMeetingDate(parsed.meetingDate || '');
+      setMeetingTime(parsed.meetingTime ? parsed.meetingTime.slice(0, 5) : '');
+    } else {
+      setApplyParsedFields(false);
+    }
   };
 
   const formatFileSize = (bytes: number) => {
@@ -176,6 +205,34 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
 
       const session = await response.json();
       console.log('[SessionCreator] Session created:', session.id);
+
+      // If the parser pre-filled meeting_date / meeting_time and the user
+      // didn't uncheck the preview, write the values onto the session row
+      // before the upload pipeline takes over. Keeps the editable
+      // "when it actually happened" decoupled from server ingest time.
+      if (applyParsedFields && (meetingDate || meetingTime)) {
+        try {
+          await fetch(
+            `${config.apiBaseUrl}/api/simple/recording-sessions/${session.session_id || session.id}`,
+            {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+              },
+              body: JSON.stringify({
+                meeting_date: meetingDate || null,
+                meeting_time: meetingTime || null,
+              }),
+            },
+          );
+        } catch (err) {
+          // Non-fatal: backend will also re-parse from the filename at
+          // upload time, so the date still lands. We just won't have it
+          // set the instant the session row is created.
+          console.warn('[SessionCreator] meeting_date PATCH failed:', err);
+        }
+      }
 
       // Hand the audio off to the chunked uploads pipeline with action=attach
       // so it routes through ProviderRegistry STT + summarization with proper
@@ -422,6 +479,65 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
                 </div>
               )}
             </div>
+
+            {/* Filename parser preview. Only shown when the parser found
+                something useful (confidence > 0.5). User can uncheck the
+                Apply box to opt out of pre-fill, or edit the date / time
+                directly before submitting. */}
+            {parsedFilename && parsedFilename.confidence > 0.5 && (
+              <div className="mt-3 rounded-lg border border-purple-700/40 bg-purple-900/15 p-3 text-sm">
+                <div className="flex items-start gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-300 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="text-purple-100">
+                      Filename looks like a meeting
+                      {parsedFilename.source === 'notes' || parsedFilename.source === 'downloads'
+                        ? ' from Mac Notes / Voice Memos'
+                        : ''}.
+                      Pre-fill these values?
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-purple-200">
+                      <input
+                        type="checkbox"
+                        checked={applyParsedFields}
+                        onChange={(e) => setApplyParsedFields(e.target.checked)}
+                        className="accent-purple-500"
+                      />
+                      Apply parsed title + meeting date to this session
+                    </label>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-1 text-xs text-purple-200">
+                        <span className="flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          Meeting date
+                        </span>
+                        <input
+                          type="date"
+                          value={meetingDate}
+                          onChange={(e) => setMeetingDate(e.target.value)}
+                          disabled={!applyParsedFields}
+                          className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:outline-none focus:border-purple-500 disabled:opacity-50"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs text-purple-200">
+                        <span>Meeting time</span>
+                        <input
+                          type="time"
+                          value={meetingTime}
+                          onChange={(e) => setMeetingTime(e.target.value)}
+                          disabled={!applyParsedFields}
+                          className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:outline-none focus:border-purple-500 disabled:opacity-50"
+                        />
+                      </label>
+                    </div>
+                    <div className="text-[11px] text-purple-300/80">
+                      Confidence {Math.round(parsedFilename.confidence * 100)}%
+                      {parsedFilename.title ? ` · ${parsedFilename.title}` : ''}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

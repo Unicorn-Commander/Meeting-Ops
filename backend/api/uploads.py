@@ -899,15 +899,35 @@ async def _extract_audio(source_path: Path, audio_path: Path, upload_id: str, db
 
 
 async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
-    created_at = _created_at_from_filename_or_mtime(audio_path, datetime.now(timezone.utc))
+    # Run the shared filename parser. Pattern 1 (notes__/downloads__ Mac
+    # Notes + Voice Memos export) gives us title + meeting_date +
+    # meeting_time + source in one shot; patterns 2-5 cover generic ISO /
+    # US-date filenames. parsed.title is always populated (best-effort
+    # stem cleanup when nothing matches) so the session never lands
+    # without a title.
+    from utils.filename_parser import parse_filename
+    parsed = parse_filename(job.filename or "")
+
+    fallback_title = _title_from_filename(job.filename) or "Uploaded Meeting"
+    title = (parsed.title or fallback_title)[:200]
+
+    # started_at / created_at stay the actual server ingest time so
+    # processing analytics aren't poisoned by historical backfill. The
+    # new meeting_date / meeting_time columns are the user-editable
+    # "when the meeting actually happened" view.
+    server_now = datetime.now(timezone.utc)
+    created_at = _created_at_from_filename_or_mtime(audio_path, server_now)
+
     session = RecordingSession(
         session_id=str(uuid.uuid4()),
-        name=_title_from_filename(job.filename),
-        title=_title_from_filename(job.filename),
+        name=title,
+        title=title,
         description=f"Uploaded from {job.filename}",
         meeting_type="upload",
         created_at=created_at,
         started_at=created_at,
+        meeting_date=parsed.meeting_date,
+        meeting_time=parsed.meeting_time,
         status="processing",
         user_id=job.user_id,
         organization_id=job.organization_id,
@@ -917,6 +937,11 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
             "upload_id": str(job.upload_id),
             "original_filename": job.filename,
             "content_type": job.content_type,
+            "filename_parse": {
+                "confidence": parsed.confidence,
+                "source": parsed.source,
+                "matched_title": parsed.title,
+            },
         },
     )
     db.add(session)

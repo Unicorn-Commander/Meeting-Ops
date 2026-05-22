@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, func
 import asyncio
 import os
 import re
@@ -127,6 +127,10 @@ class SessionResponse(BaseModel):
     project_app: Optional[str] = None
     project_id: Optional[int] = None
     project_slug: Optional[str] = None
+    # User-editable "when the meeting actually happened". ISO date /
+    # 24h time. Backfilled from started_at / created_at by alembic 027.
+    meeting_date: Optional[str] = None
+    meeting_time: Optional[str] = None
 
 
 def _summary_preview(session: DBRecordingSession, max_chars: int = 220) -> Optional[str]:
@@ -320,6 +324,9 @@ async def create_session(
         duration=0.0
     )
 
+_VALID_SORT_KEYS = {"created_at_desc", "meeting_date_desc", "meeting_date_asc"}
+
+
 @router.get("/recording-sessions")
 async def list_sessions(
     db: Session = Depends(get_db),
@@ -327,6 +334,14 @@ async def list_sessions(
     active_org: ActiveOrganization = Depends(get_current_organization),
     limit: int = 100,
     tags: Optional[str] = Query(None, description="Comma-separated tags; AND filter"),
+    sort: Optional[str] = Query(
+        None,
+        description=(
+            "Sort order. One of created_at_desc (default), "
+            "meeting_date_desc, meeting_date_asc. When meeting_date is "
+            "null the sort falls back to started_at."
+        ),
+    ),
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
 
@@ -347,13 +362,24 @@ async def list_sessions(
             & ((DBRecordingSession.audio_file.is_(None)) | (DBRecordingSession.audio_file == ""))
         )
     )
-    sessions = (
-        query
-        .order_by(desc(DBRecordingSession.created_at))
-        .limit(limit)
-        .all()
-    )
-    
+
+    sort_key = sort if sort in _VALID_SORT_KEYS else "created_at_desc"
+    if sort_key in ("meeting_date_desc", "meeting_date_asc"):
+        # Coalesce so a null meeting_date falls back to started_at and
+        # finally to created_at. Keeps newly-uploaded sessions visible
+        # in date-sorted views even before the user edits a date in.
+        effective = func.coalesce(
+            DBRecordingSession.meeting_date,
+            func.date(DBRecordingSession.started_at),
+            func.date(DBRecordingSession.created_at),
+        )
+        order_clause = desc(effective) if sort_key == "meeting_date_desc" else effective
+        query = query.order_by(order_clause, desc(DBRecordingSession.id))
+    else:
+        query = query.order_by(desc(DBRecordingSession.created_at))
+
+    sessions = query.limit(limit).all()
+
     result = []
     for session in sessions:
         # Parse transcription if it exists
@@ -363,7 +389,7 @@ async def list_sessions(
                 transcription_data = json.loads(session.transcript) if isinstance(session.transcript, str) else session.transcript
             except (json.JSONDecodeError, ValueError, TypeError):
                 transcription_data = {"text": session.transcript} if session.transcript else None
-        
+
         result.append(SessionResponse(
             id=session.session_id or str(session.id),
             name=session.name or session.title or f"Session {session.id}",
@@ -381,8 +407,10 @@ async def list_sessions(
             project_app=session.project_app,
             project_id=session.project_id,
             project_slug=session.project_slug,
+            meeting_date=session.meeting_date.isoformat() if session.meeting_date else None,
+            meeting_time=session.meeting_time.isoformat() if session.meeting_time else None,
         ))
-    
+
     return result
 
 
@@ -641,6 +669,11 @@ async def get_session(
             "created_at": session.created_at.isoformat() if session.created_at else None,
             "started_at": session.started_at.isoformat() if session.started_at else None,
             "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+            # User-editable meeting date/time. ISO date / 24h time. Null
+            # only if backfill (alembic 027) found no started_at / created_at
+            # to pull from, or the user explicitly cleared the value.
+            "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
+            "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
             "status": session.status or "unknown",
             "duration": float(session.duration) if session.duration else 0.0,
             "audio_file": session.audio_file or "",
@@ -1362,6 +1395,44 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
 class RenameSessionRequest(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    # ISO YYYY-MM-DD; empty string or null clears. The string form lets
+    # the frontend send the native <input type="date"> value as-is.
+    meeting_date: Optional[str] = None
+    # 24h HH:MM[:SS]; empty string or null clears.
+    meeting_time: Optional[str] = None
+
+
+def _parse_meeting_date(value: Optional[str]):
+    """Parse a YYYY-MM-DD into a date, or None to clear.
+
+    Raises HTTPException(400) on malformed input so the client gets a
+    helpful error instead of a 500.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        from datetime import date as _date
+        return _date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"meeting_date must be YYYY-MM-DD, got {value!r}",
+        )
+
+
+def _parse_meeting_time(value: Optional[str]):
+    """Parse a HH:MM[:SS] into a time, or None to clear."""
+    if value is None or value == "":
+        return None
+    try:
+        from datetime import time as _time
+        # Native <input type="time"> emits HH:MM; ISO accepts both.
+        return _time.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"meeting_time must be HH:MM or HH:MM:SS, got {value!r}",
+        )
 
 
 @router.patch("/recording-sessions/{session_id}")
@@ -1372,12 +1443,13 @@ async def rename_session(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ):
-    """Update user-editable session metadata (title, description).
+    """Update user-editable session metadata.
 
-    Setting title flips title_user_set=True, which prevents the
-    auto-summary step from overwriting the rename on the next reprocess.
-    Clearing title back to empty string flips it False again so the
-    next summarize pass can re-generate one.
+    Supports title, description, meeting_date, meeting_time. Each is
+    independently optional. Setting title flips title_user_set=True,
+    which prevents the auto-summary step from overwriting the rename
+    on the next reprocess. Setting meeting_date / meeting_time to "" or
+    null clears the column back to NULL.
     """
     session = _get_session_for_org(db, active_org.organization.id, session_id)
     if not session:
@@ -1396,6 +1468,14 @@ async def rename_session(
     if request.description is not None:
         session.description = request.description
 
+    # meeting_date / meeting_time. The Pydantic field being present (not
+    # absent) is what triggers an update; "" clears, value writes.
+    fields_set = request.model_dump(exclude_unset=True)
+    if "meeting_date" in fields_set:
+        session.meeting_date = _parse_meeting_date(request.meeting_date)
+    if "meeting_time" in fields_set:
+        session.meeting_time = _parse_meeting_time(request.meeting_time)
+
     session.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(session)
@@ -1405,6 +1485,8 @@ async def rename_session(
         "session_id": session.session_id,
         "title": session.title,
         "title_user_set": session.title_user_set,
+        "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
+        "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
     }
 
 

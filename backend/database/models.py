@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Text, Float, Boolean, JSON, ForeignKey, Index, func
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Date, Time, Text, Float, Boolean, JSON, ForeignKey, Index, func
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
@@ -50,6 +50,14 @@ class RecordingSession(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = Column(DateTime)  # Changed from start_time
     ended_at = Column(DateTime)    # Changed from end_time
+    # User-editable "when the meeting actually happened" — separate from
+    # started_at/created_at which track when the recording landed on the
+    # server. Backfilled from DATE(started_at) / DATE(created_at) by
+    # alembic 027; foundation for the /import page that ingests Aaron's
+    # 526-file Voice Memos archive (each file's date comes from the
+    # filename parser, not the upload time).
+    meeting_date = Column(Date, nullable=True, index=True)
+    meeting_time = Column(Time, nullable=True)
     duration = Column(Float, default=0)
     status = Column(String(50), default="active")
     mode = Column(String(20), default="upload", nullable=False, server_default="upload")

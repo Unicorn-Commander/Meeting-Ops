@@ -94,6 +94,14 @@ interface Session {
   created_at: string;
   started_at?: string;
   ended_at?: string;
+  /**
+   * User-editable "when the meeting actually happened" — separate
+   * from started_at/created_at (server ingest time). ISO YYYY-MM-DD.
+   * Backfilled from started_at / created_at by alembic 027.
+   */
+  meeting_date?: string | null;
+  /** User-editable 24h time of day, HH:MM:SS. */
+  meeting_time?: string | null;
   status: string;
   duration?: number;
   audio_file?: string;
@@ -306,6 +314,13 @@ export const SessionDetails: React.FC = () => {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  // Meeting date / time editor. Both columns are user-editable on the
+  // recording_sessions row (alembic 027) and represent when the meeting
+  // actually happened, distinct from server ingest time.
+  const [editingMeetingDate, setEditingMeetingDate] = useState(false);
+  const [meetingDateDraft, setMeetingDateDraft] = useState<string>("");
+  const [meetingTimeDraft, setMeetingTimeDraft] = useState<string>("");
+  const [savingMeetingDate, setSavingMeetingDate] = useState(false);
   const [projectLinkDraft, setProjectLinkDraft] = useState<ProjectLink>({
     project_app: null,
     project_id: null,
@@ -1316,6 +1331,61 @@ export const SessionDetails: React.FC = () => {
     setEditingTitle(true);
   };
 
+  const startEditMeetingDate = () => {
+    if (!session) return;
+    // Hydrate from session.meeting_date if set; otherwise fall back to
+    // the calendar date of started_at / created_at so the user has a
+    // sensible default already in the input on first edit. Time stays
+    // empty unless meeting_time is set — we don't want to guess.
+    const fallbackDate = (session.started_at || session.created_at || "").slice(0, 10);
+    setMeetingDateDraft((session.meeting_date || fallbackDate || "") as string);
+    // The API returns HH:MM:SS, but <input type="time"> wants HH:MM.
+    const tRaw = session.meeting_time || "";
+    setMeetingTimeDraft(tRaw ? tRaw.slice(0, 5) : "");
+    setEditingMeetingDate(true);
+  };
+
+  const saveMeetingDate = async () => {
+    if (!session) return;
+    setSavingMeetingDate(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const body: Record<string, string | null> = {
+        // Empty input clears the column back to NULL on the server.
+        meeting_date: meetingDateDraft || null,
+        meeting_time: meetingTimeDraft || null,
+      };
+      const response = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setSession({
+          ...session,
+          meeting_date: data.meeting_date ?? null,
+          meeting_time: data.meeting_time ?? null,
+        });
+        setEditingMeetingDate(false);
+      } else {
+        const errText = await response.text();
+        alert(`Failed to update meeting date: ${errText}`);
+      }
+    } catch (err) {
+      console.error('Meeting date save failed:', err);
+      alert('Failed to update meeting date');
+    } finally {
+      setSavingMeetingDate(false);
+    }
+  };
+
   const saveTitle = async () => {
     if (!session) return;
     setSavingTitle(true);
@@ -1661,11 +1731,74 @@ export const SessionDetails: React.FC = () => {
                     <span className="text-xs text-red-600 ml-1">{tagError}</span>
                   )}
                 </div>
-                <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
-                  <span className="flex items-center gap-1">
-                    <Calendar className="w-4 h-4" />
-                    {formatDate(session.created_at)}
-                  </span>
+                <div className="flex items-center gap-4 mt-1 text-sm text-gray-500 flex-wrap">
+                  {/* Meeting date / time: inline-editable, distinct from
+                      the server ingest time. Click the calendar pill to
+                      open native date + time inputs. Falls back to the
+                      ingest date for sessions that haven't been edited
+                      since the alembic 027 backfill. */}
+                  {editingMeetingDate ? (
+                    <span className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-purple-500" />
+                      <input
+                        type="date"
+                        value={meetingDateDraft}
+                        onChange={(e) => setMeetingDateDraft(e.target.value)}
+                        disabled={savingMeetingDate}
+                        className="text-sm px-2 py-0.5 bg-white border border-gray-300 rounded text-gray-700 focus:outline-none focus:border-purple-500"
+                      />
+                      <input
+                        type="time"
+                        value={meetingTimeDraft}
+                        onChange={(e) => setMeetingTimeDraft(e.target.value)}
+                        disabled={savingMeetingDate}
+                        className="text-sm px-2 py-0.5 bg-white border border-gray-300 rounded text-gray-700 focus:outline-none focus:border-purple-500"
+                      />
+                      <button
+                        onClick={saveMeetingDate}
+                        disabled={savingMeetingDate}
+                        className="flex items-center gap-1 px-2 py-0.5 bg-purple-600 text-white text-xs rounded hover:bg-purple-700 disabled:opacity-50"
+                        title="Save meeting date"
+                      >
+                        {savingMeetingDate ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Check className="w-3 h-3" />
+                        )}
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setEditingMeetingDate(false)}
+                        disabled={savingMeetingDate}
+                        className="px-2 py-0.5 text-xs text-gray-500 hover:text-gray-700"
+                        title="Cancel"
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startEditMeetingDate}
+                      className="flex items-center gap-1 hover:text-purple-600 transition-colors group"
+                      title="Edit meeting date"
+                    >
+                      <Calendar className="w-4 h-4" />
+                      {session.meeting_date
+                        ? new Date(session.meeting_date + 'T00:00:00').toLocaleDateString(undefined, {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                          })
+                        : formatDate(session.created_at)}
+                      {session.meeting_time && (
+                        <span className="text-gray-400 tabular-nums">
+                          {session.meeting_time.slice(0, 5)}
+                        </span>
+                      )}
+                      <Edit2 className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400" />
+                    </button>
+                  )}
                   <span className="flex items-center gap-1">
                     <Clock className="w-4 h-4" />
                     {session.duration ? formatTime(session.duration) : 'N/A'}

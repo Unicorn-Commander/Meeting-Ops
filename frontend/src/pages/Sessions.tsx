@@ -44,6 +44,11 @@ interface Session {
   description?: string;
   created_at: string;
   updated_at: string;
+  /** User-editable meeting date (ISO YYYY-MM-DD), distinct from
+   *  created_at. Backfilled from started_at / created_at by alembic 027. */
+  meeting_date?: string | null;
+  /** User-editable 24h time of day (HH:MM:SS). */
+  meeting_time?: string | null;
   duration?: number;
   status: 'idle' | 'active' | 'recording' | 'completed' | 'processing' | 'failed';
   participants?: Participant[];
@@ -96,9 +101,39 @@ interface RagMessage {
 }
 
 type SortKey = 'date' | 'name' | 'duration' | 'speakers' | 'status';
+/**
+ * dateBasis controls what the 'date' column + 'date' sort key actually
+ * compare against:
+ *   - 'upload'  → created_at (server ingest time, existing default)
+ *   - 'meeting' → meeting_date (user-editable "when it actually happened")
+ *
+ * Lives in localStorage so a user who imports 526 historical Voice Memos
+ * doesn't have to flip the toggle every session.
+ */
+type DateBasis = 'upload' | 'meeting';
 
 const VIEW_MODE_KEY = 'meetingops.sessionsViewMode.v1';
+const DATE_BASIS_KEY = 'meetingops.sessionsDateBasis.v1';
 const VALID_SORT_KEYS: ReadonlyArray<SortKey> = ['date', 'name', 'duration', 'speakers', 'status'];
+
+function readDateBasis(): DateBasis {
+  try {
+    const v = localStorage.getItem(DATE_BASIS_KEY);
+    return v === 'meeting' ? 'meeting' : 'upload';
+  } catch {
+    return 'upload';
+  }
+}
+
+/** Pull the comparable date string for sort + display, honoring dateBasis.
+ *  When dateBasis = 'meeting' and meeting_date is null, falls back to
+ *  created_at so a session never disappears from the date column. */
+function effectiveSessionDate(session: Session, basis: DateBasis): string {
+  if (basis === 'meeting' && session.meeting_date) {
+    return session.meeting_date;
+  }
+  return session.created_at;
+}
 
 function deriveSpeakerCount(session: Session): number {
   if (typeof session.speaker_count === 'number' && session.speaker_count > 0) {
@@ -135,6 +170,7 @@ interface SessionsTableProps {
   formatDuration: (seconds?: number) => string;
   getStatusColor: (status: string) => string;
   getStatusLabel: (status: string) => string;
+  dateBasis: DateBasis;
 }
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
@@ -168,6 +204,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
   formatDuration,
   getStatusColor,
   getStatusLabel,
+  dateBasis,
 }) => {
   const filtered = useMemo(() => {
     return sessions.filter((s) => {
@@ -217,7 +254,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
           <thead className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur">
             <tr className="border-b border-gray-800">
               <th className="px-4 py-3 text-left">{headerBtn('name', 'Title')}</th>
-              <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('date', 'Date')}</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('date', dateBasis === 'meeting' ? 'Meeting' : 'Uploaded')}</th>
               <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('duration', 'Duration')}</th>
               <th className="px-4 py-3 text-left whitespace-nowrap">
                 <div className="flex items-center gap-2">
@@ -382,7 +419,17 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                       )}
                     </td>
                     <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300">
-                      {session.created_at ? new Date(session.created_at).toLocaleDateString() : '—'}
+                      {(() => {
+                        const d = effectiveSessionDate(session, dateBasis);
+                        if (!d) return '—';
+                        // meeting_date is plain YYYY-MM-DD without TZ;
+                        // pin it to local midnight to avoid an off-by-one
+                        // when the browser TZ is west of UTC.
+                        const parsed = d.length === 10
+                          ? new Date(d + 'T00:00:00')
+                          : new Date(d);
+                        return parsed.toLocaleDateString();
+                      })()}
                     </td>
                     <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300 tabular-nums">
                       {formatDuration(session.duration)}
@@ -524,6 +571,14 @@ export const Sessions: React.FC = () => {
       return 'grid';
     }
   });
+  // dateBasis decides whether the date column + 'date' sort use the
+  // server upload time (default) or the user-editable meeting_date.
+  // Persisted in localStorage so a user backfilling historical audio
+  // doesn't have to flip it every visit.
+  const [dateBasis, setDateBasis] = useState<DateBasis>(() => readDateBasis());
+  useEffect(() => {
+    try { localStorage.setItem(DATE_BASIS_KEY, dateBasis); } catch { /* non-fatal */ }
+  }, [dateBasis]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -817,7 +872,7 @@ export const Sessions: React.FC = () => {
 
   useEffect(() => {
     filterSessions();
-  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, sortBy, sortOrder]);
+  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, sortBy, sortOrder, dateBasis]);
 
   // showSpinner=false on polling refresh so the list doesn't flash
   // through the empty-loading state every 10 seconds. Initial mount + filter
@@ -958,10 +1013,15 @@ export const Sessions: React.FC = () => {
           bValue = (b.status || '').toLowerCase();
           break;
         case 'date':
-        default:
-          aValue = new Date(a.created_at).getTime();
-          bValue = new Date(b.created_at).getTime();
+        default: {
+          // Sort by upload (created_at) or meeting (meeting_date with
+          // created_at fallback) depending on the dateBasis toggle.
+          const aRaw = effectiveSessionDate(a, dateBasis);
+          const bRaw = effectiveSessionDate(b, dateBasis);
+          aValue = aRaw ? new Date(aRaw.length === 10 ? aRaw + 'T00:00:00' : aRaw).getTime() : 0;
+          bValue = bRaw ? new Date(bRaw.length === 10 ? bRaw + 'T00:00:00' : bRaw).getTime() : 0;
           break;
+        }
       }
 
       if (sortOrder === 'asc') {
@@ -1323,6 +1383,26 @@ export const Sessions: React.FC = () => {
                 Ask AI
               </button>
             )}
+
+            {/* Date Basis Toggle — controls whether the date column +
+                'date' sort use the server upload time or the
+                user-editable meeting_date. */}
+            <div className="flex items-center bg-gray-800 rounded-lg" title="Sort sessions by upload date or meeting date">
+              <button
+                onClick={() => setDateBasis('upload')}
+                className={`px-3 py-2 text-xs rounded-l-lg transition-colors ${dateBasis === 'upload' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                aria-pressed={dateBasis === 'upload'}
+              >
+                Uploaded
+              </button>
+              <button
+                onClick={() => setDateBasis('meeting')}
+                className={`px-3 py-2 text-xs rounded-r-lg transition-colors ${dateBasis === 'meeting' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                aria-pressed={dateBasis === 'meeting'}
+              >
+                Meeting date
+              </button>
+            </div>
 
             {/* View Mode Toggle */}
             <div className="flex items-center bg-gray-800 rounded-lg">
@@ -1784,6 +1864,7 @@ export const Sessions: React.FC = () => {
               formatDuration={formatDuration}
               getStatusColor={getStatusColor}
               getStatusLabel={getStatusLabel}
+              dateBasis={dateBasis}
             />
           )
         )}
