@@ -21,7 +21,12 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the application (skip TypeScript checking for Docker)
+# Build the application. build:docker now runs `tsc -b && vite build`
+# (parity with `npm run build`), so a strict TypeScript error fails the
+# Docker build instead of silently riding to production as it did before
+# (17 strict errors + at least one real runtime bug in
+# AdminBulkImport.tsx where showToast was called as a function instead
+# of showToast.error(...) snuck through for weeks).
 RUN npm run build:docker
 
 # Production stage

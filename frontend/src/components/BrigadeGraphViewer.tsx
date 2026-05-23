@@ -270,7 +270,11 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
       >
         {containerWidth > 0 && (
           <ForceGraph3D
-            ref={fgRef as React.MutableRefObject<unknown>}
+            // react-force-graph-3d's ref typing is generic and depends
+            // on the node/link generic params; we don't use the imperative
+            // API today so a loose any-cast keeps the call-site type-clean
+            // without dragging in ForceGraphMethods from the lib.
+            ref={fgRef as React.MutableRefObject<any>}
             graphData={graphData}
             width={containerWidth}
             height={height}

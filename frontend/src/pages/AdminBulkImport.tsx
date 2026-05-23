@@ -101,7 +101,7 @@ export default function AdminBulkImport() {
       setJobs(data.jobs);
     } catch (err) {
       console.error('Failed to fetch admin jobs:', err);
-      showToast('Failed to load bulk import jobs', 'error');
+      showToast.error('Failed to load bulk import jobs');
     } finally {
       setLoading(false);
     }
@@ -116,7 +116,7 @@ export default function AdminBulkImport() {
       setJobDetail(data);
     } catch (err) {
       console.error('Failed to fetch job detail:', err);
-      showToast('Failed to load job details', 'error');
+      showToast.error('Failed to load job details');
     } finally {
       setDetailLoading(false);
     }
@@ -144,13 +144,13 @@ export default function AdminBulkImport() {
         const detail = await resp.text();
         throw new Error(detail || `HTTP ${resp.status}`);
       }
-      showToast(`Job ${action}d successfully`, 'success');
+      showToast.success(`Job ${action}d successfully`);
       await fetchJobs();
       if (selectedJob === jobId) {
         await fetchJobDetail(jobId);
       }
     } catch (err) {
-      showToast(`Failed to ${action} job: ${err}`, 'error');
+      showToast.error(`Failed to ${action} job: ${err}`);
     } finally {
       setActionLoading(null);
     }

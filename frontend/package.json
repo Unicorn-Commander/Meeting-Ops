@@ -9,7 +9,7 @@
     "dev:localhost": "vite --host localhost",
     "build": "tsc -b && vite build",
     "build:production": "vite build",
-    "build:docker": "vite build",
+    "build:docker": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
