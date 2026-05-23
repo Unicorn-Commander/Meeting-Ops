@@ -54,10 +54,8 @@ class WorkerSettings:
 
     functions = [process_bulk_file]
     max_jobs = get_bulk_import_concurrency()
-    redis_settings = RedisSettings(
-        host="unicorn-redis",
-        port=6379,
-        database=4,
+    redis_settings = RedisSettings.from_dsn(
+        os.getenv("ARQ_REDIS_URL") or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
     )
     job_timeout = 3600
 
@@ -70,9 +68,9 @@ async def get_arq_pool():
     global _arq_pool
     if _arq_pool is None:
         _arq_pool = await create_pool(
-            host="unicorn-redis",
-            port=6379,
-            database=4,
+            RedisSettings.from_dsn(
+                os.getenv("ARQ_REDIS_URL") or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
+            )
         )
     return _arq_pool
 
