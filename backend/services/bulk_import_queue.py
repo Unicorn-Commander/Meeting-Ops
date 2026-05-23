@@ -53,13 +53,11 @@ import asyncio
 import hashlib
 import logging
 import os
-import shutil
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -167,18 +165,6 @@ def _find_existing_session_by_sha256(
         )
         .first()
     )
-
-
-def _get_org_slug(db: Session, organization_id: int) -> str:
-    """Cheap lookup so the local disk path is human-readable."""
-    from auth.models import Organization
-
-    org = (
-        db.query(Organization)
-        .filter(Organization.id == organization_id)
-        .first()
-    )
-    return org.slug if org else str(organization_id)
 
 
 def _safe_ext(filename: str) -> str:
@@ -465,7 +451,6 @@ class BulkImportPipelineQueue:
             org_id = job.organization_id
             user_id = job.user_id
             job_id = job.id
-            org_slug = _get_org_slug(db, org_id)
             original_filename = file_row.original_filename
             local_path = (
                 _bulk_dir(job_id)
