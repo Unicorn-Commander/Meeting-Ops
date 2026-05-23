@@ -113,19 +113,24 @@ async def test_enqueue_file_creates_arq_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_respects_max_jobs_concurrency():
-    """WorkerSettings.max_jobs reflects BULK_IMPORT_WORKERS env."""
-    import os
-    os.environ["BULK_IMPORT_WORKERS"] = "3"
-    try:
-        # Force reimport
-        import importlib
-        import workers.bulk_import_worker
-        importlib.reload(workers.bulk_import_worker)
-        from workers.bulk_import_worker import WorkerSettings
-        assert WorkerSettings.max_jobs == 3
-    finally:
-        os.environ["BULK_IMPORT_WORKERS"] = "2"
-        import importlib
-        import workers.bulk_import_worker
-        importlib.reload(workers.bulk_import_worker)
+async def test_worker_respects_max_jobs_concurrency(monkeypatch):
+    """BULK_IMPORT_WORKERS env feeds through to the concurrency helper.
+
+    We test the helper function directly rather than reloading the worker
+    module. importlib.reload(workers.bulk_import_worker) transitively
+    re-imports database.models, which puts fresh Table objects on
+    Base.metadata and breaks every other test in the suite whose FK
+    relationships are bound to the OLD tables (test_bulk_import.py's
+    test_duplicate_sha256_marked_skipped was the canary). See bug class
+    4 cleanup 2026-05-22.
+    """
+    from services.bulk_import_queue import get_bulk_import_concurrency
+
+    monkeypatch.setenv("BULK_IMPORT_WORKERS", "3")
+    assert get_bulk_import_concurrency() == 3
+
+    monkeypatch.setenv("BULK_IMPORT_WORKERS", "1")
+    assert get_bulk_import_concurrency() == 1
+
+    monkeypatch.delenv("BULK_IMPORT_WORKERS", raising=False)
+    assert get_bulk_import_concurrency() == 2  # documented default

@@ -111,6 +111,15 @@ def app():
     # resolve to the freshly-reloaded tables on Base.metadata.
     if "database.models_rooms" in sys.modules:
         importlib.reload(sys.modules["database.models_rooms"])
+    # Bulk-import code paths cache model references at import time
+    # (workers.bulk_import_worker, services.bulk_import_queue). When other
+    # tests import them BEFORE the app fixture runs (e.g. test_arq_worker.py),
+    # those cached references point at the original Base, which the
+    # database.models reload has now replaced. Reload them too so their
+    # model lookups resolve through the freshly-bound Base.metadata.
+    for mod_name in ("services.bulk_import_queue", "workers.bulk_import_worker"):
+        if mod_name in sys.modules:
+            importlib.reload(sys.modules[mod_name])
     from database.database import engine, SessionLocal
     from database.models import Base
 

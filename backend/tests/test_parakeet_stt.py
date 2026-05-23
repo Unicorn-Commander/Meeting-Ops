@@ -7,7 +7,7 @@ These cover the bits we OWN:
   * The dummy whisper / parakeet providers expose the same `transcribe`
     signature so the upload pipeline can call either without branching.
 
-We intentionally do NOT exercise the live HTTP endpoints — those are covered
+We intentionally do NOT exercise the live HTTP endpoints, those are covered
 by the curl smoke tests in deploy/bigboy/STATUS.md.
 """
 from __future__ import annotations
@@ -100,9 +100,20 @@ class TestSTTAvailableProviders:
 
 
 class TestProviderRegistrySTTRouting:
-    """Registry resolves the right STT provider per org-level setting."""
+    """Registry resolves the right STT provider per org-level setting.
 
-    def test_default_is_local_whisper(self):
+    Takes the session-scoped `app` fixture so table creation runs first.
+    Without it these tests fail in isolation with "no such table" because
+    `app` is the fixture that calls Base.metadata.create_all(...).
+    """
+
+    def test_default_is_local_whisper(self, app, monkeypatch):
+        """With STT_DEFAULT_PROVIDER=local_whisper, registry falls back to whisper
+        when no per-org row exists. (Codebase default flipped to parakeet on
+        the Phase B.2 commit, so this test now explicitly pins the legacy
+        whisper default.)
+        """
+        monkeypatch.setenv("STT_DEFAULT_PROVIDER", "local_whisper")
         from services.providers.registry import ProviderRegistry
         from services.providers.impl_stt import LocalWhisperProvider
         _, _, _, SessionLocal, OrgProviderSettings = _models()
@@ -117,7 +128,32 @@ class TestProviderRegistrySTTRouting:
             db.rollback()
             db.close()
 
-    def test_parakeet_resolves_when_provider_name_set(self):
+    def test_default_is_parakeet_in_production(self, app, monkeypatch):
+        """No STT_DEFAULT_PROVIDER env -> default is parakeet (current prod default)."""
+        monkeypatch.delenv("STT_DEFAULT_PROVIDER", raising=False)
+        from services.providers.registry import ProviderRegistry
+        from services.providers.impl_stt import LocalParakeetProvider
+        _, _, _, SessionLocal, OrgProviderSettings = _models()
+        db = SessionLocal()
+        try:
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+            registry = ProviderRegistry(db)
+            stt = registry.get_stt(org_id=999_998)
+            assert isinstance(stt, LocalParakeetProvider)
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_parakeet_resolves_when_provider_name_set(self, app, monkeypatch):
+        """When provider_name=parakeet is set, registry returns Parakeet provider
+        and falls back to the in-cluster URL when PARAKEET_SERVER_URL isn't set.
+
+        Production sets PARAKEET_SERVER_URL=http://100.66.42.57:8881, so we
+        clear it here to assert the in-cluster default path.
+        """
+        monkeypatch.delenv("PARAKEET_SERVER_URL", raising=False)
+
         from services.providers.registry import ProviderRegistry
         from services.providers.impl_stt import LocalParakeetProvider
         _, _, _, SessionLocal, OrgProviderSettings = _models()
@@ -138,13 +174,12 @@ class TestProviderRegistrySTTRouting:
             registry = ProviderRegistry(db)
             stt = registry.get_stt(org_id=org.id)
             assert isinstance(stt, LocalParakeetProvider)
-            # Endpoint should default to the in-cluster service URL.
             assert stt.endpoint.startswith("http://meet-parakeet-svc:")
         finally:
             db.rollback()
             db.close()
 
-    def test_unknown_provider_falls_back_to_whisper(self):
+    def test_unknown_provider_falls_back_to_whisper(self, app):
         from services.providers.registry import ProviderRegistry
         from services.providers.impl_stt import LocalWhisperProvider
         _, _, _, SessionLocal, OrgProviderSettings = _models()
