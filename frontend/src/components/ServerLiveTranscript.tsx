@@ -90,11 +90,24 @@ function SpeakerBadges({ speakers }: { speakers?: SpeakerTurn[] }) {
 
 // ---- Component ----
 
+interface FinalizedToken {
+  word: string;
+  start: number;
+  end: number;
+  confidence?: number;
+}
+
 interface TranscriptEntry {
   type: 'partial' | 'final';
   sequence: number;
   text: string;
   speakers?: SpeakerTurn[];
+  // v2.0.0: per-word finalized tokens (delta — only the words newly
+  // promoted from draft → finalized in THIS frame). Empty arrays when
+  // STREAMING_USE_V2_PARAKEET is off server-side.
+  tokensFinalized?: FinalizedToken[];
+  textDraft?: string;
+  eouDetected?: boolean;
 }
 
 interface ServerLiveTranscriptProps {
@@ -204,8 +217,15 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
             sequence: msg.sequence ?? 0,
             text: (msg.text ?? '').trim(),
             speakers: Array.isArray(msg.speakers) ? msg.speakers : undefined,
+            tokensFinalized: Array.isArray(msg.tokens_finalized)
+              ? (msg.tokens_finalized as FinalizedToken[])
+              : undefined,
+            textDraft: typeof msg.text_draft === 'string' ? msg.text_draft : undefined,
+            eouDetected: Boolean(msg.eou_detected),
           };
-          if (!entry.text) return;
+          // Allow empty text when an EOU marker fires alone — the chip
+          // alone is informative even without new words.
+          if (!entry.text && !entry.eouDetected) return;
           setTranscript(prev => {
             // Cap at 200 entries to keep DOM manageable on long sessions.
             const next = [...prev, entry];
@@ -303,10 +323,40 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
                 paddingLeft: 8,
                 marginBottom: 3,
               }}
-              title={`${e.type} seq=${e.sequence}`}
+              title={`${e.type} seq=${e.sequence}${e.tokensFinalized ? ` tokens=${e.tokensFinalized.length}` : ''}`}
             >
               <SpeakerBadges speakers={e.speakers} />
               {e.text}
+              {/* v2.0.0: in-flight draft tokens — model has not committed
+                  these yet, may revise. Rendered in faint italic so users
+                  see the leading edge of the stream without confusing it
+                  with finalized text. Hidden when text_draft is empty. */}
+              {e.textDraft && (
+                <span style={{ opacity: 0.45, fontStyle: 'italic', marginLeft: 4 }}>
+                  {e.textDraft}
+                </span>
+              )}
+              {/* v2.0.0: EOU detection chip. Fires when the model emits
+                  the <EOU> end-of-utterance token, telling the user the
+                  system recognized they stopped talking. Subtle indicator
+                  rather than a big banner. */}
+              {e.eouDetected && (
+                <span
+                  style={{
+                    marginLeft: 6,
+                    padding: '1px 5px',
+                    borderRadius: 3,
+                    background: '#52525b',
+                    color: '#d4d4d8',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: 0.3,
+                  }}
+                  title="End of utterance detected by streaming model"
+                >
+                  EOU
+                </span>
+              )}
             </div>
           ))
         )}

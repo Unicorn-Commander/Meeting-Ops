@@ -614,7 +614,17 @@ async def _flush_to_stt(
     try:
         wav_bytes = _pcm16_to_wav_bytes(pcm_at_call, state.sample_rate)
 
-        url = f"{PARAKEET_STREAM_URL}/transcribe-stream"
+        # Phase B.3 chunk C: v2 endpoint serves per-word tokens_finalized +
+        # tokens_draft instead of a single text + segments shape. Routes via
+        # STREAMING_USE_V2_PARAKEET (flipped to 1 in v2.0.0 once the new
+        # streaming-trained checkpoint shipped in v1.5.0). v1 endpoint stays
+        # on the same parakeet-stream-svc image so rollback is a single env
+        # flip.
+        url = (
+            f"{PARAKEET_STREAM_URL}/transcribe-stream-v2"
+            if STREAMING_USE_V2_PARAKEET
+            else f"{PARAKEET_STREAM_URL}/transcribe-stream"
+        )
         headers = {
             "Content-Type": "audio/wav",
             "X-Session-Id": state.session_id,
@@ -701,11 +711,50 @@ async def _flush_to_stt(
             })
             return
 
-        text = (data.get("text") or "").strip()
-        segments = data.get("segments") or []
-        confidence = data.get("confidence")
-        model = data.get("model")
-        rtf = data.get("rtf")
+        # Phase B.3 v2 endpoint: response shape is different.
+        # v1: { text, segments, confidence, model, rtf }
+        # v2: { tokens_finalized: [{word, start, end, confidence}, ...],
+        #       tokens_draft, text_finalized, text_draft, model, rtf, ... }
+        # Both shapes flow into ONE outbound JSON; clients consume whichever
+        # set they understand. New fields ride alongside the legacy text/
+        # segments so v1.4.x clients keep working.
+        tokens_finalized: list = []
+        tokens_draft: list = []
+        text_draft: str = ""
+        eou_detected: bool = False
+        if STREAMING_USE_V2_PARAKEET:
+            tokens_finalized = data.get("tokens_finalized") or []
+            tokens_draft = data.get("tokens_draft") or []
+            text = (data.get("text_finalized") or "").strip()
+            text_draft = (data.get("text_draft") or "").strip()
+            # EOU detection: the EOU token shows up as the last word's
+            # text or as a suffix in text_finalized. Detect either way.
+            if tokens_finalized:
+                last_word = (tokens_finalized[-1].get("word") or "")
+                if "<EOU>" in last_word or "<eou>" in last_word.lower():
+                    eou_detected = True
+            if not eou_detected and ("<EOU>" in text or "<eou>" in text.lower()):
+                eou_detected = True
+            # Strip the EOU sentinel from the user-facing text so the UI
+            # does not render it as a word. We still surface it via the
+            # eou_detected flag below.
+            text = text.replace("<EOU>", "").replace("<eou>", "").strip()
+            segments = []  # v2 omits chunk-level segments; per-word is the unit
+            confidence = None  # v2 confidence lives per-token, not per-call
+            model = data.get("model")
+            rtf = data.get("rtf")
+        else:
+            text = (data.get("text") or "").strip()
+            segments = data.get("segments") or []
+            confidence = data.get("confidence")
+            model = data.get("model")
+            rtf = data.get("rtf")
+            # v1 model (parakeet_realtime_eou_120m-v1) ALSO emits <EOU>
+            # as a literal suffix in the text. Strip + surface as flag
+            # so frontends can show a "stopped talking" indicator.
+            if "<EOU>" in text or "<eou>" in text.lower():
+                eou_detected = True
+                text = text.replace("<EOU>", "").replace("<eou>", "").strip()
 
         # Phase B.3 chunk D: collect sortformer result if it was dispatched.
         # By this point parakeet has finished; sortformer is usually faster
@@ -800,6 +849,15 @@ async def _flush_to_stt(
             "sortformer_model": sortformer_model,
             "sortformer_rtf": sortformer_rtf,
             "sortformer_distinct_speakers": sortformer_distinct_speakers,
+            # Phase B.3 chunk C / v2.0.0 wire-up: per-word stream + EOU.
+            # Empty arrays when STREAMING_USE_V2_PARAKEET is off or the
+            # checkpoint doesn't expose word timestamps. eou_detected
+            # also fires on v1 endpoint when the new EOU-trained model
+            # (parakeet_realtime_eou_120m-v1) emits <EOU> in the text.
+            "tokens_finalized": tokens_finalized,
+            "tokens_draft": tokens_draft,
+            "text_draft": text_draft,
+            "eou_detected": eou_detected,
         })
         # Phase B.5 metric: count emitted partial/final back to client.
         ws_partial_transcripts_emitted_total.inc()

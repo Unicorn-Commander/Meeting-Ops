@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-26
+
+### Added
+- **True cache-aware streaming WS path is now the production default**: backend `_flush_to_stt` now POSTs to `services/parakeet-stream-svc/main.py`'s `/transcribe-stream-v2` endpoint (built by Agent C in v1.2.0 as a stepping stone) instead of `/transcribe-stream`. Combined with the v1.5.0 model swap to `parakeet_realtime_eou_120m-v1`, this is the realization of Phase B.3 chunk C's original vision — Agent C's spike found the v3 checkpoint blocked cache-aware streaming, so they built the v2 endpoint as a stepping stone; v1.5.0 swapped to a checkpoint that actually supports it; v2.0.0 wires the endpoint up live. Gated by `STREAMING_USE_V2_PARAKEET=1` in `.env.bigboy` + the explicit forward in the backend service env block of `docker-compose.bigboy.yml`. Rollback is a single env flip back to 0 + backend restart.
+- **Partial/final JSON frames now carry per-word `tokens_finalized` array**: each WS frame from the live endpoint includes `tokens_finalized: [{word, start, end, confidence}, ...]` (delta of words newly promoted from draft → finalized in THIS frame) plus `tokens_draft`, `text_draft`, and `eou_detected: bool`. The legacy `text` field stays populated (built from the joined finalized words) so v1.4.x clients keep working. New fields ride alongside the existing `segments` / `confidence` / `model` / `rtf` shape — additive, non-breaking.
+- **End-of-utterance (EOU) detection surfaced in the live UI**: the streaming-trained model emits an `<EOU>` token when the speaker stops talking. The backend strips the literal token from `text` (so the UI doesn't render it as a word) and surfaces it as `eou_detected: bool` on the outbound WS frame. The frontend `ServerLiveTranscript` renders a small gray "EOU" chip next to entries where the model detected end-of-utterance — visible feedback that the model understands speaker pauses. Works on both v2-endpoint and v1-endpoint paths (the new model emits `<EOU>` either way).
+- **In-flight draft tokens visualized**: when `tokens_draft` is non-empty (model emitted speculative words it may revise), the frontend renders `text_draft` in faint italic next to the finalized text. Gives users a sense of the leading edge of the transcript stream without committing them to the un-stable suffix.
+
+### Changed
+- **Wire-contract bump for the live WS endpoint**: partial/final frames may now contain `tokens_finalized` + `tokens_draft` + `text_draft` + `eou_detected`. Clients that ignored unknown fields (the v1.x compat path) keep working; clients that want per-word streaming UX should consume the new fields. This is the rationale for the 2.0.0 major bump — wire-format addition, not removal, but a semantic widening of what live WS frames carry.
+
+### Notes
+- The v1.3.0 `consumed_through_ms` cursor + `audioop.rms` VAD silence-gate workarounds STAY in place. With v1.5.0's EOU-trained checkpoint they should fire much less often (the model itself recognizes silence), but they're cheap insurance against checkpoint regressions or unusual audio. We can remove them in v2.1.0 if production telemetry shows zero firings over a sustained window.
+- The v2 endpoint is session-stateful (maintains a per-`X-Session-Id` audio ring). Backend WS forwarder already passes a stable `X-Session-Id` header per WS connection, so the svc reconstructs the ring correctly across the 2.5s flush cadence.
+- Per-word streaming UI in v2.0.0 is intentionally minimal — full per-word render-as-they-arrive (the v2.1.0 polish) requires a richer state model than "one transcript entry per partial frame". For now the entries still snap in at 2.5s cadence; the draft + EOU chips are the visible upgrade.
+
 ## [1.5.0] - 2026-05-26
 
 ### Changed
