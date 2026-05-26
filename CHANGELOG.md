@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-26
+
+### Added
+- **Server-live transcript with Sortformer speaker labels now visible inside the production Record page**: refactored the Phase B.2 streaming UX out of the admin-only `/streaming-test` diagnostic and into the actual `/record` page (`LiveRecording.tsx`). New reusable component `frontend/src/components/ServerLiveTranscript.tsx` (~270 lines) owns the WebSocket lifecycle for `/ws/sessions/{sessionId}/live`, runs its own AudioWorklet mic capture via the existing `startPcm16Capture` helper, and renders a transcript pane with the v1.2.1 `<SpeakerBadges>` color palette inline. Drop-in component takes `sessionId` + `enabled` props; teardown / re-init is automatic on prop changes. Tier-gated at the call site via `useTierFeatures().hasFeature('server_live')` — free tier sees no change, enterprise / pro / superuser see a second transcript pane fed by Phase B.2 streaming + Sortformer parallel dispatch (per v1.2.0 / v1.3.0 / v1.3.1). Both pipelines run in parallel during a recording — the existing `/ws/transcription-auto` path keeps providing live captions + auto-summaries + audio-levels, the new `/ws/sessions/{id}/live` path adds the speaker-labeled near-streaming view. Browsers happily share one OS-level mic across multiple `getUserMedia` calls, so the dual-pipeline architecture works without coordination. The admin `/streaming-test` page stays as the diagnostic; this is the production view. Frontend Docker build (tsc -b strict per v1.1.0) succeeds; 5 baseline vite warnings unchanged.
+
 ## [1.3.1] - 2026-05-26
 
 ### Fixed

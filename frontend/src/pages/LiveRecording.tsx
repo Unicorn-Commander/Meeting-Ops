@@ -31,6 +31,8 @@ import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
 import AlwaysOnControl from '../components/AlwaysOnControl';
 import ConfirmModal from '../components/ConfirmModal';
 import PipelineStatusPicker from '../components/PipelineStatusPicker';
+import ServerLiveTranscript from '../components/ServerLiveTranscript';
+import { useTierFeatures } from '../hooks/useTierFeatures';
 import {
   isAlwaysOnActive,
   setRecordActive,
@@ -179,6 +181,11 @@ export default function LiveRecording() {
 
   // Always-on recording mode
   const { token } = useAuth();
+  // Phase B.3 chunk D: gate the server-live transcript + speaker badges on
+  // the tier_features.server_live flag. Free tier sees no change; enterprise
+  // / pro / superuser get a second transcript pane fed by Phase B.2 + Sortformer.
+  const { hasFeature } = useTierFeatures();
+  const serverLiveEnabled = hasFeature('server_live');
   const [alwaysOnEnabled, setAlwaysOnEnabled] = useState(false);
   const [alwaysOnState, setAlwaysOnState] = useState<string>('IDLE');
   const [alwaysOnSessionId, setAlwaysOnSessionId] = useState<string | null>(null);
@@ -1504,6 +1511,21 @@ export default function LiveRecording() {
                   </span>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Phase B.3 chunk D: server-live transcript with Sortformer
+              speaker labels. Renders only for users whose tier exposes
+              the `server_live` feature (enterprise / pro / superuser).
+              Opens its own WS to /ws/sessions/{id}/live and runs in
+              parallel with the existing /ws/transcription-auto pipeline
+              — the user sees BOTH transcripts while recording. */}
+          {serverLiveEnabled && sessionData?.id && (
+            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
+              <ServerLiveTranscript
+                sessionId={sessionData.id}
+                enabled={isRecording}
+              />
             </div>
           )}
         </div>
