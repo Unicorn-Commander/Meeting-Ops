@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, Lock, Mic, RefreshCw } from 'lucide-react';
+import { Brain, Download, Lock, Mic, RefreshCw } from 'lucide-react';
 import {
   DEFAULT_AUTO_CONFIG,
   DEFAULT_MODEL_ID,
@@ -100,6 +100,28 @@ export default function InBrowserAISettings(_props: SectionProps) {
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
   const [autoConfig, setAutoConfig] = useState(() => getLiveSummaryAutoConfig());
+  // Phase B.3 polish: server-side summarizer label fetched from
+  // /api/system/pipeline. Surfaces which model actually drives the live
+  // progressive summaries during normal-mode recordings, so users do not
+  // mistake the in-browser dropdown above for a global setting.
+  const [serverSideSummarizerLabel, setServerSideSummarizerLabel] = useState<string>('');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/system/pipeline');
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        const models = Array.isArray(data?.available_llm_models) ? data.available_llm_models : [];
+        const def = models.find((m: { default?: boolean }) => m.default);
+        const label = def?.label || data?.llm?.label || data?.llm?.model || '';
+        if (label) setServerSideSummarizerLabel(String(label));
+      } catch {
+        // leave blank — paragraph falls back to a generic message
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   // Privacy mode: persisted in localStorage. Forces browser STT + local
   // LLM, never writes to the server, persists session data in
   // IndexedDB. Available iff WebGPU exists (the final-summary roll-up
@@ -433,8 +455,17 @@ export default function InBrowserAISettings(_props: SectionProps) {
 
       <div>
         <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="in-browser-model">
-          Summary model
+          In-browser summary model
+          <span className="ml-2 text-xs font-normal text-zinc-500">
+            (privacy mode + browser-only fallback)
+          </span>
         </label>
+        <p className="mb-2 text-xs text-zinc-500">
+          This model runs <em>only</em> inside your browser. Used when Privacy Mode is on,
+          or as a fallback when the server-side path isn't reachable. Normal-mode recordings
+          send audio to the server and the server-side summarizer (shown below) produces the
+          live summary you see during recording.
+        </p>
         <select
           id="in-browser-model"
           value={selectedModel}
@@ -487,6 +518,23 @@ export default function InBrowserAISettings(_props: SectionProps) {
             {webGPUStatus.forcedServer ? webGPUStatus.detail : optionDetail(selectedOption)}
           </p>
         </div>
+      </div>
+
+      {/* Phase B.3 polish: surface the server-side summarizer model so users
+          understand which model actually produces the live summary they see
+          during recording. Read-only display fetched from /api/system/pipeline;
+          per-org overrides (admin only) live in Settings > AI Providers. */}
+      <div className="rounded-lg border border-zinc-800 bg-black/20 p-4 space-y-1">
+        <h4 className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+          <Brain className="h-4 w-4 text-pink-400" /> Server-side summarizer
+          <span className="text-xs font-normal text-zinc-500">(used for normal-mode recordings)</span>
+        </h4>
+        <p className="text-xs text-zinc-500">
+          {serverSideSummarizerLabel
+            ? <>Currently <span className="text-zinc-300 font-medium">{serverSideSummarizerLabel}</span> on backend GPU. Live progressive summaries during recording use this model regardless of the in-browser selection above.</>
+            : <>Configured by your organization; the backend default is set via <code className="text-zinc-400">MEETING_OPS_LLM_MODEL</code> env. Live progressive summaries during recording use this model regardless of the in-browser selection above.</>
+          }
+        </p>
       </div>
 
       {showDtypeSelector && (

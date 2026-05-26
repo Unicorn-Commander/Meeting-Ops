@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [1.4.1] - 2026-05-26
+
+### Fixed
+- **Settings > In-browser AI: clarify what the "Summary model" dropdown actually controls** (Aaron observed selecting Gemma 4 E2B but seeing Qwen 3.6 in the live summary display). The dropdown previously labeled "Summary model" sets the WebGPU/wasm in-browser LLM used only in Privacy Mode or as a browser-only fallback; normal-mode recordings send audio to the server, and the server-side summarizer (env-configured via `MEETING_OPS_LLM_MODEL`, defaults to `Qwen3.6-35B-A3B-Vision` on midboy1 P40) drives the live progressive summaries the user sees. The label now reads "In-browser summary model (privacy mode + browser-only fallback)" with a paragraph explanation directly below. New read-only "Server-side summarizer" panel below the dropdown fetches the actual model from `/api/system/pipeline` and surfaces it as `Currently {Qwen3.6-35B-A3B-Vision} on backend GPU` so users see both sides at a glance. No behavior change — pure UX clarity. Per-org server-side overrides (admin only) still live in Settings > AI Providers and the dropdown will continue to honor /finalize-audio overrides per `transcription_options.llm_model`.
+
 ## [1.4.0] - 2026-05-26
 
 ### Added
