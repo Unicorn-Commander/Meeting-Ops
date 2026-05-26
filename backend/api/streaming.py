@@ -725,7 +725,15 @@ async def _flush_to_stt(
         if STREAMING_USE_V2_PARAKEET:
             tokens_finalized = data.get("tokens_finalized") or []
             tokens_draft = data.get("tokens_draft") or []
-            text = (data.get("text_finalized") or "").strip()
+            # Defensive: fall back to v1's `text` field when the v2 response
+            # lacks text_finalized. Covers the edge case where backend env
+            # says v2 but the svc actually returned v1 shape (e.g. mid-deploy
+            # before the svc swap), or test fixtures using the v1 mock.
+            text = (
+                data.get("text_finalized")
+                or data.get("text")
+                or ""
+            ).strip()
             text_draft = (data.get("text_draft") or "").strip()
             # EOU detection: the EOU token shows up as the last word's
             # text or as a suffix in text_finalized. Detect either way.
