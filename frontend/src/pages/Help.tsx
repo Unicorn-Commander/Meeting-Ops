@@ -11,6 +11,8 @@ import {
   Brain,
   Lock,
   Smartphone,
+  Users,
+  Radio,
 } from 'lucide-react';
 
 /**
@@ -82,6 +84,69 @@ export default function Help() {
               </span>
             </li>
           </ul>
+        </section>
+
+        <section className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Radio className="h-5 w-5 text-fuchsia-400" />
+            <h2 className="text-lg font-semibold text-zinc-100">
+              Server live transcript (paid tier only)
+            </h2>
+          </div>
+          <p className="text-zinc-300">
+            On enterprise / pro tier, you'll see a second transcript pane in
+            the Record page below the browser-side Live transcript. This is
+            the <span className="text-zinc-100">Server live transcript</span> —
+            a separate pipeline that sends your audio to our GPU and runs a
+            different family of models specifically built for live streaming.
+          </p>
+          <ul className="space-y-2 text-zinc-300">
+            <li className="flex items-start gap-3">
+              <Mic className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+              <span>
+                <span className="text-zinc-100">Per-word streaming</span> via
+                NVIDIA Parakeet realtime EOU 120M — a streaming-trained
+                checkpoint that emits words as the model commits them rather
+                than at a fixed 2-3 second cadence. Each word shows its
+                timestamp + confidence on mouse-over.
+              </span>
+            </li>
+            <li className="flex items-start gap-3">
+              <Users className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+              <span>
+                <span className="text-zinc-100">Live speaker labels</span> via
+                NVIDIA Sortformer 4-speaker streaming diarization, running in
+                parallel with the transcript. Each utterance gets a colored
+                speaker chip (red / green / blue / amber) so you can see who
+                said what while you record.
+              </span>
+            </li>
+            <li className="flex items-start gap-3">
+              <Brain className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+              <span>
+                <span className="text-zinc-100">EOU detection</span> — when
+                the model recognizes you've stopped talking, it emits an
+                end-of-utterance marker and starts a new paragraph. No more
+                hallucinated tokens during quiet stretches.
+              </span>
+            </li>
+            <li className="flex items-start gap-3">
+              <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+              <span>
+                <span className="text-zinc-100">Latency</span> — about 175ms
+                round trip per window on our RTX 3060. Smaller, faster, and
+                lower-VRAM than the original full-context checkpoint, while
+                staying close enough to your audio that it feels real-time.
+              </span>
+            </li>
+          </ul>
+          <p className="text-zinc-400 text-sm">
+            <Clock className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
+            Both transcripts run side-by-side during recording — the browser
+            one stays as your privacy-respecting baseline, the server one is
+            the higher-fidelity live view. Each utterance is a paragraph; an
+            italic suffix shows what the model is "thinking" before it commits.
+          </p>
         </section>
 
         <section className="space-y-4">
