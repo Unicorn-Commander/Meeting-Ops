@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [1.2.1] - 2026-05-26
+
+### Added
+- **Frontend speaker label badges in StreamingTest**: rendered the `speakers` array shipped on partial/final WS frames in v1.2.0. Each transcript entry now leads with one colored chip per distinct speaker that spoke during the window (sortformer's 4-speaker max → 4-color palette: red / green / blue / amber). Tooltip on each chip shows the speaker's first-turn start/end timestamps. Empty/undefined `speakers` is handled gracefully — entries without speaker data render identically to pre-v1.2.0. Removes the v1.2.0 deferral; the data was DevTools-observable but invisible in the UI, now it's visible inline. New types `SpeakerTurn` + helper `speakerColor(spk_id)` + presentational `<SpeakerBadges>` component in `frontend/src/pages/StreamingTest.tsx`. Docker frontend build (which enforces `tsc -b` strict per v1.1.0) succeeds; 5 baseline vite warnings unchanged.
+
 ## [1.2.0] - 2026-05-26
 
 ### Added

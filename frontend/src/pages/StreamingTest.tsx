@@ -76,11 +76,75 @@ function bytesPreview(buf: ArrayBuffer, max = 64): string {
   return buf.byteLength > max ? `${hex} ... (+${buf.byteLength - max}B)` : hex;
 }
 
+interface SpeakerTurn {
+  spk_id: number;
+  spk_label?: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 interface TranscriptEntry {
   type: 'partial' | 'final';
   sequence: number;
   text: string;
   ts: string;
+  // Phase B.3 chunk D: sortformer speaker turns covering this window.
+  // Empty / undefined when STREAMING_USE_SORTFORMER is off server-side or
+  // when sortformer dispatch failed (the backend swallows failures so the
+  // user still gets the parakeet transcript).
+  speakers?: SpeakerTurn[];
+  distinctSpeakerCount?: number;
+}
+
+// Speaker palette — Sortformer caps at 4 distinct speakers in v1; pick four
+// visually-distinct hues that work on the page's dark background.
+const SPEAKER_COLORS = ['#ef4444', '#10b981', '#3b82f6', '#f59e0b'];
+
+function speakerColor(spkId: number): string {
+  // Use modulo so any unexpected spk_id (e.g. 5+ from a future variant)
+  // still renders rather than crashes.
+  return SPEAKER_COLORS[((spkId % SPEAKER_COLORS.length) + SPEAKER_COLORS.length) % SPEAKER_COLORS.length];
+}
+
+interface SpeakerBadgesProps {
+  speakers?: SpeakerTurn[];
+}
+
+function SpeakerBadges({ speakers }: SpeakerBadgesProps) {
+  if (!speakers || speakers.length === 0) {
+    return null;
+  }
+  // Render one badge per distinct spk_id in the window, preserving the order
+  // of first appearance. Tooltip carries the start/end timestamps for the
+  // first turn that spk_id appears in.
+  const seen = new Map<number, SpeakerTurn>();
+  for (const turn of speakers) {
+    if (!seen.has(turn.spk_id)) {
+      seen.set(turn.spk_id, turn);
+    }
+  }
+  const distinct = Array.from(seen.values());
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, marginRight: 6, verticalAlign: 'middle' }}>
+      {distinct.map(turn => (
+        <span
+          key={turn.spk_id}
+          style={{
+            background: speakerColor(turn.spk_id),
+            color: '#fff',
+            padding: '1px 6px',
+            borderRadius: 4,
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: 0.2,
+          }}
+          title={`${turn.spk_label || `spk_${turn.spk_id}`} (first turn ${turn.start_ms}-${turn.end_ms}ms)`}
+        >
+          {turn.spk_label || `spk_${turn.spk_id}`}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 /** Build a binary frame with the canonical 19-byte BE header followed
@@ -167,6 +231,13 @@ function ActiveStream({ url, sessionId, onLog, onPartialOrFinal, onClose }: Acti
               sequence: msg.sequence ?? 0,
               text: msg.text ?? '',
               ts: nowIso(),
+              // Phase B.3 chunk D: speakers array from sortformer parallel
+              // dispatch (empty when STREAMING_USE_SORTFORMER is off server-
+              // side or when sortformer call failed for this window).
+              speakers: Array.isArray(msg.speakers) ? msg.speakers : undefined,
+              distinctSpeakerCount: typeof msg.sortformer_distinct_speakers === 'number'
+                ? msg.sortformer_distinct_speakers
+                : undefined,
             });
           }
           if (msg.type === 'server_shutdown') {
@@ -588,6 +659,7 @@ export default function StreamingTest() {
                 }}
                 title={`${e.type} seq=${e.sequence} ${e.ts}`}
               >
+                <SpeakerBadges speakers={e.speakers} />
                 {e.text || <em style={{ opacity: 0.5 }}>(empty)</em>}
               </div>
             ))
