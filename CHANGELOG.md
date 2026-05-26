@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-26
+
 ### Added
 - **Brigade Phase 2: inline 3D graph viewer**: new BrigadeGraphViewer component (lazy-loaded, react-force-graph-3d) embedded on SessionDetails. Shows the current meeting's Brigade nodes + 1-hop neighbors (Speaker, ActionItem, Topic, Decision) with color-coded labels and click-to-inspect tooltips. Backend: new GET /api/sessions/{id}/brigade-graph endpoint queries Brigade's Cypher endpoint and returns {nodes, links, graph_url} shape; returns empty + "not_synced_yet" reason for sessions before Brigade write fires. 30s cache. Cross-org isolated. "Open in Brigade" button below the viewer for the full-screen Brigade UI. The existing "View in Brigade graph" indigo banner from Phase 1 stays as an alternative entry point. The inline 3D viewer is gated behind a collapse/expand toggle so the Three.js footprint only loads when the user wants the graph. 7 new backend tests cover the endpoint shape, not-synced state, cross-org isolation, and cache.
 
