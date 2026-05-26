@@ -4,9 +4,9 @@ Part of the Unicorn Commander Suite
 ## Project Overview
 Hardware appliance for AI-powered meeting recording and transcription. NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware for SMBs. Cloud build (v0.7.x) and on-prem appliance build ship from the same codebase via compose targets.
 
-**Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive
+**Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive | Phase B server-live streaming with Sortformer speakers + EOU detection LIVE | Brigade graph writes LIVE
 
-**Latest release**: v0.8.1 tagged 2026-05-22; meeting_date editable, filename parser, Phase B/Bulk Import/Phase C-1 design docs, synthetic-WAV diarization probe
+**Latest release**: v2.1.0 tagged 2026-05-26; utterance-grouped per-word streaming UI, on top of v2.0.0 (v2 endpoint wire-up with per-word `tokens_finalized` + EOU detection) + v1.5.0 (parakeet checkpoint swap to streaming-trained `parakeet_realtime_eou_120m-v1`) + v1.4.0 (`<ServerLiveTranscript>` wired into Record page) + v1.3.0 (cursor + VAD silence-gate) + v1.2.0 (Sortformer parallel dispatch + speaker badges) + v1.1.0 (catch-up of post-v1.0.0 commits). Operational runbook at `docs/runbook-streaming-v2.md`. Backend pytest: 329 passed / 0 failed / 3 skipped.
 
 ## Architecture is browser-first by design
 
@@ -39,11 +39,17 @@ Canonical index: `docs/README.md`. It groups every document in `docs/` by topic,
 
 Mobile and native roadmap is locked as A → B → C-1 → C-2 → C-3:
 
-1. Phase A, mobile PWA capture-only: shipped in v0.8.0 plus v0.8.1 follow-up work. Mobile can capture and upload, with completion processing after stop.
-2. Phase B, server-live streaming for paid tiers: designed and queued. Adds live transcript and rolling summary for mobile, weak desktops, Chromebooks, and locked-down devices that cannot run the browser model stack.
-3. Phase C-1, native iOS: designed and queued. Native Swift plus SwiftUI app, Core ML STT, Apple Foundation Models where available, and watchOS-compatible architecture.
+1. Phase A, mobile PWA capture-only: SHIPPED v0.8.0 + v0.8.1. Mobile captures + uploads with completion processing after stop.
+2. Phase B, server-live streaming: SHIPPED through v2.1.0. Sortformer 4-speaker live diarization, Parakeet realtime-EOU 120M streaming, per-word `tokens_finalized` + EOU detection, utterance-grouped UI in the Record page. Gated on `hasFeature('server_live')` (enterprise/pro/superuser). See `docs/runbook-streaming-v2.md` for operational details. Remaining: Opus uplink (utility shipped v1.2.0 but capture path not wired), full deprecation of v1.3.0 cursor+VAD workarounds (cheap insurance for now).
+3. Phase C-1, native iOS: C-1.2 SHIPPED on local branch `/Users/aaronstransky/UC-Meeting-Ops-iOS/phase-c1-2-fluidaudio @ 0ed9982`. TranscriptionService + GRDB schema + BackgroundAudioUploader + SessionViewModel. Swift build clean, 14 tests pass. Xcode target wiring still pending. No Forgejo remote yet.
 4. Phase C-2, watchOS extension on top of C-1: future.
 5. Phase C-3, native Android plus NNAPI: future.
+
+Queued behind product/design decisions:
+- Sortformer canonical /finalize-audio (cross-host audio sharing + embedding tradeoff)
+- Free-tier reframe (Privacy Mode → Free Tier UX relabel)
+- PWA deploy coordination (update-banner UX vs auto-reload on active recording)
+- Pricing decision + Stripe checkout build
 
 ## Quick Start
 
