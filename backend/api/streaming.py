@@ -503,6 +503,30 @@ async def _flush_to_stt(
             "X-Is-Final": "1" if is_final else "0",
         }
 
+        # Phase B.3 chunk D: fire sortformer in parallel with parakeet when
+        # the flag is on. Sortformer is fast (~175 ms warm on RTX 3060) so
+        # collecting its result after parakeet usually adds zero latency.
+        # Failures here are non-blocking — we only annotate the partial JSON
+        # with empty speakers, and the user gets the same transcript.
+        sortformer_task: Optional[asyncio.Task] = None
+        if STREAMING_USE_SORTFORMER:
+            window_duration_ms = int(
+                len(pcm_at_call) / 2 / state.sample_rate * 1000
+            )
+            window_start_ms = max(0, cumulative_at_call - window_duration_ms)
+            sortformer_headers = {
+                **headers,
+                "X-Window-Start-Ms": str(window_start_ms),
+            }
+            sortformer_task = asyncio.create_task(
+                http_client.post(
+                    f"{SORTFORMER_URL}/diarize-stream",
+                    content=wav_bytes,
+                    headers=sortformer_headers,
+                    timeout=STREAM_UPSTREAM_TIMEOUT_S,
+                )
+            )
+
         try:
             with parakeet_stream_request_duration_seconds.time():
                 resp = await http_client.post(
@@ -516,6 +540,10 @@ async def _flush_to_stt(
                 "[B.2 WS] upstream_unreachable session=%s seq=%d err=%s",
                 state.session_id, seq, exc,
             )
+            # Cancel sortformer if it's still running — no point computing
+            # speaker labels for a partial we won't emit.
+            if sortformer_task is not None and not sortformer_task.done():
+                sortformer_task.cancel()
             await websocket.send_json({
                 "type": "error",
                 "reason": "upstream_unreachable",
@@ -530,6 +558,8 @@ async def _flush_to_stt(
                 "[B.2 WS] upstream_http_error session=%s seq=%d status=%d body=%s",
                 state.session_id, seq, resp.status_code, resp.text[:200],
             )
+            if sortformer_task is not None and not sortformer_task.done():
+                sortformer_task.cancel()
             await websocket.send_json({
                 "type": "error",
                 "reason": "upstream_http_error",
@@ -542,6 +572,8 @@ async def _flush_to_stt(
         try:
             data = resp.json()
         except json.JSONDecodeError:
+            if sortformer_task is not None and not sortformer_task.done():
+                sortformer_task.cancel()
             await websocket.send_json({
                 "type": "error",
                 "reason": "upstream_bad_json",
@@ -555,6 +587,45 @@ async def _flush_to_stt(
         confidence = data.get("confidence")
         model = data.get("model")
         rtf = data.get("rtf")
+
+        # Phase B.3 chunk D: collect sortformer result if it was dispatched.
+        # By this point parakeet has finished; sortformer is usually faster
+        # (~175 ms vs parakeet's 200-600 ms) so the await is typically a
+        # no-op. Failures are logged and silently dropped — sortformer is
+        # an enhancement, not a blocking dependency.
+        speakers: list = []
+        sortformer_model: Optional[str] = None
+        sortformer_rtf: Optional[float] = None
+        sortformer_distinct_speakers: Optional[int] = None
+        if sortformer_task is not None:
+            try:
+                sf_resp = await sortformer_task
+                if sf_resp.status_code < 400:
+                    sf_data = sf_resp.json()
+                    speakers = sf_data.get("speakers") or []
+                    sortformer_model = sf_data.get("model")
+                    sortformer_rtf = sf_data.get("rtf")
+                    sortformer_distinct_speakers = sf_data.get(
+                        "distinct_speaker_count"
+                    )
+                else:
+                    logger.warning(
+                        "[B.3 WS] sortformer_http_error session=%s seq=%d "
+                        "status=%d body=%s",
+                        state.session_id, seq, sf_resp.status_code,
+                        sf_resp.text[:200],
+                    )
+            except (
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+                json.JSONDecodeError,
+                asyncio.CancelledError,
+            ) as sf_exc:
+                logger.warning(
+                    "[B.3 WS] sortformer_unreachable session=%s seq=%d err=%s",
+                    state.session_id, seq, sf_exc,
+                )
 
         # De-dup empty / identical partials. Real model output won't usually
         # repeat verbatim across windows once audio actually arrives, but
@@ -578,6 +649,12 @@ async def _flush_to_stt(
             "covers_through_ms": cumulative_at_call,
             "is_final": is_final,
             "upstream_elapsed_ms": int((time.time() - started) * 1000),
+            # Phase B.3 chunk D: speaker labels from sortformer (empty when
+            # STREAMING_USE_SORTFORMER is off or sortformer call failed).
+            "speakers": speakers,
+            "sortformer_model": sortformer_model,
+            "sortformer_rtf": sortformer_rtf,
+            "sortformer_distinct_speakers": sortformer_distinct_speakers,
         })
         # Phase B.5 metric: count emitted partial/final back to client.
         ws_partial_transcripts_emitted_total.inc()
