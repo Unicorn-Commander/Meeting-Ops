@@ -88,6 +88,70 @@ function SpeakerBadges({ speakers }: { speakers?: SpeakerTurn[] }) {
   );
 }
 
+// v2.1.0: per-word utterance view. Renders accumulated utterances as
+// paragraph blocks (speaker badges + words + EOU chip + draft suffix on
+// the trailing active utterance). React re-renders on every state
+// change but the DOM diff is small because most words don't change
+// across frames — only the trailing draft + occasional new finalized
+// words land.
+interface UtteranceViewProps {
+  utterances: Utterance[];
+  currentDraft: string;
+}
+
+function UtteranceView({ utterances, currentDraft }: UtteranceViewProps) {
+  return (
+    <>
+      {utterances.map((u, idx) => {
+        const isActive = idx === utterances.length - 1 && !u.eouSealed;
+        return (
+          <div
+            key={`utt-${u.startSequence}-${idx}`}
+            style={{
+              opacity: u.eouSealed ? 1 : 0.92,
+              borderLeft: u.eouSealed
+                ? '2px solid #4caf50'
+                : '2px solid #1976d2',
+              paddingLeft: 8,
+              marginBottom: 6,
+            }}
+          >
+            <SpeakerBadges speakers={u.speakers} />
+            {u.tokens.map((t, i) => (
+              <span key={`w-${i}-${t.start}`} title={`${t.start.toFixed(2)}s-${t.end.toFixed(2)}s${typeof t.confidence === 'number' ? ` conf=${t.confidence.toFixed(2)}` : ''}`}>
+                {i > 0 ? ' ' : ''}
+                {t.word}
+              </span>
+            ))}
+            {isActive && currentDraft && (
+              <span style={{ opacity: 0.45, fontStyle: 'italic', marginLeft: 4 }}>
+                {' '}{currentDraft}
+              </span>
+            )}
+            {u.eouSealed && (
+              <span
+                style={{
+                  marginLeft: 6,
+                  padding: '1px 5px',
+                  borderRadius: 3,
+                  background: '#52525b',
+                  color: '#d4d4d8',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: 0.3,
+                }}
+                title="End of utterance detected by streaming model"
+              >
+                EOU
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // ---- Component ----
 
 interface FinalizedToken {
@@ -120,9 +184,30 @@ interface ServerLiveTranscriptProps {
 
 type ConnState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 
+// v2.1.0: utterance-grouped accumulation for per-word streaming render.
+// Each Utterance is a paragraph of finalized words, separated by EOU
+// boundaries. Within an utterance, words arrive incrementally as the
+// model commits them — closer to how a real-time captioner displays.
+interface Utterance {
+  tokens: FinalizedToken[];
+  speakers?: SpeakerTurn[];
+  eouSealed: boolean;
+  // First sequence number that contributed to this utterance — used as
+  // React key + for ordering.
+  startSequence: number;
+}
+
 export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveTranscriptProps) {
   const [conn, setConn] = useState<ConnState>('idle');
+  // Legacy per-partial-frame view, kept for back-compat with the v1
+  // endpoint (no tokens_finalized).
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  // v2.1.0: utterance-grouped per-word view. Activates as soon as any
+  // partial frame carries tokens_finalized.
+  const [utterances, setUtterances] = useState<Utterance[]>([]);
+  // Current in-flight draft suffix (replaced, not appended). Shown
+  // faint at the end of the active utterance.
+  const [currentDraft, setCurrentDraft] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -159,6 +244,8 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
       teardown();
       setConn('idle');
       setTranscript([]);
+      setUtterances([]);
+      setCurrentDraft('');
       setErrorMsg(null);
       return;
     }
@@ -212,22 +299,75 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'partial' || msg.type === 'final') {
+          const tokensFinalized: FinalizedToken[] | undefined =
+            Array.isArray(msg.tokens_finalized)
+              ? (msg.tokens_finalized as FinalizedToken[])
+              : undefined;
+          const speakersThisFrame: SpeakerTurn[] | undefined =
+            Array.isArray(msg.speakers) ? msg.speakers : undefined;
+          const textDraft = typeof msg.text_draft === 'string' ? msg.text_draft : '';
+          const eouDetected = Boolean(msg.eou_detected);
           const entry: TranscriptEntry = {
             type: msg.type,
             sequence: msg.sequence ?? 0,
             text: (msg.text ?? '').trim(),
-            speakers: Array.isArray(msg.speakers) ? msg.speakers : undefined,
-            tokensFinalized: Array.isArray(msg.tokens_finalized)
-              ? (msg.tokens_finalized as FinalizedToken[])
-              : undefined,
-            textDraft: typeof msg.text_draft === 'string' ? msg.text_draft : undefined,
-            eouDetected: Boolean(msg.eou_detected),
+            speakers: speakersThisFrame,
+            tokensFinalized,
+            textDraft: textDraft || undefined,
+            eouDetected,
           };
           // Allow empty text when an EOU marker fires alone — the chip
           // alone is informative even without new words.
-          if (!entry.text && !entry.eouDetected) return;
+          if (!entry.text && !entry.eouDetected && !tokensFinalized?.length) return;
+
+          // v2.1.0: utterance-grouped accumulator. Appends newly
+          // finalized tokens to the trailing utterance; seals it (starts
+          // a new one) on EOU. Only activates when tokens_finalized is
+          // non-empty in the incoming frame — otherwise the legacy
+          // transcript view below handles rendering.
+          if (tokensFinalized && tokensFinalized.length > 0) {
+            setUtterances(prev => {
+              const next = [...prev];
+              let tail = next[next.length - 1];
+              if (!tail || tail.eouSealed) {
+                tail = {
+                  tokens: [],
+                  speakers: speakersThisFrame,
+                  eouSealed: false,
+                  startSequence: entry.sequence,
+                };
+                next.push(tail);
+              }
+              tail.tokens = [...tail.tokens, ...tokensFinalized];
+              // Latest speakers win — sortformer's view of who is in
+              // this window. Past utterances keep the speakers from when
+              // they were sealed.
+              if (speakersThisFrame && speakersThisFrame.length > 0) {
+                tail.speakers = speakersThisFrame;
+              }
+              if (eouDetected) {
+                tail.eouSealed = true;
+              }
+              // Cap at 50 utterances to keep DOM manageable on long
+              // sessions. Older utterances drop off the top.
+              return next.length > 50 ? next.slice(-50) : next;
+            });
+            setCurrentDraft(textDraft || '');
+          } else if (eouDetected && tokensFinalized === undefined) {
+            // EOU-only frame on the v1 path: seal whatever the last
+            // utterance was (if any).
+            setUtterances(prev => {
+              if (prev.length === 0) return prev;
+              const tail = prev[prev.length - 1];
+              if (tail.eouSealed) return prev;
+              return [...prev.slice(0, -1), { ...tail, eouSealed: true }];
+            });
+            setCurrentDraft('');
+          }
+
+          // Always append to legacy transcript view as a back-compat
+          // fallback. The render branch decides which view to display.
           setTranscript(prev => {
-            // Cap at 200 entries to keep DOM manageable on long sessions.
             const next = [...prev, entry];
             return next.length > 200 ? next.slice(-200) : next;
           });
@@ -308,7 +448,16 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
           lineHeight: 1.5,
         }}
       >
-        {transcript.length === 0 ? (
+        {/* v2.1.0: utterance-grouped per-word view when v2 endpoint
+            tokens_finalized is observed. Falls back to the legacy
+            per-frame entry view for v1-endpoint sessions or before any
+            tokens arrive. */}
+        {utterances.length > 0 ? (
+          <UtteranceView
+            utterances={utterances}
+            currentDraft={currentDraft}
+          />
+        ) : transcript.length === 0 ? (
           <span style={{ opacity: 0.4 }}>
             (no partials yet, speak to populate)
           </span>

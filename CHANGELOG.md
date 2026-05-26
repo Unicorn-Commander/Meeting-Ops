@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-26
+
+### Added
+- **Per-word streaming UI in `ServerLiveTranscript`**: v2.0.0 wired the backend to consume `/transcribe-stream-v2` and surfaced `tokens_finalized` / `tokens_draft` / `eou_detected` on each WS frame, but the frontend kept the old "one transcript entry per 2.5s flush" cadence. v2.1.0 adds an utterance-grouped accumulator (`Utterance[]`) that appends newly-finalized tokens to the trailing utterance as they arrive — closer to how a real-time captioner displays. Each utterance is a paragraph block: speaker badges + per-word render (one `<span>` per token with `title` showing the timestamp + confidence) + faint italic draft suffix on the active utterance + gray EOU chip when the model sealed end-of-utterance. New utterance opens on the next frame after EOU. Capped at 50 utterances in the DOM to keep long sessions responsive; older utterances drop off the top of the rolling pane.
+- **Activation is automatic**: as soon as ANY partial frame carries `tokens_finalized` (i.e. STREAMING_USE_V2_PARAKEET=1 and the v2 endpoint is producing per-word stream), the new utterance view replaces the legacy per-frame view. Legacy clients hitting backends without v2 endpoint keep their old rendering (the transcript[] array still populates as a fallback) — no break in either direction.
+- New `Utterance` interface + `UtteranceView` component co-located with `ServerLiveTranscript`. Per-word `<span>` carries `title={t.start.toFixed(2)}s-{t.end.toFixed(2)}s conf={t.confidence.toFixed(2)}` so users can mouse-over any word and see its timing without cluttering the visible UI.
+- The active utterance shows the in-flight `text_draft` faint italic at the trailing edge so users see the leading edge of what the model is *thinking* before it commits — this is the per-word streaming UX Phase B.3 chunk C originally envisioned.
+
+### Notes
+- The latest speakers-array from each frame "wins" for the currently-active utterance. Past sealed utterances keep their speakers from when they were sealed, so historical attribution is stable. If sortformer re-segments mid-utterance (e.g. detects a second speaker entering), the active utterance's badges update; on EOU + next utterance the prior speakers stick.
+- DOM diffing is small per frame because most rendered word spans don't change frame-to-frame — only the trailing draft + the new finalized words update. React's reconciliation handles this efficiently for the 50-utterance cap.
+- The legacy per-frame transcript view (each partial = its own entry) stays as a fallback for v1-endpoint sessions and is the rendering path before any tokens arrive (e.g. while WS is connecting). When the first tokens-bearing frame arrives, the view automatically switches.
+
 ## [2.0.0] - 2026-05-26
 
 ### Added
