@@ -1,0 +1,20 @@
+# meet-sortformer-svc — Phase B.3 spike add-ons on top of the
+# meet-parakeet-svc base.
+#
+# The base image (meet-parakeet-svc:local) already provides every dep
+# the SortformerEncLabelModel touches:
+#   - fastapi, uvicorn, pydantic, python-multipart
+#   - numpy, soundfile, librosa, scipy
+#   - torch 2.4.1 + torchaudio (CUDA 12.4)
+#   - nemo_toolkit[asr] 2.4.1 — ships SortformerEncLabelModel +
+#     SortformerModules for the v1 / 4-speaker variant
+#   - huggingface_hub (for from_pretrained download)
+#
+# Today the sortformer surface uses only the base stack, so this file
+# is intentionally empty — leaving it in place so the Dockerfile's
+# `pip install -r requirements.txt` keeps working the first time we
+# need to add something. Likely additions in a future build:
+#   - a newer nemo_toolkit (>= 2.5) when we move to the streaming v2.x
+#     models (current 2.4.1 raises a TypeError because the v2 config
+#     YAML references `spkcache_update_period` which the 2.4.1
+#     SortformerModules.__init__ does not accept).
