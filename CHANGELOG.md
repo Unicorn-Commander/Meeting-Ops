@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [1.3.1] - 2026-05-26
+
+### Fixed
+- **Sortformer min-segment filter for cleaner speaker badges**: drop speaker turns shorter than `SORTFORMER_MIN_SEGMENT_MS` (default 500 ms) before emitting in the partial JSON. Sortformer over-segments on solo / quiet audio — flagging brief background-noise / breath sounds / mic-handling artifacts as a different speaker for ~100-300 ms (Aaron observed `speaker_1` chips appearing alongside his own `speaker_0` text on the v1.3.0 smoke test). Real conversational turns are almost always > 500 ms (people speak for at least a syllable), so the 500 ms floor catches genuine multi-speaker windows while dropping the noise. Filter lives in `_flush_to_stt` right after the sortformer response parses, so the frontend `<SpeakerBadges>` never sees the noise. `sortformer_distinct_speakers` also clears to 0 if the filter drops every turn, so the UI doesn't show stale counts. Configurable via env (`SORTFORMER_MIN_SEGMENT_MS=0` disables).
+
 ## [1.3.0] - 2026-05-26
 
 ### Fixed

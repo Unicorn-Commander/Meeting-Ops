@@ -254,6 +254,14 @@ STREAM_VAD_ENABLED = os.getenv("STREAM_VAD_ENABLED", "1") not in (
     "0", "false", "False", "no", "",
 )
 
+# Phase B.3 polish: drop sortformer speaker turns shorter than this duration
+# before emitting in the partial JSON. Sortformer occasionally over-segments
+# on solo audio — flagging brief background-noise / breath sounds as a
+# different speaker for ~100-300 ms. Real conversational turns are almost
+# always > 500 ms (people speak for at least a syllable). Drops the noise
+# without affecting legitimate fast-cut speaker switches.
+SORTFORMER_MIN_SEGMENT_MS = int(os.getenv("SORTFORMER_MIN_SEGMENT_MS", "500"))
+
 
 def _is_silent(pcm: bytes, threshold: int = STREAM_VAD_RMS_THRESHOLD) -> bool:
     """RMS-based silence detection on PCM16 mono audio.
@@ -713,12 +721,27 @@ async def _flush_to_stt(
                 sf_resp = await sortformer_task
                 if sf_resp.status_code < 400:
                     sf_data = sf_resp.json()
-                    speakers = sf_data.get("speakers") or []
+                    raw_speakers = sf_data.get("speakers") or []
+                    # Filter out turns shorter than SORTFORMER_MIN_SEGMENT_MS.
+                    # Sortformer over-segments on solo / quiet audio (brief
+                    # spectral diversity from breath sounds, fridge hum, etc).
+                    # 500 ms floor catches real conversational turns and drops
+                    # noise.
+                    speakers = [
+                        s for s in raw_speakers
+                        if isinstance(s, dict)
+                        and (s.get("end_ms", 0) - s.get("start_ms", 0))
+                        >= SORTFORMER_MIN_SEGMENT_MS
+                    ]
                     sortformer_model = sf_data.get("model")
                     sortformer_rtf = sf_data.get("rtf")
                     sortformer_distinct_speakers = sf_data.get(
                         "distinct_speaker_count"
                     )
+                    # If the filter dropped every turn, also clear the
+                    # distinct_speaker_count so the UI doesn't show stale info.
+                    if not speakers:
+                        sortformer_distinct_speakers = 0
                 else:
                     logger.warning(
                         "[B.3 WS] sortformer_http_error session=%s seq=%d "
