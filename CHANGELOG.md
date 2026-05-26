@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [1.2.2] - 2026-05-26
+
+### Fixed
+- **WS streaming endpoint crashed on every Connect with `code=1006` due to DetachedInstanceError in `_resolve_org_bucket`**: latent Phase B.5 bug surfaced during the v1.2.0 smoke test. `_resolve_ws_user` (in `backend/api/streaming.py`) closes its DB `SessionLocal()` before returning the User object — necessary because Starlette WebSocket handlers don't compose with `Depends(get_db)` yield-style sessions — which leaves the User detached. Phase B.5's `_resolve_org_bucket` then called `getattr(user, "organizations", None)` on that detached User, which triggers a SQLAlchemy lazy-load and raises `DetachedInstanceError`. The exception propagated up the ASGI stack, the upgrade handshake never completed, and the client saw the worst-case `code=1006` close (abnormal). Every Connect attempt looped through `useReconnectingWebSocket`'s 500ms / 1s / 2s / 4s / 8s backoff and gave up. **Fix**: wrap the `getattr` in `try/except DetachedInstanceError`, falling back to the existing email-based bucket key. Added `DetachedInstanceError` to the `IndexError, TypeError, AttributeError` set the inner `try/except` already catches when walking the relationship. The B.5 per-org rate limit still works for eagerly-loaded callers (e.g. unit tests with a fresh session); the production WS path now degrades gracefully to per-user rate limit, which is a softer bound but still bounded. Backend rebuilt + redeployed; Connect succeeds, `<- {"type":"ready",...}` frame arrives, mic capture path is now reachable end-to-end. Smoke-tested on `meetingops.magicunicorn.dev` by Aaron immediately after deploy.
+
 ## [1.2.1] - 2026-05-26
 
 ### Added

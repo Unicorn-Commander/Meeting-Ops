@@ -99,6 +99,7 @@ import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import DetachedInstanceError
 
 from auth.models import User
 from auth.service import AuthService
@@ -180,19 +181,30 @@ def _resolve_org_bucket(user: User) -> str:
     expose it via .organization_id, .org_id, .organizations[0].id, etc.,
     depending on the schema). Fall back to the email so the limit still
     has a meaningful unit even for users without an org.
+
+    Wrapped in a DetachedInstanceError-safe try/except because
+    ``_resolve_ws_user`` closes its DB session before returning the User
+    object (Starlette's WebSocket handlers don't compose cleanly with
+    ``Depends(get_db)`` yield-style sessions). Accessing the unloaded
+    ``organizations`` relationship on a detached User triggers a
+    lazy-load that raises DetachedInstanceError — falling back to the
+    email-based bucket is the correct behavior in that case.
     """
     for attr in ("organization_id", "org_id"):
         val = getattr(user, attr, None)
         if val:
             return f"org:{val}"
-    orgs = getattr(user, "organizations", None)
+    try:
+        orgs = getattr(user, "organizations", None)
+    except DetachedInstanceError:
+        orgs = None
     if orgs:
         try:
             first = orgs[0]
             oid = getattr(first, "id", None) or getattr(first, "organization_id", None)
             if oid:
                 return f"org:{oid}"
-        except (IndexError, TypeError, AttributeError):
+        except (IndexError, TypeError, AttributeError, DetachedInstanceError):
             pass
     return f"user:{user.email}"
 
