@@ -228,6 +228,30 @@ MAX_PCM_BUFFER_SECONDS = 60.0
 # during warm-up and 10 s once warm — both controllable via env.
 STREAM_UPSTREAM_TIMEOUT_S = float(os.getenv("STREAM_UPSTREAM_TIMEOUT_S", "30.0"))
 
+# ---------------------------------------------------------------------------
+# Phase B.3 integration flags
+# ---------------------------------------------------------------------------
+# All default OFF — production behavior is identical to v1.0.0/v1.1.0. Flip
+# per env after the corresponding B.3 chunk lands and is verified.
+# See docs/phase-b3-integration-plan.md for the integration target spec.
+#
+# These are read at module import; the integration PR that follows B.3 agent
+# completion will reference them in _flush_to_stt() to route audio per flag.
+STREAMING_USE_V2_PARAKEET = os.getenv("STREAMING_USE_V2_PARAKEET", "0") not in (
+    "0", "false", "False", "no", "",
+)
+STREAMING_USE_SORTFORMER = os.getenv("STREAMING_USE_SORTFORMER", "0") not in (
+    "0", "false", "False", "no", "",
+)
+# Where the streaming Sortformer service will live once Phase B.3 chunk D
+# ships. midboy2 over Tailscale, parallel port to parakeet-stream-svc (8895)
+# and parakeet-svc (8881). Overridable via env so dev / smoke-test setups
+# can point at a local stub.
+SORTFORMER_URL = os.getenv(
+    "SORTFORMER_URL",
+    "http://100.66.42.57:8896",
+).rstrip("/")
+
 
 def _resolve_ws_user_email(websocket: WebSocket) -> Optional[str]:
     """Read oauth2-proxy forward-auth email off the WebSocket upgrade headers.
