@@ -1,16 +1,25 @@
 /**
- * Phase B.2 streaming WS smoke-test page (Phase B.5 reconnect polish).
+ * Phase B.2 streaming WS smoke-test page (Phase B.5 reconnect polish,
+ * Phase B.3 AudioWorklet migration).
  *
  * Opens a WebSocket against `/ws/sessions/{uuid}/live`, can either:
  *   - send a dummy 1 KB PCM16-formatted binary chunk wrapped in the
  *     19-byte header (seam test, no transcription expected),
- *   - capture mic audio via getUserMedia + ScriptProcessorNode and
+ *   - capture mic audio via getUserMedia + AudioWorklet (B.3) and
  *     stream real PCM16 frames so the meet-backend forwards them to
  *     meet-parakeet-stream-svc on midboy2.
  *
  * Prints every frame in both directions plus a separate "live
  * transcript" pane that aggregates `partial` / `final` JSON frames so
  * you can read what the model heard.
+ *
+ * B.3 (2026-05-26): migrated browser audio capture from the deprecated
+ * `ScriptProcessorNode` (main-thread, jank-prone) to `AudioWorklet`
+ * (dedicated audio render thread). Bit-exact wire-format preserved.
+ * Worklet source at `frontend/public/audio-worklets/pcm16-encoder.worklet.js`;
+ * helper at `frontend/src/utils/audioWorkletCapture.ts`. Falls back to
+ * ScriptProcessorNode if `AudioContext.audioWorklet` is undefined
+ * (Safari < 14.1; vanishingly small share of the 2026 install base).
  *
  * B.4 gating: this page reads `useTierFeatures().features.server_live`
  * and renders a friendly upgrade nudge in place of the connect UI when
@@ -42,6 +51,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock } from 'lucide-react';
 import { useTierFeatures } from '../hooks/useTierFeatures';
 import { useReconnectingWebSocket } from '../hooks/useReconnectingWebSocket';
+import {
+  startPcm16Capture,
+  type Pcm16Capture,
+} from '../utils/audioWorkletCapture';
 
 type MicState = 'idle' | 'requesting' | 'recording' | 'error';
 
@@ -109,35 +122,31 @@ interface ActiveStreamProps {
 
 function ActiveStream({ url, sessionId, onLog, onPartialOrFinal, onClose }: ActiveStreamProps) {
   // Refs (mic capture + sequence counter).
+  // B.3: capture is owned by `startPcm16Capture` from
+  // `utils/audioWorkletCapture`. The AudioWorklet (or ScriptProcessor
+  // fallback) lives entirely behind that helper; we just hold the
+  // returned handle so we can call `.stop()` on teardown.
   const seqRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const micBufRef = useRef<Int16Array[]>([]);
+  const captureRef = useRef<Pcm16Capture | null>(null);
 
   const [micState, setMicState] = useState<MicState>('idle');
   // Disable reconnects when the user has clicked Disconnect / End.
   const userTerminatedRef = useRef<boolean>(false);
 
   const stopMic = useCallback(() => {
-    if (processorRef.current) {
-      try { processorRef.current.disconnect(); } catch {}
-      processorRef.current = null;
-    }
-    if (sourceRef.current) {
-      try { sourceRef.current.disconnect(); } catch {}
-      sourceRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      try { audioCtxRef.current.close(); } catch {}
-      audioCtxRef.current = null;
+    if (captureRef.current) {
+      try {
+        captureRef.current.stop();
+      } catch {
+        // best-effort teardown; helper may already be stopped
+      }
+      captureRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    micBufRef.current = [];
     setMicState(prev => (prev === 'error' ? prev : 'idle'));
   }, []);
 
@@ -250,62 +259,37 @@ function ActiveStream({ url, sessionId, onLog, onPartialOrFinal, onClose }: Acti
       });
       streamRef.current = stream;
 
-      // ScriptProcessorNode is deprecated but it's the path that works on
-      // every browser without shipping a separate worklet file. B.3 will
-      // move to AudioWorklet + SharedArrayBuffer with COOP/COEP headers.
-      const ctxCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const audioCtx: AudioContext = new ctxCtor({ sampleRate: MIC_TARGET_SR });
-      audioCtxRef.current = audioCtx;
-      const source = audioCtx.createMediaStreamSource(stream);
-      sourceRef.current = source;
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-
-      processor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        const i16 = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          const s = Math.max(-1, Math.min(1, input[i]));
-          i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        micBufRef.current.push(i16);
-
-        let totalSamples = micBufRef.current.reduce((n, b) => n + b.length, 0);
-        while (totalSamples >= MIC_FRAME_SAMPLES) {
-          const frame = new Int16Array(MIC_FRAME_SAMPLES);
-          let written = 0;
-          while (written < MIC_FRAME_SAMPLES && micBufRef.current.length > 0) {
-            const head = micBufRef.current[0];
-            const remaining = MIC_FRAME_SAMPLES - written;
-            if (head.length <= remaining) {
-              frame.set(head, written);
-              written += head.length;
-              micBufRef.current.shift();
-            } else {
-              frame.set(head.subarray(0, remaining), written);
-              micBufRef.current[0] = head.subarray(remaining);
-              written += remaining;
-            }
-          }
+      // B.3: capture moves to AudioWorklet. The helper picks the
+      // AudioWorklet path on modern browsers (Chrome 64+, Firefox 76+,
+      // Safari 14.1+) and silently falls back to ScriptProcessorNode on
+      // older Safari. Wire format is preserved bit-for-bit so the WS
+      // server side does not need a corresponding change.
+      const capture = await startPcm16Capture(
+        stream,
+        (frame) => {
+          // `frame` is an Int16Array of exactly MIC_FRAME_SAMPLES samples
+          // (3200 = 200 ms at 16 kHz). One WS binary frame per callback.
           seqRef.current += 1;
           const buf = buildFrame(seqRef.current, false, frame);
-          // Best-effort: only ship if the socket is OPEN. While the hook
-          // is reconnecting, we drop frames. The PCM ring buffer on the
-          // server is for the live transcript window only, so dropping
-          // a few seconds during a reconnect is the right behavior.
+          // Best-effort: only ship if the socket is OPEN. While the
+          // hook is reconnecting, we drop frames. The PCM ring buffer
+          // on the server is for the live transcript window only, so
+          // dropping a few seconds during a reconnect is the right
+          // behavior.
           ws.send(buf);
-          totalSamples -= MIC_FRAME_SAMPLES;
+        },
+        {
+          sampleRate: MIC_TARGET_SR,
+          frameSamples: MIC_FRAME_SAMPLES,
         }
-      };
-
-      source.connect(processor);
-      const sink = audioCtx.createGain();
-      sink.gain.value = 0;
-      processor.connect(sink);
-      sink.connect(audioCtx.destination);
+      );
+      captureRef.current = capture;
 
       setMicState('recording');
-      onLog(`mic started (${MIC_TARGET_SR} Hz mono, ~${MIC_FRAME_MS} ms frames)`);
+      onLog(
+        `mic started (${MIC_TARGET_SR} Hz mono, ~${MIC_FRAME_MS} ms frames, ` +
+        `${capture.usingFallback ? 'ScriptProcessor fallback' : 'AudioWorklet'})`
+      );
     } catch (err) {
       console.error(err);
       onLog(`mic error: ${(err as Error).message}`);

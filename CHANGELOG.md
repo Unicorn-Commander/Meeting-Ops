@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Changed
+- **Phase B.3 chunk A: AudioWorklet migration for browser audio capture**: replaced the deprecated `ScriptProcessorNode` in `frontend/src/pages/StreamingTest.tsx` (the WS streaming smoke-test page) with `AudioWorkletNode`. ScriptProcessor's `onaudioprocess` runs on the main thread; AudioWorklet's `process()` runs in a dedicated audio render-thread, eliminating jank on long sessions and on devices with main-thread pressure (mobile, low-end laptops). New worklet processor at `frontend/public/audio-worklets/pcm16-encoder.worklet.js` (registered as `pcm16-encoder`, configurable frame size via MessagePort, default 3200 samples = 200 ms at 16 kHz). New helper at `frontend/src/utils/audioWorkletCapture.ts` wraps the AudioWorklet wiring behind a `startPcm16Capture(stream, onFrame, opts)` function; the helper transparently falls back to ScriptProcessorNode when `AudioContext.audioWorklet` is undefined (Safari < 14.1) with a console warning, so the page degrades rather than breaks on the rare legacy browser. The 19-byte big-endian WS frame header contract is preserved exactly — backend (`backend/api/streaming.py`) and `services/parakeet-stream-svc/` are unchanged. Bit-exact PCM16 conversion preserved (asymmetric `s < 0 ? s * 0x8000 : s * 0x7fff` mapping, matching the original ScriptProcessor loop). 5 baseline vite warnings unchanged. `tsc -b` clean. Verified production docker build of the frontend image succeeds with the worklet asset copied through to `dist/audio-worklets/`.
+
 ## [1.1.0] - 2026-05-26
 
 ### Added
