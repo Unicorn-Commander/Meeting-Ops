@@ -85,6 +85,7 @@ Server-emitted frames
 from __future__ import annotations
 
 import asyncio
+import audioop
 import json
 import logging
 import os
@@ -234,6 +235,47 @@ FLUSH_AUDIO_SECONDS = float(os.getenv("STREAM_FLUSH_AUDIO_SECONDS", "2.5"))
 # rolling window is intentionally short.
 MAX_PCM_BUFFER_SECONDS = 60.0
 
+# Phase B.3 polish: lookback window for word-boundary continuity.
+# Each flush sends audio from (consumed_through_ms - LOOKBACK) forward so
+# the model sees a tiny overlap with the previous window — improves word
+# boundaries at flush edges without re-transcribing the entire prior
+# window. 1.0 s is the speech-rate-aware sweet spot (covers most word
+# boundaries; matches NeMo's recommended chunked-streaming lookback).
+STREAM_LOOKBACK_SECONDS = float(os.getenv("STREAM_LOOKBACK_SECONDS", "1.0"))
+
+# Phase B.3 polish: VAD silence threshold via audioop.rms() on PCM16.
+# RMS scale: 0 = silence, 32767 = full-scale sine peak. Typical speech is
+# 1000-5000 RMS; quiet background noise is ~50-200; true silence is < 50.
+# Threshold of 200 catches most silence while letting quiet speech through.
+# Skipped flushes still advance the consumed cursor so silence doesn't
+# accumulate as a backlog of re-transcription targets.
+STREAM_VAD_RMS_THRESHOLD = int(os.getenv("STREAM_VAD_RMS_THRESHOLD", "200"))
+STREAM_VAD_ENABLED = os.getenv("STREAM_VAD_ENABLED", "1") not in (
+    "0", "false", "False", "no", "",
+)
+
+
+def _is_silent(pcm: bytes, threshold: int = STREAM_VAD_RMS_THRESHOLD) -> bool:
+    """RMS-based silence detection on PCM16 mono audio.
+
+    audioop.rms returns the root-mean-square amplitude as an int. For
+    silence detection we don't need fancy VAD (webrtcvad / silero) —
+    a fixed RMS threshold catches the silence-hallucination cases
+    (parakeet was trained with full-context attention and fills quiet
+    windows with repeating tokens like "a little bit of a little bit of...").
+
+    Returns True when the window's RMS amplitude is below threshold,
+    which means we should skip the parakeet call entirely.
+    """
+    if not pcm:
+        return True
+    try:
+        return audioop.rms(pcm, 2) < threshold
+    except audioop.error:
+        # Bad PCM length / odd-byte buffer — treat as non-silent so we
+        # don't silently drop data; the upstream model can decide.
+        return False
+
 # Upstream HTTP timeouts. The model on midboy2 takes ~200-600 ms for a
 # 2.5 s window at fp16 on the 3060 once warmed; cold start is up to
 # ~30 s while NeMo loads. We give /transcribe-stream 30 s of grace
@@ -354,6 +396,13 @@ class _SessionState:
     pcm_chunks: list[bytes] = field(default_factory=list)
     cumulative_audio_ms: int = 0
     last_flush_at_audio_ms: int = 0
+    # Phase B.3 polish: cursor tracking how much audio has been emitted as
+    # a partial / final. Each flush sends audio from
+    # (consumed_through_ms - LOOKBACK) forward so we never re-transcribe
+    # previously-emitted content. Advances on every flush (successful OR
+    # silence-skipped) so silence doesn't accumulate as a re-transcribe
+    # backlog.
+    consumed_through_ms: int = 0
     last_seq: int = 0
     flush_counter: int = 0  # increments per upstream transcribe call
     last_partial_text: str = ""  # de-dup empty/identical partials
@@ -425,26 +474,59 @@ class _SessionState:
             return False
         return True
 
-    def take_pcm(self, max_seconds: float = 25.0) -> bytes:
-        """Return up to ``max_seconds`` of the most recent PCM16 (does NOT clear).
+    def take_pcm(
+        self,
+        max_seconds: float = 25.0,
+        lookback_seconds: float = STREAM_LOOKBACK_SECONDS,
+    ) -> bytes:
+        """Return audio from ``consumed_through_ms - lookback_seconds`` forward.
 
-        We keep the buffer around so the next flush includes overlap with the
-        prior window — this gives the model a tiny bit of continuity context
-        across windows without needing a streaming state machine. The cheap
-        trim in ``append_pcm`` keeps the long-term buffer bounded to
-        MAX_PCM_BUFFER_SECONDS, but for each upstream call we send only the
-        most recent ``max_seconds`` so the streaming service stays inside its
-        own per-call window limit (default 30 s on parakeet-stream-svc).
+        Phase B.3 polish: previously returned the entire 25 s rolling window
+        every flush, which forced parakeet to re-transcribe the same audio
+        each time. With ``att_context_size=[-1,-1]`` full-context training,
+        that produced spurious repetition + silence hallucination ("Okay, so
+        I just hit..." would repeat, then degenerate into "a little bit of
+        a little bit of a little bit of...") because the model had no signal
+        for "stop emitting tokens past this point".
 
-        The model will see each window with overlap from the previous one —
-        the partial transcript "grows" sentence-by-sentence as more audio
-        arrives, which matches the design doc's transcript_partial semantics.
+        New behavior: each flush sends audio between (consumed_through_ms -
+        lookback_seconds) and cumulative_audio_ms — i.e. only NEW audio plus
+        a small overlap for word-boundary continuity. The caller is
+        responsible for advancing ``consumed_through_ms`` after a successful
+        flush (or after a silence-skipped flush, so the cursor never
+        falls behind).
+
+        Still caps to ``max_seconds`` as a safety net for recovery from
+        long backpressure stalls (if N flushes failed, we don't send 5×N
+        seconds of audio on the next try).
         """
         joined = b"".join(self.pcm_chunks)
-        max_bytes = int(max_seconds * self.sample_rate * 2)
-        if len(joined) <= max_bytes:
-            return joined
-        return joined[-max_bytes:]
+        if not joined:
+            return b""
+
+        # Map ms boundaries to byte offsets in the joined buffer.
+        # Buffer's first byte corresponds to (cumulative_audio_ms - buffer_duration_ms).
+        bytes_per_ms = self.sample_rate * 2 / 1000.0
+        buffer_duration_ms = int(len(joined) / bytes_per_ms)
+        buffer_start_ms = self.cumulative_audio_ms - buffer_duration_ms
+
+        # Compute the window we want to send.
+        lookback_ms = int(lookback_seconds * 1000)
+        start_ms = max(buffer_start_ms, self.consumed_through_ms - lookback_ms)
+
+        # Cap window length to max_seconds (recovery safety net).
+        max_window_ms = int(max_seconds * 1000)
+        if self.cumulative_audio_ms - start_ms > max_window_ms:
+            start_ms = self.cumulative_audio_ms - max_window_ms
+
+        # Translate ms range to byte offsets in the joined buffer.
+        start_byte = int((start_ms - buffer_start_ms) * bytes_per_ms)
+        start_byte = max(0, start_byte)
+        # Align to even byte (PCM16 sample boundary).
+        if start_byte % 2:
+            start_byte -= 1
+
+        return joined[start_byte:]
 
 
 def _pcm16_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
@@ -497,6 +579,23 @@ async def _flush_to_stt(
     pcm_at_call = state.take_pcm()
     cumulative_at_call = state.cumulative_audio_ms
     state.last_flush_at_audio_ms = cumulative_at_call
+
+    # Phase B.3 polish: VAD silence gate. If the window is below the RMS
+    # threshold, skip the parakeet call entirely — it would hallucinate
+    # repeating tokens on quiet audio (the "a little bit of a little bit
+    # of..." pattern). We still advance the consumed cursor so the next
+    # flush starts fresh and silence doesn't accumulate as a backlog of
+    # re-transcribe targets.
+    if STREAM_VAD_ENABLED and not is_final and _is_silent(pcm_at_call):
+        logger.info(
+            "[streaming-vad] session=%s seq=%d skipping silent window "
+            "(rms<%d, %d bytes, audio_ms=%d)",
+            state.session_id, seq, STREAM_VAD_RMS_THRESHOLD,
+            len(pcm_at_call), cumulative_at_call,
+        )
+        state.consumed_through_ms = cumulative_at_call
+        state.in_flight = False
+        return
 
     # Metric: every flush call counts as one audio-frame forward to the
     # upstream. Increment before the call so a hard crash mid-call still
@@ -644,10 +743,21 @@ async def _flush_to_stt(
         # zero-payload smoke tests produce empty text every time — flooding
         # the client with empty partials is noise.
         if not is_final and not text:
+            # Empty text on real audio means parakeet declined to commit
+            # tokens — advance the cursor anyway so the next flush gets
+            # genuinely-new audio rather than the same silent-ish window.
+            state.consumed_through_ms = cumulative_at_call
             return
         if not is_final and text == state.last_partial_text:
+            state.consumed_through_ms = cumulative_at_call
             return
         state.last_partial_text = text
+
+        # Phase B.3 polish: advance the consumed cursor on every successful
+        # emission so subsequent flushes don't re-transcribe the same audio.
+        # The lookback in ``take_pcm`` keeps a small overlap for word-boundary
+        # continuity, so we don't lose words at the seam.
+        state.consumed_through_ms = cumulative_at_call
 
         frame_type = "final" if is_final else "partial"
         await websocket.send_json({

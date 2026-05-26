@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-26
+
+### Fixed
+- **WS partial transcripts no longer repeat + no longer hallucinate on silence**: v1.2.x near-streaming pipeline shipped a 25 s rolling-window approach where each 2.5 s flush sent the entire buffer to parakeet, then parakeet returned a fresh transcript of the whole window. With `nvidia/parakeet-tdt-0.6b-v3`'s full-context attention training, this produced two failure modes during the v1.2.0 smoke test: (1) the user spoke a sentence and saw it repeat 5+ times in the live transcript as the window kept resending the same audio, and (2) when the user stopped talking, the trailing silence in the window degenerated into repeating-token hallucination ("a little bit of a little bit of a little bit of..."). Per Agent C's spike report (`docs/phase-b3-nemo-streaming-spike.md`), the model architecture itself can't be fixed without a checkpoint swap — but the buffer-management half can.
+  - **Cursor-based windowing**: added `_SessionState.consumed_through_ms`, advanced after every successful partial / final emission. `take_pcm()` now returns audio from `(consumed_through_ms − STREAM_LOOKBACK_SECONDS)` forward instead of the last 25 s of buffer. Default lookback 1.0 s keeps a small overlap for word-boundary continuity at the seam. Each flush now sees ~2.5 s of NEW audio + ~1 s of overlap, not 25 s of mostly-rehashed audio.
+  - **VAD silence gate** (audioop.rms): added `_is_silent()` helper using Python stdlib `audioop.rms(pcm, 2)`. Default threshold `STREAM_VAD_RMS_THRESHOLD=200` catches background-noise-level windows; full-scale PCM16 sine peaks RMS ~23170, typical speech is 1000-5000 RMS, true silence is < 50. When a window is below threshold, parakeet is skipped entirely (no GPU waste, no hallucinated tokens) but the consumed cursor still advances so silence doesn't accumulate as a backlog of re-transcribe targets. Configurable via `STREAM_VAD_ENABLED=0` for diagnostics.
+  - **Empty-text / identical-text de-dup paths** also now advance the consumed cursor (previously they only `return`ed, leaving the buffer to grow). This catches the case where parakeet declined to commit tokens on a low-confidence window — we trust its decision and move on rather than retry with the same audio.
+  - Recovery safety net: the 25 s max window cap stays as a recovery guard for the case where N consecutive flushes failed (cursor stalled) — prevents shipping 5×N seconds of audio on the next try.
+  - Smoke-tested by Aaron on `meetingops.magicunicorn.dev/#/streaming-test` immediately after deploy.
+
 ## [1.2.2] - 2026-05-26
 
 ### Fixed
