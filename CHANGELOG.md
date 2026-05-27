@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+## [3.7.0] - 2026-05-27
+
+### Added
+- **Canonical meeting audio now lives in Garage object storage.** The main meeting audio (the irreplaceable asset) was on a single host's local disk; it now also has a durable copy in the `meeting-ops-audio` Garage bucket, mirroring how session attachments already work. New nullable columns on `recording_sessions` (alembic `031`): `audio_storage_backend` (`garage`|`local`|NULL) and `audio_object_key` (`{org}/{session_id}/audio/{name}`).
+  - `services/media_storage.py`: Garage S3 client for the audio bucket — `put_path`/`put_stream`/`open_object`/`iter_object`/`cached_local_path`/`delete_object`/`delete_prefix`, with a local-first spool fallback and a `MEDIA_STORAGE_DISABLED` escape hatch (tests force-local).
+  - `services/session_media.py`: `persist_session_audio` (best-effort push + record columns), `resolve_local_path` (local-first, else pull from Garage into cache), `purge_session_media` (delete the whole session prefix).
+  - **Writes**: durable copy pushed on always-on finalize, both upload paths, and bulk-import. All best-effort and additive — the local file stays the working copy / source-of-truth; a Garage hiccup just leaves the columns NULL to retry.
+  - **Reads**: `download/audio` resolves local-first, else proxy-streams the bytes from Garage (range-capable `FileResponse`; Garage is never exposed to the browser).
+  - **Delete**: deleting a session now purges its Garage objects too — so "delete my data" is actually honored (GDPR/CCPA).
+  - **Backfill**: `scripts/backfill_audio_to_garage.py` (idempotent, additive) seeded the existing recordings into Garage (15 sessions / ~993 MB on bigboy).
+  - Free-tier audio is unaffected (browser-only; never reaches the server, never uploaded).
+
+### Changed
+- **Bulk-import Garage upload consolidated** onto `services.session_media`. The previous bespoke `_upload_to_garage` used a job-scoped key (`{org}/{job_id}/{file_id}`) and had been silently failing because the `meeting-ops-audio` bucket never existed; it's replaced by the single canonical session-scoped path so the download fallback + delete-cascade find bulk-imported audio too.
+
+### Fixed
+- **Garage `HEAD` returns 400** with this botocore (same family as the `@aws-sdk` checksum/HEAD gotchas). `cached_local_path` now streams via `get_object` instead of `download_file` (which issues a `head_object` first) — fixing the evicted-cache / disaster-recovery read path — and `ensure_bucket` no longer probes with `head_bucket`.
+
+### Ops
+- Provisioned the `meeting-ops-audio` Garage bucket and granted the `meetingops` data key read/write/owner (it couldn't self-create buckets — the root cause of the prior silent failures).
+
+### Not yet (gated / follow-ups)
+- Local stays the source-of-truth; **no cutover** to Garage-primary or local eviction yet (that's the next, separately-confirmed step). Retention/lifecycle policy per tier, encryption-at-rest (HIPAA path), and TTS-output durability are deferred follow-ups.
+
 ## [3.6.1] - 2026-05-27
 
 ### Removed
