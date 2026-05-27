@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.6.0] - 2026-05-27
+
+### Changed
+- **Live Recording page: one summary surface.** Removed the legacy page-level "Meeting Summary (Live AI Updates)", "Key Points", and optional "Live Transcript" panels (driven by the old `/ws/transcription-auto` `autoSummary`/`summaryFormats` path) that duplicated the recorder's own rolling Live summary and got pushed to the bottom of the page. `AlwaysOnControl`'s Live summary is the single live-summary surface now; the structured summary + key points + action items remain in Session Details (post-meeting), and the gated `ServerLiveTranscript` (Pro server-live) stays. (The now-dead legacy summary state + `/ws/transcription-auto` handlers are left as harmless no-ops; `noUnusedLocals` is off so they do not break the build — deeper removal is a follow-up.)
+
 ## [3.5.1] - 2026-05-27
 
 ### Fixed
