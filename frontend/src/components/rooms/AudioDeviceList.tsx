@@ -17,11 +17,18 @@ import roomsApi, {
 interface AudioDeviceListProps {
   orgSlug: string | null;
   selectedDevicePath?: string | null;
-  onSelect: (device: AudioDevice) => void;
+  selectedDevicePaths?: string[];
+  onSelect?: (device: AudioDevice) => void;
+  onSelectionChange?: (devices: AudioDevice[]) => void;
+  selectionMode?: 'single' | 'multiple';
   /**
    * Optional className for the container. Defaults to a stack of cards.
    */
   className?: string;
+  /**
+   * Device paths that should render as already in-use / unavailable.
+   */
+  disabledDevicePaths?: string[];
   /**
    * Show the Test mic button per row. Default true. The setup wizard
    * embeds this list inside a small popover where the button is useful;
@@ -59,8 +66,12 @@ interface ProbeState {
 export default function AudioDeviceList({
   orgSlug,
   selectedDevicePath,
+  selectedDevicePaths,
   onSelect,
+  onSelectionChange,
+  selectionMode = 'single',
   className = '',
+  disabledDevicePaths = [],
   showTestButton = true,
 }: AudioDeviceListProps) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -86,6 +97,10 @@ export default function AudioDeviceList({
   useEffect(() => {
     fetchDevices();
   }, [fetchDevices]);
+
+  const isMultiple = selectionMode === 'multiple';
+  const selectedSet = new Set(selectedDevicePaths || []);
+  const disabledSet = new Set(disabledDevicePaths);
 
   const startTest = useCallback(
     async (devicePath: string) => {
@@ -176,7 +191,10 @@ export default function AudioDeviceList({
       {!loading && !error && devices.length > 0 && (
         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
           {devices.map((d) => {
-            const selected = selectedDevicePath === d.device_path;
+            const selected = isMultiple
+              ? selectedSet.has(d.device_path)
+              : selectedDevicePath === d.device_path;
+            const disabled = disabledSet.has(d.device_path);
             const probe = probes[d.device_path];
             return (
               <div
@@ -184,17 +202,34 @@ export default function AudioDeviceList({
                 className={`flex flex-col gap-2 rounded-xl border px-3 py-3 transition-colors ${
                   selected
                     ? 'border-fuchsia-500/60 bg-fuchsia-500/10'
+                    : disabled
+                    ? 'border-zinc-800 bg-zinc-950/20 opacity-60'
                     : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-900'
                 }`}
               >
                 <button
                   type="button"
-                  onClick={() => onSelect(d)}
+                  onClick={() => {
+                    if (disabled) return;
+                    if (isMultiple) {
+                      if (!onSelectionChange) return;
+                      const next = selected
+                        ? (selectedDevicePaths || []).filter((path) => path !== d.device_path)
+                        : [...(selectedDevicePaths || []), d.device_path];
+                      onSelectionChange(devices.filter((device) => next.includes(device.device_path)));
+                      return;
+                    }
+                    onSelect?.(d);
+                  }}
                   className="flex items-start gap-3 text-left"
+                  aria-pressed={selected}
+                  disabled={disabled && !selected}
                 >
                   <div className="mt-0.5">
                     {selected ? (
                       <Check className="h-4 w-4 text-fuchsia-300" />
+                    ) : disabled ? (
+                      <XCircle className="h-4 w-4 text-zinc-500" />
                     ) : (
                       <Mic className="h-4 w-4 text-zinc-400" />
                     )}
@@ -209,6 +244,11 @@ export default function AudioDeviceList({
                         : ''}
                       <span className="font-mono">{d.device_path}</span>
                     </div>
+                    {disabled && (
+                      <div className="mt-1 text-[11px] uppercase tracking-wide text-zinc-500">
+                        Already added to room
+                      </div>
+                    )}
                   </div>
                 </button>
 

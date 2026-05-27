@@ -17,7 +17,9 @@ export type RoomSourceType =
   | 'server_usb_mic'
   | 'network_stream'
   | 'satellite'
+  | 'satellite_device'
   | 'companion_app';
+export type RoomSourceStatus = 'idle' | 'recording' | 'error' | 'disabled';
 export type RoomRole = 'view' | 'record' | 'manage';
 
 /**
@@ -54,8 +56,10 @@ export interface RoomSource {
   device_path?: string | null;
   device_id?: string | null;
   label: string;
+  status: RoomSourceStatus;
   is_active: boolean;
   health_status: 'healthy' | 'degraded' | 'offline' | 'unbound' | 'error' | 'unknown';
+  config_json?: Record<string, unknown> | null;
   created_at: string;
   raw_id?: string;
 }
@@ -135,21 +139,22 @@ function normalizeSource(raw: unknown): RoomSource {
       : typeof roomIdRaw === 'string' && /^\d+$/.test(roomIdRaw)
       ? Number(roomIdRaw)
       : 0;
-  // Backend uses `status` field; frontend uses health_status. is_active
-  // isn't surfaced today — infer from status === 'active' or default to
-  // the first source returned.
-  const status = String((s.status as string) || 'unknown');
+  const status =
+    s.status === 'recording' ||
+    s.status === 'error' ||
+    s.status === 'disabled' ||
+    s.status === 'idle'
+      ? (s.status as RoomSourceStatus)
+      : 'idle';
   const isActive =
     typeof s.is_active === 'boolean'
       ? (s.is_active as boolean)
-      : status === 'active';
+      : status !== 'disabled';
   const healthMap: Record<string, RoomSource['health_status']> = {
-    active: 'healthy',
-    healthy: 'healthy',
-    degraded: 'degraded',
-    offline: 'offline',
+    idle: 'healthy',
+    recording: 'healthy',
+    disabled: 'offline',
     error: 'error',
-    unbound: 'unbound',
   };
   const health_status = (healthMap[status] as RoomSource['health_status']) || 'unknown';
 
@@ -164,8 +169,13 @@ function normalizeSource(raw: unknown): RoomSource {
       String(s.label || '') ||
       String(s.device_path || '') ||
       String(s.hardware_type || ''),
+    status,
     is_active: isActive,
     health_status,
+    config_json:
+      s.config_json && typeof s.config_json === 'object'
+        ? (s.config_json as Record<string, unknown>)
+        : null,
     created_at: String(s.created_at || ''),
   };
 }
@@ -392,8 +402,10 @@ const MOCK_STORE: MockStore = {
       device_path: 'hw:2,0',
       device_id: null,
       label: 'USB mic: hw:2,0',
+      status: 'recording',
       is_active: true,
       health_status: 'healthy',
+      config_json: null,
       created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
     },
     {
@@ -403,8 +415,10 @@ const MOCK_STORE: MockStore = {
       device_path: 'hw:3,0',
       device_id: null,
       label: 'Ceiling mic',
-      is_active: false,
+      status: 'idle',
+      is_active: true,
       health_status: 'healthy',
+      config_json: null,
       created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
     },
     {
@@ -414,8 +428,10 @@ const MOCK_STORE: MockStore = {
       device_path: 'hw:3,0',
       device_id: null,
       label: 'USB mic: hw:3,0',
+      status: 'recording',
       is_active: true,
       health_status: 'healthy',
+      config_json: null,
       created_at: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
     },
   ],
@@ -616,13 +632,7 @@ export const roomsApi = {
         orgSlug,
         method: 'GET',
       });
-      const list = raw.map(normalizeSource);
-      // If the backend doesn't surface is_active, mark the first one
-      // active by default so the UI has *something* to point at.
-      if (list.length > 0 && !list.some((s) => s.is_active)) {
-        list[0].is_active = true;
-      }
-      return list;
+      return raw.map(normalizeSource);
     } catch (err) {
       if (!isMockFallback(err)) throw err;
       await pseudoSleep();
@@ -652,9 +662,10 @@ export const roomsApi = {
         device_path: body.device_path || null,
         device_id: body.device_id || null,
         label: body.label,
-        is_active:
-          MOCK_STORE.sources.filter((s) => s.room_id === Number(roomId)).length === 0,
+        status: 'idle',
+        is_active: true,
         health_status: 'healthy',
+        config_json: null,
         created_at: new Date().toISOString(),
       };
       MOCK_STORE.sources.push(newSrc);

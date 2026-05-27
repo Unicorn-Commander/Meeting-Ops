@@ -45,7 +45,7 @@ function relativeAgo(iso: string): string {
 
 function summarizeSources(sources?: RoomSource[]): string {
   if (!sources || sources.length === 0) return 'No audio source configured';
-  const active = sources.find((s) => s.is_active) || sources[0];
+  const active = sources.find((s) => s.status === 'recording') || sources[0];
   const others = sources.filter((s) => s.id !== active.id);
   const main = active.label || `${active.hardware_type}: ${active.device_path || active.device_id || ''}`;
   if (others.length === 0) return main;
