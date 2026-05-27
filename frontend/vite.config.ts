@@ -7,7 +7,13 @@ const backendUrl = process.env.VITE_BACKEND_URL || "http://localhost:9050";
 export default defineConfig({
   plugins: [
     VitePWA({
-      registerType: "autoUpdate",
+      // "prompt" (not autoUpdate) so a freshly-deployed service worker
+      // parks in the waiting state instead of taking over the page. The
+      // PWAUpdate component decides WHEN to activate it (via updateSW(true)),
+      // which it defers while a recording is in progress — applying a new
+      // SW mid-capture can swap cached chunks out from under an active
+      // recording. See src/components/PWAUpdate.tsx.
+      registerType: "prompt",
       injectRegister: "auto",
       manifest: false,
       includeAssets: [
@@ -24,7 +30,11 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/api\//, /^\/ws\//, /^\/oauth2\//, /^\/realms\//],
         cleanupOutdatedCaches: true,
         clientsClaim: true,
-        skipWaiting: true,
+        // skipWaiting stays false so the new SW waits until PWAUpdate
+        // explicitly tells it to activate (never mid-recording). clientsClaim
+        // still applies on that deferred activation so the reload picks up
+        // the new SW immediately.
+        skipWaiting: false,
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         runtimeCaching: [
           {

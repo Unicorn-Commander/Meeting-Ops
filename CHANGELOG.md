@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-27
+
+### Changed
+- **PWA updates no longer apply mid-recording.** The service worker moved from `registerType: "autoUpdate"` + workbox `skipWaiting: true` to `"prompt"` + `skipWaiting: false`, so a freshly-deployed SW parks in the *waiting* state and only activates when the user clicks "Reload now" (which sends `SKIP_WAITING` via `updateSW(true)`). The `PWAUpdate` banner is now suppressed while a recording is in progress — live (`RecordingContext.isRecording`) OR always-on capture (`AlwaysOnContext.state` in starting/recording/paused/stopping) — and reappears the moment recording stops with tailored copy ("we held an update while you were recording"). When no recording is active it behaves as before: prompt as soon as the update is detected. Removes the footgun where a deploy could swap cached chunks out from under an active recording.
+
 ## [2.2.0] - 2026-05-27
 
 ### Added
