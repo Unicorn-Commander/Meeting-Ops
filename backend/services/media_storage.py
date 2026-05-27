@@ -104,23 +104,25 @@ def ensure_bucket() -> bool:
     client = _client()
     if client is None:
         return False
+    # Don't probe with head_bucket — Garage returns 400 on HEAD with this
+    # botocore. Just attempt create and treat "already owned/exists" as
+    # success (the common case: the bucket is provisioned out-of-band).
     try:
-        client.head_bucket(Bucket=GARAGE_AUDIO_BUCKET)
+        client.create_bucket(Bucket=GARAGE_AUDIO_BUCKET)
+        logger.info("media_storage: created bucket %s", GARAGE_AUDIO_BUCKET)
         _bucket_ensured = True
         return True
-    except Exception:
-        try:
-            client.create_bucket(Bucket=GARAGE_AUDIO_BUCKET)
-            logger.info("media_storage: created bucket %s", GARAGE_AUDIO_BUCKET)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "AlreadyOwned" in msg or "AlreadyExists" in msg or "BucketAlreadyOwnedByYou" in msg:
             _bucket_ensured = True
             return True
-        except Exception as e:  # noqa: BLE001
-            # BucketAlreadyOwnedByYou etc. — treat as fine.
-            if "AlreadyOwned" in str(e) or "AlreadyExists" in str(e):
-                _bucket_ensured = True
-                return True
-            logger.warning("media_storage: ensure_bucket failed: %s", e)
-            return False
+        # Can't create (e.g. data key lacks create perm) but the bucket may
+        # already exist + be writable — assume usable and let put/get surface
+        # any real problem rather than blocking on a permission we don't need.
+        logger.info("media_storage: ensure_bucket assuming existing bucket (%s)", msg)
+        _bucket_ensured = True
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +247,19 @@ def cached_local_path(*, backend: str, key: str) -> Path:
         raise FileNotFoundError("media backend=garage but client unconfigured")
     local.parent.mkdir(parents=True, exist_ok=True)
     tmp = local.with_suffix(local.suffix + ".dl")
-    client.download_file(GARAGE_AUDIO_BUCKET, key, str(tmp))
+    # Stream via get_object rather than client.download_file: download_file
+    # issues a HEAD (head_object) first, and Garage returns 400 on HEAD with
+    # this botocore (same family as the @aws-sdk checksum/HEAD gotchas). GET
+    # works fine, so we copy the body straight to disk.
+    body = client.get_object(Bucket=GARAGE_AUDIO_BUCKET, Key=key)["Body"]
+    try:
+        with open(tmp, "wb") as out:
+            shutil.copyfileobj(body, out, length=4 * 1024 * 1024)
+    finally:
+        try:
+            body.close()
+        except Exception:
+            pass
     os.replace(tmp, local)
     return local
 
