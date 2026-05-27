@@ -38,6 +38,12 @@ POST /diarize-file       — diarize a file by absolute path on the
                             the finalize-audio worker). Same response
                             shape as /diarize-stream but no streaming
                             semantics.
+POST /diarize-file-upload — v2.2.0 canonical-hybrid path. Multipart WAV
+                            upload (cross-host, no shared mount needed).
+                            Sortformer segmentation + per-turn wespeaker
+                            embeddings from meet-speaker-svc. Returns a
+                            pyannote-compatible DiarizeResponse so the
+                            backend provider drops in for the pyannote one.
 
 Model + streaming notes
 -----------------------
@@ -81,11 +87,21 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
+import httpx
 import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("sortformer-svc")
@@ -130,6 +146,25 @@ MAX_FILE_AUDIO_SECONDS = float(
 # call. Bump only if we add a true batch endpoint. Env knob so the
 # spike's leak_bench.py can sweep it without code changes.
 BATCH_SIZE = int(os.getenv("SORTFORMER_BATCH_SIZE", "1"))
+
+# v2.2.0 canonical-hybrid path: /diarize-file-upload diarizes with
+# Sortformer then asks meet-speaker-svc (wespeaker) for a per-turn voice
+# embedding so the backend's identify_speakers can match enrolled voices
+# — exactly what pyannote's /diarize gives today, but with Sortformer
+# doing the speaker segmentation. speaker-svc is a sibling container on
+# the same midboy2 host, so this call stays on the local network. The
+# Tailscale IP (http://100.66.42.57:8889) is the documented sibling
+# address and is the safe default; override with SPEAKER_SVC_URL to use
+# the docker-network name on hosts where that resolves.
+SPEAKER_SVC_URL = os.getenv(
+    "SPEAKER_SVC_URL", "http://100.66.42.57:8889"
+).rstrip("/")
+SPEAKER_SVC_TIMEOUT = float(os.getenv("SPEAKER_SVC_TIMEOUT", "60"))
+# Turns shorter than this are not sent to speaker-svc /embed (which
+# rejects clips < 0.5 s) — they get embedding=None, matching how
+# speaker-svc itself skips embedding short turns. Keep at/above
+# speaker-svc's MIN_AUDIO_SECONDS.
+EMBED_MIN_SECONDS = float(os.getenv("SORTFORMER_EMBED_MIN_SECONDS", "0.5"))
 
 SERVICE_VERSION = "0.1.0-spike"  # Phase B.3 spike — research + prototype
 
@@ -355,6 +390,70 @@ def _diarize_wav_array(wav: np.ndarray) -> dict[str, Any]:
             pass
 
 
+async def _embed_turns_via_speaker_svc(
+    wav: np.ndarray, turns: list[dict[str, Any]]
+) -> list[Optional[list[float]]]:
+    """Crop each diarized turn out of `wav` and ask meet-speaker-svc for a
+    wespeaker embedding.
+
+    Returns a list parallel to `turns`: each entry is the embedding float
+    list, or None when the turn is too short to embed or speaker-svc could
+    not be reached. Embeddings are best-effort enrichment for the backend's
+    identify_speakers step — the speaker *labels* from Sortformer are the
+    primary product, so this never raises. If speaker-svc is unreachable we
+    stop after the first connection error rather than eating one timeout per
+    turn.
+    """
+    embeddings: list[Optional[list[float]]] = [None] * len(turns)
+    if not turns:
+        return embeddings
+
+    min_samples = int(EMBED_MIN_SECONDS * TARGET_SR)
+    embedded = 0
+    async with httpx.AsyncClient(timeout=SPEAKER_SVC_TIMEOUT) as client:
+        for i, turn in enumerate(turns):
+            start_idx = max(0, int(turn["start_ms"] / 1000.0 * TARGET_SR))
+            end_idx = min(len(wav), int(turn["end_ms"] / 1000.0 * TARGET_SR))
+            if end_idx - start_idx < min_samples:
+                continue  # too short for speaker-svc — leave as None
+            buf = io.BytesIO()
+            sf.write(
+                buf, wav[start_idx:end_idx], TARGET_SR,
+                subtype="PCM_16", format="WAV",
+            )
+            try:
+                resp = await client.post(
+                    f"{SPEAKER_SVC_URL}/embed",
+                    files={"audio": ("turn.wav", buf.getvalue(), "audio/wav")},
+                )
+                resp.raise_for_status()
+                emb = resp.json().get("embedding") or None
+                if emb:
+                    embeddings[i] = emb
+                    embedded += 1
+            except httpx.HTTPStatusError as exc:
+                # Per-clip rejection (e.g. clip just under the threshold) —
+                # skip this turn only, keep going.
+                logger.warning(
+                    "speaker-svc /embed HTTP %s turn %d: %s",
+                    exc.response.status_code, i, exc.response.text[:150],
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                logger.warning(
+                    "speaker-svc unreachable at %s (%s); skipping embeddings "
+                    "for remaining %d turns",
+                    SPEAKER_SVC_URL, exc, len(turns) - i,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("speaker-svc /embed failed turn %d: %s", i, exc)
+    logger.info(
+        "embedded %d/%d turns via speaker-svc (%s)",
+        embedded, len(turns), SPEAKER_SVC_URL,
+    )
+    return embeddings
+
+
 # ---------- request / response shapes ----------
 
 
@@ -394,6 +493,32 @@ class DiarizeStreamResponse(BaseModel):
     rtf: float
     distinct_speaker_count: int = 0
     sequence: Optional[int] = None
+    service_version: str = SERVICE_VERSION
+
+
+class DiarizeFileSegment(BaseModel):
+    """Pyannote-compatible turn: seconds-based start/end, a SPEAKER_NN
+    label, and an optional wespeaker embedding. Mirrors
+    meet-speaker-svc's DiarizeSegment so SortformerSpeakerSvcProvider
+    parses this response exactly like LocalSpeakerSvcProvider parses
+    speaker-svc's /diarize."""
+    start: float
+    end: float
+    speaker: str
+    embedding: Optional[list[float]] = None
+
+
+class DiarizeFileResponse(BaseModel):
+    """Mirror of meet-speaker-svc's DiarizeResponse, plus model/rtf so the
+    finalize pipeline can log throughput. backend is fixed to
+    'sortformer-hybrid' to make the source obvious in stored transcripts."""
+    segments: list[DiarizeFileSegment] = Field(default_factory=list)
+    num_speakers: int = 0
+    backend: str = "sortformer-hybrid"
+    duration_seconds: float = 0.0
+    model: str
+    rtf: float = 0.0
+    embeddings_enabled: bool = True
     service_version: str = SERVICE_VERSION
 
 
@@ -724,6 +849,107 @@ async def diarize_file(
         rtf=rtf,
         distinct_speaker_count=len(distinct),
         sequence=None,
+    )
+
+
+@app.post("/diarize-file-upload", response_model=DiarizeFileResponse)
+async def diarize_file_upload(
+    audio: UploadFile = File(...),
+    return_embeddings: bool = Form(default=True),
+    x_session_id: Optional[str] = Header(default=None, alias="X-Session-Id"),
+) -> DiarizeFileResponse:
+    """Canonical post-hoc diarization for the finalize-audio pipeline.
+
+    Multipart counterpart to /diarize-file. The caller streams the session
+    WAV in the request body rather than passing a path, because the backend
+    (bigboy) and this service (midboy2) do not share a filesystem — the
+    same reason meet-speaker-svc's provider always uploads bytes. We run
+    Sortformer for speaker segmentation, then ask meet-speaker-svc
+    (wespeaker) for a per-turn voice embedding, and return a
+    pyannote-compatible DiarizeResponse so the backend's
+    SortformerSpeakerSvcProvider is a drop-in for LocalSpeakerSvcProvider.
+
+    Sortformer caps at 4 speakers; the canonical pyannote path (default)
+    handles >4. Set return_embeddings=false to skip the speaker-svc round
+    trips when you only need labels.
+    """
+    global _request_count
+    started = time.time()
+
+    raw = await audio.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty audio upload")
+
+    wav, duration = _decode_audio(raw)
+    if duration < MIN_AUDIO_SECONDS:
+        raise HTTPException(
+            status_code=400, detail=f"audio too short ({duration:.2f}s)",
+        )
+    if duration > MAX_FILE_AUDIO_SECONDS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"file too long ({duration:.1f}s > "
+                f"{MAX_FILE_AUDIO_SECONDS:.0f}s)"
+            ),
+        )
+
+    if _model is None and _model_load_error is None:
+        raise HTTPException(
+            status_code=503, detail="model still loading — retry shortly",
+        )
+    if _model is None:
+        raise HTTPException(
+            status_code=503, detail=f"model load failed: {_model_load_error}",
+        )
+
+    try:
+        result = _diarize_wav_array(wav)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("diarize-file-upload failed session=%s", x_session_id)
+        raise HTTPException(status_code=500, detail=f"diarize failed: {exc}")
+
+    turns = result.get("speakers") or []
+
+    embeddings: list[Optional[list[float]]] = [None] * len(turns)
+    if return_embeddings and turns:
+        embeddings = await _embed_turns_via_speaker_svc(wav, turns)
+
+    segments: list[DiarizeFileSegment] = []
+    distinct: set[int] = set()
+    for i, turn in enumerate(turns):
+        spk_id = int(turn["spk_id"])
+        distinct.add(spk_id)
+        segments.append(DiarizeFileSegment(
+            start=turn["start_ms"] / 1000.0,
+            end=turn["end_ms"] / 1000.0,
+            # Match pyannote's SPEAKER_NN convention so identify_speakers
+            # and the UI treat hybrid labels identically to pyannote's.
+            speaker=f"SPEAKER_{spk_id:02d}",
+            embedding=embeddings[i],
+        ))
+
+    elapsed = time.time() - started
+    rtf = elapsed / duration if duration > 0 else 0.0
+
+    _request_count += 1
+    logger.info(
+        "/diarize-file-upload session=%s duration=%.1fs elapsed=%.1fs "
+        "rtf=%.3f turns=%d speakers=%d embeddings=%s",
+        x_session_id, duration, elapsed, rtf,
+        len(segments), len(distinct), return_embeddings,
+    )
+
+    return DiarizeFileResponse(
+        segments=segments,
+        num_speakers=len(distinct),
+        backend="sortformer-hybrid",
+        duration_seconds=duration,
+        model=_model_name or DEFAULT_MODEL,
+        rtf=rtf,
+        embeddings_enabled=return_embeddings,
     )
 
 

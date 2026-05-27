@@ -10,10 +10,14 @@
 #     SortformerModules for the v1 / 4-speaker variant
 #   - huggingface_hub (for from_pretrained download)
 #
-# Today the sortformer surface uses only the base stack, so this file
-# is intentionally empty — leaving it in place so the Dockerfile's
-# `pip install -r requirements.txt` keeps working the first time we
-# need to add something. Likely additions in a future build:
+# The /diarize-file-upload endpoint (v2.2.0) calls meet-speaker-svc for
+# wespeaker embeddings, so we now declare httpx as a runtime dep. It is
+# already present in the base image (0.28.1) — declaring it here is
+# belt-and-suspenders so a future base-image change can't silently drop
+# the HTTP client out from under the hybrid diarization path.
+httpx>=0.27
+#
+# Likely future additions:
 #   - a newer nemo_toolkit (>= 2.5) when we move to the streaming v2.x
 #     models (current 2.4.1 raises a TypeError because the v2 config
 #     YAML references `spkcache_update_period` which the 2.4.1

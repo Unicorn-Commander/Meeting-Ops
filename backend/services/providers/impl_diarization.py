@@ -164,5 +164,121 @@ class LocalSpeakerSvcProvider:
             return {"status": "unreachable", "error": str(exc)}
 
 
+DEFAULT_SORTFORMER_URL = os.getenv("SORTFORMER_URL", "http://meet-sortformer-svc:8896")
+
+
+class SortformerSpeakerSvcProvider:
+    """Canonical-hybrid diarization provider (v2.2.0).
+
+    Diarization (speaker segmentation) is done by meet-sortformer-svc via
+    its multipart ``/diarize-file-upload`` endpoint, which internally asks
+    meet-speaker-svc (wespeaker) for the per-turn voice embeddings. The svc
+    returns the same response shape as meet-speaker-svc's ``/diarize``, so
+    ``diarize()`` here is a drop-in for ``LocalSpeakerSvcProvider.diarize``.
+
+    Everything else — ``embed`` / ``embed_bytes`` / ``identify`` / enrollment
+    — still goes to meet-speaker-svc (wespeaker is canonical for speaker
+    identity). We hold an inner ``LocalSpeakerSvcProvider`` and delegate
+    those methods so the only thing that changes vs the pyannote default is
+    *which model draws the speaker boundaries*.
+    """
+
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        *,
+        speaker_svc_endpoint: Optional[str] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ):
+        self.endpoint = (endpoint or DEFAULT_SORTFORMER_URL).rstrip("/")
+        self.timeout = timeout
+        # wespeaker stays canonical for embed/identify/enrollment.
+        self._speaker_svc = LocalSpeakerSvcProvider(
+            endpoint=speaker_svc_endpoint, timeout=timeout
+        )
+
+    # ---------- diarize (sortformer hybrid) ----------
+
+    async def diarize(
+        self,
+        audio_path: str,
+        *,
+        num_speakers: Optional[int] = None,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+        clustering_threshold: Optional[float] = None,
+    ) -> list[dict]:
+        """Diarize via sortformer-svc /diarize-file-upload.
+
+        Returns the same list[dict] shape as LocalSpeakerSvcProvider:
+        each segment carries start / end / speaker and (best-effort)
+        embedding. The speaker-count and clustering hints pyannote honours
+        are accepted for protocol compatibility but ignored — Sortformer is
+        fixed at a 4-speaker architecture and has no clustering threshold.
+        """
+        import os as _os
+        if not _os.path.exists(audio_path):
+            logger.error(
+                "sortformer-svc /diarize-file-upload: audio missing on disk: %s",
+                audio_path,
+            )
+            return []
+        if any(v is not None for v in (num_speakers, min_speakers, max_speakers, clustering_threshold)):
+            logger.debug(
+                "sortformer hybrid ignores speaker-count/clustering hints "
+                "(num=%s min=%s max=%s thr=%s) — model is fixed 4-speaker",
+                num_speakers, min_speakers, max_speakers, clustering_threshold,
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                with open(audio_path, "rb") as f:
+                    files = {"audio": (_os.path.basename(audio_path), f, "audio/wav")}
+                    resp = await client.post(
+                        f"{self.endpoint}/diarize-file-upload",
+                        data={"return_embeddings": "true"},
+                        files=files,
+                    )
+                resp.raise_for_status()
+                payload = resp.json()
+                segments = payload.get("segments", []) or []
+                for seg in segments:
+                    seg.setdefault("backend", payload.get("backend", "sortformer-hybrid"))
+                return segments
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "sortformer-svc /diarize-file-upload HTTP %s: %s",
+                exc.response.status_code, exc.response.text[:200],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("sortformer-svc /diarize-file-upload failed: %s", exc)
+        return []
+
+    # ---------- embed / identify / health delegate to wespeaker ----------
+
+    async def embed(self, audio_path: str) -> dict:
+        return await self._speaker_svc.embed(audio_path)
+
+    async def embed_bytes(self, audio_bytes: bytes, filename: str = "clip.wav") -> dict:
+        return await self._speaker_svc.embed_bytes(audio_bytes, filename)
+
+    async def identify(self, embedding: list[float], candidates: list[dict], threshold: float = 0.55) -> dict:
+        return await self._speaker_svc.identify(embedding, candidates, threshold)
+
+    async def health(self) -> dict:
+        """Report the sortformer-svc health plus the wespeaker svc it
+        depends on for embeddings, so a degraded embedding path is visible."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{self.endpoint}/health")
+                resp.raise_for_status()
+                out = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sortformer-svc /health failed: %s", exc)
+            out = {"status": "unreachable", "error": str(exc)}
+        out["speaker_svc"] = await self._speaker_svc.health()
+        return out
+
+
 # Back-compat alias. New code should use LocalSpeakerSvcProvider.
 LocalDiarizationProvider = LocalSpeakerSvcProvider

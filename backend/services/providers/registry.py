@@ -340,11 +340,39 @@ class ProviderRegistry:
     def get_diarization(self, org_id: int) -> Any:
         """Returns a DiarizationProvider that also exposes embed() and identify().
         Configurable per-org via OrgProviderSettings; defaults to the internal
-        speaker-svc container on bigboy GPU 1."""
+        speaker-svc container.
+
+        Provider preference:
+          * ``pyannote`` (default) — canonical speaker-svc pyannote + wespeaker.
+          * ``sortformer-hybrid`` — Sortformer draws the speaker boundaries,
+            wespeaker (still via speaker-svc) supplies the per-turn embeddings.
+
+        Resolution order: per-org OrgProviderSettings ``provider_name`` wins
+        over the ``SPEAKER_PROVIDER_PREFERENCE`` env default, so we can flip
+        one org to the hybrid for validation without touching the env. In
+        both modes ``endpoint_url`` is the *speaker-svc* address (wespeaker
+        is canonical for identity either way); the sortformer URL is an
+        infra-level env (SORTFORMER_URL), not a per-org setting.
+        """
         settings = self._get_settings(org_id, "diarization")
-        endpoint = settings.get("endpoint_url") or os.getenv("SPEAKER_SVC_URL", "http://meet-speaker-svc:8889")
+        speaker_svc_endpoint = settings.get("endpoint_url") or os.getenv(
+            "SPEAKER_SVC_URL", "http://meet-speaker-svc:8889"
+        )
+        preference = (
+            settings.get("provider_name")
+            or os.getenv("SPEAKER_PROVIDER_PREFERENCE", "pyannote")
+        ).lower()
+        if preference in ("sortformer", "sortformer-hybrid", "hybrid"):
+            from .impl_diarization import SortformerSpeakerSvcProvider
+            sortformer_endpoint = os.getenv(
+                "SORTFORMER_URL", "http://meet-sortformer-svc:8896"
+            )
+            return SortformerSpeakerSvcProvider(
+                endpoint=sortformer_endpoint,
+                speaker_svc_endpoint=speaker_svc_endpoint,
+            )
         from .impl_diarization import LocalSpeakerSvcProvider
-        return LocalSpeakerSvcProvider(endpoint=endpoint)
+        return LocalSpeakerSvcProvider(endpoint=speaker_svc_endpoint)
 
     def get_speaker_svc(self, org_id: int) -> Any:
         """Convenience alias — same provider as get_diarization but reads as

@@ -327,6 +327,150 @@ def test_diarize_file_ok(client, monkeypatch, tmp_path):
     assert data["is_final"] is True
 
 
+# ---------- /diarize-file-upload (v2.2.0 canonical hybrid) ----------
+
+
+def test_diarize_file_upload_pyannote_shape(client, monkeypatch):
+    """Happy path: multipart WAV in, pyannote-compatible DiarizeResponse
+    out. Embeddings are stubbed so we don't touch speaker-svc."""
+    monkeypatch.setattr(
+        main, "_diarize_wav_array", lambda wav: _fake_diarize_result(33.5)
+    )
+
+    async def _fake_embed(wav, turns):
+        # Embed every turn except the last (exercises the None passthrough).
+        return [[0.1, 0.2, 0.3] if i < len(turns) - 1 else None
+                for i in range(len(turns))]
+
+    monkeypatch.setattr(main, "_embed_turns_via_speaker_svc", _fake_embed)
+
+    resp = client.post(
+        "/diarize-file-upload",
+        files={"audio": ("session.wav", _silence_wav_bytes(33.5), "audio/wav")},
+        data={"return_embeddings": "true"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["backend"] == "sortformer-hybrid"
+    assert data["num_speakers"] == 2
+    assert data["model"] == "nvidia/diar_sortformer_4spk-v1"
+    assert len(data["segments"]) == 4
+    # spk_id -> SPEAKER_NN, seconds-based start/end.
+    assert data["segments"][0]["speaker"] == "SPEAKER_00"
+    assert data["segments"][-1]["speaker"] == "SPEAKER_01"
+    assert data["segments"][0]["start"] == 0.0
+    assert data["segments"][0]["end"] == pytest.approx(2.56)
+    assert data["segments"][0]["embedding"] == [0.1, 0.2, 0.3]
+    # Last turn embedding came back None.
+    assert data["segments"][-1]["embedding"] is None
+
+
+def test_diarize_file_upload_skips_embeddings_when_disabled(client, monkeypatch):
+    monkeypatch.setattr(
+        main, "_diarize_wav_array", lambda wav: _fake_diarize_result(5.0)
+    )
+
+    called = {"n": 0}
+
+    async def _fake_embed(wav, turns):  # pragma: no cover - must not run
+        called["n"] += 1
+        return [None] * len(turns)
+
+    monkeypatch.setattr(main, "_embed_turns_via_speaker_svc", _fake_embed)
+
+    resp = client.post(
+        "/diarize-file-upload",
+        files={"audio": ("session.wav", _silence_wav_bytes(5.0), "audio/wav")},
+        data={"return_embeddings": "false"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["embeddings_enabled"] is False
+    assert called["n"] == 0  # embed helper never invoked
+    assert all(s["embedding"] is None for s in data["segments"])
+
+
+def test_diarize_file_upload_empty_body_400(client):
+    resp = client.post(
+        "/diarize-file-upload",
+        files={"audio": ("empty.wav", b"", "audio/wav")},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+def test_diarize_file_upload_503_when_model_down(monkeypatch):
+    monkeypatch.setattr(main, "_model", None)
+    monkeypatch.setattr(
+        main, "_model_load_error", "RuntimeError: HF download failed"
+    )
+    c = TestClient(main.app)
+    resp = c.post(
+        "/diarize-file-upload",
+        files={"audio": ("session.wav", _silence_wav_bytes(5.0), "audio/wav")},
+    )
+    assert resp.status_code == 503, resp.text
+    assert "HF download failed" in resp.json()["detail"]
+
+
+def test_embed_turns_via_speaker_svc_crops_and_skips_short(monkeypatch):
+    """_embed_turns_via_speaker_svc embeds turns >= EMBED_MIN_SECONDS and
+    leaves shorter turns as None, calling speaker-svc once per long turn."""
+    import asyncio
+
+    import httpx
+
+    posts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts["n"] += 1
+        return httpx.Response(200, json={"embedding": [0.5, 0.6], "embedding_dim": 2})
+
+    real_async_client = httpx.AsyncClient
+
+    def _factory(*_a, **_k):
+        return real_async_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", _factory)
+
+    wav = np.zeros(16000 * 4, dtype=np.float32)  # 4 s of audio
+    turns = [
+        {"spk_id": 0, "start_ms": 0, "end_ms": 2000},      # 2.0 s -> embed
+        {"spk_id": 1, "start_ms": 2000, "end_ms": 2200},   # 0.2 s -> skip
+        {"spk_id": 0, "start_ms": 2200, "end_ms": 4000},   # 1.8 s -> embed
+    ]
+    out = asyncio.run(main._embed_turns_via_speaker_svc(wav, turns))
+    assert out[0] == [0.5, 0.6]
+    assert out[1] is None  # too short, never sent
+    assert out[2] == [0.5, 0.6]
+    assert posts["n"] == 2  # only the two long turns hit speaker-svc
+
+
+def test_embed_turns_via_speaker_svc_survives_unreachable_svc(monkeypatch):
+    """If speaker-svc refuses the connection, embeddings come back all-None
+    and the helper stops early instead of raising."""
+    import asyncio
+
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    real_async_client = httpx.AsyncClient
+
+    def _factory(*_a, **_k):
+        return real_async_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", _factory)
+
+    wav = np.zeros(16000 * 4, dtype=np.float32)
+    turns = [
+        {"spk_id": 0, "start_ms": 0, "end_ms": 2000},
+        {"spk_id": 1, "start_ms": 2000, "end_ms": 4000},
+    ]
+    out = asyncio.run(main._embed_turns_via_speaker_svc(wav, turns))
+    assert out == [None, None]
+
+
 # ---------- segment string parser ----------
 
 
