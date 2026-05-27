@@ -13,6 +13,22 @@
     <meta name="apple-mobile-web-app-title" content="Meet-Ops" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Unicorn Commander: Meeting Ops</title>
+    <script>
+      // The app is a HashRouter SPA, so it only honors /#/route. Public pages
+      // (pricing/signup/login) are meant to be typed and shared as real paths,
+      // e.g. meetingops.magicunicorn.dev/pricing. Landing on the real path with
+      // no hash would otherwise fall back to "/" -> /dashboard. Rewrite to the
+      // hash form before React mounts so those links just work. No loop: after
+      // the rewrite the hash is set, so the guard is false.
+      (function () {
+        var path = window.location.pathname.replace(/\/+$/, '');
+        if (!window.location.hash && /^\/(pricing|signup|login)$/.test(path)) {
+          window.location.replace(
+            window.location.origin + '/#' + path + window.location.search
+          );
+        }
+      })();
+    </script>
   </head>
   <body class="bg-gray-900">
     <div id="root">

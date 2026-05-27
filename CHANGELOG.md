@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.5.1] - 2026-05-27
+
+### Fixed
+- Public pages now reachable at real paths. The app is a HashRouter SPA, so only `/#/pricing` (etc.) rendered; landing on `/pricing` with no hash fell back to `/` -> /dashboard. Added an `index.html` bootstrap that rewrites `/pricing`, `/signup`, `/login` to their hash form before the router mounts, so those URLs are typeable and shareable. (Anonymous access still needs the oauth2-proxy skip-routes per docs/consumer-signup.md.)
+
 ## [3.5.0] - 2026-05-27
 
 ### Added
