@@ -291,10 +291,22 @@ def identify_speakers(
     # segment we can identify without ever touching the wav file.
     has_inline_embeddings = any(seg.get("embedding") for seg in segments)
     audio_path = session.audio_file
-    if not has_inline_embeddings and (not audio_path or not os.path.exists(audio_path)):
-        summary["skipped_reason"] = f"audio_missing:{audio_path}"
-        logger.info("identify_speakers skipped: %s", summary["skipped_reason"])
-        return summary
+    if not has_inline_embeddings:
+        # We must re-extract embeddings from the wav. Resolve local-first, but
+        # fall back to pulling the canonical audio from Garage if the local
+        # working copy was evicted post-cutover. Only done here (never on the
+        # common inline-embeddings path, which never touches the file).
+        try:
+            from services.session_media import resolve_local_path
+            resolved = resolve_local_path(session)
+            if resolved is not None:
+                audio_path = str(resolved)
+        except Exception:  # noqa: BLE001
+            logger.warning("identify_speakers: Garage resolve failed for session=%s", session.id)
+        if not audio_path or not os.path.exists(audio_path):
+            summary["skipped_reason"] = f"audio_missing:{audio_path}"
+            logger.info("identify_speakers skipped: %s", summary["skipped_reason"])
+            return summary
 
     # Group segments by raw label, keep the longest one per label for embedding
     by_label: dict[str, dict] = {}

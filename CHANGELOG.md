@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [3.9.0] - 2026-05-27
+
+### Changed
+- **Garage cutover — Garage is now the authoritative home for canonical meeting audio.** Local disk becomes a transient working cache that can be evicted once a durable Garage copy is verified. To make this safe, the last audio read path that wasn't Garage-aware — `identify_speakers`' embedding re-extraction fallback (`speaker_service.py`) — now resolves via `session_media.resolve_local_path` (local-first, else pull from Garage). The common inline-embeddings path is untouched (it never reads the wav).
+- `scripts/evict_local_audio.py`: the cutover tool. Deletes a session's local audio **only after** confirming the Garage object exists with a byte-size match (verified via list, not HEAD). Idempotent, reversible (bytes stay in Garage; reads re-materialize on demand), and never touches a session without a verified durable copy. Run on bigboy to reclaim local disk for completed sessions.
+
+### Notes
+- The write/processing pipeline still writes local first (ffmpeg/STT/diarize need a file on disk), then pushes to Garage — so the bind-mount stays `:rw`; "cutover" means Garage-authoritative + local-evictable, not local-free.
+- Re-materialized audio lands in the local media-cache; an LRU cache-eviction policy is a follow-up (fine at current volume).
+
 ## [3.8.0] - 2026-05-27
 
 ### Added
