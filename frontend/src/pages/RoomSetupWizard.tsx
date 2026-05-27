@@ -115,7 +115,9 @@ export default function RoomSetupWizard() {
             device_path: state.source.device.device_path,
             label:
               state.source.label?.trim() ||
-              `USB mic: ${state.source.device.device_path}`,
+              state.source.device.device_name ||
+              state.source.device.card_name ||
+              state.source.device.device_path,
           },
           { orgSlug },
         );
@@ -327,7 +329,11 @@ function Step2({
                 source: {
                   hardware_type: 'server_usb_mic',
                   device,
-                  label: s.source?.label || `USB mic: ${device.device_path}`,
+                  label:
+                    s.source?.label ||
+                    device.device_name ||
+                    device.card_name ||
+                    device.device_path,
                 },
               }))
             }
@@ -350,7 +356,11 @@ function Step2({
                     source: s.source ? { ...s.source, label: e.target.value } : s.source,
                   }))
                 }
-                placeholder={`USB mic: ${state.source.device.device_path}`}
+                placeholder={
+                  state.source.device.device_name ||
+                  state.source.device.card_name ||
+                  state.source.device.device_path
+                }
                 className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
               />
             </div>
@@ -558,7 +568,7 @@ function Step5({ state }: { state: WizardState }) {
           label="Audio source"
           value={
             state.source?.device
-              ? `Server USB mic · ${state.source.label || state.source.device.device_path}`
+              ? `Server USB mic · ${state.source.label || state.source.device.device_name || state.source.device.card_name || state.source.device.device_path}`
               : '—'
           }
         />

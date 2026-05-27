@@ -77,6 +77,28 @@ function formatDuration(seconds?: number | null): string {
   return `${mins}m`;
 }
 
+function getSourceDeviceLabel(source: Pick<RoomSource, 'device_path' | 'device_id' | 'hardware_type'>): string {
+  return source.device_path || source.device_id || source.hardware_type;
+}
+
+function getDefaultDeviceLabel(device: AudioDevice): string {
+  return device.device_name || device.card_name || device.device_path;
+}
+
+function getSourceStatusClass(status: RoomSource['status']): string {
+  switch (status) {
+    case 'recording':
+      return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200';
+    case 'error':
+      return 'border-red-500/30 bg-red-500/10 text-red-200';
+    case 'disabled':
+      return 'border-zinc-700 bg-zinc-800 text-zinc-400';
+    case 'idle':
+    default:
+      return 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100';
+  }
+}
+
 export default function RoomDetail() {
   const { id: idParam } = useParams<{ id: string }>();
   // The backend can return either int ids (rooms via SQLAlchemy auto pk)
@@ -377,7 +399,7 @@ function LiveTab({
   onRefresh: () => Promise<void>;
 }) {
   const isRecording = room.status === 'recording';
-  const activeSources = sources.filter((s) => s.is_active);
+  const activeSources = sources.filter((s) => s.status !== 'disabled');
   const apiId: number | string = room.raw_id || room.id;
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [livePoll, setLivePoll] = useState<LiveSessionPoll | null>(null);
@@ -510,7 +532,7 @@ function LiveTab({
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-        <h2 className="text-sm font-semibold text-zinc-100">Active audio sources</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">Audio sources</h2>
         {activeSources.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500">
             No active sources. Add one in Settings.
@@ -527,17 +549,15 @@ function LiveTab({
                     <Mic className="h-4 w-4 shrink-0 text-zinc-400" />
                     <span className="truncate text-zinc-100">{src.label}</span>
                     <span className="truncate text-xs text-zinc-500">
-                      {src.device_path}
+                      {getSourceDeviceLabel(src)}
                     </span>
                   </div>
                   <span
                     className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide ${
-                      src.health_status === 'healthy'
-                        ? 'bg-emerald-500/10 text-emerald-200 border border-emerald-500/30'
-                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                      getSourceStatusClass(src.status)
                     }`}
                   >
-                    {src.health_status}
+                    {src.status}
                   </span>
                 </div>
                 <div className="mt-2">
@@ -545,7 +565,7 @@ function LiveTab({
                     roomId={apiId}
                     orgSlug={orgSlug}
                     recording={isRecording}
-                    label={src.label || src.device_path || 'Live level'}
+                    label={src.label || getSourceDeviceLabel(src) || 'Live level'}
                   />
                 </div>
               </li>
@@ -709,8 +729,9 @@ function SettingsTab({
   const [revealedSecret, setRevealedSecret] = useState<PairingRedeemResult | null>(null);
   const [redeemLoading, setRedeemLoading] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
-  const [pendingDevice, setPendingDevice] = useState<AudioDevice | null>(null);
-  const [pendingLabel, setPendingLabel] = useState('');
+  const [pendingDevices, setPendingDevices] = useState<AudioDevice[]>([]);
+  const [pendingLabels, setPendingLabels] = useState<Record<string, string>>({});
+  const [addingSources, setAddingSources] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmLegalHold, setConfirmLegalHold] = useState<boolean | null>(null);
   const [acl, setAcl] = useState<RoomAclEntry[]>([]);
@@ -722,6 +743,10 @@ function SettingsTab({
   const navigate = useNavigate();
   // Prefer the upstream string id (UUID safe) for every API call.
   const apiId: number | string = room.raw_id || room.id;
+  const roomSourceDevicePaths = useMemo(
+    () => sources.map((src) => src.device_path).filter((path): path is string => !!path),
+    [sources],
+  );
 
   // Load ACL + users for admin view.
   useEffect(() => {
@@ -827,24 +852,44 @@ function SettingsTab({
     }
   };
 
-  const addSource = async () => {
-    if (!pendingDevice) return;
+  const handlePendingDevicesChange = (nextDevices: AudioDevice[]) => {
+    setPendingDevices(nextDevices);
+    setPendingLabels((current) => {
+      const next: Record<string, string> = {};
+      nextDevices.forEach((device) => {
+        next[device.device_path] = current[device.device_path] || getDefaultDeviceLabel(device);
+      });
+      return next;
+    });
+  };
+
+  const clearPendingSources = () => {
+    setPendingDevices([]);
+    setPendingLabels({});
+  };
+
+  const addSources = async () => {
+    if (pendingDevices.length === 0) return;
+    setAddingSources(true);
     try {
-      await roomsApi.addSource(
-        apiId,
-        {
-          hardware_type: 'server_usb_mic',
-          device_path: pendingDevice.device_path,
-          label: pendingLabel.trim() || `USB mic: ${pendingDevice.device_path}`,
-        },
-        { orgSlug },
-      );
+      for (const device of pendingDevices) {
+        await roomsApi.addSource(
+          apiId,
+          {
+            hardware_type: 'server_usb_mic',
+            device_path: device.device_path,
+            label: pendingLabels[device.device_path]?.trim() || getDefaultDeviceLabel(device),
+          },
+          { orgSlug },
+        );
+      }
       setShowAddSource(false);
-      setPendingDevice(null);
-      setPendingLabel('');
+      clearPendingSources();
       await onChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add source');
+    } finally {
+      setAddingSources(false);
     }
   };
 
@@ -992,30 +1037,42 @@ function SettingsTab({
             {sources.map((src) => (
               <li
                 key={src.id}
-                className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-sm"
+                className="rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-sm"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <Mic className="h-4 w-4 text-zinc-400" />
-                    <span className="truncate text-zinc-100">{src.label}</span>
-                    {src.is_active && (
-                      <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0 text-[10px] uppercase text-emerald-200">
-                        Active
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Mic className="h-4 w-4 shrink-0 text-zinc-400" />
+                      <span className="truncate text-zinc-100">{src.label}</span>
+                      <span
+                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${getSourceStatusClass(src.status)}`}
+                      >
+                        {src.status}
                       </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                      <span className="font-mono">{getSourceDeviceLabel(src)}</span>
+                      <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 uppercase tracking-wide text-zinc-400">
+                        {src.hardware_type}
+                      </span>
+                    </div>
+                    {src.device_id && (
+                      <div className="mt-1 truncate font-mono text-[11px] text-zinc-600">
+                        device_id: {src.device_id}
+                      </div>
                     )}
                   </div>
-                  <div className="text-xs text-zinc-500 font-mono">{src.device_path}</div>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => removeSource(src.raw_id || src.id)}
+                      className="rounded-lg p-1.5 text-zinc-400 hover:bg-red-500/10 hover:text-red-300"
+                      aria-label="Remove source"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
-                {isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => removeSource(src.raw_id || src.id)}
-                    className="rounded-lg p-1.5 text-zinc-400 hover:bg-red-500/10 hover:text-red-300"
-                    aria-label="Remove source"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                )}
               </li>
             ))}
           </ul>
@@ -1025,39 +1082,92 @@ function SettingsTab({
           <div className="mt-3 rounded-xl border border-zinc-800 bg-black/30 p-3">
             <AudioDeviceList
               orgSlug={orgSlug}
-              selectedDevicePath={pendingDevice?.device_path}
-              onSelect={(d) => {
-                setPendingDevice(d);
-                setPendingLabel(`USB mic: ${d.device_path}`);
-              }}
+              selectionMode="multiple"
+              selectedDevicePaths={pendingDevices.map((device) => device.device_path)}
+              onSelectionChange={handlePendingDevicesChange}
+              disabledDevicePaths={roomSourceDevicePaths}
             />
-            {pendingDevice && (
-              <div className="mt-3 flex flex-col gap-2">
-                <input
-                  type="text"
-                  value={pendingLabel}
-                  onChange={(e) => setPendingLabel(e.target.value)}
-                  placeholder="Label"
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
-                />
-                <div className="flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAddSource(false);
-                      setPendingDevice(null);
-                    }}
-                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={addSource}
-                    className="rounded-lg bg-gradient-to-r from-fuchsia-600 to-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:from-fuchsia-500 hover:to-indigo-500"
-                  >
-                    Add
-                  </button>
+            <div className="mt-3 text-xs text-zinc-500">
+              Select one or more microphones. Each source gets its own label before it is added.
+            </div>
+            {pendingDevices.length > 0 && (
+              <div className="mt-3 flex flex-col gap-3">
+                <div className="grid gap-2">
+                  {pendingDevices.map((device) => (
+                    <div
+                      key={device.device_path}
+                      className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm text-zinc-100">
+                            {device.device_name || device.card_name}
+                          </div>
+                          <div className="mt-0.5 truncate font-mono text-xs text-zinc-500">
+                            {device.card_name && device.card_name !== device.device_name
+                              ? `${device.card_name}  ·  `
+                              : ''}
+                            {device.device_path}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handlePendingDevicesChange(
+                              pendingDevices.filter((item) => item.device_path !== device.device_path),
+                            )
+                          }
+                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <label className="mt-3 block text-[10px] uppercase tracking-wide text-zinc-500">
+                        Source label
+                      </label>
+                      <input
+                        type="text"
+                        value={pendingLabels[device.device_path] || ''}
+                        onChange={(e) =>
+                          setPendingLabels((current) => ({
+                            ...current,
+                            [device.device_path]: e.target.value,
+                          }))
+                        }
+                        placeholder="Podium, Audience, Speaker phone"
+                        className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-zinc-500">
+                    Labels are saved with each source and can be edited later in the room config.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddSource(false);
+                        clearPendingSources();
+                      }}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={addSources}
+                      disabled={addingSources || pendingDevices.length === 0}
+                      className="rounded-lg bg-gradient-to-r from-fuchsia-600 to-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:from-fuchsia-500 hover:to-indigo-500 disabled:opacity-50"
+                    >
+                      {addingSources
+                        ? 'Adding…'
+                        : pendingDevices.length === 1
+                        ? 'Add source'
+                        : `Add ${pendingDevices.length} sources`}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
