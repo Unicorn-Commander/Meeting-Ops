@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-## [3.0.0] - 2026-05-27 (built + tested; not yet tagged/deployed — awaiting sign-off)
+## [3.0.0] - 2026-05-27
 
 ### Added
 - **Free-tier enforcement: free tier is browser-only, server processing is paid-tier.** Four new `TIER_FEATURES` capabilities (free=False, pro/enterprise=True), mirrored in the frontend `TierFeatures` type + `DEFAULT_TIER_FEATURES`:
