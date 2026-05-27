@@ -10,11 +10,10 @@ Mirrors the auth + org-scoping pattern from sessions_participants.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
@@ -38,6 +37,9 @@ class TagIn(BaseModel):
 
 class TagListOut(BaseModel):
     tags: List[str]
+    tag_counts: Dict[str, int] = Field(default_factory=dict)
+    total_sessions: int = 0
+    untagged_sessions: int = 0
 
 
 def _resolve_session(
@@ -114,13 +116,29 @@ async def list_org_tags(
     """All distinct tags used across the org's sessions, sorted alpha
     (case-insensitive) for the filter chip palette."""
     rows = (
-        db.query(func.unnest(RecordingSession.tags).label("tag"))
+        db.query(RecordingSession.tags)
         .filter(RecordingSession.organization_id == active_org.organization.id)
-        .distinct()
         .all()
     )
-    tags = sorted({r.tag for r in rows if r.tag}, key=lambda s: s.lower())
-    return TagListOut(tags=tags)
+    tag_counts: Dict[str, int] = {}
+    total_sessions = 0
+    untagged_sessions = 0
+    for (raw_tags,) in rows:
+        total_sessions += 1
+        tags = _normalize(raw_tags)
+        if not tags:
+            untagged_sessions += 1
+            continue
+        for tag in dict.fromkeys(tags):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    tags = sorted(tag_counts.keys(), key=lambda s: s.lower())
+    return TagListOut(
+        tags=tags,
+        tag_counts=tag_counts,
+        total_sessions=total_sessions,
+        untagged_sessions=untagged_sessions,
+    )
 
 
 @router.get("/{session_id}/tags", response_model=TagListOut)

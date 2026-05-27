@@ -27,6 +27,7 @@ import {
   deleteLocalSession,
   isLocalSessionId,
   listLocalSessions,
+  updateLocalSessionMeta,
   type LocalSession,
 } from '../services/localSessionStore';
 
@@ -68,6 +69,13 @@ interface Session {
   is_local?: boolean;
 }
 
+interface OrgTagSummary {
+  tag: string;
+  count: number;
+}
+
+const UNGROUPED_FOLDER = '__ungrouped__';
+
 function localSessionToSession(local: LocalSession): Session {
   // Map the IndexedDB record into the same shape the server list uses
   // so the existing table/card components don't need to branch.
@@ -101,6 +109,7 @@ interface RagMessage {
 }
 
 type SortKey = 'date' | 'name' | 'duration' | 'speakers' | 'status';
+type GroupingMode = 'flat' | 'folders';
 /**
  * dateBasis controls what the 'date' column + 'date' sort key actually
  * compare against:
@@ -115,6 +124,46 @@ type DateBasis = 'upload' | 'meeting';
 const VIEW_MODE_KEY = 'meetingops.sessionsViewMode.v1';
 const DATE_BASIS_KEY = 'meetingops.sessionsDateBasis.v1';
 const VALID_SORT_KEYS: ReadonlyArray<SortKey> = ['date', 'name', 'duration', 'speakers', 'status'];
+
+function normalizeTagSummaries(payload: unknown): OrgTagSummary[] {
+  if (!payload) return [];
+  const counts: Record<string, number> = {};
+  let tags: string[] = [];
+
+  if (Array.isArray(payload)) {
+    tags = payload.filter((tag): tag is string => typeof tag === 'string' && tag.length > 0);
+  } else if (typeof payload === 'object') {
+    const data = payload as {
+      tags?: Array<string | { tag?: string; name?: string; count?: number }>;
+      tag_counts?: Record<string, number>;
+    };
+    if (Array.isArray(data.tags)) {
+      for (const item of data.tags) {
+        if (typeof item === 'string') {
+          tags.push(item);
+        } else if (item && typeof item === 'object') {
+          const tag = item.tag || item.name;
+          if (tag) {
+            tags.push(tag);
+            if (typeof item.count === 'number') {
+              counts[tag] = item.count;
+            }
+          }
+        }
+      }
+    }
+    if (data.tag_counts && typeof data.tag_counts === 'object') {
+      for (const [tag, count] of Object.entries(data.tag_counts)) {
+        if (tag) counts[tag] = Number(count) || 0;
+      }
+    }
+  }
+
+  const deduped = Array.from(new Set(tags));
+  return deduped
+    .map((tag) => ({ tag, count: counts[tag] ?? 0 }))
+    .sort((a, b) => a.tag.toLowerCase().localeCompare(b.tag.toLowerCase()));
+}
 
 function readDateBasis(): DateBasis {
   try {
@@ -167,6 +216,8 @@ interface SessionsTableProps {
   onOpenColumnFilter: (col: null | 'status' | 'speakers') => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
+  selectedSessionIds: string[];
+  onToggleSessionSelection: (id: string) => void;
   formatDuration: (seconds?: number) => string;
   getStatusColor: (status: string) => string;
   getStatusLabel: (status: string) => string;
@@ -201,6 +252,8 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
   onOpenColumnFilter,
   onOpen,
   onDelete,
+  selectedSessionIds,
+  onToggleSessionSelection,
   formatDuration,
   getStatusColor,
   getStatusLabel,
@@ -253,6 +306,9 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur">
             <tr className="border-b border-gray-800">
+              <th className="px-3 py-3 text-left w-10">
+                <span className="sr-only">Select</span>
+              </th>
               <th className="px-4 py-3 text-left">{headerBtn('name', 'Title')}</th>
               <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('date', dateBasis === 'meeting' ? 'Meeting' : 'Uploaded')}</th>
               <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('duration', 'Duration')}</th>
@@ -356,7 +412,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-gray-500 text-sm">
+                <td colSpan={9} className="px-4 py-10 text-center text-gray-500 text-sm">
                   No sessions match the current filters.
                 </td>
               </tr>
@@ -372,8 +428,19 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                 return (
                   <tr
                     key={session.id}
-                    className="border-b border-gray-800/60 hover:bg-gray-800/40 transition-colors"
+                    className={`border-b border-gray-800/60 hover:bg-gray-800/40 transition-colors ${
+                      selectedSessionIds.includes(session.id) ? 'bg-purple-500/10' : ''
+                    }`}
                   >
+                    <td className="px-3 py-3 align-middle">
+                      <input
+                        type="checkbox"
+                        checked={selectedSessionIds.includes(session.id)}
+                        onChange={() => onToggleSessionSelection(session.id)}
+                        className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-purple-500 focus:ring-purple-500"
+                        aria-label="Select session"
+                      />
+                    </td>
                     <td className="px-4 py-3 align-middle">
                       <div className="flex items-center gap-2">
                         {session.is_local && (
@@ -548,8 +615,9 @@ export const Sessions: React.FC = () => {
     [],
   );
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
-  // All tags used across the org's sessions; powers the filter chip bar.
-  const [orgTags, setOrgTags] = useState<string[]>([]);
+  // All tags used across the org's sessions, plus counts for the folder rail.
+  const [orgTagSummaries, setOrgTagSummaries] = useState<OrgTagSummary[]>([]);
+  const [orgTagStats, setOrgTagStats] = useState({ totalSessions: 0, untaggedSessions: 0 });
   // session_pk (as string) -> attachment count. Used by the list cards to
   // show a paperclip icon when a session has any attachments. Fetched
   // once per active-org swap from the dedicated counts endpoint so we
@@ -571,6 +639,7 @@ export const Sessions: React.FC = () => {
       return 'grid';
     }
   });
+  const [groupingMode, setGroupingMode] = useState<GroupingMode>('flat');
   // dateBasis decides whether the date column + 'date' sort use the
   // server upload time (default) or the user-editable meeting_date.
   // Persisted in localStorage so a user backfilling historical audio
@@ -579,6 +648,11 @@ export const Sessions: React.FC = () => {
   useEffect(() => {
     try { localStorage.setItem(DATE_BASIS_KEY, dateBasis); } catch { /* non-fatal */ }
   }, [dateBasis]);
+  const orgTags = useMemo(() => orgTagSummaries.map((item) => item.tag), [orgTagSummaries]);
+  const tagCountMap = useMemo(
+    () => Object.fromEntries(orgTagSummaries.map((item) => [item.tag, item.count])),
+    [orgTagSummaries],
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -600,6 +674,9 @@ export const Sessions: React.FC = () => {
   const [tableSpeakerFilter, setTableSpeakerFilter] = useState<string[]>([]);
   const [openColumnFilter, setOpenColumnFilter] = useState<null | 'status' | 'speakers'>(null);
   const [showFilters, setShowFilters] = useState(false);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [selectedFolder, setSelectedFolder] = useState<string>('all');
+  const [folderMutationBusy, setFolderMutationBusy] = useState(false);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -843,21 +920,27 @@ export const Sessions: React.FC = () => {
     loadRagHistory();
   }, []);
 
+  const refreshOrgTags = useCallback(async () => {
+    try {
+      const headers: any = {};
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+      const res = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/tags`, { headers });
+      if (!res.ok) return;
+      const data = await res.json();
+      const summaries = normalizeTagSummaries(data);
+      setOrgTagSummaries(summaries);
+      setOrgTagStats({
+        totalSessions: Number(data?.total_sessions) || 0,
+        untaggedSessions: Number(data?.untagged_sessions) || 0,
+      });
+    } catch { /* non-fatal */ }
+  }, [activeOrganization?.slug]);
+
   useEffect(() => {
-    const loadOrgTags = async () => {
-      try {
-        const headers: any = {};
-        const token = localStorage.getItem('access_token');
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
-        const res = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/tags`, { headers });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (Array.isArray(data?.tags)) setOrgTags(data.tags);
-      } catch { /* non-fatal */ }
-    };
-    loadOrgTags();
-  }, [activeOrganization?.slug, sessions]);
+    void refreshOrgTags();
+  }, [refreshOrgTags]);
 
   useEffect(() => {
     // If we already painted from cache, skip the spinner-on path —
@@ -872,7 +955,7 @@ export const Sessions: React.FC = () => {
 
   useEffect(() => {
     filterSessions();
-  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, sortBy, sortOrder, dateBasis]);
+  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, selectedFolder, sortBy, sortOrder, dateBasis]);
 
   // showSpinner=false on polling refresh so the list doesn't flash
   // through the empty-loading state every 10 seconds. Initial mount + filter
@@ -990,6 +1073,15 @@ export const Sessions: React.FC = () => {
       filtered = filtered.filter((session) => session.is_local !== true);
     }
 
+    // Folder view: All sessions keeps the existing flat behavior.
+    // Ungrouped means "no tags"; specific folder names are an AND
+    // filter that can still be combined with the chip filter bar.
+    if (selectedFolder === UNGROUPED_FOLDER) {
+      filtered = filtered.filter((session) => (session.tags || []).length === 0);
+    } else if (selectedFolder !== 'all') {
+      filtered = filtered.filter((session) => (session.tags || []).includes(selectedFolder));
+    }
+
     // Sort
     console.log('📊 After filtering:', filtered.length, 'sessions remain');
     filtered.sort((a, b) => {
@@ -1033,6 +1125,107 @@ export const Sessions: React.FC = () => {
 
     setFilteredSessions(filtered);
   };
+
+  const toggleSessionSelection = useCallback((sessionId: string) => {
+    setSelectedSessionIds((prev) =>
+      prev.includes(sessionId) ? prev.filter((id) => id !== sessionId) : [...prev, sessionId],
+    );
+  }, []);
+
+  const clearSessionSelection = useCallback(() => {
+    setSelectedSessionIds([]);
+  }, []);
+
+  const selectFolder = useCallback((folder: string) => {
+    setGroupingMode('folders');
+    setSelectedFolder(folder);
+    if (folder === 'all' || folder === UNGROUPED_FOLDER) {
+      setSelectedTags([]);
+      return;
+    }
+    setSelectedTags([folder]);
+  }, []);
+
+  const mutateFolderTag = useCallback(async (
+    sessionIds: string[],
+    tag: string,
+    action: 'add' | 'remove',
+  ) => {
+    const cleanedTag = tag.trim();
+    if (!cleanedTag || sessionIds.length === 0) return;
+
+    setFolderMutationBusy(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+      await Promise.all(sessionIds.map(async (sessionId) => {
+        const session = sessions.find((item) => item.id === sessionId);
+        if (session?.is_local || isLocalSessionId(sessionId)) {
+          const current = [...(session?.tags || [])];
+          const next = action === 'add'
+            ? Array.from(new Set([...current, cleanedTag]))
+            : current.filter((value) => value !== cleanedTag);
+          await updateLocalSessionMeta(sessionId, { tags: next });
+          return;
+        }
+
+        const url = `${config.apiBaseUrl}/api/simple/recording-sessions/${encodeURIComponent(sessionId)}/tags`;
+        if (action === 'add') {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ tag: cleanedTag }),
+          });
+          if (!res.ok) throw new Error(`Failed to add folder "${cleanedTag}" to ${sessionId}`);
+        } else {
+          const res = await fetch(`${url}/${encodeURIComponent(cleanedTag)}`, {
+            method: 'DELETE',
+            headers,
+          });
+          if (!res.ok) throw new Error(`Failed to remove folder "${cleanedTag}" from ${sessionId}`);
+        }
+      }));
+
+      await Promise.all([
+        fetchSessions({ showSpinner: false }),
+        refreshOrgTags(),
+      ]);
+    } catch (error) {
+      console.error('Failed to mutate folder tags:', error);
+      alert(error instanceof Error ? error.message : 'Failed to update folder tags');
+    } finally {
+      setFolderMutationBusy(false);
+    }
+  }, [activeOrganization?.slug, refreshOrgTags, sessions]);
+
+  const addSelectedSessionsToFolder = useCallback(async (tag: string) => {
+    await mutateFolderTag(selectedSessionIds, tag, 'add');
+    clearSessionSelection();
+  }, [clearSessionSelection, mutateFolderTag, selectedSessionIds]);
+
+  const removeSessionFromFolder = useCallback(async (sessionId: string, tag: string) => {
+    await mutateFolderTag([sessionId], tag, 'remove');
+  }, [mutateFolderTag]);
+
+  const handleNewFolder = useCallback(() => {
+    const value = window.prompt('New folder name');
+    if (!value) return;
+    const tag = value.trim();
+    if (!tag) return;
+    if (selectedSessionIds.length > 0) {
+      void addSelectedSessionsToFolder(tag);
+      setSelectedFolder(tag);
+      setGroupingMode('folders');
+      setSelectedTags([tag]);
+      return;
+    }
+    setGroupingMode('folders');
+    setSelectedFolder(tag);
+    setSelectedTags([tag]);
+  }, [addSelectedSessionsToFolder, selectedSessionIds.length, setSelectedTags]);
 
   const handleSessionCreated = (sessionId: string) => {
     setShowCreator(false);
@@ -1248,6 +1441,17 @@ export const Sessions: React.FC = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const activeFolderLabel = selectedFolder === 'all'
+    ? 'All sessions'
+    : selectedFolder === UNGROUPED_FOLDER
+      ? 'Ungrouped'
+      : selectedFolder;
+  const activeFolderCount = selectedFolder === 'all'
+    ? orgTagStats.totalSessions
+    : selectedFolder === UNGROUPED_FOLDER
+      ? orgTagStats.untaggedSessions
+      : (tagCountMap[selectedFolder] || 0);
+
   if (selectedSession) {
     const meetingData = {
       transcript: selectedSession.transcript || '',
@@ -1297,6 +1501,12 @@ export const Sessions: React.FC = () => {
             performSearch(value);
           }, 300);
         }}
+        folderSummaries={orgTagSummaries}
+        totalSessions={orgTagStats.totalSessions}
+        untaggedSessions={orgTagStats.untaggedSessions}
+        selectedFolder={selectedFolder}
+        onSelectFolder={selectFolder}
+        onNewFolder={handleNewFolder}
         orgTags={orgTags}
         selectedTags={selectedTags}
         onToggleTag={(tag) => {
@@ -1414,9 +1624,16 @@ export const Sessions: React.FC = () => {
               </button>
               <button
                 onClick={() => setViewMode('list')}
-                className={`p-2 rounded-r-lg ${viewMode === 'list' ? 'bg-purple-600 text-white' : 'text-gray-400'}`}
+                className={`p-2 rounded-none ${viewMode === 'list' ? 'bg-purple-600 text-white' : 'text-gray-400'}`}
               >
                 <List className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setGroupingMode(groupingMode === 'folders' ? 'flat' : 'folders')}
+                className={`p-2 rounded-r-lg border-l border-gray-700 ${groupingMode === 'folders' ? 'bg-purple-600 text-white' : 'text-gray-400'}`}
+                title="Show folders"
+              >
+                <FolderOpen className="w-4 h-4" />
               </button>
             </div>
 
@@ -1431,10 +1648,10 @@ export const Sessions: React.FC = () => {
             </button>
           </div>
 
-          {/* Extended Filters */}
-          {showFilters && (
-            <div className="mt-4 pt-4 border-t border-gray-800">
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {/* Extended Filters */}
+        {showFilters && (
+          <div className="mt-4 pt-4 border-t border-gray-800">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
@@ -1488,10 +1705,121 @@ export const Sessions: React.FC = () => {
                   {sortOrder === 'asc' ? <SortAsc className="w-4 h-4" /> : <SortDesc className="w-4 h-4" />}
                   {sortOrder === 'asc' ? 'Ascending' : 'Descending'}
                 </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {groupingMode === 'folders' && (
+        <div className="bg-gradient-to-br from-gray-900 to-gray-950 border border-purple-800/40 rounded-lg p-4 mb-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <FolderOpen className="w-4 h-4 text-purple-300" />
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-purple-200">Folders</h2>
               </div>
+              <p className="mt-1 text-sm text-gray-400">
+                Tags act as folders. A session can live in multiple folders.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleNewFolder}
+              className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-3 py-2 text-sm font-medium text-white hover:bg-purple-500"
+            >
+              <Plus className="w-4 h-4" />
+              New folder
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <button
+              type="button"
+              onClick={() => selectFolder('all')}
+              className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                selectedFolder === 'all'
+                  ? 'border-purple-500 bg-purple-600/20 text-white'
+                  : 'border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800'
+              }`}
+            >
+              <span>All sessions</span>
+              <span className="text-xs text-gray-400">{orgTagStats.totalSessions}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => selectFolder(UNGROUPED_FOLDER)}
+              className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                selectedFolder === UNGROUPED_FOLDER
+                  ? 'border-purple-500 bg-purple-600/20 text-white'
+                  : 'border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800'
+              }`}
+            >
+              <span>Ungrouped</span>
+              <span className="text-xs text-gray-400">{orgTagStats.untaggedSessions}</span>
+            </button>
+            {orgTagSummaries.length > 0 ? (
+              orgTagSummaries.map(({ tag, count }) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => selectFolder(tag)}
+                  className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                    selectedFolder === tag
+                      ? 'border-purple-500 bg-purple-600/20 text-white'
+                      : 'border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800'
+                  }`}
+                >
+                  <span className="truncate pr-2">{tag}</span>
+                  <span className="text-xs text-gray-400">{count}</span>
+                </button>
+              ))
+            ) : (
+              <div className="md:col-span-2 xl:col-span-2 rounded-lg border border-dashed border-gray-700 bg-gray-950/60 px-3 py-3 text-sm text-gray-500">
+                No folders yet. Create one and add it to a session.
+              </div>
+            )}
+          </div>
+
+          {selectedSessionIds.length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3">
+              <span className="text-sm text-gray-300">
+                {selectedSessionIds.length} selected
+              </span>
+              <button
+                type="button"
+                disabled={folderMutationBusy || selectedFolder === 'all' || selectedFolder === UNGROUPED_FOLDER}
+                onClick={() => void addSelectedSessionsToFolder(selectedFolder)}
+                className="rounded-lg bg-purple-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 hover:bg-purple-500"
+              >
+                Add to current folder
+              </button>
+              {selectedFolder !== 'all' && selectedFolder !== UNGROUPED_FOLDER && (
+                <button
+                  type="button"
+                  disabled={folderMutationBusy}
+                  onClick={() => void mutateFolderTag(selectedSessionIds, selectedFolder, 'remove')}
+                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Remove from current folder
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={clearSessionSelection}
+                className="text-sm text-gray-400 hover:text-white"
+              >
+                Clear selection
+              </button>
             </div>
           )}
+
+          <div className="mt-3 text-xs text-gray-500">
+            Active folder: <span className="text-gray-300">{activeFolderLabel}</span>
+            <span className="mx-2 text-gray-700">•</span>
+            {activeFolderCount} session{activeFolderCount === 1 ? '' : 's'}
+          </div>
         </div>
+      )}
 
         {/* Tag filter chip palette — multi-select AND. */}
         {orgTags.length > 0 && (
@@ -1848,7 +2176,7 @@ export const Sessions: React.FC = () => {
             ))}
           </div>
           ) : (
-            <SessionsTable
+          <SessionsTable
               sessions={filteredSessions}
               sortBy={sortBy}
               sortOrder={sortOrder}
@@ -1861,6 +2189,8 @@ export const Sessions: React.FC = () => {
               onOpenColumnFilter={setOpenColumnFilter}
               onOpen={(id) => navigate(`/sessions/${id}`)}
               onDelete={deleteSession}
+              selectedSessionIds={selectedSessionIds}
+              onToggleSessionSelection={toggleSessionSelection}
               formatDuration={formatDuration}
               getStatusColor={getStatusColor}
               getStatusLabel={getStatusLabel}

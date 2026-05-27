@@ -7,6 +7,7 @@ import {
   Users,
   Mic,
   FolderOpen,
+  Plus,
   Loader2,
   RefreshCw,
   X,
@@ -45,6 +46,12 @@ interface Props {
   refreshing: boolean;
   searchQuery: string;
   onSearchChange: (value: string) => void;
+  folderSummaries: Array<{ tag: string; count: number }>;
+  totalSessions: number;
+  untaggedSessions: number;
+  selectedFolder: string;
+  onSelectFolder: (folder: string) => void;
+  onNewFolder: () => void;
   orgTags: string[];
   selectedTags: string[];
   onToggleTag: (tag: string) => void;
@@ -109,6 +116,12 @@ const MobileSessionsList: React.FC<Props> = ({
   refreshing,
   searchQuery,
   onSearchChange,
+  folderSummaries,
+  totalSessions,
+  untaggedSessions,
+  selectedFolder,
+  onSelectFolder,
+  onNewFolder,
   orgTags,
   selectedTags,
   onToggleTag,
@@ -189,6 +202,69 @@ const MobileSessionsList: React.FC<Props> = ({
             )}
           </div>
         </div>
+
+        {(folderSummaries.length > 0 || totalSessions > 0 || untaggedSessions > 0) && (
+          <div className="px-4 pb-2">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Folders</p>
+                <p className="text-xs text-gray-400">Tags behave like folders.</p>
+              </div>
+              <button
+                type="button"
+                onClick={onNewFolder}
+                className="shrink-0 inline-flex items-center gap-1 rounded-full border border-purple-500/40 bg-purple-500/10 px-2.5 py-1 text-xs text-purple-200 active:bg-purple-500/20"
+              >
+                <Plus className="w-3 h-3" />
+                New folder
+              </button>
+            </div>
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
+              <button
+                type="button"
+                onClick={() => onSelectFolder('all')}
+                className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${
+                  selectedFolder === 'all'
+                    ? 'border-purple-500 bg-purple-600 text-white'
+                    : 'border-gray-700 bg-gray-900 text-gray-300 active:bg-gray-800'
+                }`}
+              >
+                All
+                <span className="text-[10px] opacity-80">{totalSessions}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onSelectFolder('__ungrouped__')}
+                className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${
+                  selectedFolder === '__ungrouped__'
+                    ? 'border-purple-500 bg-purple-600 text-white'
+                    : 'border-gray-700 bg-gray-900 text-gray-300 active:bg-gray-800'
+                }`}
+              >
+                Ungrouped
+                <span className="text-[10px] opacity-80">{untaggedSessions}</span>
+              </button>
+              {folderSummaries.map(({ tag, count }) => {
+                const selected = selectedFolder === tag;
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => onSelectFolder(tag)}
+                    className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${
+                      selected
+                        ? 'border-purple-500 bg-purple-600 text-white'
+                        : 'border-gray-700 bg-gray-900 text-gray-300 active:bg-gray-800'
+                    }`}
+                  >
+                    <span className="max-w-[10rem] truncate">{tag}</span>
+                    <span className="text-[10px] opacity-80">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {orgTags.length > 0 && (
           <div className="px-4 pb-3">
