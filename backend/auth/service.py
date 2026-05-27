@@ -46,9 +46,19 @@ class AuthService:
         full_name: Optional[str] = None,
         organization_id: Optional[int] = None,
         role: str = "user",
-        created_by_id: Optional[int] = None
+        created_by_id: Optional[int] = None,
+        personal_org: bool = False,
     ) -> User:
-        """Create a new user"""
+        """Create a new user.
+
+        Org assignment: an explicit ``organization_id`` always wins.
+        Otherwise ``personal_org=True`` (self-serve consumer signup)
+        provisions a PRIVATE per-user org (``{username}-personal``, user as
+        admin) so consumers never share a workspace — same convention as the
+        SSO new-user path in ``sync_user_organizations``. ``personal_org=False``
+        (admin-created users, appliance) keeps the legacy shared default-org
+        behavior.
+        """
         # Validate inputs
         email = sanitize_email(email)
         username = sanitize_username(username)
@@ -85,6 +95,23 @@ class AuthService:
                 invited_by=created_by_id
             )
             db.add(user_org)
+            db.commit()
+        elif personal_org:
+            # Self-serve consumer: private per-user workspace so they never
+            # land in (and see) another tenant's data. Mirrors the SSO
+            # new-user convention: slug `{username}-personal`, user is admin.
+            display = full_name or email or username
+            personal = ensure_organization(
+                db, f"{username}-personal", name=f"{display} (personal)"
+            )
+            db.add(
+                UserOrganization(
+                    user_id=user.id,
+                    organization_id=personal.id,
+                    role="admin",
+                    invited_by=created_by_id,
+                )
+            )
             db.commit()
         else:
             default_org = ensure_default_organization(db)

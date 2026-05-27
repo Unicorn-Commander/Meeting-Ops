@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+## [3.2.0] - 2026-05-27
+
+### Added
+- **Consumer self-serve signup backend (Option B), code-complete but INERT until activated.** Email/password signup for the free tier, coexisting with Keycloak enterprise SSO (the backend already dual-trusts Keycloak headers + its own JWT).
+  - `AuthService.create_user(personal_org=True)` provisions a PRIVATE per-user org (`{username}-personal`, user = admin) so consumers never share a workspace; new users are `tier="free"` + `is_verified=False`.
+  - Self-serve `POST /api/auth/register` uses the personal-org path and sends a verification email (best-effort — a mail failure never fails signup).
+  - `GET /api/auth/verify-email?token=…` (flips `is_verified`, redirects to the app) + `POST /api/auth/resend-verification` (generic 200, no account enumeration).
+  - `auth/email.py` — transactional email via `auth_config` SMTP; logs the link + returns False when SMTP is unconfigured (never 500s a signup). Email-verification tokens are type-isolated from password-reset tokens.
+  - Reuses the existing account lockout (`authenticate_user`) and free-tier default; not rebuilt.
+- Tests: `tests/test_consumer_signup.py` (11) — token helpers + type isolation, `create_user(personal_org)` (private org / free / unverified) + legacy default-org path + duplicate rejection, the register glue (personal org + verification email), and the verify-email / resend endpoints.
+
+### Notes
+- **Inert until activated**: with `ALLOW_REGISTRATION=false` (default) `/register` still requires an admin and the new endpoints sit behind oauth2-proxy. Deploying changes nothing for current users. Activation (real `SECRET_KEY`, `ALLOW_REGISTRATION=true`, SMTP, oauth2-proxy skip-routes, Traefik rate-limiting) + the frontend `/signup`+`/login`+`/pricing` pages are documented in `docs/consumer-signup.md` and gated on an explicit launch decision.
+
 ## [3.1.0] - 2026-05-27
 
 ### Added

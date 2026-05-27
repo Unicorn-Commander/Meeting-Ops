@@ -87,6 +87,30 @@ def verify_password_reset_token(token: str) -> Optional[str]:
     except JWTError:
         return None
 
+def generate_email_verification_token(email: str) -> str:
+    """Generate a signed email-verification token (24h expiry).
+
+    Mirrors the password-reset helper but with type='email_verification'
+    so a reset token can never be replayed as a verification token and
+    vice versa. The email is the subject; verification flips the matching
+    user's is_verified flag."""
+    data = {
+        "email": email,
+        "type": "email_verification",
+        "exp": datetime.now(timezone.utc) + timedelta(hours=24),
+    }
+    return jwt.encode(data, auth_config.SECRET_KEY, algorithm=auth_config.ALGORITHM)
+
+def verify_email_verification_token(token: str) -> Optional[str]:
+    """Verify an email-verification token and return the email, or None."""
+    try:
+        payload = jwt.decode(token, auth_config.SECRET_KEY, algorithms=[auth_config.ALGORITHM])
+        if payload.get("type") != "email_verification":
+            return None
+        return payload.get("email")
+    except JWTError:
+        return None
+
 def check_permission(user_role: str, permission: str) -> bool:
     """Check if a role has a specific permission"""
     from auth.config import PERMISSIONS, ROLE_HIERARCHY

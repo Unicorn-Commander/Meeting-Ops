@@ -31,7 +31,10 @@ class AuthConfig(BaseModel):
     # Registration
     ALLOW_REGISTRATION: bool = os.getenv("ALLOW_REGISTRATION", "false").lower() == "true"
     DEFAULT_USER_ROLE: str = "user"
-    
+    # Public base URL of the app, used to build links in transactional emails
+    # (email verification, password reset). Must be the user-facing origin.
+    APP_BASE_URL: str = os.getenv("APP_BASE_URL", "https://meetingops.magicunicorn.dev").rstrip("/")
+
     # OAuth2 (optional)
     ENABLE_OAUTH: bool = os.getenv("ENABLE_OAUTH", "false").lower() == "true"
     GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID")

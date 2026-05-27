@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
@@ -8,9 +9,15 @@ from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 from database.database import get_db
 from auth.service import AuthService
 from auth.dependencies import get_current_organization, get_current_user, require_admin, require_permission
+from auth.email import send_verification_email
 from auth.models import Organization, User, UserOrganization
 from auth.config import auth_config
 from auth.tier import get_tier_features, get_user_tier
+from auth.utils import (
+    generate_email_verification_token,
+    sanitize_email,
+    verify_email_verification_token,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
@@ -164,6 +171,10 @@ async def register(
             detail="Registration is disabled. Contact an administrator."
         )
     
+    # Self-serve = no admin caller. Self-serve consumers get a private
+    # personal org (not the shared default) and an email-verification link;
+    # admin-created users keep the legacy behavior.
+    is_self_serve = current_user is None
     try:
         user = AuthService.create_user(
             db,
@@ -173,14 +184,73 @@ async def register(
             full_name=user_data.full_name,
             organization_id=user_data.organization_id,
             role=user_data.role,
-            created_by_id=current_user.id if current_user else None
+            created_by_id=current_user.id if current_user else None,
+            personal_org=is_self_serve and user_data.organization_id is None,
         )
+        if is_self_serve and not user.is_verified:
+            # Best-effort: a mail failure must not fail signup (the user can
+            # resend). send_verification_email logs + returns False if SMTP
+            # is unconfigured.
+            token = generate_email_verification_token(user.email)
+            send_verification_email(
+                user.email,
+                f"{auth_config.APP_BASE_URL}/api/auth/verify-email?token={token}",
+            )
         return _build_user_response(user)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+@router.get("/verify-email")
+async def verify_email(token: str, db: Session = Depends(get_db)):
+    """Confirm an email-verification link, then redirect to the app login
+    with a status flag. Idempotent: re-clicking a still-valid link lands on
+    success again. Invalid/expired tokens redirect to an error state rather
+    than exposing whether the email exists."""
+    redirect_ok = f"{auth_config.APP_BASE_URL}/#/login?verify=success"
+    redirect_bad = f"{auth_config.APP_BASE_URL}/#/login?verify=invalid"
+    email = verify_email_verification_token(token)
+    if not email:
+        return RedirectResponse(redirect_bad, status_code=303)
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        return RedirectResponse(redirect_bad, status_code=303)
+    if not user.is_verified:
+        user.is_verified = True
+        db.commit()
+        AuthService.log_action(db, user.id, "email_verified", "user", str(user.id))
+    return RedirectResponse(redirect_ok, status_code=303)
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    payload: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    """Re-send a verification email. Always returns the same 200 message so
+    it can't be used to enumerate which addresses have accounts."""
+    try:
+        email = sanitize_email(payload.email)
+    except ValueError:
+        email = None
+    if email:
+        user = db.query(User).filter(User.email == email).first()
+        if user and not user.is_verified:
+            token = generate_email_verification_token(user.email)
+            send_verification_email(
+                user.email,
+                f"{auth_config.APP_BASE_URL}/api/auth/verify-email?token={token}",
+            )
+    return {
+        "message": "If an unverified account exists for that address, a verification link has been sent."
+    }
+
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
