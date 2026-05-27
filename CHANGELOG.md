@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.1.0] - 2026-05-27
+
+### Added
+- **Free-tier wiring: free users now record on-device by default.** The Record / always-on flow (`AlwaysOnContext`) forces local-only mode for users without the `canonical_reprocess` capability (free tier), so a free user records entirely in the browser (on-device STT + LLM + IndexedDB) with zero server-processing calls instead of hitting 403s mid-recording. A free user on a non-WebGPU browser is cleanly blocked with a "use Chrome/Edge" message rather than falling through to server calls. Every server-processing call (chunks / text / finalize / finalize-audio / resume) is guarded by a capability check plus a 403 backstop that surfaces a dismissible upgrade prompt (links to `/pricing` and Local Sessions). The Local Sessions page is now always reachable from the nav.
+
+### Changed
+- Privacy Mode + no-WebGPU now blocks recording with a clear message instead of silently falling back to server recording. Previously a paid user with Privacy Mode ON but no WebGPU would record server-side anyway, contrary to their stated privacy intent.
+
+### Notes
+- Inert for current enterprise/superuser users — the free-path code only triggers when `canonical_reprocess` is absent. Frontend-only. tsc build clean; 93 frontend vitest tests pass. Two stale frontend tests (config api-subdomain expectation, Sessions fixture) were corrected. The `/pricing` link is a placeholder pending the pricing page. On-device transcript-quality validation (a real browser-only recording) is still a pre-launch gate.
+
 ## [3.0.0] - 2026-05-27
 
 ### Added
