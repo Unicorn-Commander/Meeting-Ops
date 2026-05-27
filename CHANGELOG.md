@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.6.1] - 2026-05-27
+
+### Removed
+- The "Voice Activity Detection (removes silence)" toggle + threshold from Settings -> Audio. It persisted a preference (`enableVAD`/`vadThreshold`) that **no recording path ever read** — the always-on VAD engine ignores it, and the parallel full-session recorder captures everything continuously regardless of VAD. So the toggle was misleading. A true no-VAD live-transcription mode would be a separate feature (a time-based chunker), not this toggle.
+
 ## [3.6.0] - 2026-05-27
 
 ### Changed

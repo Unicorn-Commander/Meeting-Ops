@@ -472,41 +472,11 @@ export default function AudioSettings(_props: SectionProps) {
           </span>
         </label>
 
-        <label className="flex items-center gap-3">
-          <input
-            type="checkbox"
-            checked={settings.vadEnabled}
-            onChange={(e) =>
-              setSettings({ ...settings, vadEnabled: e.target.checked })
-            }
-            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
-          />
-          <span className="text-sm text-zinc-300">
-            Voice Activity Detection (removes silence)
-          </span>
-        </label>
-
-        {settings.vadEnabled && (
-          <div className="ml-7">
-            <label className="mb-1 block text-xs text-zinc-400">
-              VAD Threshold (0.0 - 1.0)
-            </label>
-            <input
-              type="number"
-              value={settings.vadThreshold}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  vadThreshold: parseFloat(e.target.value),
-                })
-              }
-              className="w-32 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-200"
-              min="0"
-              max="1"
-              step="0.05"
-            />
-          </div>
-        )}
+        {/* Voice Activity Detection toggle removed v3.6.1: it persisted a
+            preference no recording path ever read (the always-on VAD engine
+            ignores it), and the full-session recording is continuous
+            regardless of VAD. A real no-VAD live mode would be a separate
+            time-based-chunker feature. See reference_meeting_ops_vad_reality. */}
       </div>
     </div>
   );
