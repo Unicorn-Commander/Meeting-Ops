@@ -236,6 +236,8 @@ export default function PipelineStatusPicker({
 
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  // Advanced panel collapsed by default — model/engine pickers are power-user controls.
+  const [open, setOpen] = useState(false);
 
   // Read org-level diarization default. The "Save as default" button
   // writes here; the chunk-upload path also reads the same setting via
@@ -536,10 +538,20 @@ export default function PipelineStatusPicker({
   // --- Rendering --------------------------------------------------------
   return (
     <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
-      <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-lg font-semibold text-white"
+      >
         <Cpu className="w-5 h-5 text-purple-400" />
         Agent & Pipeline Status
-      </h3>
+        <span className="ml-auto text-xs font-normal text-zinc-400">{open ? 'Hide' : 'Advanced'}</span>
+        <ChevronDown className={`h-4 w-4 text-zinc-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+      <div className="mt-4">
 
       {/* Active Agent identity (read-only for v1) */}
       <div className="mb-4 p-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
@@ -625,6 +637,8 @@ export default function PipelineStatusPicker({
       </div>
       {saveMessage && (
         <div className="mt-2 text-[11px] text-zinc-400">{saveMessage}</div>
+      )}
+      </div>
       )}
     </div>
   );

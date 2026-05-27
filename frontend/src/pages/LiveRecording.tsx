@@ -10,7 +10,6 @@ import {
   Users, 
   Clock, 
   Sparkles,
-  Activity,
   Cpu,
   HardDrive,
   CheckCircle,
@@ -1559,92 +1558,6 @@ export default function LiveRecording() {
               </div>
             </div>
           )}
-
-          {/* Live Transcription */}
-          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-              <Activity className="w-5 h-5 text-green-400" />
-              Live Transcription
-            </h3>
-            <div className="h-64 overflow-y-auto space-y-2 font-mono text-xs text-zinc-300 bg-black/30 rounded-lg p-4">
-              {liveTranscript.length > 0 ? (
-                liveTranscript.slice(-20).map((line, idx) => (
-                  <div key={idx} className="animate-fadeIn">
-                    <span className="text-zinc-500">[{formatTranscriptTimestamp(idx)}]</span>
-                    <span className="ml-2">{line}</span>
-                  </div>
-                ))
-              ) : (
-                <div className="text-zinc-500 italic">
-                  {isRecording ? (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                        <span>Listening for speech...</span>
-                      </div>
-                      <div className="mt-2 text-xs">Session: {sessionData?.id ? sessionData.id.substring(0, 8) + '...' : 'initializing'}</div>
-                      <div className="mt-1 text-xs text-zinc-600">
-                        Transcription appears after ~5 seconds of speech
-                      </div>
-                    </>
-                  ) : (
-                    'Transcript will appear here during recording'
-                  )}
-                </div>
-              )}
-            </div>
-            
-            {isRecording && (
-              <div className="mt-4 pt-4 border-t border-zinc-800">
-                <div className="flex justify-between text-sm">
-                  <span className="text-zinc-400">Words Transcribed</span>
-                  <span className="text-white font-mono">{wordCount}</span>
-                </div>
-                
-                {/* Progressive Interval Info */}
-                {progressiveData ? (
-                  <div className="mt-2 space-y-1">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-zinc-400">Progressive Summary</span>
-                      <span className="text-zinc-300 text-xs">
-                        Next at {progressiveData.nextInterval} words
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-500">Model Size</span>
-                      <span className="text-zinc-400">{progressiveData.modelSize}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-500">Last Interval</span>
-                      <span className="text-zinc-400">{progressiveData.intervalUsed} words</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex justify-between text-sm mt-2">
-                    <span className="text-zinc-400">Auto-Summary</span>
-                    <span className="text-zinc-300 text-xs">
-                      {summarySettings.summaryTriggerMode === 'word_count' 
-                        ? `Next at ${Math.ceil(wordCount / summarySettings.summaryWordCountInterval) * summarySettings.summaryWordCountInterval + summarySettings.summaryWordCountInterval} words`
-                        : `Every ${summarySettings.summaryUpdateInterval}s`}
-                    </span>
-                  </div>
-                )}
-                
-                {/* Active Agent Info */}
-                {activeAgent && (
-                  <div className="mt-3 pt-2 border-t border-zinc-700">
-                    <div className="flex items-center gap-2 text-xs text-zinc-400">
-                      <Bot className="w-3 h-3 text-purple-400" />
-                      <span>Agent: {activeAgent.name}</span>
-                    </div>
-                    <div className="text-xs text-zinc-500 mt-1">
-                      {activeAgent.model_name} • {activeAgent.provider_type}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
 
           {/* Session Info */}
           {sessionData && (

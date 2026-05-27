@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.4.0] - 2026-05-27
+
+### Changed
+- **Record page: one live transcript + a collapsible pipeline panel.** Removed the legacy page-level "Live Transcription" panel — it mirrored the old `/ws/transcription-auto` feed and duplicated the recorder's own live transcript (the code even noted "the user sees BOTH transcripts"). The live transcript now comes only from the active recorder (`AlwaysOnControl`), plus the gated `ServerLiveTranscript` pane for Pro server-live. Collapsed the "Agent & Pipeline Status" panel (per-session STT / diarizer / summarizer / server-vs-browser pickers) behind a default-collapsed "Advanced" toggle, since those are power-user controls most users never touch. Session Info and Quick Actions panels are unchanged.
+
 ## [3.3.0] - 2026-05-27
 
 ### Changed
