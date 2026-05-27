@@ -42,6 +42,7 @@ def _seed_user(db, username, password, email, is_superuser=False):
         hashed_password=get_password_hash(password),
         is_active=True,
         is_verified=True,
+        tier="enterprise",  # paid tier: server-processing endpoints are gated (v3.0.0)
         is_superuser=is_superuser,
     )
     db.add(user)

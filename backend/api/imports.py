@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from database.models import BulkImportFile, BulkImportJob
 from services.bulk_import_queue import bulk_import_queue, _bulk_dir
@@ -204,6 +205,7 @@ async def create_job(
 ) -> JobCreateResponse:
     """Create an empty bulk import job. Returns job_id which the client
     then POSTs files into."""
+    gate_feature_for_caller(current_user, "bulk_import")  # v3.0.0 tier gate: server batch ingest is paid-tier
     job = BulkImportJob(
         id=uuid.uuid4(),
         user_id=current_user.id,
@@ -239,6 +241,7 @@ async def upload_file_to_job(
     runs the SHA-256 + dedup + RecordingSession create + reprocess
     pipeline; this endpoint just lands the bytes + the row.
     """
+    gate_feature_for_caller(current_user, "bulk_import")  # v3.0.0 tier gate: server batch ingest is paid-tier
     job = _get_job_for_user(db, job_id, current_user, active_org)
     if job.status in ("complete", "cancelled", "failed"):
         raise HTTPException(

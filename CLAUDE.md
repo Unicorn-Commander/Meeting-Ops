@@ -47,7 +47,7 @@ Mobile and native roadmap is locked as A → B → C-1 → C-2 → C-3:
 
 Queued behind product/design decisions:
 - Sortformer canonical /finalize-audio: opt-in hybrid SHIPPED v2.2.0 but PARKED — Sortformer v1 one-shot diarize OOMs on real-length meetings (38-min needs ~25 GiB on the 12 GB 3060). pyannote stays canonical. Promotion needs chunk+embedding-stitch, the streaming-state API, or NeMo 2.5. See CHANGELOG 2.2.0 + runbook.
-- Free-tier reframe (Privacy Mode → Free Tier UX relabel)
+- Free-tier enforcement: BUILT + TESTED for v3.0.0 (not yet tagged/deployed, awaiting sign-off). Free tier is browser-only; server-processing endpoints (chunks/finalize/summarize/import) 403 free users via new tier_features (canonical_reprocess, brigade_integration, cross_device_sync, bulk_import). gate helpers in auth/tier.py. See CHANGELOG 3.0.0. Remaining UX slice: Privacy-Mode-as-default + upgrade-prompt surfaces.
 - PWA deploy coordination: SHIPPED v2.3.0 — SW switched to prompt/parked (skipWaiting false); update banner deferred while recording (live or always-on), surfaces on stop.
 - Pricing decision + Stripe checkout build
 

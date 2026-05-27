@@ -60,6 +60,10 @@ def test_tier_features_have_consistent_keys():
         "retention_controls",
         "brigade_byok",
         "hipaa",
+        "canonical_reprocess",
+        "brigade_integration",
+        "cross_device_sync",
+        "bulk_import",
         "max_sessions_per_month",
         "max_session_minutes",
     }

@@ -25,6 +25,7 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.internal import InternalServiceCaller, get_internal_or_user
 from auth.models import Organization, User
 from auth.organization import ActiveOrganization, resolve_active_organization
+from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from database.models import AudioFile, RecordingSession, Transcription
 from services.summary_slices import (
@@ -632,6 +633,7 @@ async def upload_always_on_chunk(
     caller: Any = Depends(get_internal_or_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     # Dual-auth: real user OR room_recorder loopback. Internal callers
     # write to a session they already own by ID (the recorder spawned it
     # via the rooms API). We resolve org context from the session row
@@ -739,6 +741,7 @@ async def append_client_text_chunk(
 
     Provenance lives in JSONB; no schema migration required.
     """
+    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty transcript text.")
@@ -842,6 +845,7 @@ async def finalize_always_on_session(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -1021,6 +1025,7 @@ async def summarize_with_server_llm(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.0.0 tier gate: paid-tier server processing
     transcript = request.transcript.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript is required.")
@@ -1074,6 +1079,7 @@ async def summarize_slice(
     Used by the always-on live summary feature when the user has picked
     'Server' as their in-browser AI model (or when WebGPU is unavailable).
     """
+    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.0.0 tier gate: paid-tier server processing
     transcript = request.transcript.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript is required.")
@@ -1302,6 +1308,7 @@ async def append_audio_chunk(
     use this path, but plumbing dual-auth in from day one means we don't
     have to retrofit when it grows audio export.
     """
+    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     if isinstance(caller, InternalServiceCaller):
         session = _find_session_by_id(db, session_id)
         if not session:
@@ -1863,6 +1870,7 @@ async def finalize_audio(
     use this path; if we ever ship browser audio capture from a non-user
     context we can flip this to dual-auth like /audio-chunks.
     """
+    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -2026,6 +2034,7 @@ async def post_full_audio(
     future internal-only crash recovery path doesn't need an auth
     retrofit.
     """
+    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     if isinstance(caller, InternalServiceCaller):
         session = _find_session_by_id(db, session_id)
         if not session:

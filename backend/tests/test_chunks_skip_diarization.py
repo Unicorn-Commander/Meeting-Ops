@@ -65,6 +65,7 @@ def _seed_user_and_org(slug: str, username: str = "diaroff_admin"):
                 hashed_password=get_password_hash("admin123"),
                 is_active=True,
                 is_verified=True,
+                tier="enterprise",  # paid tier: server-processing endpoints are gated (v3.0.0)
                 is_superuser=False,
             )
             db.add(user)

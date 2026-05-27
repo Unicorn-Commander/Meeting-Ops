@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.0.0] - 2026-05-27 (built + tested; not yet tagged/deployed — awaiting sign-off)
+
+### Added
+- **Free-tier enforcement: free tier is browser-only, server processing is paid-tier.** Four new `TIER_FEATURES` capabilities (free=False, pro/enterprise=True), mirrored in the frontend `TierFeatures` type + `DEFAULT_TIER_FEATURES`:
+  - `canonical_reprocess` — the server audio-ingest + reprocess pipeline.
+  - `brigade_integration` — Brigade graph writes (distinct from the enterprise-only `brigade_byok`).
+  - `cross_device_sync` — server-backed cross-device sync (capability flag).
+  - `bulk_import` — the server batch `/import` pipeline.
+- Two gate primitives in `auth/tier.py`: `require_feature(feature)` (FastAPI dependency, 403s users lacking the capability; validates the feature name at boot) and `gate_feature_for_caller(caller, feature)` (inline gate for `get_internal_or_user` endpoints — internal-service callers bypass, real users are 403'd; duck-types on the `tier` attribute so it's robust to the test suite's `auth.models` reload).
+
+### Changed
+- **Server-processing endpoints now require a paid tier.** Gated (free → 403): `/sessions/{id}/chunks`, `/sessions/{id}/chunks-text`, `/sessions/{id}/audio-chunks`, `/sessions/{id}/full-audio`, `/sessions/{id}/finalize-audio`, `/sessions/{id}/finalize` (all `canonical_reprocess`); `/summarize` + `/summarize-slice` (`qwen36_summary`); `/import/jobs` + `/import/jobs/{id}/files` (`bulk_import`). The streaming WS `/ws/sessions/{id}/live` was already gated on `server_live` (Phase B.4). Session CRUD and browser-side capture stay open — free tier records locally (on-device STT + LLM + IndexedDB, i.e. Privacy Mode) and never touches the server. Brigade writes + the reprocess pipeline are downstream of the gated finalize/chunks entry points, so free users never reach them.
+- **Wire contract widens (the reason for the major bump):** free-tier users now receive explicit `403` on tier-locked endpoints. Internal-service loopback callers (room_recorder) are unaffected — they bypass tier gating.
+
+### Tests
+- New `test_free_tier_enforcement.py` (13): the two gate primitives (free 403 / pro+ pass / superuser pass / internal-caller bypass / unknown-feature ValueError) plus integration tests hitting real gated endpoints free-vs-pro. `test_tier.py` key-consistency updated for the 4 new capabilities. Affected functional tests (audio-chunks, bulk-import, chunks-text, cross-org, internal-auth) updated to seed paid-tier users. Full suite minus the bulk-import *worker* test files: 0 failed; the 3 bulk-import files pass in isolation (7 + 7 + 15). Known test-infra issue (pre-existing, orthogonal to enforcement): the bulk-import worker tests share async event-loop/queue state and hang when run after other files in a single process — tracked as a separate follow-up.
+
 ## [2.3.0] - 2026-05-27
 
 ### Changed

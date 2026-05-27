@@ -35,6 +35,13 @@ export interface TierFeatures {
   retention_controls: boolean;
   brigade_byok: boolean;
   hipaa: boolean;
+  // Server-processing gates (v3.0.0). Free tier is browser-only — these are
+  // all false for free, true for pro/enterprise. Mirrors backend
+  // TIER_FEATURES in backend/auth/tier.py.
+  canonical_reprocess: boolean;
+  brigade_integration: boolean;
+  cross_device_sync: boolean;
+  bulk_import: boolean;
   max_sessions_per_month: number | null;
   max_session_minutes: number | null;
 }
@@ -53,6 +60,10 @@ export const DEFAULT_TIER_FEATURES: TierFeatures = {
   retention_controls: false,
   brigade_byok: false,
   hipaa: false,
+  canonical_reprocess: false,
+  brigade_integration: false,
+  cross_device_sync: false,
+  bulk_import: false,
   max_sessions_per_month: 50,
   max_session_minutes: 60,
 };
