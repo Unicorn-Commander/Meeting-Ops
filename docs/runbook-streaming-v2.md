@@ -147,6 +147,42 @@ ssh magicunicorn 'docker exec meet-backend python3 -c "from services.brigade_cli
 # Expect: is_live=True key_prefix=363d6313 base_url=http://unicorn-brigade:8100
 ```
 
+## Sortformer canonical-hybrid diarization (v2.2.0, opt-in / PARKED)
+
+A post-hoc `/finalize-audio` diarization path where Sortformer draws the
+speaker boundaries and wespeaker (via `meet-speaker-svc`) supplies the
+per-turn embeddings. **Default is `pyannote`; this is OFF in production.**
+
+**Status: parked, short-audio-only.** Sortformer v1 is trained on ~90 s
+sessions and its one-shot `diarize()` is ~quadratic in audio length — a
+38-min meeting needs ~25 GiB and OOMs the 12 GB 3060 (a 24 GB card won't
+fit it either). Fine on short clips. Do NOT enable for orgs with
+real-length meetings. See CHANGELOG 2.2.0 "Known limitations" for the
+three promotion options (chunk+stitch / streaming-state API / NeMo 2.5).
+
+Enable (per-org, preferred — flip one org for validation):
+```sql
+-- set provider_name on the org's diarization OrgProviderSettings row
+UPDATE org_provider_settings SET provider_name='sortformer-hybrid'
+  WHERE organization_id=<id> AND service_kind='diarization';
+```
+Or globally via env (affects all orgs): set
+`SPEAKER_PROVIDER_PREFERENCE=sortformer-hybrid` in `.env.bigboy`, add it to
+the backend `environment:` block, force-recreate backend. Revert by
+removing it (default falls back to pyannote).
+
+Smoke the svc endpoint directly (short fixture):
+```bash
+ssh magicunicorn 'ssh midboy2 "docker cp meet-speaker-svc:/app/test_fixtures/synthetic_2speaker.wav /tmp/syn.wav; \
+  curl -s -X POST -F audio=@/tmp/syn.wav -F return_embeddings=true \
+  http://localhost:8896/diarize-file-upload | python3 -m json.tool | head -20"'
+# Expect: backend=sortformer-hybrid, num_speakers=2, segments with
+#         speaker=SPEAKER_NN + a 256-float embedding on long-enough turns.
+```
+On OOM the svc returns HTTP 500 and the provider's `diarize()` returns `[]`
+— the reprocess keeps the live transcript with no speaker overlay (no
+automatic pyannote fallback in 2.2.0).
+
 ## Common failure modes + fixes
 
 ### WS connect fails with code 1006 every time

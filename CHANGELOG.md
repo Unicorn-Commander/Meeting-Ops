@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-27
+
+### Added
+- **Opt-in Sortformer canonical-hybrid diarization for `/finalize-audio`** (default OFF). A new path where NVIDIA Sortformer draws the speaker boundaries and wespeaker (still via `meet-speaker-svc`) supplies the per-turn voice embeddings used by `identify_speakers`. Selected per-org (`OrgProviderSettings.provider_name = "sortformer-hybrid"`) or globally via `SPEAKER_PROVIDER_PREFERENCE=sortformer-hybrid`. **Default stays `pyannote` — production is unchanged.**
+  - `meet-sortformer-svc`: new `POST /diarize-file-upload` — multipart WAV upload (works cross-host; the backend on bigboy and the svc on midboy2 don't share a filesystem), runs Sortformer segmentation, then asks `meet-speaker-svc` for a per-turn wespeaker embedding over the midboy2-local network, and returns the **same response shape** `meet-speaker-svc /diarize` returns (`segments[{start,end,speaker,embedding}]`, `num_speakers`, `backend`, `duration_seconds`). Turns under 0.5 s skip embedding; an unreachable speaker-svc degrades to labels-only and never raises.
+  - Backend `SortformerSpeakerSvcProvider`: a drop-in for `LocalSpeakerSvcProvider.diarize`; `embed`/`identify`/`health` delegate to a wrapped wespeaker provider (wespeaker stays canonical for speaker identity — only the segmentation changes). `registry.get_diarization` gates on the preference, per-org override winning over the env default.
+  - Tests: 9 backend (registry selection, response parsing, delegation, graceful failures) + 6 sortformer-svc (endpoint shape, `SPEAKER_NN` label mapping, embed crop/skip, unreachable-svc degradation).
+
+### Known limitations
+- **The hybrid is NOT viable as the canonical diarizer for real-length meetings yet, and is shipped opt-in/parked.** Sortformer v1 is trained on ~90 s sessions and its one-shot `diarize()` allocates memory roughly quadratically in audio length: a 38-minute meeting needs ~25 GiB and OOMs the 12 GB RTX 3060 (a 24 GB card would not fit it either). It works fine on short clips (validated: synthetic 2-speaker fixture → 2 speakers + 256-d embeddings end-to-end). For comparison, the canonical pyannote path diarized the same 38-min meeting in ~76 s (2 speakers, 694 segments, 577 embedded turns).
+- Making it canonical requires either (a) chunked diarization with cross-chunk speaker stitching via the wespeaker embeddings, or (b) Sortformer v1's `forward_streaming_step()` + speaker-cache API (the spike report's promotion path), or (c) NeMo >= 2.5 streaming-v2 models. Deferred by decision 2026-05-27 — pyannote remains canonical; the hybrid stays as opt-in short-audio infrastructure.
+- When the hybrid is selected and the diarize call fails (e.g. OOM on a long meeting), `diarize()` returns `[]` and the reprocess pipeline keeps the live transcript with no speaker overlay. There is intentionally no automatic pyannote fallback in this release — keep the flag off for long-meeting orgs.
+
 ## [2.1.0] - 2026-05-26
 
 ### Added

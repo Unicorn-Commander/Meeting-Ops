@@ -6,7 +6,7 @@ Hardware appliance for AI-powered meeting recording and transcription. NPU accel
 
 **Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive | Phase B server-live streaming with Sortformer speakers + EOU detection LIVE | Brigade graph writes LIVE
 
-**Latest release**: v2.1.0 tagged 2026-05-26; utterance-grouped per-word streaming UI, on top of v2.0.0 (v2 endpoint wire-up with per-word `tokens_finalized` + EOU detection) + v1.5.0 (parakeet checkpoint swap to streaming-trained `parakeet_realtime_eou_120m-v1`) + v1.4.0 (`<ServerLiveTranscript>` wired into Record page) + v1.3.0 (cursor + VAD silence-gate) + v1.2.0 (Sortformer parallel dispatch + speaker badges) + v1.1.0 (catch-up of post-v1.0.0 commits). Operational runbook at `docs/runbook-streaming-v2.md`. Backend pytest: 329 passed / 0 failed / 3 skipped.
+**Latest release**: v2.2.0 tagged 2026-05-27; opt-in Sortformer canonical-hybrid diarization for `/finalize-audio` (PARKED — default stays pyannote; Sortformer v1 one-shot diarize OOMs on real-length meetings, see CHANGELOG). On top of v2.1.0 (2026-05-26) utterance-grouped per-word streaming UI, on top of v2.0.0 (v2 endpoint wire-up with per-word `tokens_finalized` + EOU detection) + v1.5.0 (parakeet checkpoint swap to streaming-trained `parakeet_realtime_eou_120m-v1`) + v1.4.0 (`<ServerLiveTranscript>` wired into Record page) + v1.3.0 (cursor + VAD silence-gate) + v1.2.0 (Sortformer parallel dispatch + speaker badges) + v1.1.0 (catch-up of post-v1.0.0 commits). Operational runbook at `docs/runbook-streaming-v2.md`. Backend pytest: 338 passed / 0 failed / 3 skipped.
 
 ## Architecture is browser-first by design
 
@@ -46,7 +46,7 @@ Mobile and native roadmap is locked as A → B → C-1 → C-2 → C-3:
 5. Phase C-3, native Android plus NNAPI: future.
 
 Queued behind product/design decisions:
-- Sortformer canonical /finalize-audio (cross-host audio sharing + embedding tradeoff)
+- Sortformer canonical /finalize-audio: opt-in hybrid SHIPPED v2.2.0 but PARKED — Sortformer v1 one-shot diarize OOMs on real-length meetings (38-min needs ~25 GiB on the 12 GB 3060). pyannote stays canonical. Promotion needs chunk+embedding-stitch, the streaming-state API, or NeMo 2.5. See CHANGELOG 2.2.0 + runbook.
 - Free-tier reframe (Privacy Mode → Free Tier UX relabel)
 - PWA deploy coordination (update-banner UX vs auto-reload on active recording)
 - Pricing decision + Stripe checkout build
