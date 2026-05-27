@@ -81,6 +81,7 @@ import {
   localAudioStore,
   type LocalAudioSessionMeta,
 } from '../services/localAudioStore';
+import { useTierFeatures } from '../hooks/useTierFeatures';
 
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
@@ -164,6 +165,8 @@ export interface AlwaysOnContextValue {
   summary: AlwaysOnSummary;
   liveTranscript: LiveTranscriptSegment[];
   error: string | null;
+  paidFeaturePrompt: string | null;
+  dismissPaidFeaturePrompt: () => void;
   statusText: string;
   sessionsCompleted: number;
   summarizing: boolean;
@@ -315,6 +318,9 @@ function transcriptSegmentId(sessionId: string, segment: any): string {
 
 export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const { activeOrganization } = useOrg();
+  const { hasFeature } = useTierFeatures();
+  const canUseServerProcessing = hasFeature('canonical_reprocess');
+  const canUseServerProcessingRef = useRef(canUseServerProcessing);
   const [state, setState] = useState<AlwaysOnState>('idle');
   const [vadActive, setVadActive] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -327,6 +333,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptSegment[]>([]);
   const [autoConfig, setAutoConfig] = useState<LiveSummaryAutoConfig>(() => getLiveSummaryAutoConfig());
   const [error, setError] = useState<string | null>(null);
+  const [paidFeaturePrompt, setPaidFeaturePrompt] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Idle');
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
   const [summarizing, setSummarizing] = useState(false);
@@ -358,6 +365,25 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const isCaptureOnlyMode = shouldShowCaptureOnlyBanner(deviceCapability);
   const allowBrowserInference = shouldRunBrowserInference(deviceCapability);
 
+  useEffect(() => {
+    canUseServerProcessingRef.current = canUseServerProcessing;
+  }, [canUseServerProcessing]);
+
+  const showPaidFeaturePrompt = useCallback((message?: string) => {
+    setPaidFeaturePrompt(
+      message
+        || 'You are on the free on-device tier. This recording stays private and local in your browser; upgrade to Pro to use server processing.',
+    );
+  }, []);
+
+  const dismissPaidFeaturePrompt = useCallback(() => {
+    setPaidFeaturePrompt(null);
+  }, []);
+
+  const getServerProcessingError = useCallback(() => (
+    'Server processing is available on Pro and Enterprise. Free recordings stay private and local in your browser.'
+  ), []);
+
   // Phase A.5 orphan tracking. On desktop-capable browsers we open the
   // local IndexedDB store at mount and check for sessions that started
   // but never finalized (browser crash, tab close mid-meeting, hard
@@ -378,7 +404,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     activeLocalOnlyRef.current = activeLocalOnly;
   }, [activeLocalOnly]);
-  const localOnlyForcedOff = localOnlyPref && !localOnlyAvailable;
+  const localOnlyForcedOff = (localOnlyPref || !canUseServerProcessing) && !localOnlyAvailable;
 
   // Device-aware capture state. activeMicDeviceId is the deviceId we're
   // RIGHT NOW capturing from (may differ from the saved preference if a
@@ -744,6 +770,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       return session.id;
     }
 
+    if (!canUseServerProcessingRef.current) {
+      showPaidFeaturePrompt();
+      throw new Error(getServerProcessingError());
+    }
+
     if (!activeOrganization) {
       throw new Error('No active organization is selected.');
     }
@@ -758,6 +789,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     });
     if (!response.ok) {
       const detail = await response.text();
+      if (response.status === 403) {
+        showPaidFeaturePrompt();
+        throw new Error(getServerProcessingError());
+      }
       throw new Error(detail || 'Failed to start always-on session.');
     }
     const session = await response.json();
@@ -771,11 +806,19 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // Local-only finalize is handled inline by stop() (final-summary
     // roll-up + endLocalSession). Don't touch the network here.
     if (activeLocalOnlyRef.current) return;
+    if (!canUseServerProcessingRef.current) {
+      showPaidFeaturePrompt();
+      throw new Error(getServerProcessingError());
+    }
     const response = await fetch(`${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`, {
       method: 'POST',
     });
     if (!response.ok) {
       const detail = await response.text();
+      if (response.status === 403) {
+        showPaidFeaturePrompt();
+        throw new Error(getServerProcessingError());
+      }
       throw new Error(detail || 'Failed to finalize always-on session.');
     }
     // Kick off the server-side reprocess pipeline if we uploaded full
@@ -789,7 +832,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       await fetch(
         `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize-audio`,
         { method: 'POST' },
-      );
+      ).then(async (response) => {
+        if (response.status === 403) {
+          showPaidFeaturePrompt();
+        }
+      });
     } catch (err) {
       // Non-fatal — the live transcript stays as the canonical record.
       // eslint-disable-next-line no-console
@@ -804,6 +851,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     chunk: VadAudioChunk,
     sessionId: string,
   ): Promise<void> => {
+    if (!canUseServerProcessingRef.current) {
+      showPaidFeaturePrompt();
+      throw new Error(getServerProcessingError());
+    }
     const form = new FormData();
     form.append('chunk', chunk.blob, `always-on-${Date.now()}.wav`);
     form.append('elapsed_seconds', String(Math.max(0, chunk.elapsedSeconds)));
@@ -815,6 +866,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     });
     if (!response.ok) {
       const detail = await response.text();
+      if (response.status === 403) {
+        showPaidFeaturePrompt();
+        throw new Error(getServerProcessingError());
+      }
       throw new Error(detail || 'Always-on chunk upload failed.');
     }
     const data = await response.json();
@@ -832,6 +887,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     text: string,
     sessionId: string,
   ): Promise<void> => {
+    if (!canUseServerProcessingRef.current) {
+      showPaidFeaturePrompt();
+      throw new Error(getServerProcessingError());
+    }
     const response = await fetch(
       `${config.apiUrl}/api/recordings/sessions/${sessionId}/chunks-text`,
       {
@@ -848,6 +907,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     );
     if (!response.ok) {
       const detail = await response.text();
+      if (response.status === 403) {
+        showPaidFeaturePrompt();
+        throw new Error(getServerProcessingError());
+      }
       throw new Error(detail || 'Always-on text chunk upload failed.');
     }
     // Optimistic append for immediate feedback. If the websocket beats
@@ -1361,6 +1424,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     setState('starting');
     setError(null);
+    setPaidFeaturePrompt(null);
     setStatusText('Starting microphone and VAD');
     setSummary(EMPTY_SUMMARY);
     lastAutoFireRef.current = Date.now();
@@ -1371,11 +1435,26 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setSessionStartedAt(new Date().toISOString());
     setElapsedSeconds(0);
 
-    // Lock the privacy mode for this session at start. If the user
-    // wants local-only but WebGPU is missing, fall back silently to
-    // standard mode for this session — the banner in the UI tells them
-    // we did so. Otherwise honor the toggle.
-    const useLocalOnly = localOnlyPref && localOnlyAvailable;
+    // Lock the privacy mode for this session at start. Free-tier users
+    // do not have canonical_reprocess, so their effective mode is
+    // local-only even when the privacy toggle is off.
+    const requiresLocalOnly = localOnlyPref || !canUseServerProcessing;
+    if (requiresLocalOnly && !localOnlyAvailable) {
+      const message = !canUseServerProcessing
+        ? 'Free recordings run on-device and require a WebGPU-capable browser such as current Chrome or Edge. This browser cannot start a free local recording.'
+        : 'Privacy Mode needs a WebGPU-capable browser such as current Chrome or Edge. Turn Privacy Mode off or switch browsers to record with server processing.';
+      if (!canUseServerProcessing) showPaidFeaturePrompt(message);
+      activeLocalOnlyRef.current = false;
+      setActiveLocalOnly(false);
+      setState('idle');
+      setStatusText('Idle');
+      setSessionStartedAt(null);
+      startedAtRef.current = null;
+      setAlwaysOnActive(false);
+      setError(message);
+      return;
+    }
+    const useLocalOnly = requiresLocalOnly;
     activeLocalOnlyRef.current = useLocalOnly;
     setActiveLocalOnly(useLocalOnly);
 
@@ -1463,7 +1542,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setStatusText('Idle');
       setError(message);
     }
-  }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable, deviceCapability, activeOrganization, activeMicStream]);
+  }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable, canUseServerProcessing, showPaidFeaturePrompt, deviceCapability, activeOrganization, activeMicStream]);
 
   const pause = useCallback(async () => {
     if (stateRef.current !== 'recording') return;
@@ -1674,6 +1753,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
             }
           }
         } else {
+          if (!canUseServerProcessingRef.current) {
+            showPaidFeaturePrompt();
+            throw new Error(getServerProcessingError());
+          }
           setStatusText('Generating final summary');
           // Phase A.5 — verify-then-confirm. When local persistence is
           // on we compute SHA-256 + byte count from IDB and POST those
@@ -2298,6 +2381,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
    *  the server using the locally-buffered chunks. Idempotent; safe to
    *  retry from a button click. */
   const resumeOrphanSession = useCallback(async (sessionId: string) => {
+    if (!canUseServerProcessingRef.current) {
+      showPaidFeaturePrompt();
+      setError(getServerProcessingError());
+      return;
+    }
     if (!activeOrganization) {
       setError('Pick an organization before resuming the upload.');
       return;
@@ -2412,6 +2500,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summary,
     liveTranscript,
     error,
+    paidFeaturePrompt,
+    dismissPaidFeaturePrompt,
     statusText,
     sessionsCompleted,
     summarizing,
@@ -2457,6 +2547,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summary,
     liveTranscript,
     error,
+    paidFeaturePrompt,
+    dismissPaidFeaturePrompt,
     statusText,
     sessionsCompleted,
     summarizing,

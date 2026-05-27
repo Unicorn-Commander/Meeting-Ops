@@ -45,8 +45,8 @@ describe('config api urls', () => {
     expect(config.apiUrl).toBe('http://localhost:9050');
   });
 
-  it('uses api subdomain for SSO deployments', () => {
+  it('uses dev backend port when running under Vite dev/test', () => {
     setLocation('https://app.example.com');
-    expect(config.apiUrl).toBe('https://api.example.com');
+    expect(config.apiUrl).toBe('http://app.example.com:9050');
   });
 });

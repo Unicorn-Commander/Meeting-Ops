@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useOrg } from './contexts/OrgContext';
@@ -26,7 +26,6 @@ import StreamingTest from './pages/StreamingTest';
 import AdminBulkImport from './pages/AdminBulkImport';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
-import { listLocalSessions } from './services/localSessionStore';
 
 
 // Layout wrapper with simplified navigation
@@ -109,28 +108,6 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     icon: string | React.ComponentType<{ className?: string }>;
   };
 
-  // Local Sessions entry only shows up once the user has at least one
-  // privacy-mode session persisted in IndexedDB. Probe once on mount
-  // and again whenever the auth user changes (re-login on the same
-  // device should pick up the rows). The probe is best-effort —
-  // failures leave hasLocalSessions=false so the entry just doesn't
-  // appear.
-  const [hasLocalSessions, setHasLocalSessions] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const sessions = await listLocalSessions();
-        if (!cancelled) setHasLocalSessions(sessions.length > 0);
-      } catch {
-        if (!cancelled) setHasLocalSessions(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.id]);
-
   // Workspace-level nav — visible to everyone. Aaron's directive is
   // that admin items move OUT of the main list and into their own
   // section, so Speakers / Rooms (the multi-tenant configuration
@@ -140,9 +117,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
     { path: '/import', label: 'Bulk Import', icon: FolderUp },
-    ...(hasLocalSessions
-      ? [{ path: '/local-sessions', label: 'Local Sessions', icon: Lock } as NavItem]
-      : []),
+    { path: '/local-sessions', label: 'Local Sessions', icon: Lock },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },

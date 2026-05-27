@@ -786,6 +786,41 @@ export default function AlwaysOnControl() {
               {alwaysOn.error}
             </div>
           )}
+          {alwaysOn.paidFeaturePrompt && (
+            <div className="mt-3 rounded-xl border border-purple-500/40 bg-zinc-900/95 px-4 py-3 shadow-lg">
+              <div className="flex items-start gap-3">
+                <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-purple-400" />
+                <div className="min-w-0 flex-1 text-sm text-zinc-100">
+                  <div className="font-medium">Free on-device recording</div>
+                  <p className="mt-0.5 text-xs leading-5 text-zinc-400">
+                    {alwaysOn.paidFeaturePrompt}
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <a
+                      href="#/pricing"
+                      className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500"
+                    >
+                      Upgrade to Pro
+                    </a>
+                    <a
+                      href="#/local-sessions"
+                      className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+                    >
+                      Local sessions
+                    </a>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={alwaysOn.dismissPaidFeaturePrompt}
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                  aria-label="Dismiss upgrade prompt"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Active mic indicator + per-session override. Only shown while
               a session is live — the chip is meaningless when idle. The
               mic chip is hidden when the audio source isn't mic-based,

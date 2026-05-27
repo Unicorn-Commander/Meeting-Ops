@@ -20,6 +20,22 @@ vi.mock('../contexts/UploadsContext', () => ({
   }),
 }));
 
+vi.mock('../contexts/OrgContext', () => ({
+  useOrg: () => ({
+    activeOrganization: {
+      id: 'org-1',
+      slug: 'test-org',
+      name: 'Test Org',
+      role: 'admin',
+    },
+    getOrgQueryUrl: (url: string) => url,
+  }),
+}));
+
+vi.mock('../services/localSessionStore', () => ({
+  listLocalSessions: vi.fn().mockResolvedValue([]),
+}));
+
 vi.mock('../components/Toast', () => ({
   showToast: {
     success: vi.fn(),
@@ -88,6 +104,6 @@ describe('Sessions', () => {
     );
 
     await waitFor(() => expect(screen.getByText('Sessions')).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText('Weekly Sync')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('Weekly Sync').length).toBeGreaterThan(0));
   });
 });
