@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.3.0] - 2026-05-27
+
+### Changed
+- **Record page: one recorder, two capture options.** Removed the redundant "Record from this browser" card (`DesktopBrowserRecorder`) — it duplicated the always-on recorder but uploaded straight to the server to transcribe, bypassing the browser-first / privacy path and the free-tier gate (an un-gated upload hole, now closed). `AlwaysOnControl` is the single recording surface. Collapsed the meeting-type selector from three (In-person / Online / Mixed) to two: **Just me** (microphone only) and **Me + system audio** (mic + screen / window / browser-tab). Dropped the now-redundant sub-toggles; the raw Mic / Tab / Mic+Tab modes remain in the Advanced expander for power users.
+
 ## [3.2.0] - 2026-05-27
 
 ### Added

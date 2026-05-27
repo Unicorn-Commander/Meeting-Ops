@@ -27,7 +27,6 @@ import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import MobileLiveRecording from '../components/MobileLiveRecording';
-import DesktopBrowserRecorder from '../components/DesktopBrowserRecorder';
 import AlwaysOnControl from '../components/AlwaysOnControl';
 import ConfirmModal from '../components/ConfirmModal';
 import PipelineStatusPicker from '../components/PipelineStatusPicker';
@@ -1050,21 +1049,18 @@ export default function LiveRecording() {
         <div className="lg:col-span-2 space-y-4 md:space-y-6">
           <AlwaysOnControl />
 
-          {/* Browser-side mic recording — the always-on / satellite controls
-              below this stay as a power-user option, but Record from this
-              browser is the obvious-default path for someone sitting at the
-              laptop. Pushes the final blob through the same chunked-upload
-              pipeline as the mobile shell. */}
-          <DesktopBrowserRecorder />
+          {/* The old "Record from this browser" (DesktopBrowserRecorder) card
+              was removed: it duplicated AlwaysOnControl but uploaded straight
+              to the server to transcribe, bypassing the browser-first /
+              privacy path and the free-tier gate. AlwaysOnControl is the one
+              recording surface now. */}
 
           {/* Legacy server-side Recording Control. This card drives the
               backend ffmpeg/arecord pipeline which requires a microphone
               physically attached to the server. bigboy has no audio
-              hardware, so it always errors. The browser-side cards above
-              (AlwaysOnControl + DesktopBrowserRecorder) replace it for
-              cloud deploys. Set SHOW_LEGACY_SERVER_RECORDING=true if we
-              ever bring back an appliance/satellite build that has a
-              local mic. */}
+              hardware, so it always errors. AlwaysOnControl replaces it for
+              cloud deploys. Set SHOW_LEGACY_SERVER_RECORDING=true if we ever
+              bring back an appliance/satellite build that has a local mic. */}
           {false && (
           <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-8">
             <div className="flex flex-col items-center">

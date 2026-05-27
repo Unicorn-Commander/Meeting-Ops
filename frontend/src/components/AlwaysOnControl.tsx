@@ -5,7 +5,6 @@ import {
   ChevronUp,
   Clock,
   Copy,
-  Headphones,
   Lightbulb,
   Mic,
   PanelTopOpen,
@@ -144,10 +143,9 @@ interface AudioSourceHintBannerProps {
 
 /**
  * First-time onboarding hint. Sits above the AudioSourcePicker and
- * nudges the user toward the use-case framing — pick "Online meeting"
- * to capture other voices from Zoom/Meet/Teams, "In-person, just me"
- * for solo notes, "Mixed" for hybrid. Dismissible; once dismissed,
- * never shown again.
+ * nudges the user toward the two options — "Just me" for mic-only solo
+ * notes, "Me + system audio" to also capture a screen/window/tab (e.g. a
+ * Zoom/Meet/Teams call). Dismissible; once dismissed, never shown again.
  */
 function AudioSourceHintBanner({ onDismiss }: AudioSourceHintBannerProps) {
   return (
@@ -158,14 +156,13 @@ function AudioSourceHintBanner({ onDismiss }: AudioSourceHintBannerProps) {
     >
       <Lightbulb className="mt-0.5 h-5 w-5 flex-shrink-0 text-sky-300" aria-hidden="true" />
       <div className="min-w-0 flex-1">
-        <div className="font-semibold text-white">Pick the kind of meeting you're in</div>
+        <div className="font-semibold text-white">Pick what to capture</div>
         <p className="mt-1 text-[13px] leading-5 text-zinc-300">
-          <span className="font-medium text-sky-200">Online meeting</span> captures the
-          meeting tab plus your mic so remote voices land in the transcript.{' '}
-          <span className="font-medium text-zinc-200">In-person, just me</span> is your
-          mic only.{' '}
-          <span className="font-medium text-sky-200">Mixed</span> is both, for hybrid
-          calls.
+          <span className="font-medium text-zinc-200">Just me</span> records your
+          microphone only.{' '}
+          <span className="font-medium text-sky-200">Me + system audio</span> also
+          captures a screen, window, or browser tab, so remote voices on a
+          Zoom / Meet / Teams call land in the transcript too.
         </p>
         <button
           type="button"
@@ -224,23 +221,12 @@ interface AudioSourcePickerProps {
 type UseCase = 'inperson' | 'online' | 'mixed';
 
 function modeToUseCase(mode: AudioSourceMode): UseCase {
-  // We treat 'tab' as a sub-state of 'online' (online + silent observer).
-  // 'mic' is in-person, 'mic+tab' could be either online-active or mixed.
-  // The last-explicit-pick is remembered via localStorage so we don't
-  // bounce the user between two cards every time they reload.
+  // Two cards: 'mic' → "Just me" (inperson); anything with tab/system audio
+  // ('tab' or 'mic+tab') → "Me + system audio" (mixed). The legacy 'online'
+  // use case no longer has a card, so we never return it — that keeps a card
+  // highlighted even for users with an old 'online' hint stored.
   if (mode === 'mic') return 'inperson';
-  if (mode === 'tab') return 'online';
-  // mic+tab — fall back to the user's last-explicit choice if we have
-  // one; otherwise default to 'online' (the more common case per Aaron).
-  if (typeof window !== 'undefined') {
-    try {
-      const stored = window.localStorage.getItem(USE_CASE_HINT_KEY);
-      if (stored === 'mixed' || stored === 'online') return stored;
-    } catch {
-      /* ignore */
-    }
-  }
-  return 'online';
+  return 'mixed';
 }
 
 const USE_CASE_HINT_KEY = 'meetingops.alwayson.useCaseHint';
@@ -259,24 +245,12 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
   const [showAdvanced, setShowAdvanced] = useState(false);
   const useCase = modeToUseCase(value);
 
-  // Sub-toggle for "Online meeting" — when true (default), include mic
-  // on top of tab audio. When false, capture tab only (silent observer).
-  const onlineIncludesMic = value === 'mic+tab';
-  // Sub-toggle for "In-person, just me" — when true, ALSO include tab
-  // (e.g. you're in-person AND on a call). When false (default), mic only.
-  const inpersonIncludesTab = value === 'mic+tab' && useCase === 'mixed';
-
+  // Two options only (Aaron): "Just me" (mic) and "Me + system audio"
+  // (mic + screen/window/tab). The raw tab-only mode stays reachable in the
+  // Advanced expander for power users.
   const pickInperson = () => {
     rememberUseCase('inperson');
     onChange('mic');
-  };
-  const pickOnline = () => {
-    rememberUseCase('online');
-    // Default Online = mic+tab (per Aaron: "capturing audio from people
-    // in the meeting" is non-negotiable, but mic-on-top is the right
-    // default for an active participant). Sub-toggle below can flip
-    // to tab-only.
-    onChange('mic+tab');
   };
   const pickMixed = () => {
     rememberUseCase('mixed');
@@ -295,27 +269,18 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
     {
       id: 'inperson',
       icon: Mic,
-      title: 'In-person, just me',
-      sub: 'Solo notes / room mic',
-      blurb: "Just my microphone. Best when no one else is on a call.",
+      title: 'Just me',
+      sub: 'Microphone only',
+      blurb: 'Just my microphone. Best for solo notes or in-person, when no one else is on a call.',
       onClick: pickInperson,
       disabled,
     },
     {
-      id: 'online',
-      icon: Headphones,
-      title: 'Online meeting',
-      sub: 'Zoom / Meet / Teams',
-      blurb: 'Captures the meeting tab audio. Includes my mic by default.',
-      onClick: pickOnline,
-      disabled: disabled || !tabSupported,
-    },
-    {
       id: 'mixed',
       icon: Users,
-      title: 'Mixed',
-      sub: 'Me + meeting audio',
-      blurb: 'Both my mic AND a shared tab. For in-person + remote calls.',
+      title: 'Me + system audio',
+      sub: 'Mic + screen / window / tab',
+      blurb: 'My mic plus system, window, or browser-tab audio (e.g. a Zoom / Meet / Teams call). You pick the source after clicking Start.',
       onClick: pickMixed,
       disabled: disabled || !tabSupported,
     },
@@ -335,7 +300,7 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
       </div>
 
       <div
-        className="grid grid-cols-1 gap-2 sm:grid-cols-3"
+        className="grid grid-cols-1 gap-2 sm:grid-cols-2"
         role="radiogroup"
         aria-label="Audio source use case"
       >
@@ -371,46 +336,6 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
           );
         })}
       </div>
-
-      {/* Sub-toggles. Online-meeting card lets the user drop their mic
-          for silent observation. In-person card lets the user add tab
-          audio when they're also dialed into a call. Both flip the
-          underlying mode without leaving the chosen use case. */}
-      {useCase === 'online' && !disabled && (
-        <label className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
-          <input
-            type="checkbox"
-            checked={onlineIncludesMic}
-            onChange={(e) => onChange(e.target.checked ? 'mic+tab' : 'tab')}
-            className="h-3.5 w-3.5 accent-fuchsia-500"
-          />
-          <span>
-            Also include my mic{' '}
-            <span className="text-zinc-500">(recommended for active participants)</span>
-          </span>
-        </label>
-      )}
-      {useCase === 'inperson' && !disabled && tabSupported && (
-        <label className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
-          <input
-            type="checkbox"
-            checked={inpersonIncludesTab}
-            onChange={(e) => {
-              if (e.target.checked) {
-                rememberUseCase('mixed');
-                onChange('mic+tab');
-              } else {
-                onChange('mic');
-              }
-            }}
-            className="h-3.5 w-3.5 accent-fuchsia-500"
-          />
-          <span>
-            Include meeting tab audio{' '}
-            <span className="text-zinc-500">(if I'm also on a call)</span>
-          </span>
-        </label>
-      )}
 
       {!tabSupported && (
         <p className="mt-2 text-[11px] text-zinc-500">
@@ -507,13 +432,13 @@ function InSessionSourceMenu({ value, onSwap, swapping }: InSessionSourceMenuPro
   }, [open]);
 
   const friendlyLabel: Record<UseCase, string> = {
-    inperson: 'In-person',
-    online: 'Online meeting',
-    mixed: 'Mixed',
+    inperson: 'Just me',
+    online: 'Me + system audio',
+    mixed: 'Me + system audio',
   };
   const friendlyIcon: Record<UseCase, React.ElementType> = {
     inperson: Mic,
-    online: Headphones,
+    online: Users,
     mixed: Users,
   };
   const Icon = friendlyIcon[useCase];
