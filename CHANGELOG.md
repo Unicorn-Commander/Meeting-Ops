@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.5.0] - 2026-05-27
+
+### Added
+- **Consumer signup / login / pricing frontend.** Public `/signup` (email + username + password -> `POST /api/auth/register`, then a "check your email to verify" state), `/login` (email-or-username + password via `AuthContext.login`, the existing enterprise SSO button kept, and verification banners for `?verify=success|invalid` with a resend flow), and `/pricing` (Free / Pro / Enterprise comparison; Pro at a placeholder $16/mo, Enterprise contact-sales). The free-tier upgrade prompt now links to `/pricing`. Routes are public (outside ProtectedRoute); the rest of the app stays auth-gated. Backend was already built (v3.2.0); this is frontend-only and reuses AuthContext for token storage.
+
+### Notes
+- Inert for current enterprise users (authed via SSO; /login keeps the SSO button). **Anonymous access to /signup + /login still requires the oauth2-proxy skip-route change + `ALLOW_REGISTRATION=true`** (see `docs/consumer-signup.md`) — that ops activation is the remaining gate before strangers can sign up. /pricing is reachable now for authed users.
+
 ## [3.4.1] - 2026-05-27
 
 ### Fixed
