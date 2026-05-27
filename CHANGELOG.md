@@ -1,6 +1,15 @@
 ## [Unreleased]
 
-## [3.9.0] - 2026-05-27
+## [3.9.1] - 2026-05-27
+
+### Added
+- **Help page: a practical "Using Meeting-Ops" guide** above the existing "How it works" architecture tour. Covers recording (Just me / Me + system audio), Sessions & Folders (tags-as-folders, multi-folder membership), Conference rooms & the multi-mic picker, reading a meeting (transcript / summary / Ask-about-this-meeting chat / export), where recordings are stored (self-hosted object storage, delete-means-delete, free-tier stays in-browser), and a Free/Pro/Enterprise plans-at-a-glance.
+- `docs/audio-storage-garage.md`: operator + developer guide for the Garage audio storage (modules, columns, read/write/delete flow, backfill + eviction scripts, bucket provisioning, the HEAD-400 gotcha). Linked from the docs index.
+
+### Changed
+- README refreshed: latest tag, implementation status (through v3.9.0), tier model (free-tier live + signup status), and a new "Audio storage & data durability" section.
+
+
 
 ### Changed
 - **Garage cutover — Garage is now the authoritative home for canonical meeting audio.** Local disk becomes a transient working cache that can be evicted once a durable Garage copy is verified. To make this safe, the last audio read path that wasn't Garage-aware — `identify_speakers`' embedding re-extraction fallback (`speaker_service.py`) — now resolves via `session_media.resolve_local_path` (local-first, else pull from Garage). The common inline-embeddings path is untouched (it never reads the wav).

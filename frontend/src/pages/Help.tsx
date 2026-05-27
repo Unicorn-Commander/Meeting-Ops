@@ -13,6 +13,15 @@ import {
   Smartphone,
   Users,
   Radio,
+  Circle,
+  FolderTree,
+  FileText,
+  MessageSquare,
+  Download,
+  Search,
+  Building2,
+  Database,
+  Tag,
 } from 'lucide-react';
 
 /**
@@ -35,10 +44,215 @@ export default function Help() {
             How Meeting-Ops works
           </h1>
           <p className="mt-3 text-zinc-400">
-            A short, honest tour of where your audio goes, what we do with it,
-            and why we built it this way.
+            How to use it, where your audio goes, and why we built it this way.
+            Jump to <span className="text-zinc-300">Using Meeting-Ops</span> for
+            the practical guide, or <span className="text-zinc-300">How it
+            works</span> for what's happening under the hood.
           </p>
         </header>
+
+        {/* ----------------------------- Using ----------------------------- */}
+        <div className="space-y-10">
+          <h2 className="text-xl font-semibold text-fuchsia-300 border-b border-zinc-800 pb-2">
+            Using Meeting-Ops
+          </h2>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <Mic className="h-5 w-5 text-fuchsia-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Recording a meeting
+              </h3>
+            </div>
+            <p className="text-zinc-300">
+              Go to <span className="text-zinc-100">Record</span> and pick how
+              you want to capture audio, then hit record. The live transcript
+              and a rolling summary build as you talk; tap Stop when you're
+              done and the finished transcript + summary land in your sessions.
+            </p>
+            <ul className="space-y-2 text-zinc-300">
+              <li className="flex items-start gap-3">
+                <Circle className="mt-1 h-3 w-3 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Just me</span> — captures your
+                  microphone only. Good for in-person meetings and dictation.
+                </span>
+              </li>
+              <li className="flex items-start gap-3">
+                <Circle className="mt-1 h-3 w-3 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Me + system audio</span> —
+                  also captures what's playing on your computer (the other
+                  people on a video call, a webinar). Your browser will ask you
+                  to share a tab or screen <em>with audio</em> — keep that box
+                  checked.
+                </span>
+              </li>
+            </ul>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <FolderTree className="h-5 w-5 text-fuchsia-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Finding meetings: Sessions &amp; Folders
+              </h3>
+            </div>
+            <p className="text-zinc-300">
+              The <span className="text-zinc-100">Sessions</span> page lists
+              every meeting with full-text search and filters. Switch to the{' '}
+              <span className="text-zinc-100">Folders</span> view to group them.
+            </p>
+            <ul className="space-y-2 text-zinc-300">
+              <li className="flex items-start gap-3">
+                <Tag className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  Folders <span className="text-zinc-100">are tags</span> — so a
+                  single meeting can live in several folders at once (e.g. a
+                  client folder <em>and</em> a project folder). The rail shows
+                  each folder with a session count, plus "All sessions" and
+                  "Ungrouped".
+                </span>
+              </li>
+              <li className="flex items-start gap-3">
+                <Search className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  Make a folder with <span className="text-zinc-100">New
+                  folder</span>, then select one or more sessions and{' '}
+                  <span className="text-zinc-100">Add to folder</span>. Remove
+                  them the same way. The flat list, search, and filters are
+                  always still there.
+                </span>
+              </li>
+            </ul>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <Building2 className="h-5 w-5 text-fuchsia-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Conference rooms &amp; microphones
+              </h3>
+            </div>
+            <p className="text-zinc-300">
+              A <span className="text-zinc-100">Conference Room</span> is a
+              fixed recording space backed by one or more server-attached mics.
+              In a room's <span className="text-zinc-100">Settings</span> tab you
+              can add <span className="text-zinc-100">one or several mics</span>{' '}
+              in a single step, give each a friendly label ("Podium",
+              "Audience", "Speaker phone"), and run a 3-second{' '}
+              <span className="text-zinc-100">Test mic</span> probe to check the
+              levels before you add it. Each source shows a live status badge
+              (idle / recording / error / disabled) and a remove button.
+            </p>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <FileText className="h-5 w-5 text-fuchsia-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Reading a meeting
+              </h3>
+            </div>
+            <p className="text-zinc-300">
+              Open any session to get the playback + everything the meeting
+              produced:
+            </p>
+            <ul className="space-y-2 text-zinc-300">
+              <li className="flex items-start gap-3">
+                <FileText className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Transcript</span> with speaker
+                  labels, searchable and filterable by speaker, synced to the
+                  audio player.
+                </span>
+              </li>
+              <li className="flex items-start gap-3">
+                <Brain className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Summary, key points, and
+                  action items</span> generated from the full transcript.
+                </span>
+              </li>
+              <li className="flex items-start gap-3">
+                <MessageSquare className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Ask about this meeting</span> —
+                  a chat panel that answers questions using the meeting's
+                  transcript as context ("what did we decide about pricing?").
+                </span>
+              </li>
+              <li className="flex items-start gap-3">
+                <Download className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+                <span>
+                  <span className="text-zinc-100">Export</span> the transcript
+                  or summary as PDF, DOCX, TXT, or SRT, and download the audio.
+                </span>
+              </li>
+            </ul>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <Database className="h-5 w-5 text-emerald-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Where your recordings are stored
+              </h3>
+            </div>
+            <p className="text-zinc-300">
+              Finished recordings are kept in <span className="text-zinc-100">our
+              own object storage, on our own hardware</span> — not a third-party
+              cloud. Nothing is shipped to AWS, Google, or any external
+              transcription service. When you <span className="text-zinc-100">delete
+              a session</span>, its audio is purged from storage too, so delete
+              means delete.
+            </p>
+            <p className="text-zinc-300">
+              On the free tier, your audio never leaves your browser at all (see
+              Privacy mode below). On paid tiers, the finished audio is stored
+              durably so it survives and stays available across devices — but it
+              still lives only inside our infrastructure.
+            </p>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <Users className="h-5 w-5 text-fuchsia-400" />
+              <h3 className="text-lg font-semibold text-zinc-100">
+                Plans at a glance
+              </h3>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="text-sm font-medium text-zinc-100">Free</div>
+                <div className="mt-1 text-sm text-zinc-400">
+                  Fully on-device in your browser. Live transcript + summary,
+                  recordings stay local. Nothing uploaded.
+                </div>
+              </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="text-sm font-medium text-zinc-100">Pro</div>
+                <div className="mt-1 text-sm text-zinc-400">
+                  Adds the server quality pass (better transcript + diarization
+                  + summary), the live server transcript, durable cross-device
+                  storage, and bulk import.
+                </div>
+              </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="text-sm font-medium text-zinc-100">Enterprise</div>
+                <div className="mt-1 text-sm text-zinc-400">
+                  On-prem / private deployment, Privacy mode on by default, and
+                  HIPAA-suitable handling for regulated environments.
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {/* -------------------------- How it works ------------------------- */}
+        <h2 className="text-xl font-semibold text-fuchsia-300 border-b border-zinc-800 pb-2">
+          How it works
+        </h2>
 
         <section className="space-y-4">
           <div className="flex items-center gap-3">

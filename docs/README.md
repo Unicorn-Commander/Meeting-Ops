@@ -2,7 +2,7 @@
 
 Design and architecture documents for UC-Meeting-Ops.
 
-Last updated: 2026-05-22.
+Last updated: 2026-05-27.
 
 This directory contains design notes, architecture decisions, operational
 references, and roadmap documents. Status labels describe the document's
@@ -14,6 +14,7 @@ relationship to the product as of the last updated date.
 
 ## Storage, protocols, and capture devices
 
+- [`audio-storage-garage.md`](audio-storage-garage.md). Status: live (cutover complete, v3.9.0). Canonical meeting audio in the Garage `meeting-ops-audio` bucket: the `media_storage` / `session_media` modules, the `audio_storage_backend` / `audio_object_key` columns (alembic 031), read/write/delete flow, the backfill + eviction scripts, bucket provisioning, and the Garage HEAD-400 gotcha.
 - [`POSTGRESQL_QDRANT_SETUP.md`](POSTGRESQL_QDRANT_SETUP.md) (333 lines). Status: live guide. PostgreSQL and Qdrant setup, SQLite migration, semantic search endpoints, and vector-search operating notes.
 - [`WYOMING_PROTOCOL.md`](WYOMING_PROTOCOL.md) (336 lines). Status: designed reference. Wyoming Protocol integration for Home Assistant satellite microphones, wake words, gesture controls, and remote activation devices.
 - [`always-on-recording-design.md`](always-on-recording-design.md) (183 lines). Status: designed, partly superseded by browser always-on work. Continuous recording and silence-gap segmentation design for server-side always-on capture.

@@ -24,7 +24,7 @@
 
 ## Release Notes
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full per-version release history. Latest tag: **v0.7.4** (2026-05-21).
+See [CHANGELOG.md](./CHANGELOG.md) for the full per-version release history. Latest tag: **v3.9.0** (2026-05-27) — canonical meeting audio now lives in Garage object storage (durable, self-hosted), on top of the per-room multi-mic picker, tags-as-folders sessions grouping, free-tier enforcement + consumer signup, and the Phase B server-live streaming line.
 
 ## What It Does
 
@@ -81,11 +81,17 @@ This is a real moat. Replicating it requires (a) shipping browser inference at a
 
 Because the browser stack is self-contained, turning the server step off is a feature flag. Audio bytes never leave the device. Privacy mode is a per-session toggle (orthogonal to pricing tier; anyone can enable it). Enterprise + HIPAA deployments default it on.
 
-### Proposed tier model (pricing decision pending)
+### Tier model
 
-- **Free**: browser live + browser final (no diarization, no Qwen 3.6 summary)
-- **Pro**: + server reprocess on completion (Parakeet 1.1B + pyannote + Qwen 3.6)
-- **Enterprise**: + speaker library + retention + BYOK Brigade + HIPAA + dedicated/on-prem
+- **Free**: browser live + browser final, on-device only — audio never leaves the browser. Enforced server-side (server-processing endpoints 403 free users). Live since v3.0.0/v3.1.0.
+- **Pro**: + server reprocess on completion (Parakeet 1.1B + pyannote + Qwen 3.6), live server transcript, durable cross-device storage, bulk import.
+- **Enterprise**: + speaker library + retention + BYOK Brigade + HIPAA + dedicated/on-prem.
+
+Consumer self-serve signup (email/password + verification) is built (v3.2.0 backend + v3.5.0 frontend) and inert until activated; SSO users are unaffected. Pricing/Stripe checkout is the remaining gate.
+
+### Audio storage & data durability (v3.7.0+)
+
+Canonical meeting audio is stored in **Garage** (S3-compatible object storage) on our own hardware — not a third-party cloud — mirroring how session attachments already work. Local disk is a transient working cache; a session row records the durable location (`audio_storage_backend` / `audio_object_key`). Reads resolve local-first and fall back to Garage; deleting a session purges its Garage objects too ("delete my data" actually deletes). As of the **v3.9.0 cutover**, Garage is authoritative and local copies of completed sessions are size-verified then evicted to reclaim disk. Free-tier audio is exempt — it stays in the browser. See [`docs/audio-storage-garage.md`](./docs/audio-storage-garage.md).
 
 ### Deployment topology
 
@@ -93,12 +99,17 @@ Because the browser stack is self-contained, turning the server step off is a fe
 - `unicorncommander.ai` — production target. Stable releases only. Free + Pro launch here.
 - Enterprise — dedicated server or on-prem appliance per customer. HIPAA deployments (Legacy1, etc.) get their own instance.
 
-### Implementation status (2026-05-21)
+### Implementation status (2026-05-27)
 
 - Browser STT + LLM: live since v0.6.0
-- Server reprocess pipeline: live since v0.7.4 + 1 (`80b2da1`)
+- Server reprocess pipeline: live
 - Privacy mode: live since v0.6.0
-- Tier gating + `unicorncommander.ai` production cutover: pending
+- Phase B server-live streaming (Sortformer diarization + Parakeet realtime-EOU): live (v2.x)
+- Tier gating / free-tier enforcement: live (v3.0.0–v3.1.0)
+- Consumer signup (backend + frontend): built, inert until activation (v3.2.0 / v3.5.0)
+- Sessions folders + per-room multi-mic picker: live (v3.8.0)
+- Garage audio object storage + cutover: live (v3.7.0–v3.9.0)
+- `unicorncommander.ai` production cutover + Stripe checkout: pending
 - Enterprise on-prem packaging: depends on `docs/appliance-extraction-design.md`
 
 **Full design + strategy doc**: [`docs/compute-economics.md`](./docs/compute-economics.md). Read this before adding any new server-side per-minute service; the architecture is the moat and we don't want to give it back by reaching for an external API when we could push the work to the browser or fold it into the completion pass.
