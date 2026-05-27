@@ -1583,6 +1583,15 @@ async def _run_session_reprocess(session_pk: int) -> None:
             )
         db.commit()
 
+        # Push the canonical reassembled audio to Garage (durable copy).
+        # Best-effort + additive: the local session.wav stays the working
+        # copy; a Garage hiccup just leaves the durability columns NULL.
+        try:
+            from services.session_media import persist_session_audio
+            persist_session_audio(db, session, local_path=str(target_wav))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Garage persist failed for session=%s: %s", session.id, exc)
+
         # Stage 2 — Parakeet 1.1B fp16 transcription. Reuses the same
         # helper the upload pipeline uses; the org's STT provider defaults
         # to Parakeet 1.1B at meet-parakeet-svc:8881.

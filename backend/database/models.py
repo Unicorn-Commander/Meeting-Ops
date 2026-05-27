@@ -125,6 +125,17 @@ class RecordingSession(Base):
     brigade_synced_at = Column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Durable object-storage (Garage) location for this session's canonical
+    # audio (alembic 031). Mirrors the SessionAttachment storage pattern:
+    #   audio_storage_backend ∈ 'garage' | 'local' | NULL
+    #   audio_object_key      = Garage key '{org}/{session_id}/audio/{name}'
+    # The legacy `audio_file` column stays the LOCAL working-copy path
+    # (source of truth during cutover); these two record the durable copy.
+    # NULL means "not yet pushed to object storage" — read paths fall back
+    # to the local `audio_file`, so existing rows keep working untouched.
+    # Free-tier audio never populates these (it stays in the browser).
+    audio_storage_backend = Column(String(20), nullable=True)
+    audio_object_key = Column(String(500), nullable=True)
 
     def to_dict(self):
         return {

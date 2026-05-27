@@ -17,9 +17,10 @@ Extends the existing UploadPipelineQueue pattern (api/uploads.py) with:
       4. Create a RecordingSession row with parsed title / meeting_date /
          meeting_time, source_type='bulk_import', processing_metadata
          carrying the bulk_import_job_id back-pointer + audio_sha256.
-      5. Push the audio bytes to Garage at meeting-ops-audio/{org_id}/
-         {job_id}/{file_id}.{ext} (falls back to local disk under
-         RECORDINGS_DIR/bulk-import/ when Garage isn't configured).
+      5. Push the audio bytes to Garage via services.session_media at the
+         canonical key meeting-ops-audio/{org_id}/{session_id}/audio/{name}
+         (recorded on the session's audio_object_key column; falls back to
+         local disk under RECORDINGS_DIR when Garage isn't configured).
       6. Park the audio on local disk as well (the reprocess pipeline
          reads from disk, not Garage — Garage is the durable backup).
       7. Internally invoke _run_session_reprocess(session.id) to kick the
@@ -180,66 +181,10 @@ def _safe_ext(filename: str) -> str:
     return "bin"
 
 
-async def _upload_to_garage(
-    *,
-    storage_key: str,
-    local_path: Path,
-    content_type: Optional[str] = None,
-) -> bool:
-    """Best-effort push to Garage. Returns True on success, False when
-    Garage isn't configured or the upload failed (caller logs + carries on,
-    the local disk copy is the source of truth for reprocess).
-
-    Pulled from attachment_storage.py's pattern verbatim — same boto3 +
-    Config + path-style addressing. We don't reuse that module directly
-    because the bucket is different (meeting-ops-audio vs meeting-ops-
-    attachments) and the key convention is different ({org_id}/{job_id}/
-    {file_id} rather than {org_id}/{session_id}/{uuid}/{filename}).
-    """
-    endpoint = os.getenv("GARAGE_ENDPOINT_URL", "").strip()
-    access = os.getenv("GARAGE_ACCESS_KEY", "").strip()
-    secret = os.getenv("GARAGE_SECRET_KEY", "").strip()
-    region = os.getenv("GARAGE_REGION", "garage").strip() or "garage"
-    if not (endpoint and access and secret):
-        return False
-
-    def _do_upload() -> None:
-        import boto3
-        from botocore.config import Config
-
-        client = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=access,
-            aws_secret_access_key=secret,
-            region_name=region,
-            config=Config(
-                signature_version="s3v4",
-                s3={"addressing_style": "path"},
-                connect_timeout=10,
-                read_timeout=300,
-                retries={"max_attempts": 3},
-            ),
-        )
-        extra = {"ContentType": content_type} if content_type else None
-        with local_path.open("rb") as f:
-            client.upload_fileobj(
-                f,
-                GARAGE_AUDIO_BUCKET,
-                storage_key,
-                ExtraArgs=extra,
-            )
-
-    try:
-        await asyncio.to_thread(_do_upload)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "bulk-import: garage upload failed key=%s: %s",
-            storage_key,
-            exc,
-        )
-        return False
+# Garage upload is now handled uniformly by services.session_media
+# (persist_session_audio) at the call site — see the "Garage upload" block in
+# _process_file. The bespoke _upload_to_garage helper that used a job-scoped
+# key was removed in favor of that single canonical path.
 
 
 # ---------------------------------------------------------------------------
@@ -602,29 +547,35 @@ class BulkImportPipelineQueue:
                 db.close()
 
         # ---- Garage upload (best-effort) ----
-        garage_key = f"{org_id}/{job_id}/{file_id}.{_safe_ext(original_filename)}"
-        garage_ok = await _upload_to_garage(
-            storage_key=garage_key,
-            local_path=local_path,
-            content_type=None,
-        )
-        if garage_ok:
-            db = SessionLocal()
-            try:
-                session = (
-                    db.query(RecordingSession)
-                    .filter(RecordingSession.id == session_pk)
-                    .first()
+        # Unified through services.session_media so the durable copy lands at
+        # the canonical key ({org}/{session_id}/audio/{name}) and is recorded
+        # on the session's audio_storage_backend / audio_object_key columns —
+        # the same mechanism the live-recording + upload paths use, so the
+        # download fallback and delete-cascade find bulk-imported audio too.
+        # (Runs in a thread: persist does blocking boto3 I/O.)
+        db = SessionLocal()
+        try:
+            session = (
+                db.query(RecordingSession)
+                .filter(RecordingSession.id == session_pk)
+                .first()
+            )
+            if session:
+                from services.session_media import persist_session_audio
+
+                backend = await asyncio.to_thread(
+                    persist_session_audio, db, session, local_path=str(local_path)
                 )
-                if session:
+                if backend == "garage":
+                    # Keep the legacy metadata keys for visibility/debug.
                     metadata = dict(session.processing_metadata or {})
                     metadata["garage_bucket"] = GARAGE_AUDIO_BUCKET
-                    metadata["garage_key"] = garage_key
+                    metadata["garage_key"] = session.audio_object_key
                     session.processing_metadata = metadata
                     flag_modified(session, "processing_metadata")
                     db.commit()
-            finally:
-                db.close()
+        finally:
+            db.close()
 
         # ---- Reprocess kick (Parakeet + pyannote + Qwen 3.6) ----
         # Re-import locally to avoid module-cycle: api.recording imports

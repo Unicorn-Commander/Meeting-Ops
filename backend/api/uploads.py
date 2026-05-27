@@ -949,6 +949,7 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
     job.session_id = session.id
     db.commit()
     db.refresh(session)
+    _persist_upload_audio_to_garage(db, session, audio_path)
     return session
 
 
@@ -988,7 +989,18 @@ async def _attach_to_existing_session(db: Session, job: UploadJob, audio_path: P
     session.processing_metadata = metadata
     db.commit()
     db.refresh(session)
+    _persist_upload_audio_to_garage(db, session, audio_path)
     return session
+
+
+def _persist_upload_audio_to_garage(db: Session, session: RecordingSession, audio_path: Path) -> None:
+    """Best-effort durable copy of the uploaded audio to Garage. Local file
+    stays the working copy; never blocks the upload pipeline."""
+    try:
+        from services.session_media import persist_session_audio
+        persist_session_audio(db, session, local_path=str(audio_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Garage persist failed for upload session=%s: %s", session.id, exc)
 
 
 async def _resolve_session_for_job(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:

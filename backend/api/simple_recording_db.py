@@ -1617,7 +1617,17 @@ async def delete_session(
             os.remove(session.audio_file)
         except OSError:
             pass
-    
+
+    # Purge any durable copies in Garage too (the whole session prefix:
+    # audio + tts + import). Makes "delete my data" actually delete it.
+    try:
+        from services.session_media import purge_session_media
+        removed = purge_session_media(session)
+        if removed:
+            logger.info(f"Purged {removed} Garage object(s) for session {session_id}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Garage purge failed for session {session_id}: {exc}")
+
     # Delete transcriptions
     db.query(Transcription).filter(
         Transcription.session_id == session.id
@@ -1645,35 +1655,37 @@ async def download_audio(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    if not session.audio_file:
-        logger.warning(f"Session {session_id} has no audio file path")
-        return JSONResponse(
-            status_code=404,
-            content={"detail": "No audio file associated with this session"}
-        )
-    
-    if not os.path.exists(session.audio_file):
-        logger.warning(f"Audio file not found: {session.audio_file}")
-        # Check if file exists without full path (relative to canonical recordings dir)
-        from services.working_audio_service import audio_service as _as
-        recordings_dir = _as.RECORDINGS_DIR
-        filename_only = os.path.basename(session.audio_file)
-        alt_path = os.path.normpath(os.path.join(recordings_dir, filename_only))
-
-        if os.path.exists(alt_path):
-            logger.info(f"Found audio file at alternate path: {alt_path}")
-            session.audio_file = alt_path
-            db.commit()
-        else:
+    # Resolve a local path: prefer the local working copy; if it's gone
+    # (e.g. evicted), pull the durable copy back from Garage into the cache.
+    # Backend proxies the bytes via FileResponse — Garage is never exposed
+    # to the browser, and range requests (audio scrubbing) keep working.
+    from services.session_media import resolve_local_path
+    resolved = resolve_local_path(session)
+    if resolved is None:
+        if not session.audio_file:
+            logger.warning(f"Session {session_id} has no audio file path")
             return JSONResponse(
                 status_code=404,
-                content={"detail": f"Audio file not found at {session.audio_file}"}
+                content={"detail": "No audio file associated with this session"}
             )
-    
+        logger.warning(f"Audio file not found locally or in Garage: {session.audio_file}")
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Audio file not found for session {session_id}"}
+        )
+    audio_path_str = str(resolved)
+    # If the local working-copy path drifted, repoint it (cheap, idempotent).
+    if session.audio_file != audio_path_str and resolved.exists():
+        session.audio_file = audio_path_str
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
     filename = f"{(session.name or session.title or 'recording').replace(' ', '_')}_audio.wav"
     # Set headers for both streaming and download
     return FileResponse(
-        session.audio_file, 
+        audio_path_str,
         filename=filename, 
         media_type="audio/wav",
         headers={

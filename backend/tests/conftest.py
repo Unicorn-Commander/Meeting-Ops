@@ -12,6 +12,11 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 _rec_dir = tempfile.mkdtemp(prefix="meeting_ops_recordings_")
 os.environ["RECORDINGS_DIR"] = _rec_dir
 
+# Never touch real Garage object storage during tests — force media_storage
+# onto its local backend so persist/purge stay in the temp recordings dir and
+# tests have no network dependency. (Production leaves this unset.)
+os.environ["MEDIA_STORAGE_DISABLED"] = "1"
+
 # Ensure backend root is on sys.path
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend_dir not in sys.path:
