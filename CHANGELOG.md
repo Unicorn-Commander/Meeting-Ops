@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.4.1] - 2026-05-27
+
+### Fixed
+- Browser tab favicon now uses the branded `icon-192.png` instead of the default Vite logo (`index.html`). Interim until the real logo lands; the PWA/apple-touch icons were already branded.
+
 ## [3.4.0] - 2026-05-27
 
 ### Changed
