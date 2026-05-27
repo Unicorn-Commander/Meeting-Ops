@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+## [3.8.0] - 2026-05-27
+
+### Added
+- **Per-room microphone picker (multi-mic).** A Conference Room can now select one *or several* server-attached mics in one flow, each with a friendly per-source label (e.g. "Podium", "Audience"), with a per-device "Test mic" RMS/peak probe before adding. The room's current sources render in the Settings tab with a status badge (idle/recording/error/disabled) and a remove action. Frontend-only; reuses the existing `/api/rooms/{id}/sources` + `/api/system/audio-devices` endpoints. (merge of `rooms-mic-picker`)
+- **Sessions folders (tags-as-folders).** A new Folders grouping mode on the Sessions page: the rail lists each tag as a folder with a session count (plus "All sessions" / "Ungrouped"), clicking filters to that tag, and bulk-select lets you add/remove sessions to a folder. A session can live in multiple folders because folders are just tags (deliberate — a meeting can belong to several). Available on mobile too. The flat list + search + filters remain. (merge of `sessions-folders`)
+
+### Changed
+- `GET /api/simple/recording-sessions/tags` now also returns `tag_counts`, `total_sessions`, and `untagged_sessions` (additive — new fields with defaults) so the folder rail renders counts without extra queries.
+
 ## [3.7.0] - 2026-05-27
 
 ### Added
