@@ -120,6 +120,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+  const authApi = (path: string) => `${config.apiUrl}${path}`;
 
   // Initialize tokens from localStorage safely
   useEffect(() => {
@@ -140,7 +141,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const checkAuth = async () => {
       if (token) {
         try {
-          const response = await fetch('/api/auth/me', {
+          const response = await fetch(authApi('/api/auth/me'), {
             headers: {
               'Authorization': `Bearer ${token}`,
             },
@@ -186,7 +187,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     // a JWT in localStorage.
     const probeSso = async () => {
       try {
-        const r = await fetch('/api/auth/me', {
+        const r = await fetch(authApi('/api/auth/me'), {
           credentials: 'same-origin',
           headers: { 'Accept': 'application/json' },
         });
@@ -214,7 +215,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
 
     try {
-      const response = await fetch('/api/auth/refresh', {
+      const response = await fetch(authApi('/api/auth/refresh'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -262,7 +263,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       formData.append('username', username);
       formData.append('password', password);
 
-      const response = await fetch('/api/auth/login', {
+      const response = await fetch(authApi('/api/auth/login'), {
         method: 'POST',
         body: formData,
       });

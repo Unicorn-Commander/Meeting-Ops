@@ -24,6 +24,8 @@ import LocalSessions from './pages/LocalSessions';
 import Import from './pages/Import';
 import StreamingTest from './pages/StreamingTest';
 import AdminBulkImport from './pages/AdminBulkImport';
+import Signup from './pages/Signup';
+import Pricing from './pages/Pricing';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
@@ -239,12 +241,6 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   );
 }
 
-function SsoLoginRedirect({ isAuthenticated }: { isAuthenticated: boolean }) {
-  if (isAuthenticated) return <Navigate to="/dashboard" replace />;
-  redirectToLogin('/');
-  return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">Redirecting to sign-in…</div></div>;
-}
-
 // Protected Route Component
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -308,7 +304,9 @@ export function AppRouterSimplified() {
 
   return (
     <Routes>
-      <Route path="/login" element={<SsoLoginRedirect isAuthenticated={isAuthenticated} />} />
+      <Route path="/login" element={<Login />} />
+      <Route path="/signup" element={<Signup />} />
+      <Route path="/pricing" element={<Pricing />} />
 
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
 

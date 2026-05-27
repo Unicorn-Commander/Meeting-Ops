@@ -1,33 +1,46 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { vi } from 'vitest';
 import { Login } from '../components/Login';
 
+const loginMock = vi.fn();
+
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    login: loginMock,
+    isAuthenticated: false,
+    isLoading: false,
+  }),
+}));
+
 describe('Login', () => {
-  const mockReplace = vi.fn();
-
   beforeEach(() => {
-    mockReplace.mockClear();
-    vi.stubGlobal('location', {
-      ...window.location,
-      replace: mockReplace,
-    });
+    loginMock.mockReset();
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
+  it('shows the verified-email banner when verify=success is present', () => {
+    render(
+      <MemoryRouter initialEntries={['/login?verify=success']}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/email verified, please sign in/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in with sso \/ enterprise/i })).toBeInTheDocument();
   });
 
-  it('renders the SSO redirect state', () => {
-    render(<Login />);
+  it('shows the resend flow when verify=invalid is present', () => {
+    render(
+      <MemoryRouter initialEntries={['/login?verify=invalid']}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+        </Routes>
+      </MemoryRouter>,
+    );
 
-    expect(screen.getByText(/redirecting to unicorn commander sign-in/i)).toBeInTheDocument();
-  });
-
-  it('redirects to oauth2-proxy sign-in', async () => {
-    render(<Login />);
-
-    await waitFor(() => {
-      expect(mockReplace).toHaveBeenCalledWith('/oauth2/start?rd=%2F');
-    });
+    expect(screen.getByText(/verification link was invalid or expired/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /resend/i })).toBeInTheDocument();
   });
 });
