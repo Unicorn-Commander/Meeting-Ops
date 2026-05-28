@@ -14,6 +14,8 @@ import logging
 import os
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,6 @@ CHUNK_SIZE = 400  # words per chunk
 CHUNK_OVERLAP = 50  # overlapping words between chunks
 
 # Speaker label patterns for speaker-aware chunking
-import re
 SPEAKER_PATTERN = re.compile(
     r'^(?:'
     r'(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?):\s'  # "Speaker 1: ..." or "John: ..."
@@ -119,6 +120,77 @@ class SemanticSearchService:
                 )
             ]
         )
+
+    @staticmethod
+    def _normalize_query_text(text: str) -> str:
+        """Normalize free-form text for lightweight lexical matching."""
+        cleaned = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+        return " ".join(cleaned.split())
+
+    @classmethod
+    def _title_boost(cls, query: str, title: str) -> float:
+        """Give title/name matches an explicit boost when ranking search hits.
+
+        Qdrant already scores semantic similarity, but exact or near-exact
+        title matches should win deterministically for user-facing queries like
+        "Transcription System Review and GUI Refinement".
+        """
+        nq = cls._normalize_query_text(query)
+        nt = cls._normalize_query_text(title)
+        if not nq or not nt:
+            return 0.0
+        if nq == nt:
+            return 2.5
+        if nq in nt or nt in nq:
+            return 1.5
+
+        query_terms = set(nq.split())
+        title_terms = set(nt.split())
+        if not query_terms or not title_terms:
+            return 0.0
+
+        overlap = len(query_terms & title_terms) / len(query_terms)
+        if overlap >= 0.75:
+            return 1.0
+        if overlap >= 0.5:
+            return 0.5
+        return 0.0
+
+    @staticmethod
+    def _summary_text(summary_value: Optional[str | dict]) -> str:
+        """Coerce legacy / structured summary shapes into searchable text."""
+        if not summary_value:
+            return ""
+        if isinstance(summary_value, str):
+            return summary_value
+        if not isinstance(summary_value, dict):
+            return str(summary_value)
+
+        parts: list[str] = []
+        executive = summary_value.get("executive") or summary_value.get("executive_summary")
+        if executive:
+            parts.append(str(executive))
+        bullets = summary_value.get("bullets") or summary_value.get("key_points") or []
+        if isinstance(bullets, list) and bullets:
+            parts.extend(str(b) for b in bullets if b)
+        decisions = summary_value.get("decisions") or []
+        if isinstance(decisions, list) and decisions:
+            parts.extend(str(d) for d in decisions if d)
+        action_items = summary_value.get("action_items") or summary_value.get("actions") or []
+        if isinstance(action_items, list) and action_items:
+            parts.extend(str(a) for a in action_items if a)
+        if not parts:
+            return json.dumps(summary_value, default=str)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _search_text(title: str, body: str) -> str:
+        """Prefix searchable bodies with the title so title queries land."""
+        title = (title or "").strip()
+        body = (body or "").strip()
+        if title and body:
+            return f"{title}\n\n{body}"
+        return title or body
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate dense embeddings for a list of texts."""
@@ -393,7 +465,7 @@ class SemanticSearchService:
             for i, chunk_data in enumerate(chunks):
                 chunk_text = chunk_data["text"]
                 chunk_speakers = chunk_data.get("speakers", [])
-                texts_to_embed.append(chunk_text)
+                texts_to_embed.append(self._search_text(title, chunk_text))
                 payloads.append({
                     "session_id": session_id,
                     "title": title or "",
@@ -408,7 +480,7 @@ class SemanticSearchService:
 
         # Index summary as a single point
         if summary and len(summary.strip()) > 10:
-            texts_to_embed.append(summary)
+            texts_to_embed.append(self._search_text(title, summary))
             payloads.append({
                 "session_id": session_id,
                 "title": title or "",
@@ -423,7 +495,7 @@ class SemanticSearchService:
 
         # Index title
         if title and len(title.strip()) > 3:
-            texts_to_embed.append(title)
+            texts_to_embed.append(self._search_text(title, title))
             payloads.append({
                 "session_id": session_id,
                 "title": title,
@@ -587,11 +659,16 @@ class SemanticSearchService:
         seen_sessions = {}
         for hit in results:
             sid = hit.payload.get("session_id")
-            if sid not in seen_sessions or hit.score > seen_sessions[sid]["score"]:
+            title = hit.payload.get("title", "")
+            boosted_score = round(
+                float(hit.score) + self._title_boost(query, title),
+                4,
+            )
+            if sid not in seen_sessions or boosted_score > seen_sessions[sid]["score"]:
                 seen_sessions[sid] = {
                     "session_id": sid,
-                    "title": hit.payload.get("title", ""),
-                    "score": round(float(hit.score), 4),
+                    "title": title,
+                    "score": boosted_score,
                     "match_type": hit.payload.get("content_type", ""),
                     "snippet": hit.payload.get("text", ""),
                     "created_at": hit.payload.get("created_at", ""),
@@ -633,14 +710,15 @@ class SemanticSearchService:
 
         chunks = []
         for hit in results:
+            title = hit.payload.get("title", "")
             chunks.append({
                 "session_id": hit.payload.get("session_id", ""),
-                "title": hit.payload.get("title", ""),
+                "title": title,
                 "content_type": hit.payload.get("content_type", ""),
                 "chunk_index": hit.payload.get("chunk_index", 0),
                 "text": hit.payload.get("text", ""),
                 "speakers": hit.payload.get("speakers", []),
-                "score": round(float(hit.score), 4),
+                "score": round(float(hit.score) + self._title_boost(query, title), 4),
                 "created_at": hit.payload.get("created_at", ""),
             })
 
@@ -736,6 +814,12 @@ class SemanticSearchService:
                     transcript = str(session.transcript) if session.transcript else ""
 
             summary = session.summary or ""
+            if not summary and isinstance(session.final_summary, dict):
+                summary = self._summary_text(session.final_summary)
+            elif isinstance(summary, dict):
+                summary = self._summary_text(summary)
+            elif not summary and session.final_summary:
+                summary = self._summary_text(session.final_summary)
             title = session.title or session.name or ""
             created = session.created_at.isoformat() if session.created_at else ""
 
