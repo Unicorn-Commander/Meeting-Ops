@@ -37,10 +37,13 @@ phased plan so a fresh session/agent can pick up cleanly.
 
 ## The gaps (what the vision needs that isn't there yet)
 
-1. **RAG quality + graph-aware retrieval.** Today RAG is vector-only. The graph
-   exists but isn't used at query time. Gap: let the agent traverse the graph
-   (e.g. "what did Shafen commit to across the last 3 meetings?") not just
-   vector-match chunks.
+1. **RAG quality + graph-aware retrieval.** Retrieval is hybrid dense + BM25
+   (RRF fusion, org-filtered) in `semantic_search_service.py` — not vector-only.
+   But the **base cross-meeting retrieval is currently weak** (audit 2026-05-27:
+   `ask_about_meetings` failed to rank an exact-title match first), and the
+   graph exists but isn't used at query time. Gap: fix the seed retriever, then
+   let the agent traverse the graph (e.g. "what did Shafen commit to across the
+   last 3 meetings?") not just match chunks.
 2. **App-control MCP tools (write surface).** The agent can read but not act.
    Gap: a *safe* set of write tools (create/rename/tag session, start/stop
    record, trigger reprocess, draft email) with auth + confirmation semantics.
@@ -48,6 +51,31 @@ phased plan so a fresh session/agent can pick up cleanly.
    tenant/user, with the existing agent-scoping pattern (private/team/org/shared).
 4. **Voice chat loop.** Wire STT (mic → text) → agent → TTS (text → speech),
    ideally low-latency + barge-in. Building blocks exist; the loop doesn't.
+
+## Phase 1 audit results + ratified decisions (2026-05-27)
+
+Audited against the live backend. Foundations are real; two blockers
+re-sequence the work:
+
+- **Base cross-meeting retrieval is weak** — `ask_about_meetings` (and even an
+  exact-title search) failed to rank the target meeting first; single-meeting
+  `chat_with_meeting` is good. Fix this *before* graph-augmented retrieval (the
+  graph layer seeds from this retriever, so a bad seed just gets amplified).
+- **The graph is nearly empty** — `agent_meeting_ops_canonical` had ~4
+  smoke-test nodes / 1 edge; the writer is correct (session 124 landed) but the
+  corpus was never backfilled. Populate it before relying on graph expansion.
+
+Ratified decisions: (1) use Brigade's FalkorDB, no local graph; (2) strict
+propose→confirm→mutate for all writes, org + tier scope enforced at the tool
+boundary (draft-email safe, send-email separately confirmed); (3) graph-augmented
+retrieval is a read-only layer over the existing meeting-rag loop (Qdrant seed →
+graph-neighborhood expand → re-rank → existing LLM loop), not a rewrite.
+
+**Re-sequenced near-term order:** (1) diagnose + fix base cross-meeting
+retrieval (indexing coverage / payload / RRF fusion weights / org filter),
+re-measure; (2) backfill the Brigade graph over all completed sessions
+(`scripts/reconcile_brigade_graph.py`); (3) THEN graph-augmented retrieval;
+(4) THEN the safe write/control MCP surface.
 
 ## Phased plan (proposed)
 

@@ -18,7 +18,7 @@ import os
 import uuid
 from typing import Any
 
-from arq import create_pool
+from arq import create_pool, cron
 from arq.connections import RedisSettings
 
 from database.database import SessionLocal
@@ -49,10 +49,24 @@ async def process_bulk_file(ctx: dict[str, Any], file_id: str) -> dict[str, Any]
         return {"status": "failed", "file_id": file_id, "error": str(exc)[:2000]}
 
 
+async def media_retention_task(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Daily cron: reclaim local disk now that Garage is the durable home for
+    audio. Evicts local working copies of older completed sessions that have a
+    size-verified Garage copy, and LRU-caps the re-materialization cache. Never
+    deletes a Garage object; fully reversible (audio re-fetches on read)."""
+    from services.media_retention import run_retention
+    result = await asyncio.to_thread(run_retention)
+    logger.info("arq cron: media_retention result=%s", result)
+    return result
+
+
 class WorkerSettings:
     """Arq worker configuration."""
 
     functions = [process_bulk_file]
+    # Daily local-disk retention (Garage cutover housekeeping). 04:30 UTC is a
+    # low-traffic window; the task is read-mostly + best-effort.
+    cron_jobs = [cron(media_retention_task, hour={4}, minute={30})]
     max_jobs = get_bulk_import_concurrency()
     redis_settings = RedisSettings.from_dsn(
         os.getenv("ARQ_REDIS_URL") or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")

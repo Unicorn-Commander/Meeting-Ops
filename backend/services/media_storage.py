@@ -203,6 +203,24 @@ def put_stream(*, key: str, stream: BinaryIO, content_type: Optional[str] = None
 # Reads
 # ---------------------------------------------------------------------------
 
+def object_size(*, key: str) -> Optional[int]:
+    """Return the Garage object's byte size, or None if absent/unconfigured.
+    Uses list_objects_v2 (not head_object — Garage 400s on HEAD). Used by
+    retention/eviction to verify a durable copy exists at the expected size
+    before deleting a local working file."""
+    client = _client()
+    if client is None:
+        return None
+    try:
+        resp = client.list_objects_v2(Bucket=GARAGE_AUDIO_BUCKET, Prefix=key)
+        for o in resp.get("Contents", []):
+            if o["Key"] == key:
+                return o["Size"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("media_storage: object_size failed key=%s: %s", key, e)
+    return None
+
+
 def open_object(*, backend: str, key: str) -> BinaryIO:
     """Open the object for read (for proxy-streaming). Caller closes it."""
     if backend == "garage":

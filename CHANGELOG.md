@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+## [3.10.0] - 2026-05-27
+
+### Added
+- **Self-managing local-disk retention (completes the Garage cutover).** A new `services/media_retention.py` plus a daily Arq cron (`media_retention_task`, 04:30 UTC, on the existing `meet-bulk-import-worker`) keeps local disk in check without manual script runs:
+  - `evict_completed_local` — deletes the local working file of completed sessions older than `MEDIA_RETENTION_KEEP_DAYS` (default 7), but only when a byte-size-verified Garage copy exists (verified via list, not HEAD). Reversible — audio re-materializes from Garage on next read.
+  - `cap_media_cache` — LRU-evicts the re-materialization cache (`MEDIA_CACHE_ROOT`) down to `MEDIA_CACHE_MAX_GB` (default 20); cache entries are re-fetchable from Garage.
+  - Safe by construction: never deletes a Garage object, never deletes a local file without a verified durable copy. Env: `MEDIA_RETENTION_ENABLED` / `MEDIA_RETENTION_KEEP_DAYS` / `MEDIA_RETENTION_STATUSES` / `MEDIA_CACHE_MAX_GB`.
+- `media_storage.object_size()` — list-based Garage object-size lookup (HEAD-free) used by retention/eviction to verify durable copies.
+
+### Docs
+- `docs/agent-platform-roadmap.md`: recorded the Phase 1 audit results + ratified decisions (use Brigade FalkorDB, strict propose→confirm→mutate writes, graph-augmented read-only retrieval) and the re-sequenced near-term order (fix base retrieval + backfill the graph before graph-augmented retrieval). Corrected the stale "vector-only" note (retrieval is hybrid dense + BM25).
+
 ## [3.9.1] - 2026-05-27
 
 ### Added
