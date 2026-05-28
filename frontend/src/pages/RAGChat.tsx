@@ -168,11 +168,11 @@ export default function RAGChatPanel() {
     );
   };
 
-  const handleProposalConfirm = async (token: string) => {
+  const handleProposalConfirm = async (token: string, typedConfirmation?: string) => {
     if (busyProposalToken) return;
     setBusyProposalToken(token);
     try {
-      const result = await confirmAgentAction(token, getHeaders());
+      const result = await confirmAgentAction(token, getHeaders(), typedConfirmation);
       updateProposalMessage(token, {
         state: 'applied',
         result: result.result,

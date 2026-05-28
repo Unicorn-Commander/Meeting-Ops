@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+## [3.14.1] - 2026-05-28
+
+### Added
+- **Typed-confirmation input on the in-app proposal card.** Closes the v3.14.0 gap where `delete_session` (and any future high-friction action) couldn't be confirmed through the RAG chat UI — the card now renders an input field, surfaces the `confirmation_instructions` text, switches to a red/destructive visual treatment (alert icon, rose accent, "Destructive action proposal", "Confirm permanent deletion" button label), and keeps the Confirm button disabled until the user's input matches `required_typed_confirmation` exactly (trimmed). The standard non-destructive card path is unchanged. Test coverage in `__tests__/AgentActionProposalCard.test.tsx`.
+- Type system updated: `AgentActionName` now includes `delete_session` / `start_recording` / `stop_recording`; `AgentActionProposal` carries optional `required_typed_confirmation` + `confirmation_instructions`. `confirmAgentAction` accepts an optional `typedConfirmation` arg and only sends `typed_confirmation` in the request body when non-empty (clean wire shape for the common path).
+
+### Verified
+- Frontend build (vite + tsc strict) passes. Deployed bundle contains the new behavior strings ("Destructive action proposal", "Confirm permanent deletion", "typed-confirmation", "Confirm stays disabled until").
+
 ## [3.14.0] - 2026-05-28
 
 ### Added

@@ -24,10 +24,17 @@ async function postJson<T>(path: string, body: unknown, headers: HeaderMap): Pro
 export async function confirmAgentAction(
   confirmationToken: string,
   headers: HeaderMap,
+  typedConfirmation?: string,
 ): Promise<AgentActionResult> {
+  const body: Record<string, unknown> = { confirmation_token: confirmationToken };
+  // Only include the field when the caller actually has a value — keeps the
+  // request shape clean for the common (non-high-friction) confirm path.
+  if (typedConfirmation !== undefined && typedConfirmation !== '') {
+    body.typed_confirmation = typedConfirmation;
+  }
   return postJson<AgentActionResult>(
     '/api/agent-actions/confirm',
-    { confirmation_token: confirmationToken },
+    body,
     headers,
   );
 }
