@@ -96,10 +96,13 @@ tenant/workspace/user with private/team/org/shared visibility (the established
 agent-scoping pattern). Exposed in-app (chat panel) and over MCP. Keep the
 "control the app" actions behind the Phase-2 confirmation gates.
 
-**Phase 4 — Voice.** STT (mic capture → streaming transcript, reuse Parakeet
-streaming) → agent → TTS (Kokoro/VibeVoice on midboy2). Target a push-to-talk
-v1, then barge-in/duplex if it earns its keep. Keep it browser-first where
-feasible (the moat); only use server compute where quality requires it.
+**Phase 4 — Voice.** Re-sequenced: **Stable owns realtime voice/LiveKit**,
+Meeting-Ops embeds. Don't reinvent the voice stack in Meeting-Ops. The
+home-ops voice + wake-word + barge-in pattern at
+`/Volumes/Studio Storage/Development/smart-home-agent/Home-Ops/voice/`
+(`voice-router/` + `wake-word/`) is the reference to lift into Stable.
+Meeting-Ops integration = embed a Stable room with a Meeting-Ops-scoped agent
+on the other side, NOT a new voice stack here.
 
 ## Key decisions to make (before/within Phase 1)
 

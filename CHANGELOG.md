@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.14.0] - 2026-05-28
+
+### Added
+- **Three new agent write actions, on the v3.12.0 propose → confirm machinery:**
+  - **`delete_session`** with high-friction typed-confirmation. The proposal envelope now includes `required_typed_confirmation` (= `"delete-{id}"`) and human-readable `confirmation_instructions`; the user (or chat UI / MCP client) must echo the exact string in `typed_confirmation` on the confirm call, or it 409s. Propose itself refuses while the session is currently recording. Applier cascades: local audio file unlink + `session_media.purge_session_media` (Garage prefix delete) + transcript rows + session row.
+  - **`start_recording`** — wraps `WorkingAudioService.start_recording`. Refuses to propose if the session is already recording / completed / processing; applier revalidates status hasn't drifted before invoking the audio service.
+  - **`stop_recording`** — wraps `WorkingAudioService.stop_recording`; refuses unless current status is `recording`; sets `status=processing`, `ended_at`, `duration` on apply.
+- `typed_confirmation` plumbed through `confirm_action` and `AgentActionConfirmRequest` (only consulted for actions whose builder set `required_typed_confirmation`; ignored otherwise). `_proposal_response` now forwards the optional friction fields (`required_typed_confirmation`, `confirmation_instructions`) so the chat UI / MCP envelope sees them.
+- `tests/test_agent_write_tools_v16.py` — 9 cases: typed-confirm positive + missing + wrong-value + recording-blocked; start/stop happy path + status-blocked; reuses the `_set_fake_redis`/`_seed_user_org`/`_seed_session` helpers.
+
+### Verified
+- Full backend suite green. **Live on bigboy**: created a throwaway session, propose returned `required_typed_confirmation="delete-126"`, confirm without typed → 409 + session preserved, confirm with wrong typed → 409, confirm with correct typed → applied and session **gone**.
+
+### Note for the Stable voice arc (parallel investigation)
+- The home-ops voice + barge-in stack lives at `/Volumes/Studio Storage/Development/smart-home-agent/Home-Ops/voice/` (voice-router + wake-word service) — the reference pattern to lift into Stable when the Stable voice work picks up.
+
 ## [3.13.0] - 2026-05-28
 
 ### Added
