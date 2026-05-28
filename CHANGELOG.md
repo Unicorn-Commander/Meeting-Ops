@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.13.0] - 2026-05-28
+
+### Added
+- **Phase 2 v1.5 — Personal Access Tokens (PATs) + MCP write surface.** The agent can now propose, confirm, and cancel write actions over MCP **as the real user**, not as a shared admin. The shared `MEETING_OPS_USER`/`MEETING_OPS_PASS` login path in the MCP server is deleted entirely (no fallback). Per-user identity at the boundary, RBAC enforced by the existing backend auth.
+  - `personal_access_tokens` table (alembic `032`): `mops_pat_` + 32 base32 chars (~160-bit entropy), sha256-hashed at rest, `token_prefix` for UI recognition, `last_used_at`/`revoked_at` for hygiene. Per-user FK with `ON DELETE CASCADE`.
+  - `backend/auth/pat.py`: `create_pat` (returns plaintext **once**), `resolve_pat` (looks up via hash, updates `last_used_at`, refuses revoked), `revoke_pat`.
+  - `backend/auth/dependencies.py`: the auth dependency now dispatches `Authorization: Bearer mops_pat_...` to `resolve_pat()` **before** JWT decode; JWT/SSO paths are unchanged (zero regression on the web app).
+  - `backend/api/personal_access_tokens.py`: `POST /api/auth/pats` (plaintext shown once), `GET /api/auth/pats` (never returns plaintext or hash), `DELETE /api/auth/pats/{id}` (revoke).
+  - `mcp/meeting_ops_mcp.py`: reads `MEETING_OPS_PAT` env var and sends as Bearer on every backend call. Adds the v3.12.0 `propose_*` tools (+ `confirm_action` / `cancel_action`) as MCP tools — thin proxies, no MCP-side auth logic.
+  - Frontend: Settings → **Personal Access Tokens** (`PersonalAccessTokens.tsx`) — list + create + revoke, copy-once modal for the plaintext.
+
+### Verified
+- 42 backend tests for PATs + MCP round-trip + agent-actions + tier enforcement; 99 frontend tests; frontend build passes. **Live on bigboy**: minted a real PAT, resolved to the correct user, proposed `rename_session` via the PAT, confirmed → audit rows carry the **real user_id** (not a shared admin), revoked PAT rejected.
+
+### Architecture note
+- Built **without** the UC Commander federation layer; PATs are simpler, ship now, and are forward-compatible with federation later (UC could mint PATs on the user's behalf in a future phase). One MCP server codebase, per-user identity per request via PATs.
+
 ## [3.12.0] - 2026-05-28
 
 ### Added
