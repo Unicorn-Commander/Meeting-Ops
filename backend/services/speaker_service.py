@@ -71,6 +71,16 @@ def update_centroid(
     return avg.tolist()
 
 
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity for speaker embeddings."""
+    va = np.asarray(a, dtype="float32")
+    vb = np.asarray(b, dtype="float32")
+    denom = np.linalg.norm(va) * np.linalg.norm(vb)
+    if denom <= 0:
+        return 0.0
+    return float(np.dot(va, vb) / denom)
+
+
 # ---------- DB helpers ----------
 
 
