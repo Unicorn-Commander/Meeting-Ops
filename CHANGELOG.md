@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.11.0] - 2026-05-27
+
+### Added
+- **Graph-augmented retrieval (read-only, feature-flagged OFF).** A new layer on top of the existing meeting-rag loop in `backend/services/graph_augmented_retrieval.py`: Qdrant seed → entity extraction → Brigade FalkorDB neighborhood expansion (via the existing read-only `BrigadeClient.fetch_entity_context`) → re-rank with a capped graph bonus (`_MAX_GRAPH_BONUS = 3.0`) → graph evidence block injected into the `ask_about_meetings` LLM prompt. Wired into `search_meetings_impl` and `ask_about_meetings_impl` only.
+- Feature flag: env `MEETING_RAG_GRAPH_AUGMENTATION` (default `0` / off) for the global default; per-request `scope.graph_augmented_retrieval` (or `.graph_augment`) wins over env so the same backend can A/B both modes per call. Safe to deploy off; flip on per-request to evaluate.
+- Brigade graph backfilled over all 80 completed sessions (`agent_meeting_ops_canonical` went from ~4 smoke-test nodes to 477) so the corpus the new layer expands into is real, not synthetic.
+- `scripts/backfill_brigade_graph.py` (idempotent reconcile via `write_meeting_to_brigade`).
+
+### Verified
+- 61 backend tests pass (`test_graph_augmented_retrieval` + `test_cross_org_isolation` + `test_semantic_search_service_retrieval` + `test_search_analytics`); cross-org isolation preserved (the graph bonus is applied after the org-filtered Qdrant query). Live A/B on a real cross-meeting query confirms `type=semantic` → `type=graph_augmented` with bounded score boosts and no regression in the OFF path.
+
 ## [3.10.1] - 2026-05-27
 
 ### Fixed
