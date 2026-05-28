@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.15.0] - 2026-05-28
+
+### Added
+- **Speaker Library — unassigned voice fingerprints + speaker merge.** Closes the gap where diarized clusters (raw `SPEAKER_00` labels) from across meetings couldn't be seen or assigned globally — previously only the per-session inline tagger surfaced them.
+  - `GET /api/speakers/unassigned-links` — paginated, org-scoped list of `SpeakerSessionLink` rows where `speaker_id IS NULL`, joined with session context (title, date, duration aggregated from `transcript_diarized` segments, preview text, segment count) and a `top_matches` array (up to 3 enrolled speakers ranked by cosine similarity to the cluster's centroid derived from inline segment embeddings). Verified live: real "Incoherent Transcript Analysis" cluster correctly suggests Aaron Stransky at 0.50 over David (0.18) / Ricky (0.12).
+  - `GET /api/speakers/voice-samples/{sample_id}/audio` — proxy for `SpeakerVoiceSample.audio_path` (gated on `STORE_SPEAKER_AUDIO=true`).
+  - `POST /api/speakers/{target_id}/merge` — transactional bulk-repoint of `SpeakerVoiceSample` + `SpeakerSessionLink` rows from source to target, recompute target centroid, delete source, audit row (`action="speaker_merge"`, `details={merged_from, source_name, samples_moved, links_moved}`). Refuses `target == source` (400) and cross-org (404). Admin-only. Rollback + 500 on any failure.
+  - `services/speaker_service.cosine_similarity` (shared helper).
+- **Frontend** (`SpeakerLibrary.tsx`): "Unassigned voice fingerprints" section with count badge, per-row session metadata, suggested-match chips (one-shot assign), and an "Assign…" dialog with searchable speakers dropdown + "Create new speaker + assign" path. Reuses the existing `PATCH /api/sessions/{id}/speaker-links/{link_id}` endpoint. "Merge into another speaker…" action on speaker detail with a rose-accent destructive modal that requires typing the source speaker's display name before Confirm enables.
+
+### Verified
+- Full backend suite green; new `tests/test_speakers_unassigned_and_merge.py` (20 pass); frontend vitest (105 pass / 20 files); `npm run build` clean. **Live on bigboy**: routes registered; org-1 baseline is 35 unassigned voice fingerprints across 44 total links, 4 enrolled speakers — Aaron can now see and assign all 35 from the Speaker Library page.
+
+### Architecture note
+- This is a direct admin tool, not an agent action — does NOT route through `services/agent_actions.py` propose → confirm → mutate. Per-session inline tagger and the global Library now both reach the same backend mutation surface (`PATCH /api/sessions/{id}/speaker-links/{link_id}`).
+
 ## [3.14.1] - 2026-05-28
 
 ### Added
