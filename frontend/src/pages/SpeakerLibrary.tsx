@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle } from 'lucide-react';
+import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -101,6 +101,9 @@ export const SpeakerLibrary: React.FC = () => {
   const [unassigned, setUnassigned] = useState<UnassignedSpeakerLink[]>([]);
   const [unassignedTotal, setUnassignedTotal] = useState(0);
   const [loadingUnassigned, setLoadingUnassigned] = useState(false);
+  // Collapsible + height-capped so a long unassigned list can't push the
+  // enrolled-speakers grid below the fold.
+  const [unassignedOpen, setUnassignedOpen] = useState(true);
   const [assigningLinkId, setAssigningLinkId] = useState<number | null>(null);
   const [assignDialogLink, setAssignDialogLink] = useState<UnassignedSpeakerLink | null>(null);
   const [speakerSearch, setSpeakerSearch] = useState('');
@@ -426,24 +429,34 @@ export const SpeakerLibrary: React.FC = () => {
       )}
 
       <section className="mb-4 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-        <div className="mb-3 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setUnassignedOpen(v => !v)}
+          aria-expanded={unassignedOpen}
+          className="mb-3 flex w-full items-center justify-between gap-2 text-left"
+        >
           <div className="flex items-center gap-2">
+            {unassignedOpen
+              ? <ChevronDown className="h-4 w-4 text-zinc-500" />
+              : <ChevronRight className="h-4 w-4 text-zinc-500" />}
             <Mic className="h-4 w-4 text-fuchsia-400" />
             <h2 className="text-sm font-semibold text-zinc-100">Unassigned voice fingerprints</h2>
             <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
-              Unassigned ({unassignedTotal})
+              {unassignedTotal}
             </span>
           </div>
           {loadingUnassigned && (
             <RefreshCw className="h-4 w-4 animate-spin text-zinc-500" />
           )}
-        </div>
-        {unassigned.length === 0 ? (
+        </button>
+        {unassignedOpen && (unassigned.length === 0 ? (
           <div className="text-xs text-zinc-500">
             No unassigned fingerprints in this workspace.
           </div>
         ) : (
-          <div className="space-y-2">
+          // Height-cap with internal scroll so the enrolled-speakers grid below
+          // is always reachable, regardless of how many unassigned rows there are.
+          <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
             {unassigned.map(link => (
               <div key={link.id} className="rounded border border-zinc-800 bg-zinc-950/60 p-3">
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
@@ -494,7 +507,7 @@ export const SpeakerLibrary: React.FC = () => {
               </div>
             ))}
           </div>
-        )}
+        ))}
       </section>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 overflow-hidden">

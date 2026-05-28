@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.15.1] - 2026-05-28
+
+### Fixed
+- Speaker Library layout: the v3.15.0 "Unassigned voice fingerprints" section rendered as a single full-height list outside the page's `overflow-hidden` grid, so a long unassigned list (e.g. 35 rows) pushed the enrolled-speakers two-column grid entirely below the fold with no way to reach it. The section is now **collapsible** (chevron toggle, default open) and its inner list is height-capped (`max-h-96`) with internal vertical scrolling — so however many unassigned fingerprints you have, the enrolled speakers + detail panel below stay in view.
+
 ## [3.15.0] - 2026-05-28
 
 ### Added
