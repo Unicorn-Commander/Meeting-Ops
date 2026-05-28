@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+## [3.12.0] - 2026-05-28
+
+### Added
+- **Phase 2 v1 — safe agent write/control via propose → confirm → mutate (in-app).** The agent can now propose mutating actions; the user explicitly confirms; only then does the backend mutate, atomically, with state re-validated against drift. Every mutating action is auditable. The MCP write surface is deferred to v1.5 once per-user MCP identity is wired — v1 ships through the in-app chat where per-user JWT/SSO identity is already solved (Codex's point that a fixed shared MCP login can't enforce per-user scoping).
+  - `backend/services/agent_actions.py`: Redis-backed one-shot tokens (`GETDEL`, TTL 300s) bound to `(user_id, org_id, action, payload_hash, expires_at, proposal_id)`. Scope re-validated on confirm AND cancel. Payload tamper detection via sha256.
+  - `backend/services/agent_write_tools.py`: 6 actions (`propose_create_session`, `propose_rename_session`, `propose_add_tag`, `propose_remove_tag`, `propose_trigger_reprocess`, `propose_draft_followup_email`). Each confirm path re-fetches the target row, checks owner/org, and verifies the `before` snapshot still matches before applying — refuses with **409 "state changed, please re-propose"** on drift.
+  - `backend/api/agent_actions.py`: `POST /api/agent-actions/{propose,confirm,cancel}` — 400 unknown action / 403 tier/ownership/org / 404 missing-or-replayed token / 409 payload-tamper or state-drift / 410 expired token or invalid precondition.
+  - `auth/tier.py`: new tier flags `agent_write_basic` (free+), `agent_write_reprocess` (pro+), `agent_write_email_draft` (pro+). `test_free_tier_enforcement.py` tightened — free tier must deny the two pro+ flags.
+  - Audit lifecycle reuses `auth_models.audit_logs` with actions `agent_action_proposed` / `agent_action_confirmed` / `agent_action_cancelled`, tied by `resource_id = proposal_id`. Full `before` / `after` / `diff` / `payload_hash` / `result` recorded in `details` JSONB.
+  - Frontend: `RAGChat.tsx` renders the new `AgentActionProposalCard` (preview + diff + Confirm/Cancel) when the agent stream returns `needs_confirmation`. Cribbed from the Crisis Ops `IntakePlanReview` pattern.
+  - Graph-augmented retrieval (v3.11.0) path preserved alongside the new write surface.
+  - `scripts/verify_agent_actions.py`: ratified safety contract as runnable script (post-deploy sanity check).
+
+### Verified
+- 36 backend tests for the agent-action surface pass (round-trip per tool + expired/replayed/cross-org/tier/payload-tamper/state-drift negatives) plus 7 frontend tests + the existing full backend suite. **Live end-to-end on bigboy**: real `propose → confirm` on session 122 mutated the row; both `agent_action_proposed` and `agent_action_confirmed` audit rows landed tied by `proposal_id`; **replay correctly rejected** (one-shot GETDEL).
+
+### Not in v1 (deliberately)
+- MCP write tools (deferred to v1.5 — needs per-user MCP identity).
+- `delete_session`, `send_email`, `start_recording`, `stop_recording` (each has its own friction/safety model worth designing separately).
+
 ## [3.11.0] - 2026-05-27
 
 ### Added
