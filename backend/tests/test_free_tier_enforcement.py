@@ -29,21 +29,29 @@ from auth.utils import get_password_hash
 # Unit: TIER_FEATURES matrix
 # ---------------------------------------------------------------------------
 
-NEW_SERVER_FEATURES = [
-    "canonical_reprocess",
-    "brigade_integration",
-    "cross_device_sync",
-    "bulk_import",
-]
-
-
-def test_tier_features_matrix_for_new_keys():
+def test_tier_features_matrix_for_server_write_keys():
     from auth.tier import TIER_FEATURES
 
-    for feat in NEW_SERVER_FEATURES:
+    server_features = [
+        "canonical_reprocess",
+        "brigade_integration",
+        "cross_device_sync",
+        "bulk_import",
+        "agent_write_reprocess",
+        "agent_write_email_draft",
+    ]
+    for feat in server_features:
         assert TIER_FEATURES["free"][feat] is False, f"free should not have {feat}"
         assert TIER_FEATURES["pro"][feat] is True, f"pro should have {feat}"
         assert TIER_FEATURES["enterprise"][feat] is True, f"enterprise should have {feat}"
+
+
+def test_tier_features_matrix_for_basic_agent_writes():
+    from auth.tier import TIER_FEATURES
+
+    assert TIER_FEATURES["free"]["agent_write_basic"] is True
+    assert TIER_FEATURES["pro"]["agent_write_basic"] is True
+    assert TIER_FEATURES["enterprise"]["agent_write_basic"] is True
 
 
 def _user(tier: str = "free", is_superuser: bool = False):

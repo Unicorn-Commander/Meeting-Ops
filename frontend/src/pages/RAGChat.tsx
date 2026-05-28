@@ -2,6 +2,12 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Send, Bot, User, Trash2, ExternalLink, ChevronDown, AlertTriangle } from 'lucide-react';
 import { useOrg } from '../contexts/OrgContext';
 import { config } from '../config';
+import AgentActionProposalCard from '../components/agent-actions/AgentActionProposalCard';
+import { cancelAgentAction, confirmAgentAction } from '../services/agentActionsApi';
+import type {
+  AgentActionProposalMessageState,
+  AgentActionProposal,
+} from '../types/agent-actions.types';
 
 interface Citation {
   meeting_id: string;
@@ -13,7 +19,10 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   citations?: Citation[];
-  metadata?: any;
+  metadata?: {
+    pending_confirmation?: AgentActionProposalMessageState;
+    [key: string]: any;
+  };
   agent_id?: string;
 }
 
@@ -50,6 +59,7 @@ export default function RAGChatPanel() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>(DEFAULT_AGENT_ID);
   const [agentWarnings, setAgentWarnings] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [busyProposalToken, setBusyProposalToken] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -134,6 +144,73 @@ export default function RAGChatPanel() {
     [agents, selectedAgentId]
   );
 
+  const updateProposalMessage = (
+    token: string,
+    patch: Partial<AgentActionProposalMessageState>
+  ) => {
+    setMessages((prev) =>
+      prev.map((msg) => {
+        const pending = msg.metadata?.pending_confirmation;
+        if (!pending || pending.proposal.confirmation_token !== token) {
+          return msg;
+        }
+        return {
+          ...msg,
+          metadata: {
+            ...(msg.metadata || {}),
+            pending_confirmation: {
+              ...pending,
+              ...patch,
+            },
+          },
+        };
+      })
+    );
+  };
+
+  const handleProposalConfirm = async (token: string) => {
+    if (busyProposalToken) return;
+    setBusyProposalToken(token);
+    try {
+      const result = await confirmAgentAction(token, getHeaders());
+      updateProposalMessage(token, {
+        state: 'applied',
+        result: result.result,
+      });
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Error confirming action: ${(error as Error).message}`,
+        },
+      ]);
+    } finally {
+      setBusyProposalToken(null);
+    }
+  };
+
+  const handleProposalCancel = async (token: string) => {
+    if (busyProposalToken) return;
+    setBusyProposalToken(token);
+    try {
+      await cancelAgentAction(token, getHeaders());
+      updateProposalMessage(token, {
+        state: 'cancelled',
+      });
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Error cancelling action: ${(error as Error).message}`,
+        },
+      ]);
+    } finally {
+      setBusyProposalToken(null);
+    }
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     const question = input.trim();
@@ -180,6 +257,7 @@ export default function RAGChatPanel() {
       let fullContent = '';
       let finalCitations: Citation[] = [];
       let finalMetadata: any = {};
+      let finalPendingConfirmation: AgentActionProposalMessageState | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -193,9 +271,28 @@ export default function RAGChatPanel() {
               if (data.token) {
                 fullContent += data.token;
                 setStreaming(fullContent);
+              } else if (data.event === 'needs_confirmation' && data.proposal) {
+                finalPendingConfirmation = {
+                  proposal: data.proposal as AgentActionProposal,
+                  state: 'pending',
+                };
+                finalMetadata = {
+                  ...finalMetadata,
+                  pending_confirmation: finalPendingConfirmation,
+                };
+                if (!fullContent) {
+                  fullContent = 'Action proposal requires confirmation.';
+                  setStreaming(fullContent);
+                }
               } else if (data.done) {
                 finalCitations = data.sources || [];
-                finalMetadata = data.metadata || {};
+                finalMetadata = {
+                  ...(data.metadata || {}),
+                  ...(finalMetadata || {}),
+                };
+                if (finalPendingConfirmation) {
+                  finalMetadata.pending_confirmation = finalPendingConfirmation;
+                }
               } else if (data.error) {
                 fullContent += `\n[Error: ${data.error}]`;
               }
@@ -372,6 +469,14 @@ export default function RAGChatPanel() {
                     </a>
                   ))}
                 </div>
+              )}
+              {msg.metadata?.pending_confirmation && msg.role === 'assistant' && (
+                <AgentActionProposalCard
+                  state={msg.metadata.pending_confirmation}
+                  busy={busyProposalToken === msg.metadata.pending_confirmation.proposal.confirmation_token}
+                  onConfirm={handleProposalConfirm}
+                  onCancel={handleProposalCancel}
+                />
               )}
             </div>
             {msg.role === 'user' && (

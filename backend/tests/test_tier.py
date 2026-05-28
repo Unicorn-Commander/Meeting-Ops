@@ -64,6 +64,9 @@ def test_tier_features_have_consistent_keys():
         "brigade_integration",
         "cross_device_sync",
         "bulk_import",
+        "agent_write_basic",
+        "agent_write_reprocess",
+        "agent_write_email_draft",
         "max_sessions_per_month",
         "max_session_minutes",
     }
@@ -100,6 +103,19 @@ def test_tier_features_quotas_unlimited_above_free():
     assert TIER_FEATURES["pro"]["max_session_minutes"] is None
     assert TIER_FEATURES["enterprise"]["max_sessions_per_month"] is None
     assert TIER_FEATURES["enterprise"]["max_session_minutes"] is None
+
+
+def test_tier_features_agent_write_flags():
+    """The new write capabilities should follow the ratified access policy."""
+    assert TIER_FEATURES["free"]["agent_write_basic"] is True
+    assert TIER_FEATURES["free"]["agent_write_reprocess"] is False
+    assert TIER_FEATURES["free"]["agent_write_email_draft"] is False
+    assert TIER_FEATURES["pro"]["agent_write_basic"] is True
+    assert TIER_FEATURES["pro"]["agent_write_reprocess"] is True
+    assert TIER_FEATURES["pro"]["agent_write_email_draft"] is True
+    assert TIER_FEATURES["enterprise"]["agent_write_basic"] is True
+    assert TIER_FEATURES["enterprise"]["agent_write_reprocess"] is True
+    assert TIER_FEATURES["enterprise"]["agent_write_email_draft"] is True
 
 
 # ---------------------------------------------------------------------------
