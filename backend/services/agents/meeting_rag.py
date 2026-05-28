@@ -245,6 +245,7 @@ async def run_meeting_rag(
     history: list[dict[str, Any]],
     db: Session,
     org_id: int,
+    scope: Optional[dict[str, Any]] = None,
 ) -> StreamingResponse:
     """Entry point used by ``api/agents.py``.
 
@@ -272,6 +273,10 @@ async def run_meeting_rag(
     # tool-using assistant whose grounding comes from tool results, not chat
     # history.
     request_history = request_history[-12:]
+
+    from services.graph_augmented_retrieval import resolve_graph_augmentation_enabled
+
+    graph_augment = resolve_graph_augmentation_enabled(scope)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(request_history)
@@ -347,6 +352,7 @@ async def run_meeting_rag(
                             db=db,
                             org_id=org_id,
                             llm_provider=llm_provider,
+                            graph_augment=graph_augment,
                         )
                     except Exception as exc:  # noqa: BLE001
                         result = {"error": f"{name} crashed: {exc}"}

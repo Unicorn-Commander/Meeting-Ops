@@ -270,6 +270,7 @@ async def dispatch_chat(
             history=history,
             db=db,
             org_id=org_id,
+            scope=body.scope,
         )
 
     real_id = brigade_agent_real_id(agent_id)

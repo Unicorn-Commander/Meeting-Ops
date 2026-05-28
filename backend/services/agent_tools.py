@@ -27,6 +27,10 @@ from database.models import (
     RecordingSession as DBRecordingSession,
     Transcription,
 )
+from services.graph_augmented_retrieval import (
+    augment_meeting_search,
+    resolve_graph_augmentation_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +167,7 @@ async def search_meetings_impl(
     *,
     query: str,
     limit: int = _DEFAULT_SEARCH_LIMIT,
+    graph_augment: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Hybrid search across this org's meetings.
 
@@ -194,11 +199,36 @@ async def search_meetings_impl(
         logger.debug("Semantic search unavailable, falling back to SQL: %s", exc)
 
     if semantic_hits:
-        return {
+        base_payload = {
             "query": query,
             "match_type": "semantic",
             "results": semantic_hits[:limit],
         }
+        if not resolve_graph_augmentation_enabled(
+            {"graph_augmented_retrieval": graph_augment}
+            if graph_augment is not None
+            else None
+        ):
+            return base_payload
+
+        try:
+            augmented = await augment_meeting_search(
+                db,
+                org_id,
+                query=query,
+                base_results=base_payload["results"],
+                limit=limit,
+                enabled=True,
+            )
+            return {
+                "query": query,
+                "match_type": "graph_augmented",
+                "results": augmented["results"],
+                "graph": augmented["graph"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("graph augmentation search failed, using semantic base: %s", exc)
+            return base_payload
 
     pattern = f"%{query}%"
     rows = (
@@ -226,7 +256,32 @@ async def search_meetings_impl(
             "match_type": "keyword",
         })
 
-    return {"query": query, "match_type": "keyword", "results": results}
+    base_payload = {"query": query, "match_type": "keyword", "results": results}
+    if not resolve_graph_augmentation_enabled(
+        {"graph_augmented_retrieval": graph_augment}
+        if graph_augment is not None
+        else None
+    ):
+        return base_payload
+
+    try:
+        augmented = await augment_meeting_search(
+            db,
+            org_id,
+            query=query,
+            base_results=base_payload["results"],
+            limit=limit,
+            enabled=True,
+        )
+        return {
+            "query": query,
+            "match_type": "graph_augmented",
+            "results": augmented["results"],
+            "graph": augmented["graph"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("graph augmentation search failed, using keyword base: %s", exc)
+        return base_payload
 
 
 async def list_meetings_impl(
@@ -392,12 +447,19 @@ async def ask_about_meetings_impl(
     *,
     query: str,
     limit: int = _DEFAULT_SEARCH_LIMIT,
+    graph_augment: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Cross-meeting RAG-style answer. Finds the top matching sessions, packs
     their summaries + transcript excerpts into one prompt, and asks the LLM
     to answer with citations. Designed for the model to use when it wants a
     synthesized answer rather than a list of raw matches."""
-    search = await search_meetings_impl(db, org_id, query=query, limit=limit)
+    search = await search_meetings_impl(
+        db,
+        org_id,
+        query=query,
+        limit=limit,
+        graph_augment=graph_augment,
+    )
     matches = search.get("results", [])
     if not matches:
         return {
@@ -408,6 +470,8 @@ async def ask_about_meetings_impl(
 
     sources: list[dict[str, Any]] = []
     context_blocks: list[str] = []
+    graph_bundle = search.get("graph") or {}
+    evidence_by_session = graph_bundle.get("evidence_by_session") or {}
     for hit in matches:
         sid = hit.get("session_id") or hit.get("internal_id")
         if sid is None:
@@ -431,6 +495,9 @@ async def ask_about_meetings_impl(
             block += "Key Points: " + "; ".join(str(b) for b in bullets[:5]) + "\n"
         if excerpt:
             block += f"Excerpt: {excerpt}\n"
+        graph_evidence = evidence_by_session.get(str(session.session_id or session.id))
+        if isinstance(graph_evidence, dict) and graph_evidence.get("graph_block"):
+            block += f"Graph:\n{graph_evidence['graph_block']}\n"
         context_blocks.append(block)
         sources.append({
             "session_id": session.session_id or str(session.id),
@@ -816,6 +883,7 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
 # dispatcher knows to thread it through. Keeping this declarative beats
 # trying to inspect helper signatures at runtime.
 _TOOLS_NEEDING_LLM = {"ask_about_meetings", "chat_with_meeting"}
+_TOOLS_USING_GRAPH_AUGMENT = {"search_meetings", "ask_about_meetings"}
 
 
 MEETING_RAG_TOOL_MAP: dict[str, Callable[..., Any]] = {
@@ -837,6 +905,7 @@ async def execute_tool(
     db: Session,
     org_id: int,
     llm_provider: Any,
+    graph_augment: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Dispatch a single tool call. Returns a JSON-safe payload — never
     raises; tool errors flow back to the model as ``{"error": "..."}`` so
@@ -850,9 +919,23 @@ async def execute_tool(
         return {"error": f"Tool arguments must be an object, got {type(safe_args).__name__}."}
 
     try:
+        extra_kwargs = {}
+        if name in _TOOLS_USING_GRAPH_AUGMENT:
+            extra_kwargs["graph_augment"] = graph_augment
         if name in _TOOLS_NEEDING_LLM:
-            return await impl(db, org_id, llm_provider, **safe_args)
-        return await impl(db, org_id, **safe_args)
+            return await impl(
+                db,
+                org_id,
+                llm_provider,
+                **safe_args,
+                **extra_kwargs,
+            )
+        return await impl(
+            db,
+            org_id,
+            **safe_args,
+            **extra_kwargs,
+        )
     except TypeError as exc:
         # Argument-shape mismatch — surface to the model so it can retry.
         logger.warning("Tool %s argument error: %s", name, exc)
