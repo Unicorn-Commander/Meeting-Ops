@@ -25,7 +25,9 @@ Usage:
   python3 mcp/meeting_ops_mcp.py
 
   # Or with custom backend URL
-  MEETING_OPS_URL=http://192.168.10.30:9050 python3 mcp/meeting_ops_mcp.py
+  MEETING_OPS_URL=http://192.168.10.30:9050 \
+  MEETING_OPS_PAT=mops_pat_YOUR_TOKEN_HERE \
+  python3 mcp/meeting_ops_mcp.py
 
 Claude Desktop config (~/.claude/claude_desktop_config.json):
   {
@@ -35,17 +37,20 @@ Claude Desktop config (~/.claude/claude_desktop_config.json):
         "args": ["/path/to/UC-Meeting-Ops/mcp/meeting_ops_mcp.py"],
         "env": {
           "MEETING_OPS_URL": "http://localhost:9050",
-          "MEETING_OPS_USER": "admin",
-          "MEETING_OPS_PASS": "admin123"
+          "MEETING_OPS_PAT": "mops_pat_YOUR_TOKEN_HERE"
         }
       }
     }
   }
+
+Mint a PAT in Meeting-Ops Settings -> Personal Access Tokens. The token is
+shown once, then stored hashed-at-rest by the backend.
 """
 
 import os
 import json
 import logging
+import sys
 from typing import Any
 
 import httpx
@@ -53,8 +58,7 @@ from mcp.server.fastmcp import FastMCP
 
 # ── Configuration ───────────────────────────────────────────────────────
 BACKEND_URL = os.getenv("MEETING_OPS_URL", "http://localhost:9050")
-USERNAME = os.getenv("MEETING_OPS_USER", "admin")
-PASSWORD = os.getenv("MEETING_OPS_PASS", "admin123")
+PERSONAL_ACCESS_TOKEN = os.getenv("MEETING_OPS_PAT", "").strip()
 
 logger = logging.getLogger("meeting-ops-mcp")
 
@@ -70,32 +74,20 @@ mcp = FastMCP(
 
 # ── HTTP Client Helpers ─────────────────────────────────────────────────
 
-_token: str | None = None
 
-
-async def _get_token() -> str:
-    """Authenticate with the Meeting-Ops backend and cache the JWT token."""
-    global _token
-    if _token:
-        return _token
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{BACKEND_URL}/api/auth/login",
-            data={"username": USERNAME, "password": PASSWORD},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        _token = data.get("access_token") or data.get("token")
-        if not _token:
-            raise RuntimeError(f"Login failed: {data}")
-        return _token
+def _require_pat() -> str:
+    if PERSONAL_ACCESS_TOKEN:
+        return PERSONAL_ACCESS_TOKEN
+    raise RuntimeError(
+        "MEETING_OPS_PAT is required. Mint a token in Meeting-Ops Settings "
+        "-> Personal Access Tokens, then set MEETING_OPS_PAT in your MCP "
+        "client config."
+    )
 
 
 async def _api(method: str, path: str, **kwargs) -> Any:
     """Make an authenticated request to the Meeting-Ops backend API."""
-    token = await _get_token()
+    token = _require_pat()
     headers = {"Authorization": f"Bearer {token}"}
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -105,19 +97,9 @@ async def _api(method: str, path: str, **kwargs) -> Any:
             **kwargs,
         )
 
-        # If token expired, refresh and retry once
-        if resp.status_code == 401:
-            global _token
-            _token = None
-            token = await _get_token()
-            headers["Authorization"] = f"Bearer {token}"
-            resp = await getattr(client, method)(
-                f"{BACKEND_URL}{path}",
-                headers=headers,
-                **kwargs,
-            )
-
         resp.raise_for_status()
+        if resp.status_code == 204:
+            return {}
         return resp.json()
 
 
@@ -126,6 +108,15 @@ def _fmt(data: Any) -> str:
     if isinstance(data, str):
         return data
     return json.dumps(data, indent=2, default=str)
+
+
+async def _propose(action: str, payload: dict[str, Any]) -> str:
+    data = await _api(
+        "post",
+        "/api/agent-actions/propose",
+        json={"action": action, "payload": payload},
+    )
+    return _fmt(data)
 
 
 # ── MCP Tools ───────────────────────────────────────────────────────────
@@ -566,6 +557,85 @@ async def get_meeting_insights(session_id: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+async def propose_create_session(
+    title: str,
+    description: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    """Propose creating a session. Requires user confirmation before mutation."""
+    payload: dict[str, Any] = {"title": title}
+    if description:
+        payload["description"] = description
+    if tags:
+        payload["tags"] = tags
+    return await _propose("create_session", payload)
+
+
+@mcp.tool()
+async def propose_rename_session(session_id: str, title: str) -> str:
+    """Propose renaming a session. Requires user confirmation before mutation."""
+    return await _propose(
+        "rename_session",
+        {"session_id": session_id, "title": title},
+    )
+
+
+@mcp.tool()
+async def propose_add_tag(session_id: str, tag: str) -> str:
+    """Propose adding a tag to a session. Requires user confirmation before mutation."""
+    return await _propose("add_tag", {"session_id": session_id, "tag": tag})
+
+
+@mcp.tool()
+async def propose_remove_tag(session_id: str, tag: str) -> str:
+    """Propose removing a tag from a session. Requires user confirmation before mutation."""
+    return await _propose("remove_tag", {"session_id": session_id, "tag": tag})
+
+
+@mcp.tool()
+async def propose_trigger_reprocess(session_id: str) -> str:
+    """Propose triggering server reprocessing. Requires user confirmation."""
+    return await _propose("trigger_reprocess", {"session_id": session_id})
+
+
+@mcp.tool()
+async def propose_draft_followup_email(
+    session_id: str,
+    recipient_name: str = "",
+    notes: str = "",
+) -> str:
+    """Propose drafting a follow-up email. Requires confirmation before returning the draft."""
+    payload: dict[str, Any] = {"session_id": session_id}
+    if recipient_name:
+        payload["recipient_name"] = recipient_name
+    if notes:
+        payload["notes"] = notes
+    return await _propose("draft_followup_email", payload)
+
+
+@mcp.tool()
+async def confirm_action(token: str) -> str:
+    """Confirm and apply a pending Meeting-Ops action proposal."""
+    data = await _api(
+        "post",
+        "/api/agent-actions/confirm",
+        json={"confirmation_token": token},
+    )
+    return _fmt(data)
+
+
+@mcp.tool()
+async def cancel_action(token: str) -> str:
+    """Cancel a pending Meeting-Ops action proposal."""
+    data = await _api(
+        "post",
+        "/api/agent-actions/cancel",
+        json={"confirmation_token": token},
+    )
+    return _fmt(data)
+
+
 # ── MCP Resources ──────────────────────────────────────────────────────
 
 
@@ -613,4 +683,10 @@ def cross_meeting_research(topic: str) -> str:
 # ── Entry Point ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    if not PERSONAL_ACCESS_TOKEN:
+        sys.exit(
+            "MEETING_OPS_PAT is required. Mint a token in Meeting-Ops "
+            "Settings -> Personal Access Tokens, then set MEETING_OPS_PAT "
+            "in your MCP client config."
+        )
     mcp.run()

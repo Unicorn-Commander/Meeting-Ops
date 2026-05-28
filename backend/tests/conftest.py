@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import types
 
 # Create temp SQLite DB and set env BEFORE pytest collects anything else.
 _db_fd, _db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
@@ -21,6 +22,27 @@ os.environ["MEDIA_STORAGE_DISABLED"] = "1"
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
+
+try:
+    import prometheus_client  # noqa: F401
+except Exception:  # pragma: no cover - local test env fallback
+    fake_prom = types.ModuleType("prometheus_client")
+
+    def make_asgi_app():
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+            })
+            await send({"type": "http.response.body", "body": b""})
+
+        return app
+
+    fake_prom.make_asgi_app = make_asgi_app
+    sys.modules["prometheus_client"] = fake_prom
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +152,13 @@ def app():
 
     # Import the auth models needed by these API tests before create_all so
     # their tables register on the same metadata object as the core DB models.
-    from auth.models import User, Organization, UserOrganization, AuditLog  # noqa: F401
+    from auth.models import (  # noqa: F401
+        AuditLog,
+        Organization,
+        PersonalAccessToken,
+        User,
+        UserOrganization,
+    )
     # Same for the Conference Room models — without this the room tables
     # never get attached to Base.metadata under SQLite, and the
     # recording_sessions FK pointing at room_audio_sources fails to

@@ -54,6 +54,7 @@ interface SettingsLayoutProps {
   saving: boolean;
   saveStatus: SaveStatus;
   onSave: () => void;
+  showSave?: boolean;
 }
 
 function LoadingShell() {
@@ -84,6 +85,7 @@ export default function SettingsLayout({
   saving,
   saveStatus,
   onSave,
+  showSave = true,
 }: SettingsLayoutProps) {
   // Group sections by the new categories first; map old categories
   // ('app' → preferences, 'admin' → workspace, 'system' → advanced) so
@@ -159,6 +161,7 @@ export default function SettingsLayout({
             {active ? children : <EmptyShell />}
           </Suspense>
 
+          {showSave && (
           <div className="mt-8 pt-6 border-t border-zinc-800">
             <div className="flex items-center gap-3">
               <button
@@ -203,6 +206,7 @@ export default function SettingsLayout({
               )}
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>
