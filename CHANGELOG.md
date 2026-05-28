@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.10.1] - 2026-05-27
+
+### Fixed
+- **Cross-meeting retrieval (RAG) was broken** — completed meetings were missing from the Qdrant corpus (stale index: org 1 had 81 sessions but only ~178 points), so `ask_about_meetings` / cross-meeting search couldn't surface the right meeting even by exact title. Root cause was corpus coverage, not org filtering (which was correct). Fixes in `semantic_search_service.py`: reindexed the corpus (org 1 → 81 sessions / 398 points); prefix embedded chunk/summary/title texts with the meeting title so titles contribute to the dense + sparse vectors; title-aware additive score boost so exact/near-exact title matches rank deterministically (applied *after* the org-filtered query — org isolation unaffected); `reindex_all` falls back to `final_summary` (structured/legacy shapes) when `summary` is empty. Verified: session 122 now ranks #1 for both exact-title and topical queries. Single-meeting chat was already correct. (Foundation for the agent-platform arc — see `docs/agent-platform-roadmap.md`.)
+
 ## [3.10.0] - 2026-05-27
 
 ### Added
