@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.17.0] - 2026-05-28
+
+### Added
+- **Project-Ops action-items bridge (ships dark; opt-in per deployment).** When a meeting completes (reprocess or live finalize), Meeting-Ops's existing `action_items` rows are written as Project-Ops tasks on a per-org PO project, modeled on the proven `services/brigade_writer` pattern (best-effort, swallow-all, never blocks the meeting pipeline).
+  - `services/projectops_client.py` — httpx Bearer-JWT client to PO NestJS API at `PROJECTOPS_BASE_URL` (default `http://project-ops-backend:3201/api/v1`). Resolves `projectNumber → UUID` by paging `GET /projects` client-side because PO exposes no by-number REST route. `is_live` gate; `create_task` and `update_task_status`; no-op when unconfigured.
+  - `services/projectops_writer.write_action_items_to_projectops` — orchestrator with target resolution order: (1) session-level PO link (`session.project_app=project-ops` + `session.project_id` UUID), (2) `session.processing_metadata.po_project_override`, (3) org-level `Organization.settings.projectops_default_project_number`, (4) skip (`mode=no-target`). Idempotent via `raw_payload` stamp on each action_item (`po_task_id`, `po_project_number`, `po_synced_at`); replay never duplicates.
+  - Hooks in `api/recording.py` on both reprocess finalize and live finalize. `action_items` PATCH propagates done → COMPLETED via PO `update_task_status` when the row carries `po_task_id`. Every PO call is swallowed.
+  - `scripts/backfill_action_items_to_projectops.py` — idempotent reconcile over completed sessions; `--set-default-project ORG=P-XXXXX` helper for the org-level target setting.
+  - 8 new tests + the 12 existing Brigade-writer tests still green.
+
+### Activation
+- The bridge is **dark** until you mint a Keycloak service-account JWT for a Project-Ops ADMIN/MANAGER identity, set it as `PROJECTOPS_API_KEY` on `meet-backend`, optionally override `PROJECTOPS_BASE_URL`, then set the per-org target with `docker exec meet-backend python3 scripts/backfill_action_items_to_projectops.py --set-default-project <orgid>=P-XXXXX`.
+
+### Future
+- Per-org integration toggles (UI for enabling Brigade / Project-Ops / Contact-Ops / Accounting-Ops per org instead of by env-var) tracked as a v1.1 follow-up.
+
+
 ## [3.16.0] - 2026-05-28
 
 ### Fixed
