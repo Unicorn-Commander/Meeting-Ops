@@ -26,11 +26,13 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
-from auth.models import User
+from auth.models import AuditLog, User
 from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import (
@@ -45,6 +47,7 @@ from services.speaker_service import (
     DEFAULT_EMBEDDING_MODEL,
     STORE_SPEAKER_AUDIO,
     add_voice_sample,
+    cosine_similarity,
     decode_embedding,
     encode_embedding,
     identify_speakers,
@@ -144,6 +147,40 @@ class IdentifyResponse(BaseModel):
     backend: Optional[str] = None
 
 
+class SpeakerTopMatch(BaseModel):
+    speaker_id: int
+    display_name: str
+    similarity: float
+
+
+class UnassignedSpeakerLinkResponse(BaseModel):
+    id: int
+    raw_label: str
+    session_id: str
+    session_pk: int
+    session_title: str
+    session_started_at: Optional[str] = None
+    meeting_date: Optional[str] = None
+    duration_seconds: float = 0.0
+    segment_count: int = 0
+    preview: str = ""
+    sample_audio_url: Optional[str] = None
+    top_matches: list[SpeakerTopMatch] = Field(default_factory=list)
+
+
+class UnassignedSpeakerLinksPage(BaseModel):
+    items: list[UnassignedSpeakerLinkResponse]
+    count: int
+    total: int
+    limit: int
+    offset: int
+    next_offset: Optional[int] = None
+
+
+class SpeakerMergeRequest(BaseModel):
+    source_id: int
+
+
 # ---------- helpers ----------
 
 
@@ -216,6 +253,106 @@ def _get_session_or_404(db: Session, organization_id: int, session_id: int | str
     return session
 
 
+def _segments_for_label(session: RecordingSession, raw_label: str) -> list[dict]:
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    segments = diarized.get("segments", []) if isinstance(diarized, dict) else []
+    out: list[dict] = []
+    for seg in segments:
+        label = (seg.get("raw_label") or seg.get("speaker") or "").strip()
+        if label == raw_label:
+            out.append(seg)
+    return out
+
+
+def _segment_duration(seg: dict) -> float:
+    try:
+        return max(0.0, float(seg.get("end") or 0) - float(seg.get("start") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cluster_centroid(segments: list[dict]) -> Optional[list[float]]:
+    vectors: list[list[float]] = []
+    for seg in segments:
+        emb = seg.get("embedding")
+        if isinstance(emb, list) and emb:
+            vectors.append([float(v) for v in emb])
+    if not vectors:
+        return None
+    centroid: Optional[list[float]] = None
+    for idx, vec in enumerate(vectors):
+        centroid = update_centroid(centroid, idx, vec)
+    return centroid
+
+
+def _first_preview(segments: list[dict], max_chars: int = 120) -> str:
+    for seg in segments:
+        text = str(seg.get("text") or "").strip()
+        if text:
+            return text[:max_chars]
+    return ""
+
+
+def _top_matches_for_centroid(
+    db: Session,
+    organization_id: int,
+    centroid: Optional[list[float]],
+) -> list[SpeakerTopMatch]:
+    if not centroid:
+        return []
+    rows = (
+        db.query(SpeakerProfile)
+        .filter(
+            SpeakerProfile.organization_id == organization_id,
+            SpeakerProfile.centroid_embedding.isnot(None),
+            SpeakerProfile.embedding_dim.isnot(None),
+        )
+        .all()
+    )
+    scored: list[SpeakerTopMatch] = []
+    for speaker in rows:
+        try:
+            speaker_centroid = decode_embedding(speaker.centroid_embedding, speaker.embedding_dim)
+            scored.append(SpeakerTopMatch(
+                speaker_id=speaker.id,
+                display_name=speaker.display_name,
+                similarity=round(cosine_similarity(centroid, speaker_centroid), 4),
+            ))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping speaker match candidate %s: %s", speaker.id, exc)
+    scored.sort(key=lambda item: item.similarity, reverse=True)
+    return scored[:3]
+
+
+def _recompute_speaker_from_samples(db: Session, speaker: SpeakerProfile) -> None:
+    samples = (
+        db.query(SpeakerVoiceSample)
+        .filter(SpeakerVoiceSample.speaker_id == speaker.id)
+        .order_by(SpeakerVoiceSample.id.asc())
+        .all()
+    )
+    centroid: Optional[list[float]] = None
+    model: Optional[str] = None
+    for idx, sample in enumerate(samples):
+        vec = decode_embedding(sample.embedding, sample.embedding_dim)
+        centroid = update_centroid(centroid, idx, vec)
+        model = sample.embedding_model
+    if centroid is None:
+        speaker.centroid_embedding = None
+        speaker.embedding_dim = None
+        speaker.embedding_model = None
+        speaker.sample_count = 0
+    else:
+        speaker.centroid_embedding = encode_embedding(centroid)
+        speaker.embedding_dim = len(centroid)
+        speaker.embedding_model = model
+        speaker.sample_count = len(samples)
+
+
+def _delete_merged_source(db: Session, source: SpeakerProfile) -> None:
+    db.delete(source)
+
+
 # ---------- speaker library ----------
 
 
@@ -232,6 +369,119 @@ async def list_speakers(
         .all()
     )
     return [_to_response(r) for r in rows]
+
+
+@router.get("/api/speakers/unassigned-links", response_model=UnassignedSpeakerLinksPage)
+async def list_unassigned_speaker_links(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    limit = max(1, min(200, int(limit or 50)))
+    offset = max(0, int(offset or 0))
+    org_id = active_org.organization.id
+
+    total = (
+        db.query(func.count(SpeakerSessionLink.id))
+        .filter(
+            SpeakerSessionLink.organization_id == org_id,
+            SpeakerSessionLink.speaker_id.is_(None),
+        )
+        .scalar()
+        or 0
+    )
+    rows = (
+        db.query(SpeakerSessionLink, RecordingSession)
+        .join(RecordingSession, RecordingSession.id == SpeakerSessionLink.session_id)
+        .filter(
+            SpeakerSessionLink.organization_id == org_id,
+            RecordingSession.organization_id == org_id,
+            SpeakerSessionLink.speaker_id.is_(None),
+        )
+        .order_by(RecordingSession.started_at.desc().nullslast(), RecordingSession.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items: list[UnassignedSpeakerLinkResponse] = []
+    for link, session in rows:
+        segments = _segments_for_label(session, link.raw_label)
+        duration = sum(_segment_duration(seg) for seg in segments)
+        centroid = _cluster_centroid(segments)
+
+        sample_audio_url = None
+        if STORE_SPEAKER_AUDIO:
+            for seg in segments:
+                idx = seg.get("idx") or seg.get("segment_idx") or seg.get("index")
+                if idx is None:
+                    continue
+                try:
+                    source_idx = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                sample = (
+                    db.query(SpeakerVoiceSample)
+                    .filter(
+                        SpeakerVoiceSample.organization_id == org_id,
+                        SpeakerVoiceSample.source_session_id == session.id,
+                        SpeakerVoiceSample.source_segment_idx == source_idx,
+                        SpeakerVoiceSample.audio_path.isnot(None),
+                    )
+                    .first()
+                )
+                if sample and sample.audio_path:
+                    sample_audio_url = f"/api/speakers/voice-samples/{sample.id}/audio"
+                    break
+
+        items.append(UnassignedSpeakerLinkResponse(
+            id=link.id,
+            raw_label=link.raw_label,
+            session_id=session.session_id or str(session.id),
+            session_pk=session.id,
+            session_title=session.title or session.name or f"Session {session.id}",
+            session_started_at=session.started_at.isoformat() if session.started_at else None,
+            meeting_date=session.meeting_date.isoformat() if session.meeting_date else None,
+            duration_seconds=round(duration, 3),
+            segment_count=len(segments),
+            preview=_first_preview(segments),
+            sample_audio_url=sample_audio_url,
+            top_matches=_top_matches_for_centroid(db, org_id, centroid),
+        ))
+
+    next_offset = offset + len(items) if offset + len(items) < total else None
+    return UnassignedSpeakerLinksPage(
+        items=items,
+        count=len(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+        next_offset=next_offset,
+    )
+
+
+@router.get("/api/speakers/voice-samples/{sample_id}/audio")
+async def get_voice_sample_audio(
+    sample_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    sample = (
+        db.query(SpeakerVoiceSample)
+        .filter(
+            SpeakerVoiceSample.id == sample_id,
+            SpeakerVoiceSample.organization_id == active_org.organization.id,
+        )
+        .first()
+    )
+    if not sample or not sample.audio_path:
+        raise HTTPException(status_code=404, detail="Voice sample audio not found")
+    if not os.path.exists(sample.audio_path):
+        raise HTTPException(status_code=404, detail="Voice sample audio missing on disk")
+    return FileResponse(sample.audio_path, media_type="audio/wav")
 
 
 @router.post("/api/speakers", response_model=SpeakerResponse, status_code=201)
@@ -449,6 +699,67 @@ async def delete_voice_sample(
             speaker.embedding_dim = len(new_centroid)
         speaker.sample_count = len(remaining)
     db.commit()
+
+
+@router.post("/api/speakers/{target_id}/merge", response_model=SpeakerResponse)
+async def merge_speaker_profile(
+    target_id: int,
+    payload: SpeakerMergeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    _require_admin(active_org, current_user)
+    org_id = active_org.organization.id
+    source_id = payload.source_id
+    if target_id == source_id:
+        raise HTTPException(status_code=400, detail="Cannot merge a speaker into itself")
+
+    target = _get_speaker_or_404(db, org_id, target_id)
+    source = _get_speaker_or_404(db, org_id, source_id)
+    source_name = source.display_name
+
+    try:
+        samples_moved = (
+            db.query(SpeakerVoiceSample)
+            .filter(
+                SpeakerVoiceSample.organization_id == org_id,
+                SpeakerVoiceSample.speaker_id == source.id,
+            )
+            .update({"speaker_id": target.id}, synchronize_session=False)
+        )
+        links_moved = (
+            db.query(SpeakerSessionLink)
+            .filter(
+                SpeakerSessionLink.organization_id == org_id,
+                SpeakerSessionLink.speaker_id == source.id,
+            )
+            .update({"speaker_id": target.id}, synchronize_session=False)
+        )
+        db.flush()
+        _recompute_speaker_from_samples(db, target)
+        _delete_merged_source(db, source)
+        db.add(AuditLog(
+            user_id=current_user.id,
+            organization_id=org_id,
+            action="speaker_merge",
+            resource_type="speaker",
+            resource_id=str(target.id),
+            details={
+                "merged_from": source_id,
+                "source_name": source_name,
+                "samples_moved": samples_moved,
+                "links_moved": links_moved,
+            },
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("speaker merge failed target=%s source=%s", target_id, source_id)
+        raise HTTPException(status_code=500, detail="Speaker merge failed")
+
+    db.refresh(target)
+    return _to_response(target)
 
 
 # ---------- session linking ----------

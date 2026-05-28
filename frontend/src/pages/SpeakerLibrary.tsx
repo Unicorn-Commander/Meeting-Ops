@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X } from 'lucide-react';
+import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -37,9 +37,43 @@ interface SpeakerDetail extends SpeakerSummary {
   session_count: number;
 }
 
+interface SpeakerTopMatch {
+  speaker_id: number;
+  display_name: string;
+  similarity: number;
+}
+
+interface UnassignedSpeakerLink {
+  id: number;
+  raw_label: string;
+  session_id: string;
+  session_pk: number;
+  session_title: string;
+  session_started_at?: string | null;
+  meeting_date?: string | null;
+  duration_seconds: number;
+  segment_count: number;
+  preview: string;
+  sample_audio_url?: string | null;
+  top_matches: SpeakerTopMatch[];
+}
+
 const isAdminRole = (role?: string, isSuperuser?: boolean): boolean => {
   if (isSuperuser) return true;
   return role === 'admin' || role === 'superuser';
+};
+
+const formatSeconds = (seconds?: number | null): string => {
+  const value = Number(seconds || 0);
+  if (value < 60) return `${value.toFixed(0)}s`;
+  const mins = Math.floor(value / 60);
+  const secs = Math.round(value % 60);
+  return `${mins}m ${secs}s`;
+};
+
+const formatDate = (value?: string | null): string => {
+  if (!value) return 'No date';
+  return new Date(value).toLocaleDateString();
 };
 
 export const SpeakerLibrary: React.FC = () => {
@@ -64,6 +98,18 @@ export const SpeakerLibrary: React.FC = () => {
   const [newEmail, setNewEmail] = useState('');
   const [newNotes, setNewNotes] = useState('');
   const [enrolling, setEnrolling] = useState(false);
+  const [unassigned, setUnassigned] = useState<UnassignedSpeakerLink[]>([]);
+  const [unassignedTotal, setUnassignedTotal] = useState(0);
+  const [loadingUnassigned, setLoadingUnassigned] = useState(false);
+  const [assigningLinkId, setAssigningLinkId] = useState<number | null>(null);
+  const [assignDialogLink, setAssignDialogLink] = useState<UnassignedSpeakerLink | null>(null);
+  const [speakerSearch, setSpeakerSearch] = useState('');
+  const [manualSpeakerId, setManualSpeakerId] = useState<number | null>(null);
+  const [createAssignName, setCreateAssignName] = useState('');
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeTargetId, setMergeTargetId] = useState<number | null>(null);
+  const [mergeConfirm, setMergeConfirm] = useState('');
+  const [merging, setMerging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const orgHeaders = (): Record<string, string> => {
@@ -98,6 +144,27 @@ export const SpeakerLibrary: React.FC = () => {
     setLoading(false);
   };
 
+  const loadUnassigned = async () => {
+    if (!isAdmin) return;
+    setLoadingUnassigned(true);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/unassigned-links?limit=50`, {
+        headers: orgHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUnassigned(Array.isArray(data.items) ? data.items : []);
+        setUnassignedTotal(Number(data.total || 0));
+      } else {
+        setError(`Failed to load unassigned fingerprints (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error loading unassigned fingerprints.');
+    } finally {
+      setLoadingUnassigned(false);
+    }
+  };
+
   const loadDetail = async (id: number) => {
     setSelectedId(id);
     setDetail(null);
@@ -118,8 +185,90 @@ export const SpeakerLibrary: React.FC = () => {
       return;
     }
     loadSpeakers();
+    loadUnassigned();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrganization?.slug, isAdmin]);
+
+  const assignUnassignedLink = async (link: UnassignedSpeakerLink, speakerId: number) => {
+    setAssigningLinkId(link.id);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/sessions/${link.session_id}/speaker-links/${link.id}`,
+        {
+          method: 'PATCH',
+          headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speaker_id: speakerId, confirmed: true }),
+        },
+      );
+      if (res.ok) {
+        setUnassigned(prev => prev.filter(item => item.id !== link.id));
+        setUnassignedTotal(prev => Math.max(0, prev - 1));
+        setSpeakers(prev => prev.map(s => (
+          s.id === speakerId ? { ...s, sample_count: (s.sample_count || 0) + 1 } : s
+        )));
+        setAssignDialogLink(null);
+        setManualSpeakerId(null);
+        setSpeakerSearch('');
+        if (selectedId === speakerId) await loadDetail(speakerId);
+      } else {
+        setError(`Assign failed (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error assigning speaker.');
+    } finally {
+      setAssigningLinkId(null);
+    }
+  };
+
+  const createSpeakerAndAssign = async () => {
+    if (!assignDialogLink || !createAssignName.trim()) return;
+    setAssigningLinkId(assignDialogLink.id);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers`, {
+        method: 'POST',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: createAssignName.trim() }),
+      });
+      if (!res.ok) {
+        setError(`Create speaker failed (HTTP ${res.status}).`);
+        return;
+      }
+      const created: SpeakerSummary = await res.json();
+      setSpeakers(prev => [...prev, created].sort((a, b) => a.display_name.localeCompare(b.display_name)));
+      setCreateAssignName('');
+      await assignUnassignedLink(assignDialogLink, created.id);
+    } catch {
+      setError('Network error creating speaker.');
+    } finally {
+      setAssigningLinkId(null);
+    }
+  };
+
+  const mergeSelectedSpeaker = async () => {
+    if (!detail || !mergeTargetId) return;
+    setMerging(true);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${mergeTargetId}/merge`, {
+        method: 'POST',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_id: detail.id }),
+      });
+      if (res.ok) {
+        const merged: SpeakerSummary = await res.json();
+        setMergeOpen(false);
+        setMergeTargetId(null);
+        setMergeConfirm('');
+        await loadSpeakers();
+        await loadDetail(merged.id);
+      } else {
+        setError(`Merge failed (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error merging speakers.');
+    } finally {
+      setMerging(false);
+    }
+  };
 
   const createSpeaker = async () => {
     if (!newName.trim()) return;
@@ -215,6 +364,15 @@ export const SpeakerLibrary: React.FC = () => {
     }
   };
 
+  const filteredSpeakers = speakers.filter(s =>
+    s.display_name.toLowerCase().includes(speakerSearch.trim().toLowerCase())
+  );
+  const mergeCandidates = speakers.filter(s => s.id !== detail?.id);
+  const selectedMergeTarget = mergeCandidates.find(s => s.id === mergeTargetId) || null;
+  const mergeConfirmMatches = Boolean(
+    detail && mergeConfirm.trim().toLowerCase() === detail.display_name.trim().toLowerCase()
+  );
+
   if (!isAdmin) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-300">
@@ -238,7 +396,10 @@ export const SpeakerLibrary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={loadSpeakers}
+            onClick={() => {
+              loadSpeakers();
+              loadUnassigned();
+            }}
             className="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-900 flex items-center gap-1"
           >
             <RefreshCw className="w-3 h-3" />
@@ -263,6 +424,78 @@ export const SpeakerLibrary: React.FC = () => {
           </button>
         </div>
       )}
+
+      <section className="mb-4 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Mic className="h-4 w-4 text-fuchsia-400" />
+            <h2 className="text-sm font-semibold text-zinc-100">Unassigned voice fingerprints</h2>
+            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+              Unassigned ({unassignedTotal})
+            </span>
+          </div>
+          {loadingUnassigned && (
+            <RefreshCw className="h-4 w-4 animate-spin text-zinc-500" />
+          )}
+        </div>
+        {unassigned.length === 0 ? (
+          <div className="text-xs text-zinc-500">
+            No unassigned fingerprints in this workspace.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {unassigned.map(link => (
+              <div key={link.id} className="rounded border border-zinc-800 bg-zinc-950/60 p-3">
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-zinc-100">{link.session_title}</span>
+                      <span className="text-xs text-zinc-500">{formatDate(link.session_started_at || link.meeting_date)}</span>
+                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-fuchsia-200">
+                        {link.raw_label}
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {formatSeconds(link.duration_seconds)} · {link.segment_count} segment{link.segment_count === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    {link.preview && (
+                      <p className="mt-1 text-xs text-zinc-400">“{link.preview}”</p>
+                    )}
+                    {link.top_matches.length > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className="text-zinc-500">Looks like:</span>
+                        {link.top_matches.map(match => (
+                          <button
+                            key={match.speaker_id}
+                            type="button"
+                            disabled={assigningLinkId === link.id}
+                            onClick={() => assignUnassignedLink(link, match.speaker_id)}
+                            className="rounded-full border border-fuchsia-500/40 bg-fuchsia-500/10 px-2 py-0.5 text-fuchsia-100 hover:bg-fuchsia-500/20 disabled:opacity-50"
+                          >
+                            {match.display_name} {match.similarity.toFixed(2)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAssignDialogLink(link);
+                      setManualSpeakerId(link.top_matches[0]?.speaker_id ?? null);
+                      setSpeakerSearch('');
+                      setCreateAssignName('');
+                    }}
+                    className="shrink-0 rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+                  >
+                    Assign…
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 overflow-hidden">
         {/* Left column: speaker list */}
@@ -321,14 +554,27 @@ export const SpeakerLibrary: React.FC = () => {
                     <p className="text-xs text-zinc-400 mt-2 max-w-xl whitespace-pre-wrap">{detail.notes}</p>
                   )}
                 </div>
-                <button
-                  onClick={() => deleteSpeaker(detail.id)}
-                  className="text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/40 flex items-center gap-1"
-                  aria-label="Delete speaker"
-                >
-                  <Trash2 className="w-3 h-3" />
-                  Delete
-                </button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      setMergeOpen(true);
+                      setMergeTargetId(null);
+                      setMergeConfirm('');
+                    }}
+                    className="text-xs px-2 py-1 rounded border border-rose-900 text-rose-300 hover:bg-rose-950/40 flex items-center gap-1"
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    Merge into another speaker…
+                  </button>
+                  <button
+                    onClick={() => deleteSpeaker(detail.id)}
+                    className="text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/40 flex items-center gap-1"
+                    aria-label="Delete speaker"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Delete
+                  </button>
+                </div>
               </div>
 
               <div className="border border-zinc-800 rounded p-3 mb-4">
@@ -403,6 +649,156 @@ export const SpeakerLibrary: React.FC = () => {
           )}
         </section>
       </div>
+
+      {assignDialogLink && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-full max-w-lg">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-sm font-semibold text-zinc-100">Assign fingerprint</h2>
+                <p className="mt-1 text-xs text-zinc-500">
+                  {assignDialogLink.raw_label} in {assignDialogLink.session_title}
+                </p>
+              </div>
+              <button onClick={() => setAssignDialogLink(null)} className="text-zinc-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
+              <input
+                value={speakerSearch}
+                onChange={e => setSpeakerSearch(e.target.value)}
+                placeholder="Search enrolled speakers"
+                className="w-full rounded bg-zinc-950 border border-zinc-700 py-2 pl-9 pr-3 text-sm text-zinc-100"
+              />
+            </div>
+
+            <div className="max-h-52 overflow-y-auto rounded border border-zinc-800 mb-4">
+              {filteredSpeakers.length === 0 ? (
+                <div className="p-3 text-xs text-zinc-500">No matching enrolled speakers.</div>
+              ) : (
+                filteredSpeakers.map(s => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setManualSpeakerId(s.id)}
+                    className={`w-full px-3 py-2 text-left text-sm hover:bg-zinc-800 ${
+                      manualSpeakerId === s.id ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300'
+                    }`}
+                  >
+                    {s.display_name}
+                    <span className="ml-2 text-xs text-zinc-500">{s.sample_count} samples</span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div className="rounded border border-zinc-800 p-3 mb-4">
+              <label className="block text-xs text-zinc-400 mb-1">
+                Create new speaker + assign
+              </label>
+              <div className="flex gap-2">
+                <input
+                  value={createAssignName}
+                  onChange={e => setCreateAssignName(e.target.value)}
+                  placeholder="New speaker name"
+                  className="flex-1 rounded bg-zinc-950 border border-zinc-700 px-3 py-2 text-sm text-zinc-100"
+                />
+                <button
+                  type="button"
+                  onClick={createSpeakerAndAssign}
+                  disabled={!createAssignName.trim() || assigningLinkId === assignDialogLink.id}
+                  className="rounded bg-fuchsia-600 px-3 py-2 text-xs text-white hover:bg-fuchsia-500 disabled:opacity-50"
+                >
+                  Create + assign
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setAssignDialogLink(null)}
+                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => manualSpeakerId && assignUnassignedLink(assignDialogLink, manualSpeakerId)}
+                disabled={!manualSpeakerId || assigningLinkId === assignDialogLink.id}
+                className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
+              >
+                {assigningLinkId === assignDialogLink.id ? 'Assigning…' : 'Assign selected'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mergeOpen && detail && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-rose-900 rounded-lg p-5 w-full max-w-lg">
+            <div className="flex items-start gap-3 mb-4">
+              <AlertTriangle className="w-5 h-5 text-rose-300 mt-0.5" />
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-zinc-100">Merge speaker</h2>
+                <p className="mt-1 text-xs text-rose-200">
+                  This will permanently delete {detail.display_name} after moving its samples
+                  and session links into the selected speaker. Cannot be undone.
+                </p>
+              </div>
+              <button onClick={() => setMergeOpen(false)} className="text-zinc-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <label className="block text-xs text-zinc-400 mb-1">Merge into</label>
+            <select
+              value={mergeTargetId ?? ''}
+              onChange={e => setMergeTargetId(e.target.value ? Number(e.target.value) : null)}
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-3"
+            >
+              <option value="">Select target speaker</option>
+              {mergeCandidates.map(s => (
+                <option key={s.id} value={s.id}>{s.display_name}</option>
+              ))}
+            </select>
+
+            {selectedMergeTarget && (
+              <div className="mb-3 rounded border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-400">
+                {detail.display_name} will be deleted after moving into {selectedMergeTarget.display_name}.
+              </div>
+            )}
+
+            <label className="block text-xs text-zinc-400 mb-1" htmlFor="merge-confirm-speaker">
+              Type “{detail.display_name}” to confirm
+            </label>
+            <input
+              id="merge-confirm-speaker"
+              value={mergeConfirm}
+              onChange={e => setMergeConfirm(e.target.value)}
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-4"
+            />
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setMergeOpen(false)}
+                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={mergeSelectedSpeaker}
+                disabled={!mergeTargetId || !mergeConfirmMatches || merging}
+                className="text-xs px-3 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-white disabled:opacity-50"
+              >
+                {merging ? 'Merging…' : 'Merge and delete source'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
