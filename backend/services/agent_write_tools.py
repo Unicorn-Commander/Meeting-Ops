@@ -673,3 +673,283 @@ def apply_draft_followup_email(
         "status": "drafted",
     }
 
+
+# ---------------------------------------------------------------------------
+# v1.6 additions: delete_session (high-friction) + start/stop_recording.
+# ---------------------------------------------------------------------------
+
+
+def _required_typed_confirmation_for_delete(session: RecordingSession) -> str:
+    """Exact string the user must type to confirm a delete. Predictable + easy
+    to type but hard to produce by accident (embeds the session id)."""
+    return f"delete-{session.id}"
+
+
+def build_delete_session_proposal(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to delete this session")
+    if session.status == "recording":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete while recording; stop the recording first.",
+        )
+
+    required = _required_typed_confirmation_for_delete(session)
+    title = session.title or session.name or f"session #{session.id}"
+    before = {
+        "title": session.title,
+        "name": session.name,
+        "status": session.status,
+        "audio_object_key": session.audio_object_key,
+    }
+    after = {"deleted": True}
+    proposal = _proposal_base(
+        action="delete_session",
+        preview=(
+            f'PERMANENT DELETE session #{session.id} "{title}" — this purges the '
+            f"transcript, the local audio file, and the Garage object. Irreversible."
+        ),
+        diff={
+            "status": {"from": session.status, "to": "deleted"},
+            "audio_object_key": {"from": session.audio_object_key, "to": None},
+        },
+        before=before,
+        after=after,
+        payload={"session_id": str(payload.get("session_id"))},
+        resource_type="recording_session",
+        resource_id=str(session.id),
+    )
+    # Strong-friction extras: the UI/agent must surface these so the user types
+    # the exact string at confirm time; confirm_action re-checks the match.
+    proposal["required_typed_confirmation"] = required
+    proposal["confirmation_instructions"] = (
+        f"To confirm permanent deletion, type exactly: {required}"
+    )
+    return proposal
+
+
+def apply_delete_session(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+    proposal: dict[str, Any],
+    request_context: Optional[dict[str, Any]] = None,
+    typed_confirmation: Optional[str] = None,
+) -> dict[str, Any]:
+    required = proposal.get("required_typed_confirmation")
+    if not required:
+        raise HTTPException(status_code=409, detail="Proposal missing typed-confirmation contract.")
+    if (typed_confirmation or "").strip() != required:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Typed confirmation does not match. Type exactly: {required}",
+        )
+
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to delete this session")
+    expected = proposal.get("before") or {}
+    if session.status != expected.get("status"):
+        raise HTTPException(status_code=409, detail="state changed, please re-propose")
+    if session.status == "recording":
+        raise HTTPException(status_code=409, detail="Session began recording; stop it first.")
+
+    session_pk = session.id
+    session_uuid = session.session_id or str(session.id)
+    session_label = session.title or session.name or session_uuid
+
+    # Best-effort cleanup mirroring DELETE /recording-sessions/{id}.
+    import os
+    if session.audio_file and os.path.exists(session.audio_file):
+        try:
+            os.remove(session.audio_file)
+        except OSError:
+            pass
+    try:
+        from services.session_media import purge_session_media
+        purge_session_media(session)
+    except Exception:
+        pass
+
+    from database.models import Transcription
+    db.query(Transcription).filter(Transcription.session_id == session_pk).delete()
+    db.delete(session)
+    db.flush()
+
+    return {
+        "id": session_pk,
+        "session_id": session_uuid,
+        "title": session_label,
+        "deleted": True,
+    }
+
+
+def build_start_recording_proposal(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to start this recording")
+    if session.status == "recording":
+        raise HTTPException(status_code=409, detail="Session is already recording.")
+    if session.status in ("completed", "processing"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session status is {session.status!r} — cannot start a new recording on it.",
+        )
+    device_id = (payload.get("device_id") or "").strip() or None
+    before = {"status": session.status}
+    after = {"status": "recording"}
+    return _proposal_base(
+        action="start_recording",
+        preview=(
+            f'Start recording on session #{session.id} "{_session_label(session)}"'
+            + (f" using device {device_id}" if device_id else " using the default mic")
+        ),
+        diff={"status": {"from": session.status, "to": "recording"}},
+        before=before,
+        after=after,
+        payload={
+            "session_id": str(payload.get("session_id")),
+            "device_id": device_id,
+        },
+        resource_type="recording_session",
+        resource_id=str(session.id),
+    )
+
+
+def apply_start_recording(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+    proposal: dict[str, Any],
+    request_context: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to start this recording")
+    expected = proposal.get("before") or {}
+    if session.status != expected.get("status"):
+        raise HTTPException(status_code=409, detail="state changed, please re-propose")
+    if session.status == "recording":
+        raise HTTPException(status_code=409, detail="Session is already recording.")
+
+    import os
+    from services.working_audio_service import audio_service
+    device_id = payload.get("device_id") or None
+    canonical_id = session.session_id or str(session.id)
+    success, file_path = audio_service.start_recording(canonical_id, device_id=device_id)
+    if not success:
+        raise HTTPException(status_code=500, detail=f"Failed to start recording: {file_path}")
+    file_path = os.path.normpath(os.path.abspath(file_path))
+
+    session.status = "recording"
+    session.started_at = _now()
+    session.audio_file = file_path
+    session.updated_at = _now()
+    if request_context:
+        session.extra_data = {**(session.extra_data or {}), "last_agent_action": request_context}
+    db.flush()
+    return {
+        "id": session.id,
+        "session_id": canonical_id,
+        "status": session.status,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+        "audio_file": session.audio_file,
+    }
+
+
+def build_stop_recording_proposal(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to stop this recording")
+    if session.status != "recording":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is not currently recording (status={session.status!r}).",
+        )
+    before = {
+        "status": session.status,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+    }
+    after = {"status": "processing"}
+    return _proposal_base(
+        action="stop_recording",
+        preview=f'Stop recording on session #{session.id} "{_session_label(session)}"',
+        diff={"status": {"from": "recording", "to": "processing"}},
+        before=before,
+        after=after,
+        payload={"session_id": str(payload.get("session_id"))},
+        resource_type="recording_session",
+        resource_id=str(session.id),
+    )
+
+
+def apply_stop_recording(
+    *,
+    db: Session,
+    user: User,
+    org_id: int,
+    payload: dict[str, Any],
+    proposal: dict[str, Any],
+    request_context: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    session = _resolve_session(db, org_id, payload.get("session_id"))
+    if not _can_manage_session(db, user, org_id, session):
+        raise HTTPException(status_code=403, detail="Not permitted to stop this recording")
+    if session.status != "recording":
+        raise HTTPException(status_code=409, detail="state changed, please re-propose")
+
+    import os
+    from services.working_audio_service import audio_service
+    canonical_id = session.session_id or str(session.id)
+    success, audio_file = audio_service.stop_recording(canonical_id)
+    if not success:
+        raise HTTPException(status_code=500, detail=f"Failed to stop recording: {audio_file}")
+    if audio_file:
+        audio_file = os.path.normpath(os.path.abspath(audio_file))
+        session.audio_file = audio_file
+
+    session.status = "processing"
+    session.ended_at = _now()
+    if session.started_at:
+        try:
+            started = session.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            session.duration = (session.ended_at - started).total_seconds()
+        except Exception:
+            pass
+    session.updated_at = _now()
+    if request_context:
+        session.extra_data = {**(session.extra_data or {}), "last_agent_action": request_context}
+    db.flush()
+    return {
+        "id": session.id,
+        "session_id": canonical_id,
+        "status": session.status,
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "duration": session.duration,
+        "audio_file": session.audio_file,
+    }

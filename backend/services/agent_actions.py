@@ -19,15 +19,21 @@ from auth.tier import gate_feature_for_caller
 from .agent_write_tools import (
     apply_add_tag,
     apply_create_session,
+    apply_delete_session,
     apply_draft_followup_email,
     apply_remove_tag,
     apply_rename_session,
+    apply_start_recording,
+    apply_stop_recording,
     apply_trigger_reprocess,
     build_add_tag_proposal,
     build_create_session_proposal,
+    build_delete_session_proposal,
     build_draft_followup_email_proposal,
     build_remove_tag_proposal,
     build_rename_session_proposal,
+    build_start_recording_proposal,
+    build_stop_recording_proposal,
     build_trigger_reprocess_proposal,
 )
 
@@ -68,6 +74,22 @@ ACTION_REGISTRY: dict[str, dict[str, Any]] = {
         "feature": "agent_write_email_draft",
         "build": build_draft_followup_email_proposal,
         "apply": apply_draft_followup_email,
+    },
+    # v1.6 — high-friction destructive action + live-state record control
+    "delete_session": {
+        "feature": "agent_write_basic",
+        "build": build_delete_session_proposal,
+        "apply": apply_delete_session,
+    },
+    "start_recording": {
+        "feature": "agent_write_basic",
+        "build": build_start_recording_proposal,
+        "apply": apply_start_recording,
+    },
+    "stop_recording": {
+        "feature": "agent_write_basic",
+        "build": build_stop_recording_proposal,
+        "apply": apply_stop_recording,
     },
 }
 
@@ -158,7 +180,7 @@ def _audit(
 
 
 def _proposal_response(proposal: dict[str, Any]) -> dict[str, Any]:
-    return {
+    response = {
         "status": "needs_confirmation",
         "action": proposal["action"],
         "preview": proposal["preview"],
@@ -167,6 +189,12 @@ def _proposal_response(proposal: dict[str, Any]) -> dict[str, Any]:
         "proposal_id": proposal["proposal_id"],
         "expires_at": proposal["expires_at"],
     }
+    # Forward optional extra-friction fields (set by high-friction action
+    # builders like delete_session) so the UI/agent can render them.
+    for k in ("required_typed_confirmation", "confirmation_instructions"):
+        if proposal.get(k) is not None:
+            response[k] = proposal[k]
+    return response
 
 
 async def propose_action(
@@ -266,6 +294,7 @@ async def confirm_action(
     user: User,
     org_id: int,
     confirmation_token: str,
+    typed_confirmation: Optional[str] = None,
     request_context: Optional[dict[str, Any]] = None,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> dict[str, Any]:
@@ -285,6 +314,10 @@ async def confirm_action(
     action_kwargs: dict[str, Any] = {}
     if proposal["action"] == "trigger_reprocess":
         action_kwargs["background_tasks"] = background_tasks
+    if proposal["action"] == "delete_session":
+        # High-friction destructive action: the user must type the exact
+        # required string at confirm time; mismatch -> 409 inside applier.
+        action_kwargs["typed_confirmation"] = typed_confirmation
 
     try:
         result = applier(
