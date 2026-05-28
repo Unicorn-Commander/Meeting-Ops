@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SEED_LIMIT = 5
 _MAX_EXPANSION_SEEDS = 8
-_MAX_GRAPH_BONUS = 3.0
+_MAX_GRAPH_BONUS = 1.5
 _GRAPH_ENTITY_RE = re.compile(
     r"\b("
     r"[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)*"
@@ -296,6 +296,56 @@ def _speaker_matches_phrase(phrase: str, speaker_name: Optional[str], speaker_la
     return False
 
 
+def _title_boost(query: str, title: str) -> float:
+    """Score how directly a meeting's own title matches the query.
+
+    Mirrors ``SemanticSearchService._title_boost`` (v3.10.1): +2.5 exact,
+    +1.5 substring, +1.0 at >=75% term overlap, +0.5 at >=50%. Kept local so
+    the graph layer can reason about direct-text strength without importing
+    the Qdrant service (which tests routinely monkeypatch). Keep the
+    magnitudes in sync with that method.
+    """
+    nq = _normalize_text(query)
+    nt = _normalize_text(title)
+    if not nq or not nt:
+        return 0.0
+    if nq == nt:
+        return 2.5
+    if nq in nt or nt in nq:
+        return 1.5
+    query_terms = set(nq.split())
+    title_terms = set(nt.split())
+    if not query_terms or not title_terms:
+        return 0.0
+    overlap = len(query_terms & title_terms) / len(query_terms)
+    if overlap >= 0.75:
+        return 1.0
+    if overlap >= 0.5:
+        return 0.5
+    return 0.0
+
+
+def _final_score(base_score: float, title_boost: float, graph_bonus: float) -> float:
+    """Compose base + title + graph with a direct-text dominance rule.
+
+    A meeting whose own title clearly matches the query already carries a
+    strong, deterministic signal, so the graph bonus must not re-rank it
+    beneath a merely graph-adjacent sibling. When the title boost is high the
+    graph bonus collapses to a tiebreaker. When there is no direct-text signal
+    (``title_boost == 0``) the full graph bonus (up to ``_MAX_GRAPH_BONUS``)
+    applies, preserving the original intent of surfacing meetings linked via
+    speakers / topics / decisions.
+    """
+    if title_boost >= 1.0:
+        # Exact / substring / >=75%-overlap title: graph is a tiebreaker only.
+        graph_bonus = min(graph_bonus, 0.25)
+    elif title_boost >= 0.5:
+        # Partial (>=50%) title overlap: allow a small graph nudge.
+        graph_bonus = min(graph_bonus, 0.5)
+    # else: no direct-text signal -- full graph bonus up to _MAX_GRAPH_BONUS.
+    return base_score + title_boost + graph_bonus
+
+
 def _meeting_bonus(
     query: str,
     title: str,
@@ -309,21 +359,21 @@ def _meeting_bonus(
     nt = _normalize_text(title)
     if nq and nt:
         if nq == nt:
-            bonus += 2.0
+            bonus += 1.0
         elif nq in nt or nt in nq:
-            bonus += 1.25
+            bonus += 0.6
         else:
             query_terms = set(nq.split())
             title_terms = set(nt.split())
             if query_terms and title_terms:
                 overlap = len(query_terms & title_terms) / len(query_terms)
                 if overlap >= 0.75:
-                    bonus += 1.0
-                elif overlap >= 0.5:
                     bonus += 0.5
+                elif overlap >= 0.5:
+                    bonus += 0.25
 
     if graph_hits:
-        bonus += min(1.5, 0.35 * len(graph_hits))
+        bonus += min(0.75, 0.175 * len(graph_hits))
 
     if related_text:
         query_terms = {t for t in nq.split() if len(t) > 3 and t not in _STOPWORDS}
@@ -331,9 +381,12 @@ def _meeting_bonus(
             related_blob = _normalize_text(" ".join(related_text))
             overlap = len(query_terms & set(related_blob.split()))
             if overlap:
-                bonus += min(1.0, overlap * 0.2)
+                bonus += min(0.5, overlap * 0.1)
 
-    # Never let the graph swamp the base retriever.
+    # Never let the graph swamp the base retriever. Magnitudes are rebased
+    # below the title-boost ceiling (2.5) so a direct-text match always
+    # out-ranks a purely graph-adjacent sibling; the per-meeting composition
+    # in augment_meeting_search applies _final_score's dominance cap on top.
     return min(_MAX_GRAPH_BONUS, max(0.0, bonus))
 
 
@@ -560,17 +613,25 @@ async def augment_meeting_search(
             graph_hits.extend(e["title"] for e in evidence.get("linked_meetings", []))
             graph_hits.extend(evidence.get("related_speakers", []))
             related_text.extend(evidence.get("related_text", []))
-        bonus = _meeting_bonus(
+        base_score = float(hit.get("score") or 0.0)
+        title_boost = _title_boost(query, title)
+        graph_bonus = _meeting_bonus(
             query,
             title,
-            seed_score=float(hit.get("score") or 0.0),
+            seed_score=base_score,
             graph_hits=graph_hits,
             related_text=related_text,
         )
+        # The semantic base score already folds in the title boost
+        # (SemanticSearchService.search), so peel it back out and let
+        # _final_score re-add it exactly once alongside the (capped) graph
+        # bonus. Net effect for a seed: score = base_score + capped_graph.
+        final = _final_score(base_score - title_boost, title_boost, graph_bonus)
+        effective_bonus = max(0.0, round(final - base_score, 4))
         augmented = dict(hit)
-        augmented["graph_bonus"] = round(bonus, 4)
-        augmented["score"] = round(float(hit.get("score") or 0.0) + bonus, 4)
-        augmented["match_type"] = "graph_augmented" if bonus else hit.get("match_type", "semantic")
+        augmented["graph_bonus"] = effective_bonus
+        augmented["score"] = round(final, 4)
+        augmented["match_type"] = "graph_augmented" if effective_bonus else hit.get("match_type", "semantic")
         if evidence:
             augmented["graph_evidence"] = evidence
         current = scored.get(sid)
@@ -586,21 +647,28 @@ async def augment_meeting_search(
             continue
         title = row.title or row.name or f"Session {row.id}"
         graph_hits = [e["title"] for e in evidence.get("linked_meetings", [])] + evidence.get("related_speakers", [])
-        bonus = _meeting_bonus(
+        title_boost = _title_boost(query, title)
+        graph_bonus = _meeting_bonus(
             query,
             title,
             seed_score=0.0,
             graph_hits=graph_hits,
             related_text=evidence.get("related_text", []),
         )
+        # Graph-discovered meetings have no Qdrant base score, so give them
+        # their own direct-text (title) credit. This is what lets an exact-
+        # title meeting reached only through the graph still out-rank a
+        # graph-adjacent sibling (the session-122 regression).
+        final = _final_score(0.0, title_boost, graph_bonus)
+        effective_bonus = max(0.0, round(final - title_boost, 4))
         scored[sid] = {
             "session_id": sid,
             "title": title,
-            "score": round(bonus, 4),
-            "match_type": "graph_discovered" if bonus else "graph_augmented",
+            "score": round(final, 4),
+            "match_type": "graph_discovered" if (effective_bonus or title_boost) else "graph_augmented",
             "snippet": row.summary or row.transcript_simple or "",
             "created_at": row.created_at.isoformat() if row.created_at else None,
-            "graph_bonus": round(bonus, 4),
+            "graph_bonus": effective_bonus,
             "graph_evidence": evidence,
         }
 
