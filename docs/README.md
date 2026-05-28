@@ -39,6 +39,10 @@ Phased plan to bring Meeting-Ops to mobile, watch, and native devices. Phase A c
 
 - [`conference-room-design.md`](conference-room-design.md) (1136 lines). Status: Phase 1 shipped, Phases 2-5 designed. Multi-room native model, USB mic primary path, chunk-based recording, room abstraction, satellite integration, and future administrative lifecycle.
 
+## Agent platform (planning)
+
+- [`agent-platform-roadmap.md`](agent-platform-roadmap.md). Status: planning. The next arc — conversational + app-driving + voice agent. Inventories the existing foundation (per-meeting + cross-meeting RAG in `ai_chat.py` + Qdrant, the Brigade FalkorDB graph, the 8 read-only MCP tools, the `agents.py`/`agent_tools.py` framework, TTS/STT building blocks), names the gaps, and lays out a 4-phase plan (solidify RAG + graph → safe app-control MCP write tools → agent runtime → voice) plus the key design decisions and operational context.
+
 ## Ecosystem integration
 
 - [`brigade-integration-design.md`](brigade-integration-design.md) (1332 lines). Status: designed. Meeting-Ops to Brigade graph writer and 3D viewer. Writes Meeting, Speaker, ActionItem, Topic, and Decision nodes to Brigade FalkorDB on session completion. Tenancy modes are `shared`, `per_org_graph`, and `per_org_instance` via environment variable. Includes the HIPAA path for Legacy1.
