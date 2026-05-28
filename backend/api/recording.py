@@ -937,6 +937,31 @@ async def finalize_always_on_session(
 
     background_tasks.add_task(_fire_brigade_live_write, session.id)
 
+    # Project-Ops task bridge on the live/browser-only finalize path
+    # (the reprocess path fires its own call in _run_session_reprocess).
+    # Independent fire-and-forget task so a PO outage never blocks finalize
+    # and never interferes with the Brigade write above.
+    async def _fire_projectops_live_write(session_pk: int):
+        from database.database import SessionLocal
+
+        db_po = SessionLocal()
+        try:
+            from services.projectops_writer import write_action_items_to_projectops
+
+            await write_action_items_to_projectops(
+                db=db_po, session_pk=session_pk, completion_mode="live"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[projectops] live write failed session=%s: %s",
+                session_pk,
+                e,
+            )
+        finally:
+            db_po.close()
+
+    background_tasks.add_task(_fire_projectops_live_write, session.id)
+
     return _session_payload(session)
 
 
@@ -1759,6 +1784,28 @@ async def _run_session_reprocess(session_pk: int) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Reprocess brigade graph write failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
+        # Stage 7 — Project-Ops task bridge. Best-effort one-way write:
+        # each AI-extracted action item becomes a Project-Ops task on the
+        # per-org target project (resolved from the session->PO link, a
+        # per-meeting override, or the org default). Idempotent via a
+        # po_task_id stamp on action_items.raw_payload, so reprocess
+        # re-runs don't duplicate. Same swallow-all posture as the Brigade
+        # block above: failures NEVER raise into the reprocess pipeline,
+        # and an unconfigured PO (PROJECTOPS_API_KEY unset) is a clean
+        # no-op.
+        try:
+            from services.projectops_writer import write_action_items_to_projectops
+
+            await write_action_items_to_projectops(
+                db=db, session_pk=session.id, completion_mode="reprocess"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Project-Ops write swallowed error session=%s: %s",
                 session.id,
                 exc,
             )

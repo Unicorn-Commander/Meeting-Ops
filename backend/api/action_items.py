@@ -325,6 +325,23 @@ async def update_action_item(
 
     db.commit()
     db.refresh(item)
+
+    # Best-effort: if this action item was bridged to a Project-Ops task
+    # and its status changed (e.g. user marked it done), propagate the
+    # new status to PO. Never blocks the response; swallowed on any error
+    # and a clean no-op when PO is unconfigured.
+    if "status" in fields and (item.raw_payload or {}).get("po_task_id"):
+        try:
+            from services.projectops_writer import propagate_action_item_status
+
+            await propagate_action_item_status(item)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "action_items: PO status propagation swallowed id=%s: %s",
+                item.id,
+                exc,
+            )
+
     logger.info(
         "action_items: patch id=%s user=%s fields=%s",
         item.id,
