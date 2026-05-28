@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
+from auth.models import User
 from sqlalchemy import desc, func, or_
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,7 @@ from services.graph_augmented_retrieval import (
     augment_meeting_search,
     resolve_graph_augmentation_enabled,
 )
+from services.agent_actions import propose_action
 
 logger = logging.getLogger(__name__)
 
@@ -876,6 +878,119 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_create_session",
+            "description": (
+                "Propose creating a new meeting session. Returns a "
+                "confirmation request; do not imply the session already "
+                "exists until the user confirms."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_rename_session",
+            "description": (
+                "Propose renaming a specific meeting session. Returns a "
+                "confirmation request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "title": {"type": "string"},
+                },
+                "required": ["session_id", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_add_tag",
+            "description": (
+                "Propose adding a single tag to a session. Returns a "
+                "confirmation request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "tag": {"type": "string"},
+                },
+                "required": ["session_id", "tag"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_remove_tag",
+            "description": (
+                "Propose removing a single tag from a session. Returns a "
+                "confirmation request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "tag": {"type": "string"},
+                },
+                "required": ["session_id", "tag"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_trigger_reprocess",
+            "description": (
+                "Propose triggering a server reprocess for a session. "
+                "Returns a confirmation request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_draft_followup_email",
+            "description": (
+                "Propose a drafted follow-up email for a session. Returns "
+                "a confirmation request and the drafted text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "recipient_name": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
 ]
 
 
@@ -884,6 +999,23 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
 # trying to inspect helper signatures at runtime.
 _TOOLS_NEEDING_LLM = {"ask_about_meetings", "chat_with_meeting"}
 _TOOLS_USING_GRAPH_AUGMENT = {"search_meetings", "ask_about_meetings"}
+_TOOLS_USING_AGENT_ACTIONS = {
+    "propose_create_session",
+    "propose_rename_session",
+    "propose_add_tag",
+    "propose_remove_tag",
+    "propose_trigger_reprocess",
+    "propose_draft_followup_email",
+}
+
+_AGENT_ACTION_TOOL_TO_ACTION = {
+    "propose_create_session": "create_session",
+    "propose_rename_session": "rename_session",
+    "propose_add_tag": "add_tag",
+    "propose_remove_tag": "remove_tag",
+    "propose_trigger_reprocess": "trigger_reprocess",
+    "propose_draft_followup_email": "draft_followup_email",
+}
 
 
 MEETING_RAG_TOOL_MAP: dict[str, Callable[..., Any]] = {
@@ -904,19 +1036,38 @@ async def execute_tool(
     *,
     db: Session,
     org_id: int,
+    current_user: Optional[User] = None,
     llm_provider: Any,
     graph_augment: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Dispatch a single tool call. Returns a JSON-safe payload — never
     raises; tool errors flow back to the model as ``{"error": "..."}`` so
     it can recover (e.g. try a different session_id)."""
-    impl = MEETING_RAG_TOOL_MAP.get(name)
-    if impl is None:
-        return {"error": f"Unknown tool '{name}'."}
-
     safe_args = arguments or {}
     if not isinstance(safe_args, dict):
         return {"error": f"Tool arguments must be an object, got {type(safe_args).__name__}."}
+
+    if name in _TOOLS_USING_AGENT_ACTIONS:
+        if current_user is None:
+            return {"error": f"Tool '{name}' requires an authenticated user context."}
+        action_name = _AGENT_ACTION_TOOL_TO_ACTION.get(name)
+        if not action_name:
+            return {"error": f"Unknown action tool '{name}'."}
+        try:
+            return await propose_action(
+                db=db,
+                user=current_user,
+                org_id=org_id,
+                action=action_name,
+                payload=safe_args,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Agent action proposal failed")
+            return {"error": f"{name} failed: {exc}"}
+
+    impl = MEETING_RAG_TOOL_MAP.get(name)
+    if impl is None:
+        return {"error": f"Unknown tool '{name}'."}
 
     try:
         extra_kwargs = {}

@@ -103,6 +103,25 @@ function installFetch(streamEvents: string[] | null = null, historyPayload: unkn
       }
       return streamingResponse(streamEvents);
     }
+    if (url.includes('/api/agent-actions/confirm')) {
+      return jsonResponse({
+        status: 'applied',
+        action: 'rename_session',
+        proposal_id: 'phc_v1_test',
+        result: {
+          id: 1,
+          session_id: '1',
+          title: 'HTTP Round Trip (final)',
+        },
+      });
+    }
+    if (url.includes('/api/agent-actions/cancel')) {
+      return jsonResponse({
+        status: 'cancelled',
+        action: 'rename_session',
+        proposal_id: 'phc_v1_test',
+      });
+    }
     if (url.includes('/api/rag/chat')) {
       if (streamEvents === null) {
         return jsonResponse({ detail: 'no embeddings yet' }, 503);
@@ -229,6 +248,32 @@ describe('RAGChat', () => {
     const link = await screen.findByRole('link', { name: /Meeting abc-123 chunk 4/ });
     expect(link).toBeInTheDocument();
     expect(link).toHaveAttribute('href', '#/sessions/abc-123');
+  });
+
+  it('renders a confirmation card and applies the action inline', async () => {
+    installFetch([
+      'data: {"event":"needs_confirmation","proposal":{"status":"needs_confirmation","action":"rename_session","preview":"Rename session #12 \\"Old\\" → \\"New\\"","diff":{"title":{"from":"Old","to":"New"}},"confirmation_token":"phc_v1_test","proposal_id":"phc_v1_test","expires_at":"2026-05-03T00:00:00Z"}}\n\n',
+      'data: {"done": true, "sources": [], "metadata": {"pending_confirmation": {"proposal": {"status":"needs_confirmation","action":"rename_session","preview":"Rename session #12 \\"Old\\" → \\"New\\"","diff":{"title":{"from":"Old","to":"New"}},"confirmation_token":"phc_v1_test","proposal_id":"phc_v1_test","expires_at":"2026-05-03T00:00:00Z"},"state":"pending"}}}\n\n',
+    ]);
+    await renderRAGChat();
+
+    const input = screen.getByPlaceholderText(/ask a question about your meetings/i);
+    fireEvent.change(input, { target: { value: 'Rename the session.' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    expect(
+      await screen.findByText(/Action proposal requires confirmation/i)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/Rename session #12/i).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('button', { name: /Confirm/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Applied successfully/i)).toBeInTheDocument();
+      expect(fetchCalls.some((call) => call.url.includes('/api/agent-actions/confirm'))).toBe(true);
+    });
   });
 
   it('shows an error message when the agent dispatcher is unreachable', async () => {

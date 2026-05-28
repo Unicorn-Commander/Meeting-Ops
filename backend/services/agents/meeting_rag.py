@@ -28,6 +28,7 @@ import httpx
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from auth.models import User
 from services.agent_tools import (
     MEETING_RAG_TOOLS,
     execute_tool,
@@ -69,6 +70,12 @@ SYSTEM_PROMPT = (
     "- list_meetings — 'show me my recent meetings'.\n"
     "- get_analytics — counts, durations, top speakers over a window.\n"
     "- get_meeting_insights — cached sentiment/keywords/engagement metrics.\n"
+    "\n"
+    "Write tools:\n"
+    "- propose_create_session, propose_rename_session, propose_add_tag, propose_remove_tag — return a confirmation proposal; do not claim the change has already happened.\n"
+    "- propose_trigger_reprocess — return a confirmation proposal; do not claim reprocessing has started until confirmed.\n"
+    "- propose_draft_followup_email — return a confirmation proposal and draft text; wait for confirmation before presenting it as the final draft.\n"
+    "If a write tool returns a confirmation proposal, surface the proposal and stop the loop instead of pretending the mutation was applied.\n"
     "\n"
     "Cite meetings by title (and date when relevant). Be concise. If a "
     "search snippet already contains the answer, you can quote from it "
@@ -245,6 +252,7 @@ async def run_meeting_rag(
     history: list[dict[str, Any]],
     db: Session,
     org_id: int,
+    current_user: User,
     scope: Optional[dict[str, Any]] = None,
 ) -> StreamingResponse:
     """Entry point used by ``api/agents.py``.
@@ -288,6 +296,7 @@ async def run_meeting_rag(
         nonlocal messages
         full_answer = ""
         t0 = time.time()
+        pending_proposal: dict[str, Any] | None = None
         try:
             for iteration in range(_MAX_TOOL_ITERATIONS):
                 assistant_msg = await _call_llm_with_tools(
@@ -351,6 +360,7 @@ async def run_meeting_rag(
                             args,
                             db=db,
                             org_id=org_id,
+                            current_user=current_user,
                             llm_provider=llm_provider,
                             graph_augment=graph_augment,
                         )
@@ -370,12 +380,29 @@ async def run_meeting_rag(
                         "preview": _truncate_for_preview(result),
                     })
 
+                    if isinstance(result, dict) and result.get("status") == "needs_confirmation":
+                        pending_proposal = result
+                        full_answer = result.get("preview") or full_answer
+                        yield _sse({
+                            "event": "needs_confirmation",
+                            "name": name,
+                            "proposal": result,
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": result.get("preview") or "",
+                        })
+                        break
+
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.get("id") or name,
                         "name": name,
                         "content": json.dumps(result, default=str),
                     })
+
+                if pending_proposal is not None:
+                    break
 
             else:
                 # Iteration cap hit — force a final answer. We strip tools so
@@ -410,6 +437,7 @@ async def run_meeting_rag(
             "iterations": len(tool_history),
             "response_time_ms": elapsed_ms,
             "model": getattr(llm_provider, "model", None),
+            "pending_confirmation": pending_proposal,
         }
         yield _sse({"done": True, "sources": sources, "metadata": metadata})
 
@@ -425,6 +453,7 @@ async def run_meeting_rag(
             metadata={
                 "tools_called": [e["name"] for e in tool_history],
                 "sources": sources,
+                "pending_confirmation": pending_proposal,
             },
         )
 

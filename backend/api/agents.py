@@ -270,6 +270,7 @@ async def dispatch_chat(
             history=history,
             db=db,
             org_id=org_id,
+            current_user=current_user,
             scope=body.scope,
         )
 
