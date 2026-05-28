@@ -3,6 +3,7 @@ import {
   Brain,
   BookOpen,
   Cpu,
+  KeyRound,
   Mic,
   Monitor,
   Network,
@@ -32,6 +33,13 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     title: 'In-browser AI',
     icon: Brain,
     description: 'WebGPU model + privacy-mode fallback',
+    category: 'preferences',
+  },
+  {
+    id: 'personal-access-tokens',
+    title: 'Personal Access Tokens',
+    icon: KeyRound,
+    description: 'Per-user MCP access tokens',
     category: 'preferences',
   },
 

@@ -308,6 +308,7 @@ _load_router(app, "provider_settings", "api.provider_settings")
 _load_router(app, "integrations", "api.integrations")
 _load_router(app, "digests", "api.digests")
 _load_router(app, "agent_actions", "api.agent_actions")
+_load_router(app, "personal_access_tokens", "api.personal_access_tokens")
 
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")

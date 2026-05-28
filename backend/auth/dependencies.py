@@ -8,6 +8,7 @@ from jose import JWTError
 from database.database import get_db
 from auth.models import User
 from auth.organization import ActiveOrganization, is_global_admin, parse_group_list, resolve_active_organization
+from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat
 from auth.service import AuthService
 from auth.utils import decode_token, check_permission
 
@@ -86,6 +87,15 @@ async def get_current_user_optional(
             # when this is invisible (see Shafen 2026-05-18: full-email
             # username + a sanitize regex that rejects '@'/'.').
             logger.exception("SSO auto-provision failed for email=%s username=%s", sso_email, sso_username)
+            user = None
+
+    # Try Personal Access Token bearer auth before JWT decoding. PATs are
+    # intentionally prefix-scoped so legacy JWT/SSO behavior is unchanged.
+    if not user and token and token.startswith(PAT_PREFIX):
+        try:
+            user = resolve_pat(db, plaintext=token)
+        except Exception:
+            logger.exception("PAT resolution failed for prefix=%s", token[:12])
             user = None
 
     # Try JWT token

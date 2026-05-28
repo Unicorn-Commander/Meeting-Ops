@@ -97,6 +97,29 @@ class User(Base):
     # Relationships
     organizations = relationship("UserOrganization", back_populates="user", foreign_keys="UserOrganization.user_id")
     audit_logs = relationship("AuditLog", back_populates="user")
+    personal_access_tokens = relationship(
+        "PersonalAccessToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class PersonalAccessToken(Base):
+    __tablename__ = "personal_access_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_personal_access_tokens_token_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    token_hash = Column(String(64), nullable=False, index=True)
+    token_prefix = Column(String(12), nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="personal_access_tokens")
 
 class UserOrganization(Base):
     __tablename__ = "user_organizations"

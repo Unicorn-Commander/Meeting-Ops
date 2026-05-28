@@ -40,6 +40,9 @@ const WifiSettings = lazy(() => import('../components/settings/WifiSettings'));
 const PerformanceSettings = lazy(
   () => import('../components/settings/PerformanceSettings')
 );
+const PersonalAccessTokens = lazy(
+  () => import('../components/settings/PersonalAccessTokens')
+);
 
 export default function SettingsEnhanced() {
   const { user } = useAuth();
@@ -215,6 +218,8 @@ export default function SettingsEnhanced() {
         return <WifiSettings />;
       case 'performance':
         return <PerformanceSettings />;
+      case 'personal-access-tokens':
+        return <PersonalAccessTokens />;
       default:
         return null;
     }
@@ -246,6 +251,7 @@ export default function SettingsEnhanced() {
             saving={saving}
             saveStatus={saveStatus}
             onSave={handleSave}
+            showSave={activeSection !== 'personal-access-tokens'}
           >
             {renderActive()}
           </SettingsLayout>
