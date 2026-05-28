@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.16.0] - 2026-05-28
+
+### Fixed
+- **Graph-augmented retrieval — tuned magnitudes + direct-text dominance rule, closing the v3.11.0 regression.** Live A/B on prod data (4 anchor queries, 80-meeting corpus, 477-node graph): `automatic summarization manual button transcription` no longer demotes the title-matching meeting (the regression case); 3/4 queries reorder usefully with the graph engaged on 4/4. Specific changes in `backend/services/graph_augmented_retrieval.py`:
+  - `_MAX_GRAPH_BONUS` reduced 3.0 → 1.5 (now sits below the v3.10.1 `_title_boost` ceiling of 2.5).
+  - `_meeting_bonus` per-component values halved: 2.0/1.25/1.0/0.5 → 1.0/0.6/0.5/0.25.
+  - New `_title_boost()` mirrors `SemanticSearchService._title_boost` so the rerank composer sees the same direct-text signal as the seed retriever.
+  - New `_final_score()` applies a direct-text dominance cap: `title_boost >= 1.0` caps graph_bonus at 0.25; `>= 0.5` caps at 0.5; no direct-text signal lets the full graph bonus through (up to 1.5).
+- Three new tests cover the regression (`test_exact_title_outranks_graph_sibling`), the no-direct-text case (`test_graph_signal_still_works_without_direct_text`), and magnitude bounds.
+- New `scripts/eval_graph_rag.py`: idempotent A/B harness over the 4 anchor queries; prints a paste-ready comparison table.
+
+### Operational note
+- `MEETING_RAG_GRAPH_AUGMENTATION` env var default remains `"0"` (flag off). With the regression fixed and the live eval clean, flipping it to `"1"` on bigboy is now a safe default-on. Per-request `scope.graph_augmented_retrieval=true` continues to override.
+
+
 ## [3.15.1] - 2026-05-28
 
 ### Fixed
