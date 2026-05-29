@@ -2011,6 +2011,7 @@ async def cleanup_old_recordings(
 async def start_always_on(
     body: Optional[StartRecordingRequest] = None,
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Enable always-on recording mode. The system will listen continuously
     and automatically create meeting sessions when speech is detected."""
@@ -2018,6 +2019,10 @@ async def start_always_on(
 
     device_id = body.device_id if body else None
     result = await always_on_recorder.start(device_id=device_id)
+    # Scope every auto-detected meeting to the requesting user's org. Without
+    # this the recorder refuses to create sessions (organization_id is NOT
+    # NULL) — see AlwaysOnRecorder.attach_owner / _start_new_meeting.
+    always_on_recorder.attach_owner(active_org.organization.id, current_user.id)
     return result
 
 

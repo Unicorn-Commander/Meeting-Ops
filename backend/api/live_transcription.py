@@ -32,8 +32,8 @@ async def get_live_transcription_status():
 @router.post("/start")
 async def start_live_transcription(current_user = Depends(get_current_user)):
     """Start live transcription service (admin only)"""
-    if not current_user.get("is_superuser", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="superuser required")
     
     try:
         await live_transcription_service.start()
@@ -44,8 +44,8 @@ async def start_live_transcription(current_user = Depends(get_current_user)):
 @router.post("/stop")
 async def stop_live_transcription(current_user = Depends(get_current_user)):
     """Stop live transcription service (admin only)"""
-    if not current_user.get("is_superuser", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="superuser required")
     
     await live_transcription_service.stop()
     return {"message": "Live transcription stopped", "status": "success"}
@@ -56,8 +56,8 @@ async def configure_live_transcription(
     current_user = Depends(get_current_user)
 ):
     """Configure live transcription settings (admin only)"""
-    if not current_user.get("is_superuser", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="superuser required")
     
     # Apply configuration
     live_transcription_service.configure(
