@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+## [3.18.2] - 2026-05-29
+
+### Security — generative-endpoint tier gating
+Continues the v3.18.1 moat restoration. v3.18.1 closed the audio-upload + server-recording paths; v3.18.2 closes the remaining server-LLM-on-content paths called out in the Codex code audit table.
+
+- **`/api/ai-chat/sessions/{id}/messages`** (`backend/api/ai_chat.py:231`): per-session AI chat runs server LLM with meeting transcript as context. Now `gate_feature_for_caller(current_user, "canonical_reprocess")` rejects free users with 403 before any work starts.
+- **`/api/ai-chat/rag/query`** (`backend/api/ai_chat.py:496`): cross-meeting RAG calls the server LLM over retrieved transcript chunks. Same gate.
+- **`/api/simple/recording-sessions/{id}/insights`** + **`/insights/regenerate`** (`backend/api/ai_insights.py`): the gate sits just before `_generate_ai_insights` so cached reads stay open for any tier (cached insights only exist if a paid run generated them earlier) while new generation is paid-tier.
+- **`/api/digests`** (`backend/api/digests.py:222`): the gate sits between the cache-check and `_generate_digest`. Cached digest reads stay open; new digest generation is paid-tier.
+
+### Performance — async event-loop hygiene
+- **`backend/api/ai_insights.py`**: 6 `svc.chat_sync(...)` calls inside async helper functions (`_generate_summary`, `_extract_keywords`, `_analyze_speaker_sentiment`, `_analyze_overall_sentiment`, `_extract_action_items`, `_extract_decisions`) were blocking the asyncio event loop for tens of seconds per LLM round-trip. Each is now wrapped in `await asyncio.to_thread(svc.chat_sync, ...)` so the loop stays responsive to other requests while the LLM runs. Test guard ensures every `chat_sync` is paired with a `to_thread` wrap (regression catches a future refactor that re-introduces a bare sync call inside an async handler).
+
+### Tests
+- `backend/tests/test_free_tier_enforcement.py` (+5 tests): ai-chat messages 403, ai-chat rag/query 403, insights regenerate 403, digest generation 403 (free + force=true with sessions present), and the chat_sync→to_thread regression guard.
+- `backend/tests/test_session_watchdog.py` (+2 tests): double-run idempotency (a second consecutive pass over already-failed sessions marks zero new rows), and `SESSION_WATCHDOG_MAX_PER_PASS` cap behavior.
+
+### Audit context
+- Findings from the 2026-05-29 Codex code audit, sections "Tier-Gating Audit" + "Performance Findings" (S1). PO P-00055 task `622e44b8-6f9e-4f5c-aa66-d4701cb9794f` tracks the v3.18.x sequence.
+
+### Deferred to v3.18.3
+- Background-jobification of long handlers — `api/recording.py:840` (always-on finalize), `api/digests.py:_generate_digest` (LLM chain), `api/tts.py:214,415` (sync render). These need arq job IDs + status-polling endpoints + frontend integration; bigger refactor than fits cleanly here.
+- Full before-snapshot drift checks in `services/agent_write_tools.py` (S2).
+- Tier gates for `api/session_emails.py` + `api/batch_export.py` + `api/speakers.py` (defense-in-depth; not S0/S1).
+
+
 ## [3.18.1] - 2026-05-29
 
 ### Security — moat restoration

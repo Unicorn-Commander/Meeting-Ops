@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import asyncio
 import logging
 import json
 
@@ -15,6 +16,7 @@ from database.models import RecordingSession as DBRecordingSession, Transcriptio
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
+from auth.tier import gate_feature_for_caller
 from services.providers import get_provider_registry
 
 logger = logging.getLogger(__name__)
@@ -152,6 +154,11 @@ async def get_meeting_insights(
                     "Cached insights for session %s failed validation, regenerating: %s",
                     session.id, exc,
                 )
+
+        # v3.18.2 tier gate: insight generation runs the server LLM.
+        # Cached reads above stay open (cache only exists if a paid run
+        # generated it earlier), but actual generation is paid-tier.
+        gate_feature_for_caller(current_user, "canonical_reprocess")
 
         # Generate insights using the org's configured LLM
         insights = await _generate_ai_insights(
@@ -294,7 +301,8 @@ async def _generate_summary(transcript: str, db: Session, org_id: Optional[int])
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
-            text = svc.chat_sync(
+            text = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt=(
                     "You are a meeting assistant. Provide a concise, structured "
                     "meeting summary covering main topics, key decisions, and "
@@ -323,7 +331,8 @@ async def _extract_keywords(
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
-            raw = svc.chat_sync(
+            raw = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt="You extract keywords from meeting transcripts. Return ONLY a JSON array of strings.",
                 user_prompt=(
                     "Extract the top 10 important keywords or key phrases from this meeting transcript. "
@@ -414,7 +423,8 @@ async def _analyze_speaker_sentiment(segments: List[str], db: Session, org_id: O
     if svc:
         try:
             combined = " ".join(segments[:50])[:6000]
-            raw = svc.chat_sync(
+            raw = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt="You classify sentiment. Respond with ONLY one word: positive, negative, or neutral.",
                 user_prompt=(
                     "Classify the overall sentiment of this speaker's dialogue as exactly one word: "
@@ -459,7 +469,8 @@ async def _analyze_overall_sentiment(
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
-            raw = svc.chat_sync(
+            raw = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt="You analyze meeting sentiment. Return ONLY a JSON object with keys: positive, neutral, negative (percentages summing to 100).",
                 user_prompt=(
                     "Analyze the sentiment of this meeting transcript. "
@@ -509,7 +520,8 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
-            raw = svc.chat_sync(
+            raw = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt="You extract action items from meeting transcripts. Return ONLY a JSON array.",
                 user_prompt=(
                     "Extract action items from this meeting transcript. "
@@ -550,7 +562,8 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
-            raw = svc.chat_sync(
+            raw = await asyncio.to_thread(
+                svc.chat_sync,
                 system_prompt="You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object.",
                 user_prompt=(
                     "Extract key decisions and follow-up items from this meeting. "

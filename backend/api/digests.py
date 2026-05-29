@@ -13,6 +13,7 @@ from database.models import RecordingSession, MeetingDigest
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
+from auth.tier import gate_feature_for_caller
 from services.providers.registry import get_provider_registry
 
 router = APIRouter(prefix="/api/digests", tags=["Digests"])
@@ -216,5 +217,10 @@ async def get_digest(
                 meeting_count=existing.meeting_count,
                 cached=True,
             )
+
+    # v3.18.2 tier gate: digest generation runs the server LLM (multiple
+    # chat calls to mini-summarize + synthesize). Cached digests above
+    # are free for any tier to read; new generation is paid-tier.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
 
     return await _generate_digest(db, active_org.organization.id, period, date, project_id)

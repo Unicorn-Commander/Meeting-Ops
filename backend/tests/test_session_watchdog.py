@@ -145,3 +145,58 @@ def test_watchdog_disabled_flag(monkeypatch):
     from services.session_watchdog import mark_abandoned_recording_sessions
     res = mark_abandoned_recording_sessions()
     assert res == {"enabled": False}
+
+
+def test_watchdog_double_run_idempotent(org_and_user, monkeypatch):
+    """A second consecutive run finds nothing to do — already-failed sessions
+    must not be re-touched. Confirms the cron can fire on its 30-min schedule
+    without churning the DB or stamping new auto_failed_reason values."""
+    org_id, user_id = org_and_user
+    monkeypatch.setenv("SESSION_WATCHDOG_HOURS", "6")
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from services.session_watchdog import mark_abandoned_recording_sessions
+
+    db = SessionLocal()
+    try:
+        old = _make_session(db=db, org_id=org_id, user_id=user_id, status="recording", hours_old=12)
+        old_id = old.id
+    finally:
+        db.close()
+
+    res1 = mark_abandoned_recording_sessions()
+    assert res1["marked_failed"] >= 1
+    res2 = mark_abandoned_recording_sessions()
+    assert res2["marked_failed"] == 0, "second run must not re-mark already-failed rows"
+
+    db = SessionLocal()
+    try:
+        row = db.get(RecordingSession, old_id)
+        assert row.status == "failed"
+    finally:
+        db.close()
+
+
+def test_watchdog_respects_max_per_pass_cap(org_and_user, monkeypatch):
+    """When more stale sessions exist than the per-pass cap, the watchdog
+    marks at most N. Prevents a runaway state where a single pass touches
+    thousands of rows and blocks for minutes."""
+    org_id, user_id = org_and_user
+    monkeypatch.setenv("SESSION_WATCHDOG_HOURS", "6")
+    monkeypatch.setenv("SESSION_WATCHDOG_MAX_PER_PASS", "2")
+    from database.database import SessionLocal
+    from services.session_watchdog import mark_abandoned_recording_sessions
+
+    db = SessionLocal()
+    try:
+        for _ in range(5):
+            _make_session(db=db, org_id=org_id, user_id=user_id, status="recording", hours_old=12)
+    finally:
+        db.close()
+
+    res = mark_abandoned_recording_sessions()
+    # First pass takes at most the cap
+    assert res["marked_failed"] <= 2, f"expected cap=2, got {res['marked_failed']}"
+    # Second pass takes the next batch
+    res2 = mark_abandoned_recording_sessions()
+    assert res2["marked_failed"] <= 2

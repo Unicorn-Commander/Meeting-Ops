@@ -17,6 +17,7 @@ from database.models import RecordingSession as DBRecordingSession, ChatHistory
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
+from auth.tier import gate_feature_for_caller
 from services.providers import get_provider_registry
 
 router = APIRouter(prefix="/api/ai-chat", tags=["AI Chat"])
@@ -237,6 +238,10 @@ async def send_chat_message(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Send a message about a meeting and get an AI response using the real LLM."""
+
+    # v3.18.2 tier gate: per-session AI chat calls the server LLM with the
+    # meeting transcript as context. Free tier is browser-only.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
 
     # Look up the recording session
     session = db.query(DBRecordingSession).filter(
@@ -501,6 +506,10 @@ async def rag_query(
     and sends to Granite 3.3 2B for an answer citing which meeting each fact
     comes from. Uses chat history for query rewriting and conversational context.
     """
+    # v3.18.2 tier gate: cross-meeting RAG calls the server LLM with
+    # retrieved transcript chunks. Free tier is browser-only.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
+
     import time
 
     try:
