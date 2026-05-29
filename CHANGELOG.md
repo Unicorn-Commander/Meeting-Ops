@@ -1,5 +1,38 @@
 ## [Unreleased]
 
+## [3.18.1] - 2026-05-29
+
+### Security — moat restoration
+- **`/api/uploads/start` transcribe action now tier-gated** (`backend/api/uploads.py`). Free-tier users could previously POST `action="transcribe"` with the 500MB/month quota and trigger the full server STT/diarization/summary pipeline — a moat violation. Now `gate_feature_for_caller(current_user, "canonical_reprocess")` rejects free users at 403 before any work starts.
+- **`/api/simple/recording-sessions/{id}/start` tier-gated** (`backend/api/simple_recording_db.py`). Legacy server-recording start triggered STT/diarization/summary on stop. Free is browser-only.
+- **`/api/rooms/{id}/recordings/start` tier-gated** (`backend/api/rooms.py`). RoomRecorder posts chunks via `InternalServiceCaller` (legitimately bypassing the gate once running), so we gate at start to prevent free orgs from kicking off the server pipeline.
+- **Satellite `/upload-audio` and `/transcript` endpoints now tier-gated by org plan** (`backend/api/satellite_api.py`). Satellites authenticate by device secret OR user session and resolve to an owning org. Free-plan orgs cannot use satellite capture even with a valid device secret. New `_gate_satellite_for_org` helper reads `Organization.plan` (the actual schema column — `Organization` has no `tier` column).
+- **`backend/auth/tier.py`: added `get_org_tier(org)` helper** that reads `Organization.plan`, mirroring `get_user_tier` for org-keyed gates. Defaults to `"free"` when missing/None.
+- **`backend/api/websocket_remote_audio.py`: WebSocket org/tier authorization**. Previously any valid JWT could connect to any `session_id` UUID (cross-org audio injection). Now: tier-gates on `canonical_reprocess` before `accept()` (close 4403), org-scopes the session lookup via the user's `UserOrganization` membership set (superusers bypass), and returns 4403 on both cross-org miss and not-found (avoids existence-leak).
+- **`backend/api/live_transcription.py`: admin check fix on all 3 endpoints**. Previously called `current_user.get("is_superuser", False)` on a SQLAlchemy `User` object — that's a dict method on an ORM object and raised `AttributeError` → 500 instead of 403. Replaced with `not current_user.is_superuser` on start/stop/configure (all three had the same bug).
+- **`backend/services/always_on_recorder.py`: org/user injection on `_start_new_meeting()`**. Previously inserted `RecordingSession` rows without `organization_id` or `user_id` (NOT NULL columns). Added `attach_owner(org_id, user_id)` instance method, owner injection in `_start_new_meeting()`, and an early skip-with-warning when both are still `None` at insert time. State machine untouched. `backend/api/simple_recording_db.py:start_always_on` now calls `attach_owner()` immediately after `start()`.
+
+### Security — unauth admin surface lockdown
+- **`backend/api/simple_settings.py`, `ai_settings.py`, `agent_management_api.py`, `unified_agent_api.py`**: added `Depends(get_current_user)` + `is_superuser` checks to mutation endpoints (defense-in-depth — a pre-existing prefix double-mount bug in `main.py` made these routes unreachable from outside the container, so the auth changes will engage when that bug is fixed in a follow-up PR).
+- **`backend/api/meeting_intelligence_real.py` removed from `main.py` router includes**. Had sync `requests.post(..., timeout=30)` calls that blocked the asyncio loop, no auth, and duplicated functionality covered by `services/providers/impl_llm.py`. File preserved on disk for history.
+
+### Compose hygiene
+- **`deploy/bigboy/docker-compose.bigboy.yml` + `.env.bigboy.example`**: added 26 missing env pass-throughs to both `meet-backend` and `meet-bulk-import-worker` (`GARAGE_AUDIO_BUCKET`, `SESSION_WATCHDOG_*`, `ALWAYS_ON_AUTO_SEGMENT`, `MEDIA_RETENTION_*`, `APP_BASE_URL`, `APP_PUBLIC_URL`, `MEETING_RAG_GRAPH_AUGMENTATION`, `PROJECTOPS_*`, `BRIGADE_*`, `STT_DEFAULT_PROVIDER`, `WHISPER_SERVER_URL`, etc.) — closes the env-file-vs-YAML gotcha that caused silent default-value boots. `.env.bigboy.example` updated to match. Build context paths intentionally unchanged (`../../src/backend` is correct for the bigboy symlink-src deploy layout per the "Cloud deployment (bigboy)" section above).
+
+### Tests
+- `backend/tests/test_v3_18_1_authz.py` (new, 6 tests): live_transcription 403-not-500, always_on owned/unowned session creation, ws_remote_audio cross-org + free-tier + unauth rejection.
+- `backend/tests/test_free_tier_enforcement.py` (+7 tests): uploads transcribe, simple_recording start, room recording start, satellite-via-`get_org_tier`, plus `meeting_intelligence_real`-not-mounted and unauth admin routers xfail (citing the unreachable-prefix bug).
+
+### Audit context
+- All findings sourced from the 2026-05-29 Codex code + UI/UX audits. See `~/Documents/meeting-ops-codex-code-audit.md` for the prompt template, and PO P-00055 task `622e44b8-6f9e-4f5c-aa66-d4701cb9794f` for the full v3.18.1 + v3.18.2 + prod-launch plan.
+
+### Pre-existing follow-ups (NOT in v3.18.1)
+- Router prefix double-mount bug (`simple_settings`/`ai_settings`/`agent_management`/`unified_agent`).
+- `services/working_audio_service.py` hardcodes `/home/ucadmin` paths.
+- Python 3.14 + `audioop` removal blocks `api/streaming.py` import on dev machine.
+- v3.18.2: background-jobification of long handlers (`recording.py:840`, `digests.py:107`, `tts.py:214,415`), `ai_insights.py:292` async fix, full before-snapshot drift checks in `agent_write_tools.py`, remaining tier gates for `ai_chat` / `ai_insights` / `digests` / `session_emails`.
+
+
 ## [3.17.0] - 2026-05-28
 
 ### Added
