@@ -13,7 +13,7 @@ import logging
 from database.database import get_db
 from services.agent_manager_service import agent_manager
 from models.agent_system import AgentType, AgentPermission
-from auth.dependencies import get_current_user_optional
+from auth.dependencies import get_current_user
 from auth.models import User
 from auth.organization import resolve_active_organization
 
@@ -66,7 +66,8 @@ class SetDefaultRequest(BaseModel):
 async def list_agents(
     agent_type: Optional[str] = None,
     include_inactive: bool = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List all available agents"""
     agents = agent_manager.list_agents(
@@ -80,7 +81,7 @@ async def list_agents(
     }
 
 @router.get("/core")
-async def get_core_agents():
+async def get_core_agents(current_user: User = Depends(get_current_user)):
     """Get the core pipeline agents"""
     core_agents = agent_manager.get_core_agents()
     return {
@@ -89,7 +90,7 @@ async def get_core_agents():
     }
 
 @router.get("/defaults")
-async def get_default_agents(db: Session = Depends(get_db)):
+async def get_default_agents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get current default agents for pipeline"""
     defaults = agent_manager.get_default_agents(db)
     return {
@@ -100,9 +101,12 @@ async def get_default_agents(db: Session = Depends(get_db)):
 @router.post("/defaults")
 async def set_default_agent(
     request: SetDefaultRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Set an agent as default for pipeline role"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     success = agent_manager.set_default_agent(
         request.agent_slug,
         request.pipeline_role,
@@ -119,7 +123,7 @@ async def get_agent(
     slug: str,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_user),
 ):
     """Get specific agent by slug.
 
@@ -159,9 +163,13 @@ async def get_agent(
 @router.post("/")
 async def create_agent(
     request: AgentCreateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Create a new custom agent"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
+
     # TODO: Get actual user ID from auth
     user_id = uuid.uuid4()  # Placeholder
     
@@ -181,9 +189,12 @@ async def create_agent(
 async def update_agent(
     slug: str,
     request: AgentUpdateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Update an existing agent"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     agent = agent_manager.update_agent(
         slug,
         request.dict(exclude_unset=True),
@@ -200,8 +211,10 @@ async def update_agent(
     }
 
 @router.delete("/{slug}")
-async def delete_agent(slug: str, db: Session = Depends(get_db)):
+async def delete_agent(slug: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Delete (deactivate) an agent"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     success = agent_manager.delete_agent(slug, db)
     
     if not success:
@@ -215,7 +228,7 @@ async def delete_agent(slug: str, db: Session = Depends(get_db)):
 # Import/Export Endpoints
 
 @router.get("/{slug}/export")
-async def export_agent(slug: str, db: Session = Depends(get_db)):
+async def export_agent(slug: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Export agent configuration"""
     config = agent_manager.export_agent(slug, db)
     
@@ -227,10 +240,13 @@ async def export_agent(slug: str, db: Session = Depends(get_db)):
 @router.post("/import")
 async def import_agent(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Import agent from JSON file"""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         content = await file.read()
         data = json.loads(content)
         
@@ -254,7 +270,8 @@ async def import_agent(
 @router.get("/templates/")
 async def list_templates(
     category: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List available agent templates"""
     from models.agent_system import AgentTemplate
@@ -274,9 +291,12 @@ async def list_templates(
 async def instantiate_template(
     template_id: str,
     name: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Create agent from template"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     from models.agent_system import AgentTemplate
     
     template = db.query(AgentTemplate).filter_by(id=template_id).first()
@@ -305,7 +325,7 @@ async def instantiate_template(
 # Agent Type Information
 
 @router.get("/types/")
-async def get_agent_types():
+async def get_agent_types(current_user: User = Depends(get_current_user)):
     """Get available agent types and their descriptions"""
     return {
         "types": [
@@ -365,7 +385,7 @@ async def get_agent_types():
 @router.get("/models/performance")
 async def get_model_performance(
     request: Request,
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Get performance metrics for the available models.

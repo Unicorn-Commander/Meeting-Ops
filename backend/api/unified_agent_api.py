@@ -9,6 +9,8 @@ from typing import Dict, Optional
 from pydantic import BaseModel
 
 from database.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
 from models.unified_agent import UnifiedMeetingAgent
 from services.unified_agent_service import unified_agent_service
 
@@ -27,12 +29,12 @@ class AgentUpdateRequest(BaseModel):
     output_template: Optional[Dict] = None
 
 @router.get("/status")
-async def get_agent_status():
+async def get_agent_status(current_user: User = Depends(get_current_user)):
     """Get current unified agent status and configuration"""
     return unified_agent_service.get_agent_status()
 
 @router.get("/agent")
-async def get_agent(db: Session = Depends(get_db)):
+async def get_agent(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get the current unified agent configuration"""
     agent = UnifiedMeetingAgent.get_default_agent(db)
     
@@ -45,9 +47,12 @@ async def get_agent(db: Session = Depends(get_db)):
 @router.put("/agent")
 async def update_agent(
     update_request: AgentUpdateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Update the unified agent configuration"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     agent = UnifiedMeetingAgent.get_default_agent(db)
     
     if not agent:
@@ -74,8 +79,10 @@ async def update_agent(
     }
 
 @router.post("/agent/reset")
-async def reset_agent(db: Session = Depends(get_db)):
+async def reset_agent(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Reset agent to default configuration"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
     # Delete current agent
     current_agent = UnifiedMeetingAgent.get_default_agent(db)
     if current_agent:
@@ -92,7 +99,7 @@ async def reset_agent(db: Session = Depends(get_db)):
     }
 
 @router.get("/models")
-async def get_available_models():
+async def get_available_models(current_user: User = Depends(get_current_user)):
     """Get available models for the agent"""
     try:
         import requests
@@ -135,7 +142,7 @@ async def get_available_models():
         }
 
 @router.get("/providers")
-async def get_available_providers():
+async def get_available_providers(current_user: User = Depends(get_current_user)):
     """Get available AI providers"""
     return {
         "providers": [
@@ -165,7 +172,7 @@ async def get_available_providers():
     }
 
 @router.post("/test")
-async def test_agent(db: Session = Depends(get_db)):
+async def test_agent(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Test the current agent configuration with sample text"""
     agent = UnifiedMeetingAgent.get_default_agent(db)
     
