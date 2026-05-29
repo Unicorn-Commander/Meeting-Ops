@@ -194,6 +194,18 @@ def require_feature(feature: str):
     return checker
 
 
+def get_org_tier(org: Any) -> str:
+    """Return the effective tier for an Organization.
+
+    Mirrors `get_user_tier` for cases where the caller is identified by
+    org (e.g. satellite devices that authenticate via device secret and
+    resolve to an owning org, not an individual user). The Organization
+    model stores the tier in the `plan` column (free / pro / enterprise),
+    not `tier`. Defaults to `free` when the column is missing or empty.
+    """
+    return ((getattr(org, "plan", None) or "free")).lower()
+
+
 def gate_feature_for_caller(caller: Any, feature: str) -> None:
     """Inline tier gate for endpoints that resolve the caller themselves.
 

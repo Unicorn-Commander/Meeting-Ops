@@ -45,13 +45,14 @@ import hashlib
 from database.database import get_db
 from database.models import SatelliteDevice, RecordingSession as DBRecordingSession, Transcription
 from auth.dependencies import get_current_user, get_current_organization
+from auth.tier import get_org_tier
 from auth.device_auth import (
     DeviceAuthError,
     authenticate_device,
     device_auth_from_http,
 )
 from auth.organization import ActiveOrganization
-from auth.models import User
+from auth.models import User, Organization
 
 router = APIRouter(prefix="/api/satellites", tags=["satellites"])
 logger = logging.getLogger(__name__)
@@ -315,6 +316,27 @@ def _create_satellite_session(
     db.commit()
     db.refresh(db_session)
     return db_session
+
+
+def _gate_satellite_for_org(db: Session, org_id: int) -> None:
+    """v3.18.1 tier gate: satellite uploads + transcripts run the server
+    STT/diarization/summary pipeline. Free orgs cannot trigger that path.
+
+    Satellite endpoints authenticate by device secret OR user session, then
+    resolve to the owning org. We gate on the owning org's `plan` column
+    (free/pro/enterprise) rather than a user tier — the device IS the caller.
+    """
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="device organization not found")
+    if get_org_tier(org) == "free":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Satellite devices require Pro or Enterprise. "
+                "Upgrade at /pricing to use satellite capture."
+            ),
+        )
 
 
 # === Endpoints ===
@@ -581,6 +603,7 @@ async def upload_audio(
         presented_secret=presented_secret,
         active_org=active_org,
     )
+    _gate_satellite_for_org(db, org_id)
 
     # Validate file type
     if file.content_type and "audio" not in file.content_type and "octet-stream" not in file.content_type:
@@ -685,6 +708,7 @@ async def upload_transcript(
         presented_secret=presented_secret,
         active_org=active_org,
     )
+    _gate_satellite_for_org(db, _org_id)
 
     if request.room_name:
         device.room_name = request.room_name
