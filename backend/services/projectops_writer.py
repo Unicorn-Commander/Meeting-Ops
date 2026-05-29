@@ -278,7 +278,31 @@ async def write_action_items_to_projectops(
                 ok=False, mode="error", detail="session not found"
             )
 
+        # v3.19.0: honor the per-org integration toggle. When the org
+        # has integrations.project_ops.enabled=False, no-op even if
+        # PROJECTOPS_API_KEY is set in env — no leakage.
+        from services.integrations.org_config import resolve_project_ops
+
+        po_cfg = resolve_project_ops(db, session.organization_id)
+        if not po_cfg.enabled and po_cfg.source == "disabled":
+            logger.info(
+                "projectops_writer org=%s explicitly disabled project_ops "
+                "integration — skipping session=%s",
+                session.organization_id,
+                session_pk,
+            )
+            return ProjectOpsWriteResult(ok=True, mode="no-op")
+
         target_ref, source = _resolve_target_project(db, session)
+        # If the session+meta didn't yield a target but the per-org
+        # integration config has a default_project_number, use that.
+        # (resolve_project_ops merges legacy Organization.settings into
+        # extra["default_project_number"] so this also handles pre-v3.19
+        # orgs.)
+        if not target_ref:
+            org_default = po_cfg.extra.get("default_project_number")
+            if org_default:
+                target_ref, source = org_default, "org_default"
         if not target_ref:
             logger.info(
                 "projectops_writer no target project for session=%s "
@@ -288,7 +312,18 @@ async def write_action_items_to_projectops(
             return ProjectOpsWriteResult(ok=True, mode="no-target")
 
         owned_client = client is None
-        active_client = client or ProjectOpsClient()
+        # Per-org override wins when source==org_override; otherwise the
+        # client falls back to env vars (legacy path).
+        if client is None:
+            if po_cfg.source == "org_override":
+                active_client = ProjectOpsClient(
+                    base_url=po_cfg.api_base_url,
+                    api_key=po_cfg.api_key,
+                )
+            else:
+                active_client = ProjectOpsClient()
+        else:
+            active_client = client
         try:
             if not active_client.is_live:
                 logger.info(
