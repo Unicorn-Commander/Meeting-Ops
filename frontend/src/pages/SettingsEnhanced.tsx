@@ -1,4 +1,5 @@
 import { lazy, useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { ExternalLink } from 'lucide-react';
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
@@ -51,6 +52,7 @@ const IntegrationsPanel = lazy(() => import('../components/settings/Integrations
 export default function SettingsEnhanced() {
   const { user } = useAuth();
   const { activeOrganization } = useOrg();
+  const location = useLocation();
   const isAdmin = isAdminRole(activeOrganization?.role, user?.is_superuser);
   // Default to 'audio' (the user-preferences section everyone can see).
   // We re-select to a visible section in a useEffect below in case
@@ -138,6 +140,25 @@ export default function SettingsEnhanced() {
     }
     return list;
   }, [hostCaps.local_audio, isAdmin]);
+
+  // Deep-link bridge: `#audio-devices` (used by the dashboard's
+  // first-run onboarding checklist) selects the audio section. The
+  // SettingsLayout sidebar can also be cued by `?section=<id>`.
+  useEffect(() => {
+    const hash = location.hash.replace(/^#/, '').toLowerCase();
+    const queryParams = new URLSearchParams(location.search);
+    const explicit = queryParams.get('section');
+    let target: string | null = null;
+    if (explicit) {
+      target = explicit;
+    } else if (hash) {
+      if (hash === 'audio-devices' || hash.startsWith('audio')) target = 'audio';
+    }
+    if (target && target !== activeSection) {
+      setActiveSection(target);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.hash, location.search]);
 
   // If the active section vanishes (admin/role flip, hostCaps load),
   // re-anchor to the first visible section so the panel doesn't show

@@ -79,11 +79,24 @@ export default function RoomSetupWizard() {
       case 1:
         return state.name.trim().length > 0;
       case 2:
-        return state.source !== null && state.source.device !== null;
+        // For server_usb_mic the user must pick a device; the satellite
+        // path is configured post-create on the room's pairing screen, so
+        // no device is required at this step. network_stream is still
+        // disabled (placeholder UI, no transport yet).
+        if (!state.source) return false;
+        if (state.source.hardware_type === 'server_usb_mic') {
+          return state.source.device !== null;
+        }
+        if (state.source.hardware_type === 'satellite_device') {
+          return true;
+        }
+        return state.source.device !== null;
       case 3:
         return true;
       case 4:
-        return state.recordingMode === 'manual';
+        // All three modes are now permitted (always_on / scheduled persist
+        // through schedule_json and are configurable from Room Settings).
+        return true;
       case 5:
         return !creating;
       default:
@@ -96,11 +109,23 @@ export default function RoomSetupWizard() {
     setCreating(true);
     setError(null);
     try {
+      // Persist visibility + recording mode into the room's schedule_json
+      // so the user's choices in the wizard actually round-trip. The
+      // backend stores it as JSONB on conference_rooms.schedule_json and
+      // the rooms-api `normalizeRoom()` already reads `mode` back out as
+      // recording_mode. Visibility is read from `schedule_json.access`
+      // by RoomDetail's Settings tab.
+      const scheduleJson: Record<string, unknown> = {
+        mode: state.recordingMode,
+        access: state.visibility,
+      };
+
       const room = await roomsApi.create(
         {
           name: state.name.trim(),
           location: state.location.trim() || null,
           default_retention_days: state.retentionDays,
+          schedule_json: scheduleJson,
         },
         { orgSlug },
       );
@@ -122,7 +147,14 @@ export default function RoomSetupWizard() {
           { orgSlug },
         );
       }
-      navigate(`/rooms/${navId}`);
+      // Satellite path: jump straight into the room detail's pairing
+      // tab. The pairing UI already exists at RoomDetail (#satellite-pair
+      // anchor) — we don't duplicate it here, we just deep-link.
+      if (state.source && state.source.hardware_type === 'satellite_device') {
+        navigate(`/rooms/${navId}#satellite-pair`);
+      } else {
+        navigate(`/rooms/${navId}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create room');
       setCreating(false);
@@ -278,7 +310,20 @@ function Step2({
   const selectedType: RoomSourceType | null = state.source?.hardware_type || null;
 
   const pick = (hardware_type: RoomSourceType) => {
-    if (hardware_type !== 'server_usb_mic') return; // others disabled in Phase 1
+    // network_stream still has no transport on the backend — keep it
+    // disabled. server_usb_mic + satellite_device are real paths now.
+    if (hardware_type === 'network_stream') return;
+    if (hardware_type === 'satellite_device') {
+      setState((s) => ({
+        ...s,
+        source: {
+          hardware_type: 'satellite_device',
+          device: null, // device gets bound later via pairing on RoomDetail
+          label: s.source?.label,
+        },
+      }));
+      return;
+    }
     setState((s) => ({
       ...s,
       source: {
@@ -305,18 +350,28 @@ function Step2({
           title="Network audio stream"
           description="Chunk-based capture from a remote PC or audio interface in the room."
           selected={false}
-          badge="Coming in Phase 2"
+          badge="Coming soon"
           disabled
         />
         <SourceOption
           icon={<Cpu className="h-5 w-5" />}
           title="Satellite device (RPi / ESP32)"
-          description="Dedicated room hardware that pairs over the network. Reach out to get one for your space."
-          selected={false}
-          badge="Coming in Phase 3"
-          disabled
+          description="Dedicated room hardware that pairs over the network. You'll generate a pairing code on the room's detail page after creation."
+          selected={selectedType === 'satellite_device'}
+          onClick={() => pick('satellite_device')}
         />
       </div>
+
+      {selectedType === 'satellite_device' && (
+        <div className="rounded-xl border border-zinc-800 bg-black/30 p-4 text-xs text-zinc-400">
+          <p className="font-medium text-zinc-200">Pairing happens after create.</p>
+          <p className="mt-1">
+            We'll take you to this room's <span className="text-zinc-200">Pair satellite</span>{' '}
+            screen after the room is saved. Generate a 6-digit code there, then enter it on the
+            satellite device to bind it.
+          </p>
+        </div>
+      )}
 
       {selectedType === 'server_usb_mic' && (
         <div className="rounded-xl border border-zinc-800 bg-black/30 p-4">
@@ -528,24 +583,40 @@ function Step4({
           </div>
         </div>
       </label>
-      <label className="flex cursor-not-allowed items-start gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 opacity-60">
-        <input type="radio" disabled className="mt-1" />
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2">
+        <input
+          type="radio"
+          name="mode"
+          checked={state.recordingMode === 'always_on'}
+          onChange={() => setState((s) => ({ ...s, recordingMode: 'always_on' }))}
+          className="mt-1"
+        />
         <div>
           <div className="text-sm text-zinc-100 flex items-center gap-2">
             <Clock className="h-3.5 w-3.5" /> Always recording
           </div>
           <div className="text-xs text-zinc-500">
-            Continuous capture with silence-gap segmentation. Coming Phase 2.
+            Continuous capture with silence-gap segmentation. The room records whenever its mic
+            picks up speech.
           </div>
         </div>
       </label>
-      <label className="flex cursor-not-allowed items-start gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 opacity-60">
-        <input type="radio" disabled className="mt-1" />
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2">
+        <input
+          type="radio"
+          name="mode"
+          checked={state.recordingMode === 'scheduled'}
+          onChange={() => setState((s) => ({ ...s, recordingMode: 'scheduled' }))}
+          className="mt-1"
+        />
         <div>
           <div className="text-sm text-zinc-100 flex items-center gap-2">
             <Clock className="h-3.5 w-3.5" /> Scheduled
           </div>
-          <div className="text-xs text-zinc-500">Cron-style schedules. Coming Phase 2.</div>
+          <div className="text-xs text-zinc-500">
+            Cron-style schedules. Configure the windows from this room's Settings tab after
+            creation.
+          </div>
         </div>
       </label>
     </div>
@@ -558,27 +629,41 @@ function Step5({ state }: { state: WizardState }) {
   const retentionLabel = state.retentionDays
     ? `${state.retentionDays} days`
     : 'Unlimited';
+  const modeLabel =
+    state.recordingMode === 'always_on'
+      ? 'Always recording'
+      : state.recordingMode === 'scheduled'
+      ? 'Scheduled'
+      : 'Manual';
+  const sourceLabel = (() => {
+    if (!state.source) return '—';
+    if (state.source.hardware_type === 'satellite_device') {
+      return 'Satellite device · pair after create';
+    }
+    if (state.source.device) {
+      const dev = state.source.device;
+      return `Server USB mic · ${state.source.label || dev.device_name || dev.card_name || dev.device_path}`;
+    }
+    return state.source.hardware_type;
+  })();
   return (
     <div className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold text-zinc-100">Review</h2>
       <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Name" value={state.name} />
         <Field label="Location" value={state.location || '—'} />
+        <Field label="Audio source" value={sourceLabel} />
         <Field
-          label="Audio source"
-          value={
-            state.source?.device
-              ? `Server USB mic · ${state.source.label || state.source.device.device_name || state.source.device.card_name || state.source.device.device_path}`
-              : '—'
-          }
+          label="Access"
+          value={state.visibility === 'org_members' ? 'All org members' : 'Custom (set after create)'}
         />
-        <Field label="Access" value={state.visibility === 'org_members' ? 'All org members' : 'Custom (set after create)'} />
-        <Field label="Recording mode" value="Manual" />
+        <Field label="Recording mode" value={modeLabel} />
         <Field label="Retention" value={retentionLabel} />
       </dl>
       <p className="mt-2 text-xs text-zinc-500">
         Press <span className="font-semibold text-zinc-300">Create room</span> to save. You'll be
-        taken to the room detail page where you can start recording.
+        taken to the room detail page where you can start recording
+        {state.source?.hardware_type === 'satellite_device' ? ' or finish pairing the satellite device.' : '.'}
       </p>
     </div>
   );

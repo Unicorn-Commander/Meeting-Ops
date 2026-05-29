@@ -100,7 +100,15 @@ export const SpeakerLibrary: React.FC = () => {
   const [enrolling, setEnrolling] = useState(false);
   const [unassigned, setUnassigned] = useState<UnassignedSpeakerLink[]>([]);
   const [unassignedTotal, setUnassignedTotal] = useState(0);
+  // Backend returns `next_offset` when there are more rows beyond what was
+  // returned (see backend/api/speakers.py UnassignedSpeakerLinksPage). Track
+  // it so the "Load more" button can fetch the next page without trampling
+  // what's already on screen. Codex audit flagged the original
+  // `limit=50, no pagination` as a silent ceiling.
+  const [unassignedNextOffset, setUnassignedNextOffset] = useState<number | null>(null);
+  const UNASSIGNED_PAGE_SIZE = 50;
   const [loadingUnassigned, setLoadingUnassigned] = useState(false);
+  const [loadingMoreUnassigned, setLoadingMoreUnassigned] = useState(false);
   // Collapsible + height-capped so a long unassigned list can't push the
   // enrolled-speakers grid below the fold.
   const [unassignedOpen, setUnassignedOpen] = useState(true);
@@ -151,13 +159,16 @@ export const SpeakerLibrary: React.FC = () => {
     if (!isAdmin) return;
     setLoadingUnassigned(true);
     try {
-      const res = await fetch(`${config.apiBaseUrl}/api/speakers/unassigned-links?limit=50`, {
-        headers: orgHeaders(),
-      });
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/speakers/unassigned-links?limit=${UNASSIGNED_PAGE_SIZE}&offset=0`,
+        { headers: orgHeaders() },
+      );
       if (res.ok) {
         const data = await res.json();
         setUnassigned(Array.isArray(data.items) ? data.items : []);
         setUnassignedTotal(Number(data.total || 0));
+        const nextRaw = data.next_offset;
+        setUnassignedNextOffset(typeof nextRaw === 'number' ? nextRaw : null);
       } else {
         setError(`Failed to load unassigned fingerprints (HTTP ${res.status}).`);
       }
@@ -165,6 +176,37 @@ export const SpeakerLibrary: React.FC = () => {
       setError('Network error loading unassigned fingerprints.');
     } finally {
       setLoadingUnassigned(false);
+    }
+  };
+
+  const loadMoreUnassigned = async () => {
+    if (!isAdmin) return;
+    if (unassignedNextOffset === null) return;
+    setLoadingMoreUnassigned(true);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/speakers/unassigned-links?limit=${UNASSIGNED_PAGE_SIZE}&offset=${unassignedNextOffset}`,
+        { headers: orgHeaders() },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const incoming: UnassignedSpeakerLink[] = Array.isArray(data.items) ? data.items : [];
+        // Append while de-duping by link id — the page below might have
+        // moved if an assign landed between calls.
+        setUnassigned(prev => {
+          const seen = new Set(prev.map(x => x.id));
+          return [...prev, ...incoming.filter(x => !seen.has(x.id))];
+        });
+        setUnassignedTotal(Number(data.total || 0));
+        const nextRaw = data.next_offset;
+        setUnassignedNextOffset(typeof nextRaw === 'number' ? nextRaw : null);
+      } else {
+        setError(`Failed to load more fingerprints (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error loading more fingerprints.');
+    } finally {
+      setLoadingMoreUnassigned(false);
     }
   };
 
@@ -506,6 +548,34 @@ export const SpeakerLibrary: React.FC = () => {
                 </div>
               </div>
             ))}
+            {/* Pagination — the backend pages 50 at a time
+                (UnassignedSpeakerLinksPage.next_offset). Earlier versions
+                ignored that field, so any org with >50 unassigned rows
+                showed a silent ceiling. */}
+            {unassignedNextOffset !== null && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={loadMoreUnassigned}
+                  disabled={loadingMoreUnassigned}
+                  className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {loadingMoreUnassigned ? (
+                    <span className="inline-flex items-center justify-center gap-2">
+                      <RefreshCw className="h-3 w-3 animate-spin" />
+                      Loading…
+                    </span>
+                  ) : (
+                    <>
+                      Load more
+                      <span className="ml-2 text-[10px] text-zinc-500">
+                        ({unassigned.length} of {unassignedTotal})
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         ))}
       </section>

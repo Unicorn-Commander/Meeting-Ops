@@ -1,16 +1,29 @@
 // Conference Room API client.
 //
 // Wraps every /api/rooms endpoint with a single auth+org-header build.
-// Backend agent is shipping the matching endpoints; until they land,
-// every call falls back to a small in-memory mock so the UI can be
-// exercised end-to-end. The mock layer is keyed on `MOCK_MODE`, which
-// flips to true the first time any endpoint 404s — once the backend
-// lands no app restart is needed, just a refresh.
 //
-// TODO(backend-rooms): delete mocks + MOCK_STORE once Phase 1 backend
-// is in production. Tracked in CR-006 ticket.
+// Mock fallback (CR-006): when the backend hadn't shipped the endpoints
+// yet, this module flipped to an in-memory MOCK_STORE on any 404. The
+// mocks include two sample rooms ("Conference Room A (sample)" etc.)
+// which is *fine* in early dev but a real liability in production —
+// users can see fake rooms if a deploy regression 404s a real endpoint.
+//
+// As of v3.19 the backend rooms API is shipped, so the mock path is now
+// off by default and only re-enabled when the `VITE_USE_ROOM_MOCKS`
+// build-time flag is set to a truthy string. Production builds should
+// never set it. See the audit note "roomsApi.ts:1, 488" for context.
 
 import { config } from '../config';
+
+const MOCKS_ENABLED = (() => {
+  try {
+    const flag = (import.meta as any)?.env?.VITE_USE_ROOM_MOCKS;
+    if (typeof flag === 'string') return flag === '1' || flag.toLowerCase() === 'true';
+    return !!flag;
+  } catch {
+    return false;
+  }
+})();
 
 export type RoomStatus = 'idle' | 'recording' | 'offline' | 'error' | 'paused';
 export type RoomSourceType =
@@ -321,6 +334,13 @@ export interface CreateRoomBody {
   name: string;
   location?: string | null;
   default_retention_days?: number | null;
+  /**
+   * Persisted on conference_rooms.schedule_json (JSONB). Used to round-trip
+   * the wizard's recording mode (`mode`) + visibility (`access`) selections
+   * — see `RoomSetupWizard.handleSubmit`. `normalizeRoom` reads `mode`
+   * back as the Room's recording_mode.
+   */
+  schedule_json?: Record<string, unknown> | null;
 }
 
 export interface UpdateRoomBody {
@@ -359,7 +379,11 @@ interface MockStore {
   nextSourceId: number;
 }
 
-const MOCK_STORE: MockStore = {
+// Seed sample rooms are only useful when the dev wants to exercise the
+// rooms UI without a backend. We start the store empty unless mocks
+// were explicitly enabled at build time.
+const MOCK_STORE: MockStore = MOCKS_ENABLED
+  ? {
   rooms: [
     {
       id: 1,
@@ -439,7 +463,15 @@ const MOCK_STORE: MockStore = {
   pairing: new Map(),
   nextRoomId: 3,
   nextSourceId: 4,
-};
+}
+  : {
+      rooms: [],
+      sources: [],
+      acl: new Map(),
+      pairing: new Map(),
+      nextRoomId: 1,
+      nextSourceId: 1,
+    };
 
 function pseudoSleep(): Promise<void> {
   return new Promise((res) => setTimeout(res, 80));
@@ -486,9 +518,14 @@ async function request<T>(
     credentials: 'include',
   });
   if (res.status === 404) {
-    // Backend agent hasn't landed the endpoint yet — flip to mock mode.
-    MOCK_MODE = true;
-    throw new MockFallbackNeeded(url);
+    // Pre-v3.19 the mock fallback flipped on the first 404, but that
+    // meant a regressed real endpoint silently showed sample rooms in
+    // production. Now we only flip when `VITE_USE_ROOM_MOCKS` is set;
+    // otherwise the 404 surfaces to the caller as a real error.
+    if (MOCKS_ENABLED) {
+      MOCK_MODE = true;
+      throw new MockFallbackNeeded(url);
+    }
   }
   if (!res.ok) {
     let detail = '';

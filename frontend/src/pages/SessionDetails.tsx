@@ -38,6 +38,7 @@ import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
 import MoveSessionOrgModal from '../components/MoveSessionOrgModal';
+import SessionDetailsTabs, { type SessionDetailsTab } from '../components/SessionDetailsTabs';
 import { config } from '../config';
 import {
   deleteLocalSession,
@@ -265,6 +266,12 @@ export const SessionDetails: React.FC = () => {
   // primary landing page for completed meetings; many users won't ever
   // need the graph view, and we don't want to pay the cost for them.
   const [showBrigadeGraph, setShowBrigadeGraph] = useState(false);
+  // v3.19 desktop IA refactor: borrow the mobile tab pattern. Six tabs in
+  // the main content column; sidebar (participants/metadata/insights) is
+  // shared across tabs. Advanced surfaces (Brigade graph, podcast, etc.)
+  // are tucked behind a "More" toggle inside the Summary tab.
+  const [activeTab, setActiveTab] = useState<SessionDetailsTab>('summary');
+  const [moreOpen, setMoreOpen] = useState(false);
   // Speaker link + org speaker library — fetched once per session so the
   // inline SpeakerLabelEditor popover can render assign/merge targets
   // without making the user open the side-panel SpeakerTagger.
@@ -324,6 +331,17 @@ export const SessionDetails: React.FC = () => {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatHistoryLoaded, setChatHistoryLoaded] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Chat tab activation triggers the existing chat-history loader
+  // (keyed on `chatOpen`). Without this bridge, switching to the Chat
+  // tab would show the empty state on first open. Safe even though the
+  // sidebar AI Chat card was removed.
+  useEffect(() => {
+    if (activeTab === 'chat' && !chatOpen) {
+      setChatOpen(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // AI Insights state
   const [insights, setInsights] = useState<any>(null);
@@ -1664,8 +1682,9 @@ export const SessionDetails: React.FC = () => {
     <>
     <MobileSessionDetails {...mobileProps} />
     <div className="hidden md:flex min-h-screen bg-gray-50 flex-col">
-      {/* Header */}
-      <div className="bg-white shadow-sm border-b">
+      {/* Header — sticky so title / project / primary actions stay
+          reachable while users scroll the active tab panel. */}
+      <div className="sticky top-0 z-30 bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-4 min-w-0 flex-1">
@@ -2252,13 +2271,29 @@ export const SessionDetails: React.FC = () => {
         className="hidden"
       />
 
+      {/* Tab strip — desktop equivalent of the mobile pill-tab nav. Local
+          sessions can't use the AI Chat tab (it depends on server-side
+          RAG over indexed transcripts) so we disable it explicitly. */}
+      <div className="sticky top-[97px] z-20 border-b bg-white">
+        <div className="mx-auto max-w-7xl px-4">
+          <SessionDetailsTabs
+            value={activeTab}
+            onChange={setActiveTab}
+            chatDisabled={!!session.is_local}
+            chatDisabledReason="Local-only session — Ask not available"
+          />
+        </div>
+      </div>
+
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
 
-            {/* Phase 3: speaker tagger — confirm/change diarized labels */}
-            <SpeakerTagger sessionId={String(session.id || sessionId)} />
+            {/* Speakers tab: Phase 3 speaker tagger — confirm/change diarized labels */}
+            {activeTab === 'speakers' && (
+              <SpeakerTagger sessionId={String(session.id || sessionId)} />
+            )}
 
             {/* Server-side reprocess status banner.
                Browser always-on sessions stream full audio to the server in
@@ -2339,8 +2374,8 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* AI Summary Section */}
-            {(session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
+            {/* AI Summary Section — Summary tab */}
+            {activeTab === 'summary' && (session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
@@ -2475,6 +2510,36 @@ export const SessionDetails: React.FC = () => {
                 )}
               </div>
             )}
+
+            {/* Advanced surfaces — Knowledge graph + listen-to-summary
+                podcast + progressive timeline + generated emails — all
+                live behind a single "More" toggle so the Summary tab
+                opens to the answer the user came for, not the kitchen
+                sink. Codex audit flagged these as "advanced surfaces
+                folded into a More menu or collapsed-by-default section". */}
+            {activeTab === 'summary' && (
+              <div className="bg-white rounded-lg shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setMoreOpen((v) => !v)}
+                  aria-expanded={moreOpen}
+                  className="w-full flex items-center justify-between p-5 text-left"
+                >
+                  <div>
+                    <h2 className="text-base font-semibold text-gray-900">More for this meeting</h2>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Knowledge graph, listen-to-summary podcast, progressive timeline, and
+                      generated emails.
+                    </p>
+                  </div>
+                  <ChevronDown
+                    className={`w-5 h-5 text-gray-500 transition-transform ${
+                      moreOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+                {moreOpen && (
+                  <div className="border-t border-gray-100 p-4 space-y-6">
 
             {/* Brigade Phase 2: inline 3D knowledge-graph viewer.
                 Collapsed by default so we don't ship the Three.js
@@ -2785,10 +2850,18 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* Transcript — kept at the bottom of the left column so the AI
-                Summary stays above the fold. Still has the full set of
-                navigation tools inside: speaker timeline, filter chips,
-                inline rename, click-to-seek. */}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Transcript — Transcript tab. Was previously stacked under
+                AI Summary on a single scroll; tabs now keep each surface
+                on its own panel. The full set of navigation tools inside
+                (speaker timeline, filter chips, inline rename,
+                click-to-seek) is preserved. */}
+            {activeTab === 'transcript' && (
+            <>
             <div className="bg-white rounded-lg shadow-sm p-6 flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: '480px' }}>
               <div className="flex items-center justify-between mb-4 flex-shrink-0">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -3007,6 +3080,87 @@ export const SessionDetails: React.FC = () => {
                 <p className="text-gray-500 text-center py-2 text-sm">No audio recording available</p>
               )}
             </div>
+            </>
+            )}
+            {/* end Transcript tab */}
+
+            {/* Attachments tab — main column variant. Identical component
+                to the sidebar usage on the Summary tab, just promoted to
+                its own panel. */}
+            {activeTab === 'attachments' && (
+              <SessionAttachments sessionPublicId={sessionId} />
+            )}
+
+            {/* Chat tab — the per-meeting RAG chat lifted out of the
+                sidebar Card. Local-only sessions can't use it because the
+                index is server-side; the tab strip disables the Chat tab
+                in that case so users never land here without content. */}
+            {activeTab === 'chat' && (
+              <div className="bg-white rounded-lg shadow-sm p-4">
+                <h2 className="text-base font-semibold flex items-center gap-2 mb-3">
+                  <MessageCircle className="w-5 h-5 text-purple-600" />
+                  Ask about this meeting
+                </h2>
+                {session.is_local ? (
+                  <p className="text-sm text-gray-500">
+                    AI Chat is not available for local-only sessions. Sync the recording first.
+                  </p>
+                ) : (
+                  <>
+                    <div className="border rounded-lg mb-3 max-h-[60vh] overflow-y-auto bg-gray-50">
+                      {chatMessages.length === 0 ? (
+                        <div className="p-4 text-center text-sm text-gray-500">
+                          Ask questions about this meeting — summaries, action items, decisions, who said what.
+                        </div>
+                      ) : (
+                        <div className="p-3 space-y-3">
+                          {chatMessages.map((msg, idx) => (
+                            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                              <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
+                                msg.role === 'user'
+                                  ? 'bg-purple-600 text-white'
+                                  : 'bg-white border text-gray-700'
+                              }`}>
+                                {msg.content}
+                              </div>
+                            </div>
+                          ))}
+                          {chatLoading && (
+                            <div className="flex justify-start">
+                              <div className="bg-white border rounded-lg px-3 py-2 text-sm text-gray-500">
+                                <div className="flex items-center gap-2">
+                                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-600"></div>
+                                  Thinking...
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                          <div ref={chatEndRef} />
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={chatMessage}
+                        onChange={(e) => setChatMessage(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
+                        placeholder="Ask about this meeting..."
+                        disabled={chatLoading}
+                        className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <button
+                        onClick={sendChatMessage}
+                        disabled={chatLoading || !chatMessage.trim()}
+                        className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                      >
+                        <Send className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
           </div>
 
@@ -3150,7 +3304,10 @@ export const SessionDetails: React.FC = () => {
               </div>
             </div>
 
-            {/* Action items */}
+            {/* Action items — visible on Summary + Action Items tabs.
+                The Action Items tab elevates the same surface to its own
+                IA panel; on Summary it's a sidebar overview. */}
+            {(activeTab === 'summary' || activeTab === 'action_items') && (
             <div className="bg-white rounded-lg shadow-sm p-6">
               <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                 <Zap className="w-5 h-5 text-amber-500" />
@@ -3262,12 +3419,16 @@ export const SessionDetails: React.FC = () => {
                 </button>
               </div>
             </div>
+            )}
 
-            {/* Attachments — Granola notes, external transcripts, slide
-                decks, photos of a whiteboard, etc. Pluggable storage
-                (Garage when configured, else local disk) handled in
-                services/attachment_storage.py on the backend. */}
-            <SessionAttachments sessionPublicId={sessionId} />
+            {/* Attachments sidebar card — only on Summary tab. The
+                Attachments tab promotes the same component to a full
+                main-column panel; keeping the sidebar copy on Summary
+                gives users a quick attach affordance without leaving the
+                summary view. */}
+            {activeTab === 'summary' && (
+              <SessionAttachments sessionPublicId={sessionId} />
+            )}
 
             {/* Processing Metadata */}
             {session.metadata && (
@@ -3521,89 +3682,10 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* AI Chat Panel — disabled for local-only sessions because
-                Ask depends on server-side RAG over indexed transcripts. */}
-            <div className="bg-white rounded-lg shadow-sm">
-              <button
-                onClick={() => !session.is_local && setChatOpen(!chatOpen)}
-                disabled={session.is_local}
-                title={session.is_local ? 'Local-only session — Ask not available' : undefined}
-                className={`w-full p-4 flex items-center justify-between rounded-lg transition-colors ${
-                  session.is_local ? 'cursor-not-allowed opacity-60' : 'hover:bg-gray-50'
-                }`}
-              >
-                <h3 className="text-lg font-semibold flex items-center gap-2">
-                  <MessageCircle className="w-5 h-5 text-purple-600" />
-                  AI Chat
-                  {session.is_local && (
-                    <span className="text-xs text-gray-500 font-normal">
-                      (disabled in local mode)
-                    </span>
-                  )}
-                </h3>
-                {!session.is_local && (
-                  <ChevronRight className={`w-5 h-5 text-gray-400 transition-transform ${chatOpen ? 'rotate-90' : ''}`} />
-                )}
-              </button>
-
-              {chatOpen && !session.is_local && (
-                <div className="px-4 pb-4">
-                  {/* Chat messages */}
-                  <div className="border rounded-lg mb-3 max-h-64 overflow-y-auto bg-gray-50">
-                    {chatMessages.length === 0 ? (
-                      <div className="p-4 text-center text-sm text-gray-500">
-                        Ask questions about this meeting.
-                      </div>
-                    ) : (
-                      <div className="p-3 space-y-3">
-                        {chatMessages.map((msg, idx) => (
-                          <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
-                              msg.role === 'user'
-                                ? 'bg-purple-600 text-white'
-                                : 'bg-white border text-gray-700'
-                            }`}>
-                              {msg.content}
-                            </div>
-                          </div>
-                        ))}
-                        {chatLoading && (
-                          <div className="flex justify-start">
-                            <div className="bg-white border rounded-lg px-3 py-2 text-sm text-gray-500">
-                              <div className="flex items-center gap-2">
-                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-600"></div>
-                                Thinking...
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                        <div ref={chatEndRef} />
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Chat input */}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={chatMessage}
-                      onChange={(e) => setChatMessage(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
-                      placeholder="Ask about this meeting..."
-                      disabled={chatLoading}
-                      className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                    />
-                    <button
-                      onClick={sendChatMessage}
-                      disabled={chatLoading || !chatMessage.trim()}
-                      className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* AI Chat moved to its own Chat tab (see main column above).
+                v3.19 tab IA — Codex audit explicitly called out hoisting
+                per-meeting chat out of the sidebar card into a dedicated
+                tab so it gets the breathing room a multi-turn UI needs. */}
           </div>
         </div>
       </div>
