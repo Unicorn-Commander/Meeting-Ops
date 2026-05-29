@@ -60,13 +60,31 @@ async def media_retention_task(ctx: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Every-30-min cron: flip abandoned status=recording sessions to failed
+    so endpoints that iterate active recordings don't accumulate zombies and
+    trip Cloudflare's 120s edge timeout (see the 2026-05-29 524 incident).
+    Audio + transcripts + graph + Garage all stay intact — only status +
+    ended_at change. Configurable via SESSION_WATCHDOG_* env vars; ships
+    enabled by default with a 6h threshold."""
+    from services.session_watchdog import mark_abandoned_recording_sessions
+    result = await asyncio.to_thread(mark_abandoned_recording_sessions)
+    logger.info("arq cron: session_watchdog result=%s", result)
+    return result
+
+
 class WorkerSettings:
     """Arq worker configuration."""
 
     functions = [process_bulk_file]
     # Daily local-disk retention (Garage cutover housekeeping). 04:30 UTC is a
     # low-traffic window; the task is read-mostly + best-effort.
-    cron_jobs = [cron(media_retention_task, hour={4}, minute={30})]
+    # Session watchdog runs every 30 min on the half-hour to keep the active-
+    # recordings set tight (see services/session_watchdog.py).
+    cron_jobs = [
+        cron(media_retention_task, hour={4}, minute={30}),
+        cron(session_watchdog_task, minute={0, 30}),
+    ]
     max_jobs = get_bulk_import_concurrency()
     redis_settings = RedisSettings.from_dsn(
         os.getenv("ARQ_REDIS_URL") or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
