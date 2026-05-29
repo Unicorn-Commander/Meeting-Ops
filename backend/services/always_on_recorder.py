@@ -33,6 +33,15 @@ class AlwaysOnRecorder:
         self.monitor_task: Optional[asyncio.Task] = None
         self.device_id: Optional[str] = None
 
+        # Owning context for sessions this recorder creates. RecordingSession
+        # rows are NOT NULL on organization_id (database/models.py per
+        # 004_multi_org_scoping), so always-on sessions MUST be scoped to the
+        # user/org that enabled the mode. Set via attach_owner() by the API
+        # layer right after the singleton is started. If both are still None at
+        # insert time we skip session creation rather than insert an unowned row.
+        self.organization_id: Optional[int] = None
+        self.user_id: Optional[int] = None
+
         # Configuration
         self.silence_threshold_chunks = 20  # 20 * 15s = 5 min silence to split
         self.min_meeting_chunks = 2  # 2 * 15s = 30s minimum meeting
@@ -61,6 +70,22 @@ class AlwaysOnRecorder:
         self.context_check_speech_needed = 2  # Need 2 chunks of speech for LLM check
         self.pre_gap_transcript: Optional[str] = None  # Transcript before the gap
         self.gap_duration_minutes: float = 0.0  # Duration of the silence gap
+
+    def attach_owner(self, organization_id: Optional[int], user_id: Optional[int]):
+        """Bind the org/user that owns sessions this recorder creates.
+
+        Called by the API layer immediately after enabling always-on mode so
+        every auto-detected meeting is scoped to the requesting user's org.
+        Without this, _start_new_meeting() refuses to insert a session
+        (organization_id is NOT NULL) and logs a warning instead of creating
+        an orphaned, unscoped row."""
+        self.organization_id = organization_id
+        self.user_id = user_id
+        logger.info(
+            "Always-on owner attached: organization_id=%s user_id=%s",
+            organization_id,
+            user_id,
+        )
 
     async def start(self, device_id: Optional[str] = None):
         """Enable always-on mode"""
@@ -486,6 +511,19 @@ class AlwaysOnRecorder:
 
         session_id = str(uuid.uuid4())
 
+        # Refuse to create an unowned session. organization_id is NOT NULL on
+        # Postgres (004_multi_org_scoping); a None owner would either be
+        # rejected by the DB or, on the weaker SQLite test schema, produce an
+        # orphaned row no org can ever see. Skip + warn instead.
+        if self.organization_id is None and self.user_id is None:
+            logger.warning(
+                "Always-on _start_new_meeting called with no owner attached "
+                "(organization_id and user_id both None) - skipping session "
+                "creation. Call attach_owner() after start() to record sessions."
+            )
+            self.state = "IDLE"
+            return
+
         # Create session in database
         try:
             from database.database import SessionLocal
@@ -500,6 +538,8 @@ class AlwaysOnRecorder:
                     status="recording",
                     created_at=datetime.now(timezone.utc),
                     started_at=datetime.now(timezone.utc),
+                    organization_id=self.organization_id,
+                    user_id=self.user_id,
                 )
                 db.add(new_session)
                 db.commit()

@@ -15,7 +15,7 @@ Control messages (JSON text frames from client):
   - {"action": "ping"}   - keepalive (server responds with {"action": "pong"})
 """
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from datetime import datetime, timezone
 from typing import Dict, Optional
 import asyncio
@@ -146,10 +146,18 @@ class ProgressiveWAVWriter:
 # ---------------------------------------------------------------------------
 # JWT authentication helper
 # ---------------------------------------------------------------------------
-async def _authenticate_websocket(websocket: WebSocket) -> Optional[int]:
+async def _authenticate_websocket(websocket: WebSocket):
     """Validate a JWT token from the ``token`` query parameter.
 
-    Returns the user ID (int) on success, or *None* on failure.
+    Returns the active ``User`` (detached from its session) on success, or
+    *None* on failure. We hand back the full row — not just the id — so the
+    WS handler can tier-gate (``user.tier`` / ``user.is_superuser``) and
+    org-scope the session lookup without re-querying.
+
+    We open + close our own ``SessionLocal()`` because Starlette WS handlers
+    can't use ``Depends(get_db)``. The user's org-membership ids are
+    materialised onto ``_org_ids`` before the session closes so org scoping
+    survives detachment (mirrors streaming.py's ``_resolve_ws_user``).
     """
     token = websocket.query_params.get("token")
     if not token:
@@ -158,6 +166,7 @@ async def _authenticate_websocket(websocket: WebSocket) -> Optional[int]:
     try:
         from auth.utils import decode_token
         from auth.service import AuthService
+        from auth.models import UserOrganization
         from database.database import SessionLocal
 
         payload = decode_token(token)
@@ -175,7 +184,17 @@ async def _authenticate_websocket(websocket: WebSocket) -> Optional[int]:
         try:
             user = AuthService.get_user_by_id(db, user_id)
             if user and user.is_active:
-                return user_id
+                # Materialise org-membership ids while the session is open so
+                # the org-scope check works after the session closes.
+                org_ids = [
+                    row[0]
+                    for row in db.query(UserOrganization.organization_id)
+                    .filter(UserOrganization.user_id == user.id)
+                    .all()
+                ]
+                db.expunge(user)
+                user._org_ids = org_ids
+                return user
         finally:
             db.close()
     except Exception as e:
@@ -221,11 +240,33 @@ async def websocket_remote_audio(websocket: WebSocket, session_id: str):
     5. Disconnect when done (or send ``stop``).
     """
     # --- Authenticate ---
-    user_id = await _authenticate_websocket(websocket)
-    if user_id is None:
+    user = await _authenticate_websocket(websocket)
+    if user is None:
         # Reject the connection before accepting
         await websocket.close(code=4001)
         logger.warning(f"Remote-audio: rejected unauthenticated connection for session {session_id}")
+        return
+
+    user_id = user.id
+
+    # --- Tier gate (before accepting any audio frames) ---
+    # Appending remote audio drives the canonical server reprocess path, which
+    # is a paid-tier capability. Free-tier users are rejected with 4403 before
+    # the handshake completes. Internal-service principals bypass (none reach
+    # this JWT path today, but gate_feature_for_caller stays consistent with
+    # the HTTP gates). Mirrors streaming.py's tier-rejection shape (close-code
+    # in the application range), using 4403 to signal "authenticated but
+    # forbidden" per this module's existing 44xx convention.
+    from auth.tier import gate_feature_for_caller
+
+    try:
+        gate_feature_for_caller(user, "canonical_reprocess")
+    except HTTPException:
+        logger.warning(
+            f"Remote-audio: tier_insufficient for user_id={user_id} "
+            f"session {session_id} - rejecting with 4403"
+        )
+        await websocket.close(code=4403)
         return
 
     await websocket.accept()
@@ -264,15 +305,34 @@ async def websocket_remote_audio(websocket: WebSocket, session_id: str):
                     f"(reconnected in {elapsed:.0f}s, {total_bytes} bytes so far)"
                 )
 
-        # --- Validate session exists in DB ---
-        session = db.query(DBRecordingSession).filter(
+        # --- Validate session exists AND belongs to the caller's org ---
+        # Mirrors the org-scoping the HTTP session endpoints use
+        # (sessions.py: RecordingSession.organization_id == active_org.id).
+        # Without this, any user with a valid JWT could append audio to any
+        # session UUID across org boundaries. Superusers bypass the org
+        # filter (support/admin access), matching resolve_active_organization.
+        org_ids = getattr(user, "_org_ids", []) or []
+        session_query = db.query(DBRecordingSession).filter(
             DBRecordingSession.session_id == session_id
-        ).first()
+        )
+        if not user.is_superuser:
+            # in_([]) is always-false on every backend, so an orgless user
+            # matches nothing — exactly the desired deny.
+            session_query = session_query.filter(
+                DBRecordingSession.organization_id.in_(org_ids)
+            )
+        session = session_query.first()
 
         if not session:
-            logger.warning(f"Remote-audio: session {session_id} not found in database")
-            await websocket.send_json({"type": "error", "message": "Session not found"})
-            await websocket.close(code=4004)
+            # Collapse "doesn't exist" and "exists in another org" into one
+            # 4403 so we never leak cross-org session existence. (A truly
+            # missing session for an in-org caller is also forbidden access.)
+            logger.warning(
+                f"Remote-audio: session {session_id} not found or cross-org "
+                f"for user_id={user_id} (org_ids={org_ids}) - rejecting 4403"
+            )
+            await websocket.send_json({"type": "error", "message": "Session not accessible"})
+            await websocket.close(code=4403)
             db.close()
             return
 
