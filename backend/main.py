@@ -309,6 +309,15 @@ _load_router(app, "digests", "api.digests")
 _load_router(app, "agent_actions", "api.agent_actions")
 _load_router(app, "personal_access_tokens", "api.personal_access_tokens")
 
+# === BILLING (Stripe Subscriptions) ===
+# Webhook + checkout/portal/subscription endpoints. Inert until
+# STRIPE_API_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PRO_PRICE_ID are set —
+# routes return 503 in that case. See backend/api/billing.py for the
+# request shapes and backend/api/stripe_webhook.py for the event
+# dispatch table.
+_load_router(app, "stripe_webhook", "api.stripe_webhook")
+_load_router(app, "billing", "api.billing")
+
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")
 

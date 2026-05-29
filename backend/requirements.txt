@@ -14,6 +14,10 @@ alembic==1.13.1
 redis==5.0.1
 redis[hiredis]==5.0.1
 
+# Stripe Subscriptions (billing). Used by api/billing.py +
+# api/stripe_webhook.py via the wrapper in services/stripe_client.py.
+stripe==10.12.0
+
 # Task Queue (Bulk Import Arq worker — B-import.4)
 arq>=0.26
 

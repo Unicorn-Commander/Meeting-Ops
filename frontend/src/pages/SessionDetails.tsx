@@ -38,6 +38,7 @@ import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
 import MoveSessionOrgModal from '../components/MoveSessionOrgModal';
+import { UpgradeBanner } from '../components/UpgradeBanner';
 import { config } from '../config';
 import {
   deleteLocalSession,
@@ -2253,6 +2254,9 @@ export const SessionDetails: React.FC = () => {
       />
 
       <div className="max-w-7xl mx-auto px-4 py-6">
+        {/* Free-tier upgrade banner. Hidden for paid/superuser tiers and
+            self-dismissible for 7 days. See components/UpgradeBanner.tsx. */}
+        <UpgradeBanner />
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">

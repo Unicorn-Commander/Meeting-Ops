@@ -1,0 +1,247 @@
+"""Billing endpoints — Checkout Session, Billing Portal, current subscription.
+
+Three routes:
+
+  POST /api/billing/checkout
+      Body: {"plan": "pro"}
+      Returns: {"url": "https://checkout.stripe.com/..."}
+      Creates a Stripe Subscription Checkout session for the logged-in
+      user and the requested plan. Frontend redirects window.location
+      to the returned URL.
+
+  POST /api/billing/portal
+      Returns: {"url": "https://billing.stripe.com/..."}
+      Creates a Stripe Billing Portal session so the user can update
+      their card / cancel / view invoices. Aaron's cancel UX is
+      cancel-at-period-end, configured in the Stripe Dashboard at the
+      Portal product level — not here.
+
+  GET /api/billing/subscription
+      Returns: {tier, is_founder, subscription_id, status, ...}
+      Reports the current subscription state. Frontend uses this for
+      the "View existing subscription" link on /pricing and for any
+      future "your plan" banner.
+
+All three require auth and surface a 503 (not 500) when Stripe isn't
+configured, so the API doesn't look broken on environments where billing
+hasn't been wired yet (test sandboxes, offline appliance builds).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from auth.dependencies import get_current_user
+from auth.models import User
+from database.database import get_db
+from services import stripe_client
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/billing", tags=["billing"])
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    plan: str = Field(default="pro", description="Plan name: 'pro' or 'enterprise'.")
+    # Optional return URLs — frontend usually omits and we use defaults.
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+class CheckoutResponse(BaseModel):
+    url: str
+
+
+class PortalResponse(BaseModel):
+    url: str
+
+
+class SubscriptionResponse(BaseModel):
+    tier: str
+    is_founder: bool
+    has_subscription: bool
+    subscription_id: Optional[str] = None
+    status: Optional[str] = None
+    price_id: Optional[str] = None
+    current_period_end: Optional[str] = None
+    cancel_at_period_end: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _app_base_url() -> str:
+    """Default base URL for Stripe redirect targets. Falls back to a
+    sensible localhost so dev works without extra config."""
+    raw = (
+        os.getenv("APP_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or "http://localhost:7777"
+    ).rstrip("/")
+    return raw
+
+
+def _ensure_configured() -> None:
+    """Raise 503 if Stripe isn't configured. Routes call this first so
+    we don't dump SDK init errors into the response body."""
+    if not stripe_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Billing is not enabled on this instance.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@router.post("/checkout", response_model=CheckoutResponse)
+async def create_checkout(
+    payload: CheckoutRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CheckoutResponse:
+    """Create a Stripe Checkout session for the current user."""
+    _ensure_configured()
+    price_id = stripe_client.tier_to_price_id(payload.plan)
+    if not price_id:
+        # Enterprise has no public Checkout — it's a sales motion.
+        if payload.plan == "enterprise":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Enterprise is contact-sales only. Email "
+                    "hello@magicunicorn.dev to start an Enterprise conversation."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No Stripe price configured for plan '{payload.plan}'.",
+        )
+
+    base = _app_base_url()
+    success_url = (
+        payload.success_url
+        or f"{base}/#/sessions?upgrade=success&session_id={{CHECKOUT_SESSION_ID}}"
+    )
+    cancel_url = payload.cancel_url or f"{base}/#/pricing?upgrade=cancelled"
+
+    try:
+        url = stripe_client.create_checkout_session(
+            db=db,
+            user=current_user,
+            price_id=price_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except RuntimeError as exc:
+        logger.error("checkout: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stripe is not configured.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("checkout: Stripe API error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Checkout could not be created.",
+        )
+    return CheckoutResponse(url=url)
+
+
+@router.post("/portal", response_model=PortalResponse)
+async def create_portal(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PortalResponse:
+    """Create a Billing Portal session for the current user."""
+    _ensure_configured()
+    base = _app_base_url()
+    return_url = f"{base}/#/sessions"
+    # If the user has no Stripe customer record yet (free user who never
+    # checked out), bootstrap one so the Portal opens cleanly.
+    if not current_user.stripe_customer_id:
+        try:
+            stripe_client.get_or_create_stripe_customer(db, current_user)
+        except RuntimeError as exc:
+            logger.error("portal: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Stripe is not configured.",
+            )
+    try:
+        url = stripe_client.create_billing_portal_session(current_user, return_url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("portal: Stripe API error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Billing portal could not be created.",
+        )
+    return PortalResponse(url=url)
+
+
+@router.get("/subscription", response_model=SubscriptionResponse)
+async def get_subscription(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SubscriptionResponse:
+    """Return the user's current subscription state.
+
+    Always returns 200 (with `has_subscription=False`) for users who
+    have never paid. Returns Stripe data when configured + an active
+    subscription exists.
+    """
+    base_response = SubscriptionResponse(
+        tier=current_user.tier or "free",
+        is_founder=bool(getattr(current_user, "is_founder", False)),
+        has_subscription=False,
+    )
+    if not stripe_client.is_configured() or not current_user.stripe_customer_id:
+        return base_response
+    try:
+        sub = stripe_client.get_active_subscription(current_user)
+    except RuntimeError:
+        return base_response
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("subscription: Stripe lookup failed: %s", exc)
+        return base_response
+    if sub is None:
+        return base_response
+    end = sub.get("current_period_end")
+    if isinstance(end, (int, float)):
+        try:
+            end_iso = datetime.fromtimestamp(end, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            end_iso = None
+    else:
+        end_iso = None
+    return SubscriptionResponse(
+        tier=sub.get("tier") or current_user.tier or "free",
+        is_founder=bool(getattr(current_user, "is_founder", False)),
+        has_subscription=True,
+        subscription_id=sub.get("subscription_id"),
+        status=sub.get("status"),
+        price_id=sub.get("price_id"),
+        current_period_end=end_iso,
+        cancel_at_period_end=bool(sub.get("cancel_at_period_end")),
+    )

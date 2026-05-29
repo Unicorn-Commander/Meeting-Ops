@@ -57,6 +57,11 @@ class UserResponse(BaseModel):
     # without a follow-up round trip. See backend/auth/tier.py.
     tier: str = "free"
     tier_features: dict[str, Any] = {}
+    # Stripe billing surface — populated so the frontend can render the
+    # "Founders 100" badge + the right Pricing-page CTA on the very first
+    # render after login.
+    is_founder: bool = False
+    has_stripe_customer: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -154,6 +159,8 @@ def _build_user_response(
         active_organization=active_organization,
         tier=get_user_tier(user),
         tier_features=get_tier_features(user),
+        is_founder=bool(getattr(user, "is_founder", False)),
+        has_stripe_customer=bool(getattr(user, "stripe_customer_id", None)),
     )
 
 # Routes
@@ -195,6 +202,19 @@ async def register(
             send_verification_email(
                 user.email,
                 f"{auth_config.APP_BASE_URL}/api/auth/verify-email?token={token}",
+            )
+        # Founders 100: grant access flag at signup time. Aaron's pricing
+        # is unchanged ($12/mo for everyone) — the flag governs early-
+        # access + ecosystem bundle eligibility. Idempotent; respects
+        # FOUNDERS_100_ACTIVE / FOUNDERS_100_LIMIT envs.
+        try:
+            from api.stripe_webhook import _maybe_grant_founder
+            _maybe_grant_founder(db, user)
+        except Exception:
+            # Never fail signup on a Founders-flag bookkeeping error.
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "Founders 100 grant failed for user_id=%s", user.id
             )
         return _build_user_response(user)
     except ValueError as e:
