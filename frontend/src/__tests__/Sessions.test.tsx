@@ -32,6 +32,19 @@ vi.mock('../contexts/OrgContext', () => ({
   }),
 }));
 
+// Stripe UpgradeBanner uses useAuth — stub the context so Sessions tests
+// don't need a full AuthProvider tree. Mirrors the pro-tier path so the
+// banner short-circuits invisibly during rendering.
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, email: 'test@example.com', tier: 'pro', is_founder: false },
+    isAuthenticated: true,
+    isLoading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
+
 vi.mock('../services/localSessionStore', () => ({
   listLocalSessions: vi.fn().mockResolvedValue([]),
 }));

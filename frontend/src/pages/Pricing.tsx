@@ -1,5 +1,5 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   Check,
@@ -11,6 +11,11 @@ import {
   Workflow,
   Database,
 } from 'lucide-react';
+import {
+  startCheckout,
+  startPortal,
+  BillingUnavailableError,
+} from '../services/billingApi';
 
 type Plan = {
   name: string;
@@ -21,10 +26,20 @@ type Plan = {
   ctaLabel: string;
   ctaHref: string;
   highlight?: boolean;
+  /** When set, the CTA wires up to Stripe Checkout via billingApi.startCheckout(plan). */
+  checkoutPlan?: 'pro';
 };
 
 const enterpriseMailto =
   'mailto:enterprise@meeting-ops.unicorncommander.ai?subject=UC-Meeting-Ops%20Enterprise%20inquiry&body=Please%20contact%20me%20about%20Enterprise.';
+
+function isLoggedIn(): boolean {
+  try {
+    return !!localStorage.getItem('access_token');
+  } catch {
+    return false;
+  }
+}
 
 const plans: Plan[] = [
   {
@@ -46,7 +61,7 @@ const plans: Plan[] = [
     name: 'Pro',
     price: '$12',
     priceSuffix: '/ month',
-    note: 'Everything in Free, plus the server completion pass and ecosystem integrations.',
+    note: 'Everything in Free, plus the server completion pass and ecosystem integrations. Cancel anytime.',
     features: [
       'Higher-accuracy server transcription (Parakeet 1.1B)',
       'Speaker diarization (pyannote 3.1)',
@@ -59,7 +74,8 @@ const plans: Plan[] = [
       'Per-session privacy toggle (browser-only on demand)',
     ],
     ctaLabel: 'Subscribe',
-    ctaHref: '/pricing#subscribe',
+    ctaHref: '#pro',
+    checkoutPlan: 'pro',
     highlight: true,
   },
   {
@@ -87,6 +103,49 @@ const iconByPlan = {
 } as const;
 
 export const Pricing: React.FC = () => {
+  const navigate = useNavigate();
+  const [checkoutBusy, setCheckoutBusy] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const loggedIn = isLoggedIn();
+
+  const handleSubscribe = async (plan: 'pro') => {
+    setCheckoutError(null);
+    if (!loggedIn) {
+      // Carry the intent through signup so the user lands back here.
+      navigate(`/signup?return_to=${encodeURIComponent('/pricing')}`);
+      return;
+    }
+    setCheckoutBusy(plan);
+    try {
+      await startCheckout(plan);
+      // startCheckout redirects on success; if we're still here, it failed.
+    } catch (err) {
+      const msg =
+        err instanceof BillingUnavailableError
+          ? 'Stripe Checkout is not enabled yet on this instance. Email hello@magicunicorn.dev to upgrade.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not start checkout. Try again in a moment.';
+      setCheckoutError(msg);
+      setCheckoutBusy(null);
+    }
+  };
+
+  const handleManageSubscription = async () => {
+    setCheckoutError(null);
+    try {
+      await startPortal();
+    } catch (err) {
+      const msg =
+        err instanceof BillingUnavailableError
+          ? 'Billing portal is not enabled on this instance.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not open billing portal.';
+      setCheckoutError(msg);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <div className="mx-auto w-full max-w-6xl px-4 py-6 lg:px-8">
@@ -135,6 +194,27 @@ export const Pricing: React.FC = () => {
             </p>
           </div>
 
+          {loggedIn && (
+            <div className="mt-6">
+              <button
+                type="button"
+                onClick={handleManageSubscription}
+                className="text-sm text-fuchsia-200 underline-offset-4 hover:underline"
+              >
+                View existing subscription
+              </button>
+            </div>
+          )}
+
+          {checkoutError && (
+            <div
+              role="alert"
+              className="mt-6 rounded-2xl border border-amber-400/30 bg-amber-500/10 p-4 text-sm text-amber-100"
+            >
+              {checkoutError}
+            </div>
+          )}
+
           <div className="mt-10 grid gap-4 lg:grid-cols-3">
             {plans.map((plan) => (
               <article
@@ -178,7 +258,21 @@ export const Pricing: React.FC = () => {
                 </ul>
 
                 <div className="mt-6">
-                  {plan.ctaHref.startsWith('mailto:') ? (
+                  {plan.checkoutPlan ? (
+                    <button
+                      type="button"
+                      disabled={checkoutBusy === plan.checkoutPlan}
+                      onClick={() => handleSubscribe(plan.checkoutPlan!)}
+                      className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-wait disabled:opacity-70 ${
+                        plan.highlight
+                          ? 'bg-white text-zinc-950 hover:bg-zinc-100'
+                          : 'border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10'
+                      }`}
+                    >
+                      {checkoutBusy === plan.checkoutPlan ? 'Redirecting…' : plan.ctaLabel}
+                      <ArrowRight className="h-4 w-4" />
+                    </button>
+                  ) : plan.ctaHref.startsWith('mailto:') ? (
                     <a
                       href={plan.ctaHref}
                       className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${

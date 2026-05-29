@@ -68,7 +68,15 @@ class Organization(Base):
     # NEVER return the cleartext value from any HTTP response. Always mask
     # via api.integrations_org._mask_integration before serializing.
     integrations = Column(get_json_type(), nullable=False, default=dict, server_default="{}")
-    
+
+    # Stripe Subscriptions: when org-level billing lands this column links
+    # the Organization to its Stripe Subscription object. v1 is individual
+    # billing (the link lives on User.stripe_customer_id) so this stays
+    # NULL until the org-billing flow ships. Added pre-emptively in
+    # alembic 033 so we don't need a second migration.
+    stripe_subscription_id = Column(String(64), unique=True, nullable=True, index=True)
+
+
     # Relationships
     users = relationship("UserOrganization", back_populates="organization")
 
@@ -97,6 +105,19 @@ class User(Base):
     # 028 to set Aaron + Shafen to enterprise. New users default to
     # 'free' until billing flips them.
     tier = Column(String(32), nullable=False, default="free")
+
+    # Stripe customer ID (cus_...). NULL until the user first touches
+    # Checkout / Billing Portal, or until a `customer.created` webhook
+    # event arrives for them. Used by the webhook handler to find the
+    # local user when subscription events arrive. Added in alembic 033.
+    stripe_customer_id = Column(String(64), unique=True, nullable=True, index=True)
+
+    # Founders 100 flag. Aaron's pricing: founders pay the SAME $12/mo
+    # (NOT a discount) — the flag controls early-access + ecosystem
+    # bundle eligibility (Project-Ops, Accounting-Ops, etc.). Set at
+    # signup time when FOUNDERS_100_ACTIVE is on and the existing
+    # founder count is below FOUNDERS_100_LIMIT. Added in alembic 033.
+    is_founder = Column(Boolean, nullable=False, default=False)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

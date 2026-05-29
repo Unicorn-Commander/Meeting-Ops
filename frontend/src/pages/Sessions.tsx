@@ -23,6 +23,7 @@ import { useUploads } from '../contexts/UploadsContext';
 import { useOrg } from '../contexts/OrgContext';
 import { TagChip } from '../components/TagChip';
 import MobileSessionsList from '../components/MobileSessionsList';
+import { UpgradeBanner } from '../components/UpgradeBanner';
 import {
   deleteLocalSession,
   isLocalSessionId,
@@ -1529,6 +1530,9 @@ export const Sessions: React.FC = () => {
       )}
 
       <div className="p-6">
+        {/* Free-tier upgrade banner. Renders only for free users; dismissible
+            for 7 days via localStorage. See components/UpgradeBanner.tsx. */}
+        <UpgradeBanner />
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
