@@ -128,16 +128,23 @@ class _GraphTarget:
     graph_name: str
 
 
-def _resolve_tenancy(org_id: int) -> _GraphTarget:
-    """Compute the active tenancy target from env + org_id.
+def _resolve_tenancy(
+    org_id: int,
+    *,
+    tenancy_mode_override: Optional[str] = None,
+    shared_agent_id_override: Optional[str] = None,
+) -> _GraphTarget:
+    """Compute the active tenancy target from per-org config + org_id.
 
+    Per-org overrides (passed in from the brigade integration config on
+    Organization.integrations.brigade) win over the env-var defaults.
     Unknown modes fall back to ``shared`` with a WARN log so a typo
     in deployment env never silently leaks across orgs (we'd rather
     write to one graph the operator can audit than fail-open into
     cross-graph soup).
     """
     raw_mode = (
-        os.getenv("BRIGADE_TENANCY_MODE", DEFAULT_TENANCY_MODE)
+        (tenancy_mode_override or os.getenv("BRIGADE_TENANCY_MODE", DEFAULT_TENANCY_MODE))
         .strip()
         .lower()
     )
@@ -150,8 +157,11 @@ def _resolve_tenancy(org_id: int) -> _GraphTarget:
         raw_mode = DEFAULT_TENANCY_MODE
 
     if raw_mode == TENANCY_SHARED:
-        agent_id = os.getenv(
-            "BRIGADE_SHARED_AGENT_ID", DEFAULT_SHARED_GRAPH_BASENAME
+        agent_id = (
+            shared_agent_id_override
+            or os.getenv(
+                "BRIGADE_SHARED_AGENT_ID", DEFAULT_SHARED_GRAPH_BASENAME
+            )
         )
     elif raw_mode == TENANCY_PER_ORG_GRAPH:
         agent_id = f"{PER_ORG_GRAPH_PREFIX}_{org_id}"
@@ -416,9 +426,45 @@ async def write_meeting_to_brigade(
                 ok=False, mode="error", detail="no organization_id"
             )
 
-        target = _resolve_tenancy(org_id)
+        # v3.19.0: honor the per-org integration toggle. When the org
+        # has integrations.brigade.enabled=False we no-op (returns
+        # ok=True, mode="noop") regardless of env-var creds, so an
+        # opted-out org never leaks data into a shared Brigade.
+        from services.integrations.org_config import resolve_brigade
+
+        brigade_cfg = resolve_brigade(db, org_id)
+        if not brigade_cfg.enabled and brigade_cfg.source == "disabled":
+            logger.info(
+                "brigade_writer org=%s explicitly disabled brigade integration "
+                "— skipping write for session=%s",
+                org_id,
+                session_id,
+            )
+            return BrigadeWriteResult(ok=True, mode="noop")
+
+        target = _resolve_tenancy(
+            org_id,
+            tenancy_mode_override=brigade_cfg.extra.get("tenancy_mode")
+            if brigade_cfg.source == "org_override"
+            else None,
+            shared_agent_id_override=brigade_cfg.extra.get("shared_agent_id")
+            if brigade_cfg.source == "org_override"
+            else None,
+        )
         owned_client = client is None
-        active_client = client or BrigadeClient()
+        # If the org has its own creds/URL, instantiate the client with
+        # them. Tests still inject their own client via ``client=`` so
+        # this branch only runs in production.
+        if client is None:
+            if brigade_cfg.source == "org_override":
+                active_client = BrigadeClient(
+                    base_url=brigade_cfg.api_base_url,
+                    api_key=brigade_cfg.api_key,
+                )
+            else:
+                active_client = BrigadeClient()
+        else:
+            active_client = client
 
         try:
             return await _write_all(

@@ -305,6 +305,9 @@ _load_router(app, "websocket_remote_audio", "api.websocket_remote_audio")
 # === PHASE 2 ROUTERS ===
 _load_router(app, "provider_settings", "api.provider_settings")
 _load_router(app, "integrations", "api.integrations")
+# v3.19.0: per-org integration toggles + secrets (Brigade / Project-Ops /
+# Contact-Ops / Accounting-Ops / Stable). See api/integrations_org.py.
+_load_router(app, "integrations_org", "api.integrations_org")
 _load_router(app, "digests", "api.digests")
 _load_router(app, "agent_actions", "api.agent_actions")
 _load_router(app, "personal_access_tokens", "api.personal_access_tokens")

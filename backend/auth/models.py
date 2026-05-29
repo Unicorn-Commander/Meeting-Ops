@@ -51,6 +51,23 @@ class Organization(Base):
     # Settings
     settings = Column(get_json_type(), default={})
     is_active = Column(Boolean, default=True)
+
+    # Per-org integration toggles + credentials (v3.19.0).
+    # Shape (each key optional; absent = use env-var default + disabled):
+    #   {
+    #     "brigade":        {"enabled": bool, "api_base_url": str, "api_key_encrypted": str,
+    #                        "tenancy_mode": "shared"|"per_org_graph"|"per_org_instance",
+    #                        "shared_agent_id": str},
+    #     "project_ops":    {"enabled": bool, "api_base_url": str, "api_key_encrypted": str,
+    #                        "default_project_number": str},
+    #     "contact_ops":    {"enabled": bool, "api_base_url": str, "api_key_encrypted": str},
+    #     "accounting_ops": {"enabled": bool, "api_base_url": str, "api_key_encrypted": str},
+    #     "stable":         {"enabled": bool, "api_base_url": str, "api_key_encrypted": str},
+    #   }
+    # api_key_encrypted is Fernet ciphertext (services.providers.crypto).
+    # NEVER return the cleartext value from any HTTP response. Always mask
+    # via api.integrations_org._mask_integration before serializing.
+    integrations = Column(get_json_type(), nullable=False, default=dict, server_default="{}")
     
     # Relationships
     users = relationship("UserOrganization", back_populates="organization")
