@@ -1,8 +1,9 @@
 import { useCallback, useState, useRef, type RefObject } from 'react';
 import { showToast } from './Toast';
 import { parseFilename } from '../utils/filenameParser';
-import { FolderUp, FileWarning, Check } from 'lucide-react';
+import { FolderUp, FileWarning, Check, Sparkles } from 'lucide-react';
 import type { StagedFile } from '../pages/Import';
+import { useTierFeatures } from '../hooks/useTierFeatures';
 
 const MAX_FILES = 1000;
 const AUDIO_MIME_TYPES = new Set([
@@ -39,6 +40,13 @@ export default function ImportFilePickerStage({
   const [creating, setCreating] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
+  // v3.19 (audit §5). Bulk import = Pro/Enterprise — it spins up the
+  // server completion pipeline on every file, which is exactly the
+  // compute path free tier doesn't get. We gate at the job-creation
+  // entry so a free user can't even reach the file picker. Backend
+  // mirrors this with a 403 in `auth/tier.py`.
+  const { hasFeature } = useTierFeatures();
+  const canBulkImport = hasFeature('bulk_import');
 
   const processFiles = useCallback(
     (fileList: FileList | File[]) => {
@@ -119,6 +127,12 @@ export default function ImportFilePickerStage({
   );
 
   const handleCreateJob = useCallback(async () => {
+    if (!canBulkImport) {
+      // Belt-and-suspenders: the upgrade card hides the button when this
+      // is false, but a stale-state click should still bail cleanly.
+      showToast.warning('Bulk import requires Pro. Upgrade from the pricing page to enable it.');
+      return;
+    }
     setCreating(true);
     try {
       const resp = await fetch('/api/import/jobs', {
@@ -134,15 +148,15 @@ export default function ImportFilePickerStage({
     } finally {
       setCreating(false);
     }
-  }, [onJobCreated]);
+  }, [canBulkImport, onJobCreated]);
 
   const totalSize = staged.reduce((s, f) => s + f.file.size, 0);
   const totalMb = (totalSize / (1024 * 1024)).toFixed(1);
 
   return (
     <div className="space-y-6">
-      {/* Step 1: Create job */}
-      {!jobId && (
+      {/* Step 1: Create job (or upgrade prompt for free tier). */}
+      {!jobId && canBulkImport && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
           <h2 className="mb-2 text-base font-medium">Step 1: Create import job</h2>
           <p className="mb-4 text-sm text-zinc-400">
@@ -155,6 +169,28 @@ export default function ImportFilePickerStage({
           >
             {creating ? 'Creating...' : 'Create import job'}
           </button>
+        </div>
+      )}
+      {!jobId && !canBulkImport && (
+        <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-6">
+          <div className="flex items-start gap-3">
+            <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-purple-300" />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-base font-medium text-purple-100">Bulk import is a Pro workflow</h2>
+              <p className="mt-1 text-sm text-purple-200/80">
+                Bulk import is a Pro workflow for processing existing
+                audio libraries. Free keeps new recordings local in
+                this browser. Upgrade to queue files, track progress,
+                and run the server completion pipeline.
+              </p>
+              <a
+                href="#/pricing"
+                className="mt-4 inline-flex items-center rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white hover:bg-purple-500"
+              >
+                View Pro pricing
+              </a>
+            </div>
+          </div>
         </div>
       )}
 

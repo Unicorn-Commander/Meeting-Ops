@@ -716,23 +716,32 @@ export default function AlwaysOnControl() {
               <div className="flex items-start gap-3">
                 <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-purple-400" />
                 <div className="min-w-0 flex-1 text-sm text-zinc-100">
-                  <div className="font-medium">Free on-device recording</div>
+                  {/* v3.19 upgrade copy (audit §5). Server completion =
+                      one optional pass at meeting stop, not a continuous
+                      stream-to-server. Privacy Mode stays the escape
+                      valve for sensitive meetings. */}
+                  <div className="font-medium">Finish with Pro server completion</div>
                   <p className="mt-0.5 text-xs leading-5 text-zinc-400">
-                    {alwaysOn.paidFeaturePrompt}
+                    Live capture stays local in your browser while you
+                    meet. At stop, Pro can run one opt-in completion
+                    pass with higher-accuracy transcription,
+                    diarization, speaker memory, and a final summary.
+                    Sensitive meeting? Leave Privacy Mode on.
                   </p>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <a
                       href="#/pricing"
                       className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500"
                     >
-                      Upgrade to Pro
+                      View Pro pricing
                     </a>
-                    <a
-                      href="#/local-sessions"
+                    <button
+                      type="button"
+                      onClick={alwaysOn.dismissPaidFeaturePrompt}
                       className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
                     >
-                      Local sessions
-                    </a>
+                      Keep local
+                    </button>
                   </div>
                 </div>
                 <button

@@ -4,6 +4,8 @@ import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
 import { cacheKey, useHydratedState } from '../utils/cachedState';
+import { Dialog } from '../components/ui/Dialog';
+import ConfirmModal from '../components/ConfirmModal';
 
 interface SpeakerSummary {
   id: number;
@@ -104,6 +106,11 @@ export const SpeakerLibrary: React.FC = () => {
   // Collapsible + height-capped so a long unassigned list can't push the
   // enrolled-speakers grid below the fold.
   const [unassignedOpen, setUnassignedOpen] = useState(true);
+  // v3.19 (audit §6). Replace `window.confirm()` on destructive flows
+  // with our themed ConfirmModal so screen readers, focus management,
+  // and the Cancel-as-default-focus convention apply uniformly.
+  const [pendingDeleteSampleId, setPendingDeleteSampleId] = useState<number | null>(null);
+  const [pendingDeleteSpeakerId, setPendingDeleteSpeakerId] = useState<number | null>(null);
   const [assigningLinkId, setAssigningLinkId] = useState<number | null>(null);
   const [assignDialogLink, setAssignDialogLink] = useState<UnassignedSpeakerLink | null>(null);
   const [speakerSearch, setSpeakerSearch] = useState('');
@@ -333,7 +340,8 @@ export const SpeakerLibrary: React.FC = () => {
 
   const deleteSample = async (sampleId: number) => {
     if (!selectedId) return;
-    if (!confirm('Delete this voice sample? Centroid will be recomputed from the remaining samples.')) return;
+    // Confirm path moved to <ConfirmModal>. Callers set
+    // `pendingDeleteSampleId` and the modal's onConfirm invokes this.
     try {
       const res = await fetch(
         `${config.apiBaseUrl}/api/speakers/${selectedId}/voice-samples/${sampleId}`,
@@ -349,7 +357,7 @@ export const SpeakerLibrary: React.FC = () => {
   };
 
   const deleteSpeaker = async (id: number) => {
-    if (!confirm('Delete this speaker? Existing meeting links will be cleared.')) return;
+    // Confirm path moved to <ConfirmModal>.
     try {
       const res = await fetch(`${config.apiBaseUrl}/api/speakers/${id}`, {
         method: 'DELETE',
@@ -580,7 +588,7 @@ export const SpeakerLibrary: React.FC = () => {
                     Merge into another speaker…
                   </button>
                   <button
-                    onClick={() => deleteSpeaker(detail.id)}
+                    onClick={() => setPendingDeleteSpeakerId(detail.id)}
                     className="text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/40 flex items-center gap-1"
                     aria-label="Delete speaker"
                   >
@@ -642,7 +650,7 @@ export const SpeakerLibrary: React.FC = () => {
                             : ''}
                         </span>
                         <button
-                          onClick={() => deleteSample(sample.id)}
+                          onClick={() => setPendingDeleteSampleId(sample.id)}
                           className="text-zinc-400 hover:text-red-300"
                           aria-label="Delete sample"
                         >
@@ -663,21 +671,27 @@ export const SpeakerLibrary: React.FC = () => {
         </section>
       </div>
 
-      {assignDialogLink && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-full max-w-lg">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="text-sm font-semibold text-zinc-100">Assign fingerprint</h2>
-                <p className="mt-1 text-xs text-zinc-500">
+      {/* v3.19 (audit §6). Speaker Library modals migrated off ad-hoc
+          `fixed inset-0` overlays onto Radix Dialog so focus trap,
+          focus return, role=dialog, aria-modal, ESC, and click-outside
+          all work consistently with the rest of the app. */}
+      <Dialog
+        open={assignDialogLink !== null}
+        onOpenChange={(open) => { if (!open) setAssignDialogLink(null); }}
+      >
+        <Dialog.Content size="lg" describedById="assign-fingerprint-description">
+          <Dialog.Header>
+            <div className="flex-1">
+              <Dialog.Title>Assign fingerprint</Dialog.Title>
+              {assignDialogLink && (
+                <p id="assign-fingerprint-description" className="mt-1 text-xs text-zinc-500">
                   {assignDialogLink.raw_label} in {assignDialogLink.session_title}
                 </p>
-              </div>
-              <button onClick={() => setAssignDialogLink(null)} className="text-zinc-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
+              )}
             </div>
-
+            <Dialog.Close />
+          </Dialog.Header>
+          <div className="px-5 py-4">
             <div className="relative mb-3">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
               <input
@@ -708,7 +722,7 @@ export const SpeakerLibrary: React.FC = () => {
               )}
             </div>
 
-            <div className="rounded border border-zinc-800 p-3 mb-4">
+            <div className="rounded border border-zinc-800 p-3">
               <label className="block text-xs text-zinc-400 mb-1">
                 Create new speaker + assign
               </label>
@@ -722,50 +736,57 @@ export const SpeakerLibrary: React.FC = () => {
                 <button
                   type="button"
                   onClick={createSpeakerAndAssign}
-                  disabled={!createAssignName.trim() || assigningLinkId === assignDialogLink.id}
+                  disabled={!createAssignName.trim() || (assignDialogLink !== null && assigningLinkId === assignDialogLink.id)}
                   className="rounded bg-fuchsia-600 px-3 py-2 text-xs text-white hover:bg-fuchsia-500 disabled:opacity-50"
                 >
                   Create + assign
                 </button>
               </div>
             </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setAssignDialogLink(null)}
-                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => manualSpeakerId && assignUnassignedLink(assignDialogLink, manualSpeakerId)}
-                disabled={!manualSpeakerId || assigningLinkId === assignDialogLink.id}
-                className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
-              >
-                {assigningLinkId === assignDialogLink.id ? 'Assigning…' : 'Assign selected'}
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+          <Dialog.Footer>
+            <button
+              onClick={() => setAssignDialogLink(null)}
+              className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => assignDialogLink && manualSpeakerId && assignUnassignedLink(assignDialogLink, manualSpeakerId)}
+              disabled={!manualSpeakerId || (assignDialogLink !== null && assigningLinkId === assignDialogLink.id)}
+              className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
+            >
+              {assignDialogLink && assigningLinkId === assignDialogLink.id ? 'Assigning…' : 'Assign selected'}
+            </button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
 
-      {mergeOpen && detail && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-rose-900 rounded-lg p-5 w-full max-w-lg">
-            <div className="flex items-start gap-3 mb-4">
-              <AlertTriangle className="w-5 h-5 text-rose-300 mt-0.5" />
+      <Dialog
+        open={mergeOpen && detail !== null}
+        onOpenChange={(open) => { if (!open) setMergeOpen(false); }}
+      >
+        <Dialog.Content
+          size="lg"
+          describedById="merge-speaker-description"
+          contentClassName="border-rose-900"
+        >
+          <Dialog.Header>
+            <div className="flex items-start gap-3 flex-1">
+              <AlertTriangle className="w-5 h-5 text-rose-300 mt-0.5 shrink-0" />
               <div className="flex-1">
-                <h2 className="text-sm font-semibold text-zinc-100">Merge speaker</h2>
-                <p className="mt-1 text-xs text-rose-200">
-                  This will permanently delete {detail.display_name} after moving its samples
-                  and session links into the selected speaker. Cannot be undone.
-                </p>
+                <Dialog.Title>Merge speaker</Dialog.Title>
+                {detail && (
+                  <p id="merge-speaker-description" className="mt-1 text-xs text-rose-200">
+                    This will permanently delete {detail.display_name} after moving its samples
+                    and session links into the selected speaker. Cannot be undone.
+                  </p>
+                )}
               </div>
-              <button onClick={() => setMergeOpen(false)} className="text-zinc-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
             </div>
-
+            <Dialog.Close />
+          </Dialog.Header>
+          <div className="px-5 py-4">
             <label className="block text-xs text-zinc-400 mb-1">Merge into</label>
             <select
               value={mergeTargetId ?? ''}
@@ -778,50 +799,55 @@ export const SpeakerLibrary: React.FC = () => {
               ))}
             </select>
 
-            {selectedMergeTarget && (
+            {detail && selectedMergeTarget && (
               <div className="mb-3 rounded border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-400">
                 {detail.display_name} will be deleted after moving into {selectedMergeTarget.display_name}.
               </div>
             )}
 
-            <label className="block text-xs text-zinc-400 mb-1" htmlFor="merge-confirm-speaker">
-              Type “{detail.display_name}” to confirm
-            </label>
-            <input
-              id="merge-confirm-speaker"
-              value={mergeConfirm}
-              onChange={e => setMergeConfirm(e.target.value)}
-              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-4"
-            />
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setMergeOpen(false)}
-                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={mergeSelectedSpeaker}
-                disabled={!mergeTargetId || !mergeConfirmMatches || merging}
-                className="text-xs px-3 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-white disabled:opacity-50"
-              >
-                {merging ? 'Merging…' : 'Merge and delete source'}
-              </button>
-            </div>
+            {detail && (
+              <>
+                <label className="block text-xs text-zinc-400 mb-1" htmlFor="merge-confirm-speaker">
+                  Type “{detail.display_name}” to confirm
+                </label>
+                <input
+                  id="merge-confirm-speaker"
+                  value={mergeConfirm}
+                  onChange={e => setMergeConfirm(e.target.value)}
+                  className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100"
+                />
+              </>
+            )}
           </div>
-        </div>
-      )}
+          <Dialog.Footer>
+            <button
+              onClick={() => setMergeOpen(false)}
+              className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={mergeSelectedSpeaker}
+              disabled={!mergeTargetId || !mergeConfirmMatches || merging}
+              className="text-xs px-3 py-1.5 rounded bg-rose-700 hover:bg-rose-600 text-white disabled:opacity-50"
+            >
+              {merging ? 'Merging…' : 'Merge and delete source'}
+            </button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
 
-      {showCreate && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-full max-w-md">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-zinc-100">New speaker</h2>
-              <button onClick={() => setShowCreate(false)} className="text-zinc-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      <Dialog open={showCreate} onOpenChange={setShowCreate}>
+        <Dialog.Content size="md" describedById="new-speaker-description">
+          <Dialog.Header>
+            <Dialog.Title>New speaker</Dialog.Title>
+            <Dialog.Close />
+          </Dialog.Header>
+          <div className="px-5 py-4">
+            <p id="new-speaker-description" className="sr-only">
+              Create a new speaker by providing a display name and
+              optional email + notes.
+            </p>
             <label className="block text-xs text-zinc-400 mb-1">Display name *</label>
             <input
               value={newName}
@@ -841,26 +867,62 @@ export const SpeakerLibrary: React.FC = () => {
               value={newNotes}
               onChange={e => setNewNotes(e.target.value)}
               rows={3}
-              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100 mb-3"
+              className="w-full px-3 py-2 rounded bg-zinc-950 border border-zinc-700 text-sm text-zinc-100"
             />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowCreate(false)}
-                className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={createSpeaker}
-                disabled={creating || !newName.trim()}
-                className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
-              >
-                {creating ? 'Creating…' : 'Create speaker'}
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+          <Dialog.Footer>
+            <button
+              onClick={() => setShowCreate(false)}
+              className="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={createSpeaker}
+              disabled={creating || !newName.trim()}
+              className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white disabled:opacity-50"
+            >
+              {creating ? 'Creating…' : 'Create speaker'}
+            </button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
+
+      {/* v3.19 (audit §6). Replaces `window.confirm()` on the sample +
+          speaker delete flows. ConfirmModal defaults focus to Cancel
+          for destructive tone, so an accidental Enter doesn't delete. */}
+      <ConfirmModal
+        isOpen={pendingDeleteSampleId !== null}
+        title="Delete voice sample?"
+        description="Delete this voice sample? Centroid will be recomputed from the remaining samples."
+        confirmLabel="Delete sample"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={() => {
+          const sampleId = pendingDeleteSampleId;
+          setPendingDeleteSampleId(null);
+          if (sampleId !== null) {
+            void deleteSample(sampleId);
+          }
+        }}
+        onCancel={() => setPendingDeleteSampleId(null)}
+      />
+      <ConfirmModal
+        isOpen={pendingDeleteSpeakerId !== null}
+        title="Delete speaker?"
+        description="Delete this speaker? Existing meeting links will be cleared. This cannot be undone."
+        confirmLabel="Delete speaker"
+        cancelLabel="Cancel"
+        tone="danger"
+        onConfirm={() => {
+          const speakerId = pendingDeleteSpeakerId;
+          setPendingDeleteSpeakerId(null);
+          if (speakerId !== null) {
+            void deleteSpeaker(speakerId);
+          }
+        }}
+        onCancel={() => setPendingDeleteSpeakerId(null)}
+      />
     </div>
   );
 };

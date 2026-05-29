@@ -343,6 +343,7 @@ export default function RAGChatPanel() {
             onClick={clearHistory}
             className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors"
             title="Clear history"
+            aria-label="Clear chat history"
           >
             <Trash2 className="w-4 h-4" />
           </button>

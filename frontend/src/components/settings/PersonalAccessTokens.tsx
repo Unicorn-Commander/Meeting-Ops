@@ -7,9 +7,9 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-  X,
 } from 'lucide-react';
 import { config } from '../../config';
+import { Dialog } from '../ui/Dialog';
 
 interface PersonalAccessToken {
   id: number;
@@ -180,20 +180,21 @@ export default function PersonalAccessTokens() {
         )}
       </div>
 
-      {dialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-md rounded-lg border border-zinc-800 bg-zinc-950 p-5 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-white">New Personal Access Token</h3>
-              <button
-                type="button"
-                aria-label="Close"
-                onClick={() => setDialogOpen(false)}
-                className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+      {/* v3.19. PAT modals moved off ad-hoc `fixed inset-0` overlays
+          onto Radix Dialog so they inherit focus trap, focus return,
+          `role="dialog"` + `aria-modal="true"`, ESC, and click-outside.
+          Audit §6. */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog.Content size="md" describedById="pat-create-description">
+          <Dialog.Header>
+            <Dialog.Title>New Personal Access Token</Dialog.Title>
+            <Dialog.Close />
+          </Dialog.Header>
+          <div className="px-5 py-4">
+            <p id="pat-create-description" className="sr-only">
+              Create a new personal access token. You must give the
+              token a name before creating it.
+            </p>
             <label className="block text-sm text-zinc-300" htmlFor="pat-name">
               Token name
             </label>
@@ -204,44 +205,53 @@ export default function PersonalAccessTokens() {
               placeholder="Claude Desktop on Mac"
               className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-fuchsia-500"
             />
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setDialogOpen(false)}
-                className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={createToken}
-                disabled={!name.trim() || busy}
-                className="inline-flex items-center gap-2 rounded-lg bg-fuchsia-600 px-3 py-2 text-sm font-medium text-white hover:bg-fuchsia-500 disabled:opacity-50"
-              >
-                {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                Create
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+          <Dialog.Footer>
+            <button
+              type="button"
+              onClick={() => setDialogOpen(false)}
+              className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={createToken}
+              disabled={!name.trim() || busy}
+              className="inline-flex items-center gap-2 rounded-lg bg-fuchsia-600 px-3 py-2 text-sm font-medium text-white hover:bg-fuchsia-500 disabled:opacity-50"
+            >
+              {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Create
+            </button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
 
-      {created && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-xl rounded-lg border border-amber-500/30 bg-zinc-950 p-5 shadow-xl">
-            <div className="mb-4 flex items-start gap-3">
-              <AlertTriangle className="mt-1 h-5 w-5 shrink-0 text-amber-300" />
-              <div>
-                <h3 className="text-lg font-semibold text-white">Copy this token now</h3>
-                <p className="mt-1 text-sm text-zinc-400">
-                  You will not be able to see this plaintext token again.
-                </p>
-              </div>
+      <Dialog
+        open={created !== null}
+        onOpenChange={(open) => { if (!open) setCreated(null); }}
+      >
+        <Dialog.Content
+          size="xl"
+          describedById="pat-created-description"
+          contentClassName="border-amber-500/30"
+        >
+          <Dialog.Header>
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
+              <Dialog.Title>Copy this token now</Dialog.Title>
             </div>
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3 font-mono text-sm text-zinc-100 break-all">
-              {created.plaintext}
+            <Dialog.Close />
+          </Dialog.Header>
+          <div className="px-5 py-4">
+            <p id="pat-created-description" className="text-sm text-zinc-400">
+              You will not be able to see this plaintext token again.
+            </p>
+            <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 font-mono text-sm text-zinc-100 break-all">
+              {created?.plaintext}
             </div>
-            <pre className="mt-3 overflow-x-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-300">
+            {created && (
+              <pre className="mt-3 overflow-x-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-300">
 {`{
   "mcpServers": {
     "meeting-ops": {
@@ -254,27 +264,28 @@ export default function PersonalAccessTokens() {
     }
   }
 }`}
-            </pre>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={copyCreatedToken}
-                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-100 hover:bg-zinc-800"
-              >
-                {copied ? <Check className="h-4 w-4 text-emerald-300" /> : <Clipboard className="h-4 w-4" />}
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setCreated(null)}
-                className="rounded-lg bg-fuchsia-600 px-3 py-2 text-sm font-medium text-white hover:bg-fuchsia-500"
-              >
-                Done
-              </button>
-            </div>
+              </pre>
+            )}
           </div>
-        </div>
-      )}
+          <Dialog.Footer>
+            <button
+              type="button"
+              onClick={copyCreatedToken}
+              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-100 hover:bg-zinc-800"
+            >
+              {copied ? <Check className="h-4 w-4 text-emerald-300" /> : <Clipboard className="h-4 w-4" />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreated(null)}
+              className="rounded-lg bg-fuchsia-600 px-3 py-2 text-sm font-medium text-white hover:bg-fuchsia-500"
+            >
+              Done
+            </button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
     </div>
   );
 }

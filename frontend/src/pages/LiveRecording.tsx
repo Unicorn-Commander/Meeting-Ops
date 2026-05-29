@@ -1294,6 +1294,34 @@ export default function LiveRecording() {
               />
             </div>
           )}
+          {/* v3.19 upgrade copy (audit §5). Pre-v3.19 we silently hid
+              this slot when `server_live` was false, so free + standard
+              Pro users never saw the affordance exists. Show an inline
+              card explaining the upgrade — keeps the browser transcript
+              framed as the private baseline. */}
+          {!serverLiveEnabled && (
+            <div className="rounded-2xl border border-purple-500/30 bg-purple-500/5 p-6">
+              <div className="flex items-start gap-3">
+                <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-purple-300" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-purple-100">
+                    Pro live transcript
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-purple-200/80">
+                    Pro live transcript adds lower-latency server
+                    captions and speaker turns while your browser
+                    transcript remains the private baseline.
+                  </p>
+                  <a
+                    href="#/pricing"
+                    className="mt-3 inline-flex items-center rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500"
+                  >
+                    View Pro pricing
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right: Status & Metrics */}

@@ -114,8 +114,18 @@ export default function SettingsLayout({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      {/* v3.19 (audit §7 a11y). Sidebar buttons act as tabs (activate
+          → show panel) but had no ARIA. Added proper `role="tablist"` /
+          `role="tab"` / `aria-selected` / `aria-controls` so screen
+          readers + AT can announce + navigate the same way they would
+          for any other tab interface. */}
       <div className="lg:col-span-1">
-        <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-2">
+        <div
+          className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-2"
+          role="tablist"
+          aria-orientation="vertical"
+          aria-label="Settings sections"
+        >
           {Object.entries(groupedSections).map(([category, items]) =>
             items.length === 0 ? null : (
               <div key={category} className="mb-4">
@@ -124,12 +134,19 @@ export default function SettingsLayout({
                 </div>
                 {items.map((section) => {
                   const Icon = section.icon;
+                  const isActive = activeSection === section.id;
                   return (
                     <button
                       key={section.id}
+                      id={`settings-tab-${section.id}`}
+                      role="tab"
+                      type="button"
+                      aria-selected={isActive}
+                      aria-controls={`settings-panel-${section.id}`}
+                      tabIndex={isActive ? 0 : -1}
                       onClick={() => onSectionChange(section.id)}
-                      className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-colors ${
-                        activeSection === section.id
+                      className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-colors focus:outline-none focus:ring-2 focus:ring-fuchsia-500 ${
+                        isActive
                           ? 'bg-zinc-800 text-white'
                           : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
                       }`}
@@ -152,7 +169,13 @@ export default function SettingsLayout({
       </div>
 
       <div className="lg:col-span-3">
-        <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
+        <div
+          className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6"
+          role="tabpanel"
+          id={active ? `settings-panel-${active.id}` : undefined}
+          aria-labelledby={active ? `settings-tab-${active.id}` : undefined}
+          tabIndex={0}
+        >
           <h2 className="text-xl font-semibold text-white mb-6">
             {active?.title}
           </h2>

@@ -272,37 +272,67 @@ export default function RoomDetail() {
         </div>
       )}
 
-      <div className="mb-4 flex gap-2 border-b border-zinc-800">
+      {/* v3.19 (audit §7 a11y). Tab buttons had no ARIA — added
+          `role="tablist"` / `role="tab"` / `aria-selected` /
+          `aria-controls` and corresponding `role="tabpanel"` /
+          `aria-labelledby` on the panels so screen readers + AT can
+          announce + navigate this as a real tab interface. */}
+      <div
+        className="mb-4 flex gap-2 border-b border-zinc-800"
+        role="tablist"
+        aria-label="Room sections"
+      >
         <TabButton id="live" current={activeTab} onClick={setActiveTab}>Live</TabButton>
         <TabButton id="sessions" current={activeTab} onClick={setActiveTab}>Sessions</TabButton>
         <TabButton id="settings" current={activeTab} onClick={setActiveTab}>Settings</TabButton>
       </div>
 
       {activeTab === 'live' && (
-        <LiveTab
-          room={room}
-          sources={sources}
-          orgSlug={orgSlug}
-          busy={busy}
-          onStart={handleStart}
-          onStop={handleStop}
-          onRefresh={fetchAll}
-        />
+        <div
+          role="tabpanel"
+          id="room-panel-live"
+          aria-labelledby="room-tab-live"
+          tabIndex={0}
+        >
+          <LiveTab
+            room={room}
+            sources={sources}
+            orgSlug={orgSlug}
+            busy={busy}
+            onStart={handleStart}
+            onStop={handleStop}
+            onRefresh={fetchAll}
+          />
+        </div>
       )}
       {activeTab === 'sessions' && (
-        <SessionsTab
-          roomId={room.raw_id || room.id}
-          orgSlug={orgSlug}
-        />
+        <div
+          role="tabpanel"
+          id="room-panel-sessions"
+          aria-labelledby="room-tab-sessions"
+          tabIndex={0}
+        >
+          <SessionsTab
+            roomId={room.raw_id || room.id}
+            orgSlug={orgSlug}
+          />
+        </div>
       )}
       {activeTab === 'settings' && (
-        <SettingsTab
-          room={room}
-          sources={sources}
-          orgSlug={orgSlug}
-          isAdmin={isAdmin}
-          onChange={fetchAll}
-        />
+        <div
+          role="tabpanel"
+          id="room-panel-settings"
+          aria-labelledby="room-tab-settings"
+          tabIndex={0}
+        >
+          <SettingsTab
+            room={room}
+            sources={sources}
+            orgSlug={orgSlug}
+            isAdmin={isAdmin}
+            onChange={fetchAll}
+          />
+        </div>
       )}
     </div>
   );
@@ -367,8 +397,13 @@ function TabButton({
   return (
     <button
       type="button"
+      role="tab"
+      id={`room-tab-${id}`}
+      aria-selected={active}
+      aria-controls={`room-panel-${id}`}
+      tabIndex={active ? 0 : -1}
       onClick={() => onClick(id)}
-      className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+      className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-500 ${
         active
           ? 'border-fuchsia-500 text-fuchsia-100'
           : 'border-transparent text-zinc-400 hover:text-zinc-200'

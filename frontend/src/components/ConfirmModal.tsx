@@ -1,13 +1,24 @@
-import { useEffect } from 'react';
-import { AlertTriangle, X } from 'lucide-react';
+import { useRef } from 'react';
+import { AlertTriangle } from 'lucide-react';
+import { Dialog } from './ui/Dialog';
 
 /**
- * Generic confirm dialog matched to the existing modal styling
- * (EmailAttendeesModal / SessionPermissionsModal). Used in place of
- * `window.confirm()` for the simultaneous-recording guard so we get a
- * non-blocking, theme-consistent prompt.
+ * Generic confirm dialog. Previously a hand-rolled `fixed inset-0`
+ * overlay; v3.19 refactor moves it on top of Radix Dialog so callers
+ * inherit proper a11y (focus trap, focus return to opener,
+ * `role="dialog"` + `aria-modal="true"`, ESC + click-outside).
  *
- * Renders nothing when `isOpen` is false.
+ * The public API is preserved so existing callers (AlwaysOnControl,
+ * MobileLiveRecording, etc.) don't need touch-ups.
+ *
+ * Renders nothing when `isOpen` is false (Radix handles unmount via the
+ * `open` prop, so we still gate on `isOpen` to keep the same flow).
+ *
+ * Default focus target on open:
+ *   - Cancel button when `tone === 'danger'` (audit finding: autoFocus on
+ *     the confirm button is a footgun for destructive actions; one
+ *     accidental Enter delete-confirms).
+ *   - Confirm button when `tone === 'primary'`.
  */
 
 export interface ConfirmModalProps {
@@ -45,15 +56,8 @@ export default function ConfirmModal({
   onCancel,
   icon,
 }: ConfirmModalProps) {
-  // Escape-to-cancel — same convention as the rest of the app's modals.
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, onCancel]);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
 
   if (!isOpen) return null;
 
@@ -66,41 +70,42 @@ export default function ConfirmModal({
     : 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 text-white';
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="confirm-modal-title"
-      onClick={(event) => {
-        // Click-outside-to-cancel. The inner container stops propagation
-        // so clicking the modal body doesn't trigger this.
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/60">
-        <div className="flex items-start justify-between gap-3 border-b border-zinc-800 px-5 py-4">
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <Dialog.Content
+        size="md"
+        describedById="confirm-modal-description"
+        onOpenAutoFocus={(event) => {
+          // Audit finding: destructive flows should default focus to
+          // Cancel, not Confirm — one accidental Enter shouldn't fire a
+          // delete. For primary-tone prompts we focus Confirm as the
+          // expected positive default.
+          event.preventDefault();
+          if (tone === 'danger') {
+            cancelRef.current?.focus();
+          } else {
+            confirmRef.current?.focus();
+          }
+        }}
+      >
+        <Dialog.Header>
           <div className="flex items-start gap-3">
             {showIcon}
-            <h2 id="confirm-modal-title" className="text-base font-semibold text-white">
-              {title}
-            </h2>
+            <Dialog.Title>{title}</Dialog.Title>
           </div>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+          <Dialog.Close />
+        </Dialog.Header>
 
-        <div className="px-5 py-4 text-sm leading-6 text-zinc-200">
-          {description}
-        </div>
+        <Dialog.Description
+          id="confirm-modal-description"
+          className="px-5 py-4 text-sm leading-6 text-zinc-200"
+          asChild
+        >
+          <div>{description}</div>
+        </Dialog.Description>
 
-        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3">
+        <Dialog.Footer>
           <button
+            ref={cancelRef}
             type="button"
             onClick={onCancel}
             className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:bg-zinc-700"
@@ -108,15 +113,15 @@ export default function ConfirmModal({
             {cancelLabel}
           </button>
           <button
+            ref={confirmRef}
             type="button"
             onClick={onConfirm}
             className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${confirmClasses}`}
-            autoFocus
           >
             {confirmLabel}
           </button>
-        </div>
-      </div>
-    </div>
+        </Dialog.Footer>
+      </Dialog.Content>
+    </Dialog>
   );
 }

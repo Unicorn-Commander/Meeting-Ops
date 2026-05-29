@@ -201,7 +201,8 @@ describe('RoomDetail sources', () => {
 
     await waitFor(() => expect(screen.getByText('Board Room')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: /settings/i }));
+    // v3.19: room tab buttons now use role="tab" (ARIA tablist).
+    fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
 
     expect(screen.getByText('Podium mic')).toBeInTheDocument();
     expect(screen.getByText('Audience mic')).toBeInTheDocument();
