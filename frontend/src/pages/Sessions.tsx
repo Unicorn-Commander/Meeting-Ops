@@ -1990,25 +1990,32 @@ export const Sessions: React.FC = () => {
         ) : (
           viewMode === 'grid' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <button
-              onClick={() => uploadInputRef.current?.click()}
-              className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-cyan-500/70 bg-gray-900 p-6 text-center transition-colors hover:border-cyan-300 hover:bg-gray-900/80"
-            >
-              <Upload className="mb-3 h-10 w-10 text-cyan-300" />
-              <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
-              <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
-              <span
-                role="button"
-                onClick={(e) => {
-                  e.stopPropagation();
+            {/* v3.19 (audit §7 a11y). Was a `<button>` with a nested
+                `<span role="button">` — invalid HTML (interactive in
+                interactive) which screen readers + AT can't parse.
+                Refactored to a single outer card with two real sibling
+                buttons inside, both keyboard + AT addressable. */}
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-cyan-500/70 bg-gray-900 p-6 text-center transition-colors hover:border-cyan-300 hover:bg-gray-900/80">
+              <button
+                type="button"
+                onClick={() => uploadInputRef.current?.click()}
+                className="flex w-full flex-col items-center justify-center rounded-md text-center focus:outline-none focus:ring-2 focus:ring-cyan-400"
+              >
+                <Upload className="mb-3 h-10 w-10 text-cyan-300" />
+                <span className="text-lg font-semibold text-white">Upload Audio/Video</span>
+                <span className="mt-2 max-w-xs text-sm text-gray-400">Drop files anywhere or pick recordings to transcribe as meetings.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   setPickerWithOptions(true);
                   uploadInputRef.current?.click();
                 }}
-                className="mt-3 text-xs text-cyan-300/80 hover:text-cyan-200 underline-offset-2 hover:underline cursor-pointer"
+                className="mt-3 rounded text-xs text-cyan-300/80 hover:text-cyan-200 underline-offset-2 hover:underline focus:outline-none focus:ring-2 focus:ring-cyan-400"
               >
                 Upload with options…
-              </span>
-            </button>
+              </button>
+            </div>
             {filteredSessions.map(session => (
               <div
                 key={session.id}

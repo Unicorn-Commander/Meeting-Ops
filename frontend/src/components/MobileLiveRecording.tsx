@@ -40,6 +40,8 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
+import { useTierFeatures } from '../hooks/useTierFeatures';
+import { Dialog } from './ui/Dialog';
 import {
   isLikelyTouchDevice,
   tapAudioLevel,
@@ -115,6 +117,22 @@ async function requestWakeLock(): Promise<WakeLockHandle | null> {
 
 export default function MobileLiveRecording() {
   const { activeOrganization } = useOrg();
+  // v3.19 moat fix. Mobile is paid-only until on-device mobile STT +
+  // summary ships (phones can't run Parakeet 0.6B + Qwen 3 0.6B
+  // reliably). Free users hit a full-screen gate before the recorder
+  // ever opens a mic stream or hits `/api/recordings/start-always-on`,
+  // so the "browser-only, never leaves device" free-tier promise stays
+  // intact on the device most signups arrive from. See audit
+  // 2026-05-29 §1 (MobileLiveRecording.tsx:4,315).
+  const { hasFeature } = useTierFeatures();
+  // `canonical_reprocess` is the right capability — it gates the
+  // server-side completion pass (Parakeet 1.1B + pyannote + Qwen 3.6)
+  // that every chunk we'd upload from this page feeds. Backend mirrors
+  // this gate in `auth/tier.py`; the UI just refuses to start the
+  // capture so we don't leak the user's mic audio to the server before
+  // the 403 lands.
+  const canUseMobileServer = hasFeature('canonical_reprocess');
+  const [freeTierGateOpen, setFreeTierGateOpen] = useState(false);
   const [state, setState] = useState<RecorderState>('idle');
   const [title, setTitle] = useState<string>(() => {
     const stored = localStorage.getItem(TITLE_STORAGE_KEY);
@@ -254,6 +272,16 @@ export default function MobileLiveRecording() {
     setChunksUploaded(0);
     setChunksFailed(0);
     setBackgrounded(false);
+
+    // v3.19 free-tier moat gate. Mobile recording is paid-only until
+    // on-device mobile STT ships — we bail BEFORE opening the mic so
+    // free-user audio never leaves the device, even momentarily, when
+    // we're going to refuse to upload it anyway. Surfaces a dedicated
+    // dialog explaining the constraint + pointing at desktop free mode.
+    if (!canUseMobileServer) {
+      setFreeTierGateOpen(true);
+      return;
+    }
 
     // Cross-surface guard. If always-on is already capturing audio,
     // prompt the user instead of silently starting a second capture.
@@ -413,7 +441,7 @@ export default function MobileLiveRecording() {
         mimeType: probedMime,
       }),
     );
-  }, [activeOrganization, cleanupCapture, title]);
+  }, [activeOrganization, canUseMobileServer, cleanupCapture, title]);
 
   const finishRecording = useCallback(async () => {
     if (state !== 'recording') return;
@@ -847,6 +875,60 @@ export default function MobileLiveRecording() {
         onConfirm={() => setCollisionOpen(false)}
         onCancel={() => setCollisionOpen(false)}
       />
+
+      {/* v3.19 free-tier moat gate. Triggered the moment a free user
+          taps Record on mobile, BEFORE the mic stream opens or any
+          chunk hits the server. The copy is intentionally honest about
+          *why* mobile is paid-only (phones can't run the on-device
+          models reliably yet) — see audit 2026-05-29 §1 + §5. */}
+      <Dialog
+        open={freeTierGateOpen}
+        onOpenChange={(open) => setFreeTierGateOpen(open)}
+      >
+        <Dialog.Content
+          size="lg"
+          describedById="mobile-free-tier-gate-description"
+        >
+          <Dialog.Header>
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-300">
+                <Smartphone className="h-4 w-4" />
+              </div>
+              <Dialog.Title>Mobile recording is a Pro feature</Dialog.Title>
+            </div>
+            <Dialog.Close />
+          </Dialog.Header>
+          <Dialog.Description
+            id="mobile-free-tier-gate-description"
+            className="px-5 py-4 text-sm leading-6 text-zinc-200"
+            asChild
+          >
+            <div>
+              Free mobile browser recording is not yet available because
+              phones can&apos;t reliably run the local speech and summary
+              models. Use desktop Chrome or Edge for free local
+              recording, or upgrade to Pro to use mobile server
+              completion.
+            </div>
+          </Dialog.Description>
+          <Dialog.Footer className="flex-col-reverse items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
+            <a
+              href="#/help/desktop-free-mode"
+              onClick={() => setFreeTierGateOpen(false)}
+              className="inline-flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:bg-zinc-700"
+            >
+              Use desktop free mode
+            </a>
+            <a
+              href="#/pricing"
+              onClick={() => setFreeTierGateOpen(false)}
+              className="inline-flex items-center justify-center rounded-lg bg-gradient-to-r from-fuchsia-600 to-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:from-fuchsia-500 hover:to-indigo-500"
+            >
+              View Pro pricing
+            </a>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
     </div>
   );
 }

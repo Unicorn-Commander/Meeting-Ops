@@ -47,6 +47,8 @@ import {
 } from '../services/localSessionStore';
 import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
+import { useTierFeatures } from '../hooks/useTierFeatures';
+import ConfirmModal from '../components/ConfirmModal';
 
 /**
  * Normalize a backend error body into a user-readable string.
@@ -242,6 +244,20 @@ export const SessionDetails: React.FC = () => {
   const navigate = useNavigate();
   const { getOrgQueryUrl, activeOrganization } = useOrg();
   const { startUploads } = useUploads();
+  // v3.19 (audit §5). Brigade graph banner / inline 3D viewer surface
+  // for the user only when their tier exposes `brigade_integration`.
+  // For free users we swap in an upgrade card so they understand the
+  // affordance exists. `cross_device_sync` gates the "this session is
+  // synced to your workspace" affordance on Local Sessions /
+  // SessionDetails.
+  const { hasFeature } = useTierFeatures();
+  const brigadeIntegrationEnabled = hasFeature('brigade_integration');
+  const crossDeviceSyncEnabled = hasFeature('cross_device_sync');
+  // v3.19. window.confirm() replacement on the local-session delete
+  // path — destructive, irreversible action that should look + behave
+  // like the rest of the app's confirmations (a11y, themed, focus
+  // trap, focus return). See audit §6.
+  const [deleteLocalConfirmOpen, setDeleteLocalConfirmOpen] = useState(false);
   
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1969,16 +1985,7 @@ export const SessionDetails: React.FC = () => {
                     Export markdown
                   </button>
                   <button
-                    onClick={async () => {
-                      if (!confirm('Delete this local session permanently? This cannot be undone.')) return;
-                      try {
-                        await deleteLocalSession(session.id);
-                        navigate('/sessions');
-                      } catch (err) {
-                        console.error('Local delete failed:', err);
-                        alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
-                      }
-                    }}
+                    onClick={() => setDeleteLocalConfirmOpen(true)}
                     className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 text-sm"
                     title="Delete this local session"
                   >
@@ -2352,7 +2359,7 @@ export const SessionDetails: React.FC = () => {
                 name on the client. The full embedded viewer lands in
                 Phase 2 of the integration; for now this is a
                 lightweight "open in Brigade" affordance. */}
-            {session.brigade_graph_url && (
+            {session.brigade_graph_url && brigadeIntegrationEnabled && (
               <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
                 <div className="flex items-start gap-3">
                   <span className="font-semibold text-indigo-900">
@@ -2371,6 +2378,60 @@ export const SessionDetails: React.FC = () => {
                 >
                   View in Brigade graph
                 </a>
+              </div>
+            )}
+            {/* v3.19 upgrade copy (audit §5). When the user doesn't have
+                `brigade_integration` we still want them to know the
+                affordance exists — otherwise the feature is invisible
+                to free tier. */}
+            {!brigadeIntegrationEnabled && (
+              <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 text-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-purple-900">
+                      Brigade knowledge graph
+                    </div>
+                    <p className="mt-1 text-purple-700">
+                      Brigade graph is a Pro/Enterprise integration.
+                      Upgrade to sync meetings into your private
+                      knowledge graph and see related people,
+                      decisions, and action items across Unicorn
+                      Commander.
+                    </p>
+                  </div>
+                  <a
+                    href="#/pricing"
+                    className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 whitespace-nowrap"
+                  >
+                    View pricing
+                  </a>
+                </div>
+              </div>
+            )}
+            {/* v3.19 cross-device-sync upgrade (audit §5). Free tier
+                local sessions live only in this browser — surface what
+                Pro adds so users understand the difference. */}
+            {!crossDeviceSyncEnabled && session.is_local && (
+              <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 text-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-purple-900">
+                      Cross-device sync
+                    </div>
+                    <p className="mt-1 text-purple-700">
+                      Cross-device sync stores finished meetings in
+                      your workspace so you can search, share, and open
+                      them anywhere. Free local sessions stay in this
+                      browser.
+                    </p>
+                  </div>
+                  <a
+                    href="#/pricing"
+                    className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 whitespace-nowrap"
+                  >
+                    View pricing
+                  </a>
+                </div>
               </div>
             )}
 
@@ -2547,7 +2608,12 @@ export const SessionDetails: React.FC = () => {
                 opts in by expanding the section. The existing Phase 1
                 "View in Brigade graph" indigo banner stays as the
                 full-screen alternative for users who prefer
-                Brigade's native UI. */}
+                Brigade's native UI.
+
+                v3.19: the embedded viewer is gated on
+                `brigade_integration`. Free users see the upgrade card
+                above instead. */}
+            {brigadeIntegrationEnabled && (
             <div className="bg-white rounded-lg shadow-sm">
               <button
                 type="button"
@@ -2588,6 +2654,7 @@ export const SessionDetails: React.FC = () => {
                 </div>
               )}
             </div>
+            )}
 
             {/* Listen-to-summary + podcast recap (Phase 4c-2 — VibeVoice TTS) */}
             {(session.final_summary || session.summary || session.transcript_simple || session.transcript) && (
@@ -3799,6 +3866,37 @@ export const SessionDetails: React.FC = () => {
         </div>
       )}
     </div>
+    {/* v3.19 (audit §6). Replaces `window.confirm()` on the local-
+        session delete path — destructive flow now uses the themed
+        ConfirmModal, which gives us focus trap, focus return, ESC,
+        click-outside, and (since v3.19) Cancel-as-default-focus so an
+        accidental Enter doesn't fire a delete. */}
+    <ConfirmModal
+      isOpen={deleteLocalConfirmOpen}
+      title="Delete local session?"
+      description={(
+        <>
+          Delete this local session permanently? This cannot be undone.
+          The session lives only in this browser; once removed it
+          cannot be recovered.
+        </>
+      )}
+      confirmLabel="Delete forever"
+      cancelLabel="Cancel"
+      tone="danger"
+      onConfirm={async () => {
+        setDeleteLocalConfirmOpen(false);
+        if (!session) return;
+        try {
+          await deleteLocalSession(session.id);
+          navigate('/sessions');
+        } catch (err) {
+          console.error('Local delete failed:', err);
+          alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
+        }
+      }}
+      onCancel={() => setDeleteLocalConfirmOpen(false)}
+    />
     </>
   );
 };
