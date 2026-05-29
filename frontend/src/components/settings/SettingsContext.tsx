@@ -1,31 +1,46 @@
 import React, { createContext, useContext } from 'react';
 import {
+  Bell,
   Brain,
   BookOpen,
   Cpu,
+  Download,
+  Keyboard,
   KeyRound,
+  Library,
   Mic,
   Monitor,
   Network,
+  Palette,
+  Plug,
+  Settings2,
+  Share2,
   Wifi,
 } from 'lucide-react';
 import type { SettingsSectionMeta } from './SettingsLayout';
 
-// Settings sections, regrouped into Aaron's three buckets:
-//   - "Your preferences"  → per-user, visible to everyone
-//   - "Workspace setup"   → per-org, admin-only (adminOnly: true)
-//   - "Advanced"          → power-user / debugging / appliance plumbing
+// Settings sections, regrouped into Aaron's four-tier IA (2026-05-29
+// Codex audit, UX-A batch):
+//   - "My preferences"     → per-user client-side surfaces (audio device,
+//                            in-browser AI, theme, notifications,
+//                            hotkeys, PATs).
+//   - "Recording defaults" → defaults applied to new meetings (vocabulary,
+//                            recording defaults panel).
+//   - "Workspace settings" → per-org integrations, calendar, sharing,
+//                            retention, speaker library.
+//   - "Admin & appliance"  → providers, network, wifi, NPU, legacy AI
+//                            panel. adminOnly: true → hidden entirely
+//                            for non-admins.
 //
-// Don't delete sections during regrouping — just re-bucket. Existing
-// functionality (load/save, lazy section imports in SettingsEnhanced)
-// stays intact; only the sidebar grouping shifts.
+// UX-A scope: only regroup the existing 9 panels + add placeholder
+// shells for the new groups. Don't rebuild individual panel internals.
 export const ALL_SECTIONS: SettingsSectionMeta[] = [
-  // Your preferences — per-user surfaces.
+  // ── My preferences ────────────────────────────────────────────────
   {
     id: 'audio',
-    title: 'Audio & Recording',
+    title: 'Audio & devices',
     icon: Mic,
-    description: 'Microphone, devices, recording defaults',
+    description: 'Microphone, devices, mic-test',
     category: 'preferences',
   },
   {
@@ -36,59 +51,129 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     category: 'preferences',
   },
   {
-    id: 'personal-access-tokens',
-    title: 'Personal Access Tokens',
-    icon: KeyRound,
-    description: 'Per-user MCP access tokens',
+    id: 'theme',
+    title: 'Theme',
+    icon: Palette,
+    description: 'Appearance (System / Dark)',
+    category: 'preferences',
+  },
+  {
+    id: 'notifications',
+    title: 'Notifications',
+    icon: Bell,
+    description: 'Meeting alerts and summary delivery',
+    category: 'preferences',
+  },
+  {
+    id: 'hotkeys',
+    title: 'Hotkeys',
+    icon: Keyboard,
+    description: 'Keyboard shortcuts for recording',
     category: 'preferences',
   },
 
-  // Workspace setup — per-org, admin-only.
+  // ── Recording defaults ───────────────────────────────────────────
   {
-    id: 'providers',
-    title: 'AI Providers',
-    icon: Network,
-    description: 'Per-service AI provider configuration',
+    id: 'recording-defaults',
+    title: 'Recording defaults',
+    icon: Settings2,
+    description: 'Default meeting type, mic+system, storage policy',
+    category: 'recording',
+  },
+  {
+    id: 'vocabulary',
+    title: 'Custom vocabulary',
+    icon: BookOpen,
+    description: 'Industry terms and acronyms for transcription',
+    category: 'recording',
+    adminOnly: true,
+  },
+
+  // ── Workspace settings ───────────────────────────────────────────
+  {
+    id: 'integrations',
+    title: 'Integrations',
+    icon: Plug,
+    description: 'Project-Ops, Brigade, Contact-Ops, Stable',
     category: 'workspace',
     adminOnly: true,
   },
   {
-    id: 'vocabulary',
-    title: 'Custom Vocabulary',
-    icon: BookOpen,
-    description: 'Industry terms and acronyms for transcription',
+    id: 'calendar-sync',
+    title: 'Calendar sync',
+    icon: Bell,
+    description: 'Auto-create sessions from your calendar',
+    category: 'workspace',
+    adminOnly: true,
+  },
+  {
+    id: 'sharing-retention',
+    title: 'Sharing & retention',
+    icon: Share2,
+    description: 'Default sharing, retention windows, export',
+    category: 'workspace',
+    adminOnly: true,
+  },
+  {
+    id: 'speaker-library',
+    title: 'Speaker library',
+    icon: Library,
+    description: 'Workspace voice enrollments and labels',
     category: 'workspace',
     adminOnly: true,
   },
 
-  // Advanced — appliance plumbing + debugging surfaces.
+  // ── Admin & appliance ────────────────────────────────────────────
+  {
+    id: 'providers',
+    title: 'AI providers',
+    icon: Network,
+    description: 'Per-service AI provider routing and BYOK',
+    category: 'admin-appliance',
+    adminOnly: true,
+  },
   {
     id: 'ai',
-    title: 'AI & Transcription (legacy)',
+    title: 'AI & transcription (legacy)',
     icon: Cpu,
-    description: 'Legacy NPU model picker — superseded by AI Providers',
-    category: 'advanced',
+    description: 'Legacy NPU model picker — superseded by AI providers',
+    category: 'admin-appliance',
   },
   {
     id: 'network',
-    title: 'Network Configuration',
+    title: 'Network',
     icon: Network,
     description: 'Ethernet, IP, DNS settings',
-    category: 'advanced',
+    category: 'admin-appliance',
   },
   {
     id: 'wifi',
-    title: 'WiFi Settings',
+    title: 'WiFi',
     icon: Wifi,
     description: 'Wireless network configuration',
-    category: 'advanced',
+    category: 'admin-appliance',
   },
   {
     id: 'performance',
     title: 'Performance & NPU',
     icon: Monitor,
     description: 'Hardware acceleration and limits',
-    category: 'advanced',
+    category: 'admin-appliance',
+  },
+  {
+    id: 'personal-access-tokens',
+    title: 'Personal access tokens',
+    icon: KeyRound,
+    description: 'Per-user MCP tokens (admin policy: future)',
+    category: 'admin-appliance',
+  },
+  {
+    id: 'audit-export',
+    title: 'Audit & export',
+    icon: Download,
+    description: 'Audit log download and bulk data export',
+    category: 'admin-appliance',
+    adminOnly: true,
   },
 ];
 
@@ -223,3 +308,16 @@ export function useSettingsContext(): SettingsContextValue {
 export interface SectionProps {
   onSavedNotice?: (msg: string) => void;
 }
+
+// IDs of sections that are placeholder shells — no Save button, no state.
+// SettingsEnhanced reads this to suppress the Save button row.
+export const PLACEHOLDER_SECTIONS = new Set<string>([
+  'notifications',
+  'hotkeys',
+  'recording-defaults',
+  'integrations',
+  'calendar-sync',
+  'sharing-retention',
+  'speaker-library',
+  'audit-export',
+]);

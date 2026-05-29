@@ -9,6 +9,7 @@ import type { SaveStatus } from '../components/settings/SettingsLayout';
 import {
   ALL_SECTIONS,
   APPLIANCE_ONLY_SECTIONS,
+  PLACEHOLDER_SECTIONS,
   SettingsProvider,
   SETTINGS_STORAGE_KEY,
   loadStoredSettings,
@@ -43,6 +44,8 @@ const PerformanceSettings = lazy(
 const PersonalAccessTokens = lazy(
   () => import('../components/settings/PersonalAccessTokens')
 );
+const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'));
+const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 
 export default function SettingsEnhanced() {
   const { user } = useAuth();
@@ -202,16 +205,74 @@ export default function SettingsEnhanced() {
 
   const renderActive = () => {
     switch (activeSection) {
+      // ── My preferences ──
       case 'audio':
         return <AudioSettings />;
-      case 'ai':
-        return <AISettings />;
-      case 'vocabulary':
-        return <VocabularySettings />;
-      case 'providers':
-        return <ProvidersSettings />;
       case 'in-browser-ai':
         return <InBrowserAISettings />;
+      case 'theme':
+        return <ThemeSettings />;
+      case 'notifications':
+        return (
+          <EmptyPanel
+            title="Notifications"
+            description="Per-meeting alerts, summary delivery, and digest cadence. Coming in a future release."
+          />
+        );
+      case 'hotkeys':
+        return (
+          <EmptyPanel
+            title="Hotkeys"
+            description="Customizable keyboard shortcuts for start/stop/pause/marker. Coming in a future release."
+          />
+        );
+
+      // ── Recording defaults ──
+      case 'recording-defaults':
+        return (
+          <EmptyPanel
+            title="Recording defaults"
+            description="Default meeting type, mic+system capture default, Free local-storage policy, Pro completion default, speaker-labeling defaults. Coming in a future release."
+          />
+        );
+      case 'vocabulary':
+        return <VocabularySettings />;
+
+      // ── Workspace settings ──
+      case 'integrations':
+        return (
+          <EmptyPanel
+            title="Integrations"
+            description="Project-Ops, Brigade, Contact-Ops, Accounting-Ops, Stable. Coming in a future release."
+          />
+        );
+      case 'calendar-sync':
+        return (
+          <EmptyPanel
+            title="Calendar sync"
+            description="Auto-create sessions from your Google / Microsoft calendar. Coming in a future release."
+          />
+        );
+      case 'sharing-retention':
+        return (
+          <EmptyPanel
+            title="Sharing & retention"
+            description="Default sharing scope, retention windows, and export defaults. Coming in a future release."
+          />
+        );
+      case 'speaker-library':
+        return (
+          <EmptyPanel
+            title="Speaker library"
+            description="Workspace voice enrollments and speaker labels. Coming in a future release."
+          />
+        );
+
+      // ── Admin & appliance ──
+      case 'providers':
+        return <ProvidersSettings />;
+      case 'ai':
+        return <AISettings />;
       case 'network':
         return <NetworkSettings />;
       case 'wifi':
@@ -220,10 +281,27 @@ export default function SettingsEnhanced() {
         return <PerformanceSettings />;
       case 'personal-access-tokens':
         return <PersonalAccessTokens />;
+      case 'audit-export':
+        return (
+          <EmptyPanel
+            title="Audit & export"
+            description="Audit log download and bulk data export. Coming in a future release."
+          />
+        );
+
       default:
         return null;
     }
   };
+
+  // The Save button row is suppressed for PATs (which has its own
+  // create/revoke flow), placeholder shells, and the Theme panel (which
+  // persists via ThemeContext on click and doesn't go through the
+  // backend settings POST).
+  const showSave =
+    activeSection !== 'personal-access-tokens' &&
+    activeSection !== 'theme' &&
+    !PLACEHOLDER_SECTIONS.has(activeSection);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-6">
@@ -251,7 +329,7 @@ export default function SettingsEnhanced() {
             saving={saving}
             saveStatus={saveStatus}
             onSave={handleSave}
-            showSave={activeSection !== 'personal-access-tokens'}
+            showSave={showSave}
           >
             {renderActive()}
           </SettingsLayout>
