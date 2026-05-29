@@ -15,6 +15,7 @@ import {
 type Plan = {
   name: string;
   price: string;
+  priceSuffix?: string;
   note: string;
   features: string[];
   ctaLabel: string;
@@ -22,50 +23,60 @@ type Plan = {
   highlight?: boolean;
 };
 
-const proMailto = 'mailto:hello@magicunicorn.dev?subject=UC-Meeting-Ops%20Pro%20upgrade&body=I%27m%20interested%20in%20the%20Pro%20plan.';
-const salesMailto = 'mailto:hello@magicunicorn.dev?subject=UC-Meeting-Ops%20Enterprise%20sales&body=Please%20contact%20me%20about%20Enterprise.';
+const enterpriseMailto =
+  'mailto:enterprise@meeting-ops.unicorncommander.ai?subject=UC-Meeting-Ops%20Enterprise%20inquiry&body=Please%20contact%20me%20about%20Enterprise.';
 
 const plans: Plan[] = [
   {
     name: 'Free',
     price: '$0',
-    note: 'Private, local-first transcription',
+    priceSuffix: 'forever',
+    note: 'Browser-only meeting transcription + summaries.',
     features: [
-      'On-device transcription and summaries',
-      'Unlimited usage',
-      'Audio never leaves your device',
-      'Local session history',
+      'Unlimited meetings, no minute caps',
+      'Your audio never leaves your device',
+      'Local STT (Parakeet 0.6B) + on-device summaries (Qwen 3 0.6B)',
+      'Local Sessions storage (IndexedDB)',
+      'One-shot upload to a Pro org for shared meetings',
     ],
     ctaLabel: 'Get started',
     ctaHref: '/signup',
   },
   {
     name: 'Pro',
-    price: '$16/mo',
-    note: 'Placeholder pricing, TBD',
+    price: '$12',
+    priceSuffix: '/ month',
+    note: 'Everything in Free, plus the server completion pass and ecosystem integrations.',
     features: [
-      'Everything in Free',
-      'Server-side high-accuracy transcript',
-      'Speaker diarization',
-      'AI summary',
+      'Higher-accuracy server transcription (Parakeet 1.1B)',
+      'Speaker diarization (pyannote 3.1)',
+      'Longer-context summaries (Qwen 3.6 35B-A3B-Vision)',
       'Cross-device sync',
-      'Knowledge graph',
+      'Brigade knowledge-graph integration',
+      'Project-Ops action-items bridge',
+      'Bulk import + server live transcription',
+      'Speaker library + 4-week retention controls',
+      'Per-session privacy toggle (browser-only on demand)',
     ],
-    ctaLabel: 'Upgrade',
-    ctaHref: proMailto,
+    ctaLabel: 'Subscribe',
+    ctaHref: '/pricing#subscribe',
     highlight: true,
   },
   {
     name: 'Enterprise',
-    price: 'Contact sales',
-    note: 'Managed deployment and controls',
+    price: 'Custom',
+    note: 'On-prem appliance, HIPAA perimeter, BYOK, dedicated graph.',
     features: [
-      'SSO',
-      'On-prem / HIPAA',
-      'Retention controls',
+      'On-prem appliance build',
+      'HIPAA perimeter mode',
+      'BYOK provider routing (OpenAI / Anthropic / Azure OpenAI / your LiteLLM)',
+      'Dedicated Brigade graph instance',
+      'Multi-org admin',
+      'SSO via OIDC',
+      'Enterprise SLA',
     ],
-    ctaLabel: 'Contact sales',
-    ctaHref: salesMailto,
+    ctaLabel: 'Talk to us',
+    ctaHref: enterpriseMailto,
   },
 ];
 
@@ -116,8 +127,11 @@ export const Pricing: React.FC = () => {
               Choose the tier that matches how you work.
             </h1>
             <p className="max-w-2xl text-base leading-7 text-zinc-300">
-              Free keeps transcription local. Pro adds server-side intelligence. Enterprise adds the controls teams ask for.
-              Pro pricing is a placeholder for now; checkout has not shipped yet.
+              Free is browser-only and stays that way — your audio never leaves your device,
+              and there are no minute caps. Pro adds an optional server completion pass for
+              higher-accuracy transcription, speaker diarization, longer-context summaries,
+              and the integrations that connect meetings to the rest of your workspace.
+              Enterprise is the on-prem path.
             </p>
           </div>
 
@@ -137,12 +151,19 @@ export const Pricing: React.FC = () => {
                       {iconByPlan[plan.name as keyof typeof iconByPlan]}
                       <h2 className="text-xl font-semibold text-white">{plan.name}</h2>
                     </div>
-                    <div className="text-3xl font-semibold tracking-tight text-white">{plan.price}</div>
+                    <div className="flex items-baseline gap-2">
+                      <div className="text-3xl font-semibold tracking-tight text-white">
+                        {plan.price}
+                      </div>
+                      {plan.priceSuffix && (
+                        <div className="text-sm text-zinc-400">{plan.priceSuffix}</div>
+                      )}
+                    </div>
                     <div className="text-sm text-zinc-400">{plan.note}</div>
                   </div>
                   {plan.highlight && (
                     <span className="rounded-full border border-fuchsia-400/40 bg-fuchsia-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-fuchsia-100">
-                      Placeholder
+                      Most popular
                     </span>
                   )}
                 </div>
@@ -158,6 +179,18 @@ export const Pricing: React.FC = () => {
 
                 <div className="mt-6">
                   {plan.ctaHref.startsWith('mailto:') ? (
+                    <a
+                      href={plan.ctaHref}
+                      className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                        plan.highlight
+                          ? 'bg-white text-zinc-950 hover:bg-zinc-100'
+                          : 'border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10'
+                      }`}
+                    >
+                      {plan.ctaLabel}
+                      <ArrowRight className="h-4 w-4" />
+                    </a>
+                  ) : plan.ctaHref.startsWith('#') || plan.ctaHref.includes('#') ? (
                     <a
                       href={plan.ctaHref}
                       className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
@@ -187,27 +220,39 @@ export const Pricing: React.FC = () => {
             ))}
           </div>
 
-          <section className="mt-8 rounded-3xl border border-white/10 bg-white/5 p-6">
+          <section
+            id="subscribe"
+            className="mt-8 rounded-3xl border border-white/10 bg-white/5 p-6"
+          >
             <div className="grid gap-4 md:grid-cols-3">
               <div className="flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-fuchsia-300" />
                 <div>
                   <h3 className="font-medium text-white">Free stays private.</h3>
-                  <p className="mt-1 text-sm leading-6 text-zinc-300">Local audio, local history, and no subscription required.</p>
+                  <p className="mt-1 text-sm leading-6 text-zinc-300">
+                    Browser-only, forever. No minute caps. Audio and transcripts stay on
+                    your device.
+                  </p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
                 <Workflow className="mt-0.5 h-5 w-5 shrink-0 text-fuchsia-300" />
                 <div>
                   <h3 className="font-medium text-white">Pro is the upgrade path.</h3>
-                  <p className="mt-1 text-sm leading-6 text-zinc-300">Cross-device sync and server processing are waiting on checkout integration.</p>
+                  <p className="mt-1 text-sm leading-6 text-zinc-300">
+                    Server completion pass, cross-device sync, knowledge-graph and
+                    action-item integrations. Per-session privacy toggle if you want
+                    one meeting browser-only.
+                  </p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
                 <Database className="mt-0.5 h-5 w-5 shrink-0 text-fuchsia-300" />
                 <div>
-                  <h3 className="font-medium text-white">Enterprise adds controls.</h3>
-                  <p className="mt-1 text-sm leading-6 text-zinc-300">SSO, on-prem, HIPAA, and retention controls are the managed-path features.</p>
+                  <h3 className="font-medium text-white">Enterprise is on-prem.</h3>
+                  <p className="mt-1 text-sm leading-6 text-zinc-300">
+                    HIPAA perimeter, BYOK routing, dedicated Brigade graph, SSO, SLA.
+                  </p>
                 </div>
               </div>
             </div>

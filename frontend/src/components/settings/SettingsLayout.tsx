@@ -11,21 +11,25 @@ import {
 export type SaveStatus = 'idle' | 'success' | 'error' | 'backend-pending';
 
 /**
- * Settings sections are bucketed into one of three groups per Aaron's
- * regrouping audit (2026-05-20 UX refactor). The pre-existing
- * 'app' / 'admin' / 'system' values are retained for compatibility
- * with any callers we missed, but the modern groups are:
- *   - 'preferences'  → per-user, mostly client-side. Visible to
- *                       everyone. Mic device, in-browser AI, theme.
- *   - 'workspace'    → per-org, admin-only. AI Providers, Custom
- *                       Vocabulary, anything that ties to the active
- *                       organization's shared config.
- *   - 'advanced'     → power-user / debugging / appliance plumbing.
- *                       Network, WiFi, Performance, legacy AI panel.
+ * Settings sections are bucketed into one of four groups per the
+ * 2026-05-29 Codex audit (UX-A batch):
+ *   - 'preferences'      → per-user client-side surfaces. Mic, in-browser
+ *                          AI, theme, notifications, hotkeys.
+ *   - 'recording'        → defaults applied to new meetings. Recording
+ *                          defaults panel, vocabulary.
+ *   - 'workspace'        → per-org, admin-only. Integrations, calendar
+ *                          sync, sharing/retention, speaker library.
+ *   - 'admin-appliance'  → providers, network, wifi, NPU, PATs, audit.
+ *
+ * Older 'app' / 'admin' / 'system' / 'advanced' values are retained for
+ * backwards compatibility and mapped during render so callers we
+ * missed still land somewhere sensible.
  */
 export type SettingsCategory =
   | 'preferences'
+  | 'recording'
   | 'workspace'
+  | 'admin-appliance'
   | 'advanced'
   | 'app'
   | 'admin'
@@ -87,24 +91,31 @@ export default function SettingsLayout({
   onSave,
   showSave = true,
 }: SettingsLayoutProps) {
-  // Group sections by the new categories first; map old categories
-  // ('app' → preferences, 'admin' → workspace, 'system' → advanced) so
-  // any callers that haven't migrated still render under the right
-  // heading. Empty groups are filtered out in the render below.
+  // Group sections by the 4-tier IA. Legacy categories are mapped to
+  // keep older callers rendering somewhere sensible:
+  //   'app'      → My preferences
+  //   'admin'    → Workspace settings
+  //   'system'   → Admin & appliance
+  //   'advanced' → Admin & appliance
+  // Empty groups are filtered out in the render below. Insertion order
+  // here is the visual order of the sidebar groups.
   const groupedSections = useMemo(() => {
     const buckets: Record<string, SettingsSectionMeta[]> = {
-      'Your preferences': [],
-      'Workspace setup': [],
-      'Advanced': [],
+      'My preferences': [],
+      'Recording defaults': [],
+      'Workspace settings': [],
+      'Admin & appliance': [],
     };
     for (const s of sections) {
       if (s.category === 'preferences' || s.category === 'app') {
-        buckets['Your preferences'].push(s);
+        buckets['My preferences'].push(s);
+      } else if (s.category === 'recording') {
+        buckets['Recording defaults'].push(s);
       } else if (s.category === 'workspace' || s.category === 'admin') {
-        buckets['Workspace setup'].push(s);
+        buckets['Workspace settings'].push(s);
       } else {
-        // 'advanced' + 'system' + anything unknown lands in Advanced
-        buckets['Advanced'].push(s);
+        // 'admin-appliance' + 'advanced' + 'system' + unknown
+        buckets['Admin & appliance'].push(s);
       }
     }
     return buckets;
