@@ -39,6 +39,14 @@ class AlwaysOnRecorder:
         self.chunk_duration = 15  # seconds per chunk
         self.sample_rate = 44100
         self.speech_threshold_db = -75.0
+        # v3.18.0 — silence-gap auto-segmentation default OFF. When off, a long
+        # quiet stretch never ends the session or spawns a new one; we just
+        # reset the silence counter and keep recording until explicit Stop (or
+        # the v3.17.1 watchdog catches a truly abandoned recording). Opt back
+        # in per deploy by setting ALWAYS_ON_AUTO_SEGMENT=1 (env or compose).
+        self._auto_segment_enabled = os.getenv(
+            "ALWAYS_ON_AUTO_SEGMENT", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # State tracking
         self.current_session_id: Optional[str] = None
@@ -97,6 +105,7 @@ class AlwaysOnRecorder:
             "speech_chunks": self.speech_chunks,
             "meetings_created": self.meetings_created,
             "silence_threshold_minutes": (self.silence_threshold_chunks * self.chunk_duration) / 60,
+            "auto_segment_enabled": self._auto_segment_enabled,
             "device_id": self.device_id,
         }
 
@@ -165,7 +174,21 @@ class AlwaysOnRecorder:
                     else:
                         self.consecutive_silent += 1
                         if self.consecutive_silent >= self.silence_threshold_chunks:
-                            if self.speech_chunks < self.min_meeting_chunks:
+                            if not self._auto_segment_enabled:
+                                # v3.18.0 default-off path: long silence does
+                                # NOT end the session or spawn a new one. Just
+                                # reset the counter, log it, and keep recording
+                                # until explicit Stop. The watchdog (v3.17.1)
+                                # handles truly abandoned sessions.
+                                gap_min = (self.consecutive_silent * self.chunk_duration) / 60.0
+                                logger.info(
+                                    "Silence threshold reached (%.1f min) but "
+                                    "ALWAYS_ON_AUTO_SEGMENT=off — continuing the "
+                                    "same session",
+                                    gap_min,
+                                )
+                                self.consecutive_silent = 0
+                            elif self.speech_chunks < self.min_meeting_chunks:
                                 logger.info(
                                     f"Meeting too short ({self.speech_chunks} chunks), discarding"
                                 )
