@@ -35,6 +35,7 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.device_auth import generate_device_secret, hash_device_secret
 from auth.models import User
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from database.models import RecordingSession, SatelliteDevice
 from database.models_rooms import (
@@ -830,6 +831,12 @@ async def start_recording(
     """
     room = _get_room_or_404(db, room_id, active_org.organization.id)
     _require_room_role(db, current_user, room, active_org, "member")
+
+    # v3.18.1 tier gate: room recording spawns RoomRecorder which then
+    # posts chunks via InternalServiceCaller (legitimately bypassing the
+    # gate once started). Gate at start so free orgs cannot kick off the
+    # server pipeline at all.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
 
     if room.status == "recording":
         raise HTTPException(

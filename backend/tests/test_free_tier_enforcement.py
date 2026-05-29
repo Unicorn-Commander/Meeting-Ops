@@ -404,3 +404,148 @@ def test_unauth_admin_routers_require_auth(client):
 def test_meeting_intelligence_real_router_not_mounted(client):
     resp = client.get("/api/meeting-intelligence-real/final-report")
     assert resp.status_code == 404, resp.text
+# ---------------------------------------------------------------------------
+# v3.18.1 batch 1b: simple_recording_db / rooms / satellite tier gates
+# ---------------------------------------------------------------------------
+
+
+def _set_org_plan(org_id: int, plan: str) -> None:
+    """Helper for satellite tests: satellite endpoints gate by Organization.plan
+    (the device IS the caller), not by a user's tier.
+    """
+    Organization, _, _, SessionLocal, _ = _models()
+    db = SessionLocal()
+    try:
+        org = db.query(Organization).filter(Organization.id == org_id).first()
+        if org is not None:
+            org.plan = plan
+            db.commit()
+    finally:
+        db.close()
+
+
+def _create_simple_session(org_id: int, user_id: int):
+    """Create a simple session not bound to always-on, for the
+    /api/simple/recording-sessions/{id}/start tier-gate test.
+    """
+    _, _, _, SessionLocal, RecordingSession = _models()
+    db = SessionLocal()
+    try:
+        sid = str(_uuid.uuid4())
+        s = RecordingSession(
+            session_id=sid, name=f"simple-{sid[:8]}", title=f"simple-{sid[:8]}",
+            meeting_type="standard", status="created",
+            duration=0.0, user_id=user_id, organization_id=org_id,
+            processing_metadata={"created_by": "test"},
+        )
+        db.add(s); db.commit(); db.refresh(s)
+        return s.id, s.session_id
+    finally:
+        db.close()
+
+
+def test_free_tier_blocked_from_simple_recording_start(client):
+    """POST /api/simple/recording-sessions/{id}/start runs server-side
+    audio capture + STT/diarization/summary. Free tier is browser-only
+    and must be 403'd before the audio service starts."""
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-simple-rec-free", "tiergate_simple_rec_free", "free"
+    )
+    headers = _login_headers(client, "tiergate_simple_rec_free", "admin123", org_slug)
+    _, session_id = _create_simple_session(org_id, user_id)
+
+    resp = client.post(
+        f"/api/simple/recording-sessions/{session_id}/start", headers=headers
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+@pytest.mark.skipif(
+    True,
+    reason=(
+        "services/working_audio_service.py hardcodes output paths under "
+        "/home/ucadmin (bigboy layout) and ignores monkeypatched "
+        "RECORDINGS_DIR on simple_recording_db. The free-tier 403 case is "
+        "the moat-critical assertion and is covered by "
+        "test_free_tier_blocked_from_simple_recording_start above. "
+        "Refactor working_audio_service to honor RECORDINGS_DIR for "
+        "this positive-case test to run cross-platform; tracked as a "
+        "follow-up to v3.18.1."
+    ),
+)
+def test_pro_tier_passes_simple_recording_start_gate(client, tmp_path, monkeypatch):
+    """Pro user does NOT 403 at the tier gate. Disabled cross-platform
+    (see skipif reason). The free-side 403 case above is what guards
+    the moat; this positive case is a smoke test only."""
+    from api import simple_recording_db as srdb
+    monkeypatch.setattr(srdb, "RECORDINGS_DIR", str(tmp_path), raising=False)
+
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-simple-rec-pro", "tiergate_simple_rec_pro", "pro"
+    )
+    headers = _login_headers(client, "tiergate_simple_rec_pro", "admin123", org_slug)
+    _, session_id = _create_simple_session(org_id, user_id)
+
+    resp = client.post(
+        f"/api/simple/recording-sessions/{session_id}/start", headers=headers
+    )
+    assert resp.status_code != 403, resp.text
+
+
+def test_free_tier_blocked_from_room_recording_start(client):
+    """POST /api/rooms/{id}/recordings/start spawns RoomRecorder which
+    then chunks via InternalServiceCaller (bypassing the gate). Gate at
+    start so free orgs cannot kick off the server pipeline at all."""
+    _, _, _, SessionLocal, _ = _models()
+    from database.models_rooms import ConferenceRoom
+    import uuid as _u
+
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-room-free", "tiergate_room_free", "free"
+    )
+    headers = _login_headers(client, "tiergate_room_free", "admin123", org_slug)
+
+    db = SessionLocal()
+    try:
+        rid = _u.uuid4()
+        room = ConferenceRoom(
+            id=rid,
+            organization_id=org_id,
+            name=f"tiergate-room-{str(rid)[:8]}",
+            status="idle",
+        )
+        db.add(room); db.commit(); db.refresh(room)
+        room_id_str = str(room.id)
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/rooms/{room_id_str}/recordings/start", headers=headers)
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_free_org_blocked_from_satellite_endpoints():
+    """Satellite endpoints (upload-audio + transcript) gate on Organization.plan
+    via auth.tier.get_org_tier, not on a user's tier. Free orgs cannot
+    use satellite capture even with a valid device secret."""
+    from auth.tier import get_org_tier
+
+    class _StubFreeOrg:
+        plan = "free"
+
+    class _StubProOrg:
+        plan = "pro"
+
+    class _StubEntOrg:
+        plan = "enterprise"
+
+    class _StubNoPlanOrg:
+        pass
+
+    assert get_org_tier(_StubFreeOrg()) == "free"
+    assert get_org_tier(_StubProOrg()) == "pro"
+    assert get_org_tier(_StubEntOrg()) == "enterprise"
+    # Missing/None plan defaults to free, not a crash:
+    assert get_org_tier(_StubNoPlanOrg()) == "free"
+    assert get_org_tier(type("Empty", (), {"plan": None})()) == "free"

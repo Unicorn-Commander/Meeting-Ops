@@ -77,6 +77,7 @@ def apply_vocabulary_replacements(text: str, db_session, organization_id: int) -
 
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from auth.models import User
 
 import redis.asyncio as aioredis
@@ -912,6 +913,11 @@ async def start_recording(
     db: Session = Depends(get_db)
 ):
     """Start recording for a session. Optionally specify device_id to select audio input."""
+
+    # v3.18.1 tier gate: paid-tier server processing — starting a server
+    # recording triggers STT/diarization/summary at stop, all server-side.
+    # Free is browser-only and must never reach this path.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
 
     # Get session from database - handle both session_id and integer id
     session = _get_session_for_org(db, active_org.organization.id, session_id)
