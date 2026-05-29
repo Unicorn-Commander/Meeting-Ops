@@ -1,5 +1,64 @@
 ## [Unreleased]
 
+## [3.19.0] - 2026-05-29
+
+Single coordinated release from a 5-agent parallel swarm closing every UI/UX and revenue-readiness item in PO P-00055 task `622e44b8` acceptance criteria except the launch-day flip itself. All five batches landed independently on `fix/v3.19-*` worktrees, then merged sequentially through `main`; conflicts resolved manually on `Pricing.tsx`, `auth/models.py`, and `SessionDetails.tsx`. 105 frontend + 88 targeted backend tests pass.
+
+### Mobile Free-tier moat (CRITICAL)
+- **`MobileLiveRecording.tsx` now gates audio uploads behind `canonical_reprocess` BEFORE `getUserMedia` and BEFORE the recording-start POST.** Free mobile users see a Radix Dialog with the verbatim audit copy explaining mobile-Free is desktop-only today + Pro for mobile server completion. No mic stream, no session POST, no chunk uploads for free users on mobile — the moat violation that originally let the "audio never leaves your device" pitch be technically false on the device most signups arrive from.
+
+### UX rebuild (v3.19 frontend batches)
+- **Settings 4-tier IA**: My preferences / Recording defaults / Workspace settings / Admin & appliance. Existing 9 panels regrouped; 8 `<EmptyPanel>` placeholders mark future panels (notifications, hotkeys, recording-defaults, calendar-sync, sharing-retention, speaker-library, audit-export) and reserved the "integrations" slot. New `ThemeSettings` (System / Dark; Light suppressed as undertested).
+- **Pricing page**: real Free ($0) / Pro ($12/mo) / Enterprise (Custom) copy replacing placeholder text. Subscribe button wires to `/api/billing/checkout`. Anonymous click redirects to `/signup?return_to=/pricing`. Logged-in users get a "View existing subscription" portal link.
+- **Onboarding**: 4-card first-run checklist on Dashboard (test mic / record sample / privacy mode / Pro completion) with per-card localStorage dismissal. `SettingsEnhanced` honors `?section=` and `#audio-devices` deep-links from the checklist.
+- **Conference room wizard**: persists visibility + recording mode via `schedule_json`; satellite source enabled with deep-link to `/rooms/{id}#satellite-pair`; always-on + scheduled modes enabled; mock `roomsApi` fallback gated behind `VITE_USE_ROOM_MOCKS` (default off).
+- **Speaker library**: respects backend `next_offset` (was hard-capped at 50). "Load more" button + dedup-by-id on append. Height cap from v3.15.1 preserved.
+- **SessionDetails IA tabs**: desktop borrows the mobile sticky-pill pattern (custom strip — Radix Tabs not in deps and not worth adding for one consumer). 6 tabs: Summary / Transcript / Action items / Speakers / Attachments / Chat. Brigade 3D graph + TTS podcast + progressive timeline + generated emails collapsed under a "More for this meeting" toggle inside Summary. AI Chat lifted from sidebar to dedicated Chat tab.
+- **Upgrade copy on all 6 audit-flagged touchpoints**: server completion (`AlwaysOnControl`), mobile recording (`MobileLiveRecording` — also the moat fix), server live transcript (`LiveRecording`), bulk import (`ImportFilePickerStage`), Brigade graph (`SessionDetails`), cross-device sync (`SessionDetails`). Verbatim audit copy where given.
+- **Component library on Radix Dialog**: new `components/ui/Dialog.tsx` is the single modal primitive. `ConfirmModal` refactored on top (API preserved) with the destructive-tone default-focus on Cancel (was Confirm). PAT modals + SpeakerLibrary assign/merge/create modals migrated. `window.confirm` calls removed at `SpeakerLibrary.tsx:334,352` + `SessionDetails.tsx:1954`.
+- **WCAG-AA**: `SettingsLayout` sidebar gains `role="tablist"` + `role="tab"` + `aria-selected` + `aria-controls`; `RoomDetail` tabs same. `Sessions.tsx` invalid nested-button markup unwound. `RAGChat` Clear button gains `aria-label`. `ConfirmModal` autoFocus moved to Cancel for destructive flows.
+- **`UpgradeBanner` component**: shown to free-tier users at the top of `Sessions` + `SessionDetails`. 7-day localStorage dismissal.
+
+### Per-org integration toggles (Workspace → Integrations)
+- **`organizations.integrations` JSONB column** (alembic `v3_19_0_integrations`) holds per-app config: Brigade / Project-Ops / Contact-Ops / Accounting-Ops / Stable. Schema: `{enabled, api_base_url, api_key_encrypted, ...integration-specific fields}`.
+- **API keys encrypted at rest** via the existing `services.providers.crypto` Fernet helper. GET endpoints mask (only `has_api_key: bool` + `api_key_last4: str`). No plaintext keys in logs. `/test` endpoint exception path is sanitized.
+- **REST**: `GET /api/integrations/me`, `GET|PUT|DELETE /api/integrations/me/{integration}`, `POST /api/integrations/me/{integration}/test`. PUT requires org admin role.
+- **Brigade + Project-Ops consumer refactor**: when `Organization.integrations.{brigade,project_ops}.enabled == false`, the respective writer is a no-op for that org EVEN IF the global env var is set. Backwards-compat: orgs with no `integrations` block continue reading the env-var defaults exactly as before.
+- **Frontend `IntegrationsPanel`** replaces the placeholder in Workspace → Integrations. Enable/disable toggle + cred input + "Test connection" button per integration. Admin-only.
+
+### Stripe Subscriptions + Founders 100 + signup activation
+- **Stripe webhook handler** at `POST /api/stripe/webhook` (alembic `033_stripe_billing` migration: `users.stripe_customer_id`, `users.is_founder`, `organizations.stripe_subscription_id`). Signature verified via `stripe.Webhook.construct_event`. Idempotency enforced via Redis `SET NX EX 86400` on `event.id`. Falls through with warning if Redis unavailable. Handles `customer.subscription.created/updated/deleted` → tier mapping in `User.tier`.
+- **Billing API**: `POST /api/billing/checkout` (returns Stripe Checkout URL), `POST /api/billing/portal` (Customer Portal URL), `GET /api/billing/subscription` (current tier + period_end + cancel_at_period_end).
+- **Founders 100**: fires at `/api/auth/register` completion AND at first `customer.subscription.created` webhook. Cap respected via DB count vs `FOUNDERS_100_LIMIT`. Pricing unchanged — `is_founder=True` is access + ecosystem bundle eligibility, NOT a discount per Aaron's locked decision.
+- **Belt-and-suspenders live-key guard**: `services.stripe_client._stripe()` refuses any key not starting with `sk_test_` unless `STRIPE_ALLOW_LIVE=1` is ALSO set. NO live keys committed.
+- **Inert until activated**: billing endpoints return 503 + webhook 503s until `STRIPE_API_KEY` + `STRIPE_WEBHOOK_SECRET` + `STRIPE_PRO_PRICE_ID` are set in `.env.bigboy`. Zero customer impact in absence of those vars.
+- **Auth `UserResponse` returns `is_founder` and `has_stripe_customer`** so the frontend renders the Founders badge / billing UI without a second round-trip.
+
+### Mostly-shared infrastructure mistake we documented
+The first v3.19.0 deploy to bigboy looked healthy but was running stale code because the `git pull` ran from `/home/muut/Production/UC-Meeting-Ops/` (project root, no `.git`) and silently failed; the follow-on rebuild used unchanged source. Caught by route-table introspection (`/api/integrations/me*` paths missing). Memory pointer `feedback_bigboy_git_pull_path` captures the gotcha: pull from `src/`, compose from root, verify route table after every deploy.
+
+### Tests
+- Frontend: 105/105 pass after Sessions test-mock added `useAuth` stub for the new `UpgradeBanner` consumer.
+- Backend (touched suites): 88 pass, 1 skip, 1 xfail. Includes new `test_integrations_api`, `test_brigade_per_org_toggle`, `test_stripe_webhook`, `test_billing_api`, `test_founders_100`.
+
+### Activation env (set in `.env.bigboy` to enable Stripe + Founders)
+```
+STRIPE_API_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRO_PRICE_ID=price_...
+STRIPE_ENTERPRISE_PRICE_ID=
+STRIPE_ALLOW_LIVE=          # only set to 1 on explicit live deploy
+FOUNDERS_100_ACTIVE=true
+FOUNDERS_100_LIMIT=100
+ALLOW_REGISTRATION=true      # to flip public signup on (current dev: off)
+```
+
+### Deferred
+- Public signup flip + `ALLOW_REGISTRATION=true` on dev → prod cutover.
+- VPS prod stand-up at `meeting-ops.unicorncommander.ai` per `docs/deploy-unicorncommander-vps.md`.
+- v3.18.3 backlog (background-jobification, agent drift checks, prefix bug, etc.) still queued.
+
+
 ## [3.18.2] - 2026-05-29
 
 ### Security — generative-endpoint tier gating
