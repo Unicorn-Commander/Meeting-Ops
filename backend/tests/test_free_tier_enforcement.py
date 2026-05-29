@@ -549,3 +549,124 @@ def test_free_org_blocked_from_satellite_endpoints():
     # Missing/None plan defaults to free, not a crash:
     assert get_org_tier(_StubNoPlanOrg()) == "free"
     assert get_org_tier(type("Empty", (), {"plan": None})()) == "free"
+
+
+# ---------------------------------------------------------------------------
+# v3.18.2: ai_chat / ai_insights / digests tier gates
+# ---------------------------------------------------------------------------
+
+
+def _create_completed_session_with_transcripts(org_id: int, user_id: int):
+    """Seed a completed session with a couple of Transcription rows so that
+    ai_chat / ai_insights / digests endpoints reach their LLM/gate path."""
+    _, _, _, SessionLocal, RecordingSession = _models()
+    from database.models import Transcription
+    db = SessionLocal()
+    try:
+        sid = str(_uuid.uuid4())
+        s = RecordingSession(
+            session_id=sid,
+            name=f"v3182-{sid[:8]}",
+            title=f"v3182-{sid[:8]}",
+            meeting_type="standard",
+            status="completed",
+            duration=120.0,
+            user_id=user_id,
+            organization_id=org_id,
+            summary="Test summary for digest aggregation.",
+            processing_metadata={"created_by": "test"},
+        )
+        db.add(s); db.commit(); db.refresh(s)
+        for idx, txt in enumerate(["Hello world.", "Second line."]):
+            db.add(Transcription(
+                session_id=s.id,
+                text=txt,
+                speaker="SPEAKER_00",
+                start_time=float(idx),
+                end_time=float(idx + 1),
+                confidence=0.9,
+            ))
+        db.commit()
+        return s.id, s.session_id
+    finally:
+        db.close()
+
+
+def test_v3_18_2_free_blocked_from_ai_chat_messages(client):
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "v3182-aichat-free", "v3182_aichat_free", "free"
+    )
+    headers = _login_headers(client, "v3182_aichat_free", "admin123", org_slug)
+    _, session_id = _create_completed_session_with_transcripts(org_id, user_id)
+    resp = client.post(
+        f"/api/ai-chat/sessions/{session_id}/messages",
+        headers=headers,
+        json={"message": "What was discussed?"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_v3_18_2_free_blocked_from_ai_chat_rag_query(client):
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "v3182-rag-free", "v3182_rag_free", "free"
+    )
+    headers = _login_headers(client, "v3182_rag_free", "admin123", org_slug)
+    resp = client.post(
+        "/api/ai-chat/rag/query",
+        headers=headers,
+        json={"message": "any meeting"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_v3_18_2_free_blocked_from_insights_regenerate(client):
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "v3182-insights-free", "v3182_insights_free", "free"
+    )
+    headers = _login_headers(client, "v3182_insights_free", "admin123", org_slug)
+    _, session_id = _create_completed_session_with_transcripts(org_id, user_id)
+    resp = client.post(
+        f"/api/simple/recording-sessions/{session_id}/insights/regenerate",
+        headers=headers,
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_v3_18_2_free_blocked_from_digest_generation(client):
+    """Cached digest reads stay open for any tier; new digest generation
+    is paid-tier. Free + no cached digest => 403."""
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "v3182-digest-free", "v3182_digest_free", "free"
+    )
+    headers = _login_headers(client, "v3182_digest_free", "admin123", org_slug)
+    # Create a completed session so the digest generation path has data
+    # (otherwise the early "no sessions" return short-circuits before the gate).
+    _create_completed_session_with_transcripts(org_id, user_id)
+    resp = client.get(
+        "/api/digests?period=day&force=true",
+        headers=headers,
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_v3_18_2_ai_insights_uses_asyncio_to_thread():
+    """Audit finding: chat_sync() (sync LLM call) was being awaited inside
+    async handlers, blocking the asyncio event loop. v3.18.2 wraps each
+    chat_sync in asyncio.to_thread so the loop stays responsive."""
+    import inspect
+    from api import ai_insights as mod
+    src = inspect.getsource(mod)
+    # Every chat_sync call in this module must be wrapped in to_thread.
+    # Bare `svc.chat_sync(` (not preceded by to_thread,) is a regression.
+    chat_sync_calls = src.count("svc.chat_sync")
+    to_thread_calls = src.count("asyncio.to_thread")
+    assert chat_sync_calls > 0, "expected at least one chat_sync usage"
+    # Each chat_sync call should pair with a to_thread wrapping.
+    assert to_thread_calls >= chat_sync_calls, (
+        f"every chat_sync must be wrapped in asyncio.to_thread "
+        f"({chat_sync_calls} chat_sync vs {to_thread_calls} to_thread)"
+    )
