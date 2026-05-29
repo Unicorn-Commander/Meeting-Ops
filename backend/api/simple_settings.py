@@ -1,9 +1,11 @@
 """Simple settings API endpoints for Meeting-Ops."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 import logging
 
+from auth.dependencies import get_current_user
+from auth.models import User
 from models.system_settings import (
     AllSettings,
     AudioDevice,
@@ -23,7 +25,7 @@ router = APIRouter(tags=["simple-settings"])
 
 
 @router.get("/api/simple/settings", response_model=AllSettings)
-async def get_all_settings():
+async def get_all_settings(current_user: User = Depends(get_current_user)):
     """Load all system settings."""
     try:
         settings = SystemService.load_settings()
@@ -34,9 +36,11 @@ async def get_all_settings():
 
 
 @router.post("/api/simple/settings", response_model=dict)
-async def save_all_settings(settings: AllSettings):
+async def save_all_settings(settings: AllSettings, current_user: User = Depends(get_current_user)):
     """Save all system settings."""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         success = SystemService.save_settings(settings)
         if success:
             return {"success": True, "message": "Settings saved successfully"}
@@ -48,7 +52,7 @@ async def save_all_settings(settings: AllSettings):
 
 
 @router.get("/api/simple/audio-devices", response_model=List[AudioDevice])
-async def get_audio_devices():
+async def get_audio_devices(current_user: User = Depends(get_current_user)):
     """Get list of available audio devices."""
     try:
         devices = SystemService.get_audio_devices()
@@ -59,7 +63,7 @@ async def get_audio_devices():
 
 
 @router.post("/api/simple/audio/volume", response_model=AudioVolumeResponse)
-async def set_audio_volume(request: AudioVolumeRequest):
+async def set_audio_volume(request: AudioVolumeRequest, current_user: User = Depends(get_current_user)):
     """Set microphone volume for a device."""
     try:
         response = SystemService.set_audio_volume(request.device, request.volume)
@@ -72,7 +76,7 @@ async def set_audio_volume(request: AudioVolumeRequest):
 
 
 @router.get("/api/simple/audio/volume/{device}", response_model=dict)
-async def get_audio_volume(device: str):
+async def get_audio_volume(device: str, current_user: User = Depends(get_current_user)):
     """Get current volume for a device as percentage."""
     try:
         # Replace underscores with colons (URL encoding issue)
@@ -85,7 +89,7 @@ async def get_audio_volume(device: str):
 
 
 @router.get("/api/simple/system/network", response_model=NetworkInfo)
-async def get_network_info():
+async def get_network_info(current_user: User = Depends(get_current_user)):
     """Get current network configuration."""
     try:
         network_info = SystemService.get_network_info()
@@ -96,9 +100,11 @@ async def get_network_info():
 
 
 @router.post("/api/simple/system/network", response_model=dict)
-async def update_network_settings(request: NetworkConfigRequest):
+async def update_network_settings(request: NetworkConfigRequest, current_user: User = Depends(get_current_user)):
     """Update network configuration settings."""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         # Convert to dict and filter out None values
         config = {k: v for k, v in request.dict().items() if v is not None}
         
@@ -119,9 +125,11 @@ async def update_network_settings(request: NetworkConfigRequest):
 
 
 @router.post("/api/simple/system/apply", response_model=dict)
-async def apply_system_settings(request: SystemApplyRequest):
+async def apply_system_settings(request: SystemApplyRequest, current_user: User = Depends(get_current_user)):
     """Apply WiFi, NPU, and performance settings."""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         config = request.dict()
         success = await SystemService.apply_system_settings(config)
         
@@ -143,9 +151,11 @@ async def apply_system_settings(request: SystemApplyRequest):
 
 
 @router.post("/api/simple/auth/test-authentik", response_model=AuthentikTestResponse)
-async def test_authentik_connection(request: AuthentikTestRequest):
+async def test_authentik_connection(request: AuthentikTestRequest, current_user: User = Depends(get_current_user)):
     """Test connection to Authentik server."""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         response = await SystemService.test_authentik_connection(
             request.authentikUrl,
             request.clientId,
@@ -165,7 +175,7 @@ async def test_authentik_connection(request: AuthentikTestRequest):
 # Additional helper endpoints
 
 @router.get("/api/simple/settings/recording", response_model=dict)
-async def get_recording_settings():
+async def get_recording_settings(current_user: User = Depends(get_current_user)):
     """Get just recording-related settings."""
     try:
         settings = SystemService.load_settings()
@@ -182,7 +192,7 @@ async def get_recording_settings():
 
 
 @router.get("/api/simple/settings/transcription", response_model=dict)
-async def get_transcription_settings():
+async def get_transcription_settings(current_user: User = Depends(get_current_user)):
     """Get just transcription-related settings."""
     try:
         settings = SystemService.load_settings()
@@ -200,7 +210,7 @@ async def get_transcription_settings():
 
 
 @router.get("/api/simple/settings/ai", response_model=dict)
-async def get_ai_settings():
+async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get just AI-related settings."""
     try:
         settings = SystemService.load_settings()
@@ -219,9 +229,11 @@ async def get_ai_settings():
 
 
 @router.post("/api/simple/settings/reset", response_model=dict)
-async def reset_settings_to_defaults():
+async def reset_settings_to_defaults(current_user: User = Depends(get_current_user)):
     """Reset all settings to defaults."""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         default_settings = AllSettings()
         success = SystemService.save_settings(default_settings)
         
@@ -235,7 +247,7 @@ async def reset_settings_to_defaults():
 
 
 @router.get("/api/simple/system/info", response_model=dict)
-async def get_system_info():
+async def get_system_info(current_user: User = Depends(get_current_user)):
     """Get system information summary."""
     try:
         import platform

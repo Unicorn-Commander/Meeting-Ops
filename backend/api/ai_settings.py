@@ -16,7 +16,7 @@ import json
 import logging
 
 from database.database import get_db
-from auth.dependencies import get_current_user_optional
+from auth.dependencies import get_current_user
 from auth.models import User
 from auth.organization import resolve_active_organization
 
@@ -60,7 +60,7 @@ class ModelSwitchRequest(BaseModel):
 @router.get("/settings/models")
 async def get_model_info(
     request: Request,
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Return actual running model configuration from the model registry,
@@ -160,7 +160,7 @@ async def get_model_info(
 
 
 @router.get("/settings/models/available")
-async def get_available_models():
+async def get_available_models(current_user: User = Depends(get_current_user)):
     """Return list of models from the registry with active indicator"""
     from config.model_registry import MODEL_REGISTRY, get_active_model
 
@@ -182,7 +182,7 @@ async def get_available_models():
 
 
 @router.post("/settings/models/active")
-async def set_active_model(request: ModelSwitchRequest):
+async def set_active_model(request: ModelSwitchRequest, current_user: User = Depends(get_current_user)):
     """Set the active LLM model via settings_manager.
 
     Note: Switching the loaded model requires restarting the llama-gpu
@@ -191,6 +191,9 @@ async def set_active_model(request: ModelSwitchRequest):
     """
     from config.model_registry import MODEL_REGISTRY
     from services.settings_manager import settings_manager
+
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Superuser required")
 
     if request.model_id not in MODEL_REGISTRY:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_id}. Available: {list(MODEL_REGISTRY.keys())}")
@@ -211,7 +214,7 @@ async def set_active_model(request: ModelSwitchRequest):
 
 
 @router.get("/settings/ai")
-async def get_ai_settings():
+async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get current AI settings from the centralized settings manager"""
     try:
         from services.settings_manager import settings_manager
@@ -223,9 +226,11 @@ async def get_ai_settings():
 
 
 @router.put("/settings/ai")
-async def update_ai_settings(settings: Dict[str, Any]):
+async def update_ai_settings(settings: Dict[str, Any], current_user: User = Depends(get_current_user)):
     """Update AI settings"""
     try:
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser required")
         from services.settings_manager import settings_manager
         success = settings_manager.update_category_settings("ai", settings)
         if success:

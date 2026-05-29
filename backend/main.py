@@ -273,7 +273,6 @@ _load_router(app, "session_move_org", "api.session_move_org")
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")
-_load_router(app, "meeting_intelligence", "api.meeting_intelligence_real")
 _load_router(app, "ai_settings", "api.ai_settings")
 # === PHASE 3 ROUTERS ===
 _load_router(app, "agents", "api.agents")

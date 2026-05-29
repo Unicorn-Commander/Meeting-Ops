@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from database.database import SessionLocal, get_db
 from database.models import RecordingSession, Transcription, UploadJob
 
@@ -322,6 +323,9 @@ async def start_upload(
 ):
     if request.action not in {"transcribe", "attach"}:
         raise HTTPException(status_code=400, detail="action must be 'transcribe' or 'attach'.")
+
+    if request.action == "transcribe":
+        gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
 
     # Per-org tier quota check (file size, concurrent uploads, monthly hours).
     # Raises HTTPException(402/429) with a structured detail payload so the
