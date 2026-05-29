@@ -46,6 +46,7 @@ const PersonalAccessTokens = lazy(
 );
 const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'));
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
+const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
 
 export default function SettingsEnhanced() {
   const { user } = useAuth();
@@ -240,12 +241,7 @@ export default function SettingsEnhanced() {
 
       // ── Workspace settings ──
       case 'integrations':
-        return (
-          <EmptyPanel
-            title="Integrations"
-            description="Project-Ops, Brigade, Contact-Ops, Accounting-Ops, Stable. Coming in a future release."
-          />
-        );
+        return <IntegrationsPanel />;
       case 'calendar-sync':
         return (
           <EmptyPanel
