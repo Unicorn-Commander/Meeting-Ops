@@ -9,6 +9,7 @@ import { RecentMeetings } from '../components/dashboard/RecentMeetings';
 import { RecentActionItems } from '../components/dashboard/RecentActionItems';
 import { AskBar } from '../components/dashboard/AskBar';
 import { PipelineFooter } from '../components/dashboard/PipelineFooter';
+import OnboardingChecklist from '../components/OnboardingChecklist';
 import { cacheKey, useHydratedState } from '../utils/cachedState';
 
 export interface DashboardSession {
@@ -179,6 +180,11 @@ export default function Dashboard() {
         <div className="mt-6">
           <AskBar />
         </div>
+
+        {/* First-run onboarding checklist (4 dismissible cards). Hidden once
+            the user has any sessions AND has dismissed every card. See
+            OnboardingChecklist for the localStorage-backed visibility rule. */}
+        <OnboardingChecklist sessionCount={sessions.length} />
 
         <div className="mt-8">
           <StatsRow sessions={sessions} loading={loading} detailsLoading={detailsLoading} />
