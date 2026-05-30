@@ -50,6 +50,19 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Meeting-Ops Backend...")
 
+    # ── Hosted MCP session manager startup ─────────────────────────────
+    # FastMCP's StreamableHTTP transport spins up a long-lived task group
+    # to back its session manager. When mounted as a sub-app, that
+    # lifespan never fires unless we explicitly drive it from the parent.
+    # We enter it here so the /mcp endpoint is ready for the first
+    # external request, and tear it down on shutdown.
+    _mcp_session_cm = None
+    try:
+        from api.mcp_http import open_mcp_lifespan
+        _mcp_session_cm = await open_mcp_lifespan()
+    except Exception as e:  # pragma: no cover - hosted MCP is optional
+        logger.warning(f"Hosted MCP session manager not started: {e}")
+
     # Initialize database
     try:
         from database.database import init_database
@@ -121,6 +134,14 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down...")
+
+    # Tear down the hosted MCP session manager if it started.
+    if _mcp_session_cm is not None:
+        try:
+            from api.mcp_http import close_mcp_lifespan
+            await close_mcp_lifespan(_mcp_session_cm)
+        except Exception as e:
+            logger.warning(f"Hosted MCP session manager shutdown failed: {e}")
 
     # Phase B.5 streaming-drain: send a server_shutdown JSON frame + 1001
     # close to every active WS session on /ws/sessions/{id}/live so the
@@ -210,15 +231,47 @@ app = FastAPI(
 
 _cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
 
+# Hosted MCP endpoint is browser-installable from any AI client. The
+# known-good clients (Claude Web, Cursor) sit on their own origins; user-
+# installed clients can be anything. The endpoint is bearer-auth-only
+# (no cookies, no credentials), so a permissive Origin regex is safe.
+# Add the .* allow-origin regex when not explicitly pinned via env. When
+# CORS_ORIGINS *is* explicitly set, callers are expected to add their
+# trusted MCP origins to that list themselves.
+_default_origin_regex = (
+    r"^https?://(localhost|127\.0\.0\.1|"
+    r"10\.\d+\.\d+\.\d+|"
+    r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|"
+    r"192\.168\.\d+\.\d+|"
+    r"claude\.ai|"
+    r"cursor\.sh|"
+    r"continue\.dev"
+    r")(:\d+)?$"
+)
+
 app.add_middleware(
     CORSMiddleware,
     # In production: set CORS_ORIGINS env var. For LAN appliance: allow frontend port.
     allow_origins=_cors_origins or [],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?$" if not _cors_origins else None,
+    allow_origin_regex=_default_origin_regex if not _cors_origins else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Hosted MCP endpoint bypass for CORS gating. CORSMiddleware above
+# enforces app-wide CORS, but the MCP endpoint accepts ANY origin
+# (browser-installed AI clients carry the Origin of whatever app the
+# user opened them from — claude.ai, cursor.sh, but also a long tail of
+# custom clients). Adding this AFTER the CORS middleware means it runs
+# FIRST on the request path (Starlette middleware is LIFO), so OPTIONS
+# preflight + CORS headers on /mcp are handled here and CORSMiddleware
+# never sees them. Non-/mcp paths fall through untouched.
+try:
+    from api.mcp_http import McpCorsBypassMiddleware
+    app.add_middleware(McpCorsBypassMiddleware)
+except Exception as e:  # pragma: no cover - import-time failure
+    logger.warning(f"MCP CORS bypass middleware not installed: {e}")
 
 # === Phase B.5: Prometheus /metrics endpoint ===
 # Mounted as an ASGI sub-app so prometheus_client owns the text-format
@@ -362,6 +415,21 @@ _load_router(app, "jobs", "api.jobs")
 # forwarding is Phase B.2.
 _load_router(app, "streaming", "api.streaming")
 
+# === HOSTED MCP ENDPOINT (streamable HTTP) ===
+# /mcp serves the same FastMCP server that mcp/meeting_ops_mcp.py serves
+# over stdio, so external AI clients (Claude Desktop, Cursor, Cline,
+# Continue, Zed, ChatGPT Desktop) can connect by URL + PAT without
+# cloning the repo. Per-request PAT auth via the existing PAT store;
+# every tool call inherits the calling user's RBAC scope. Gated on
+# MCP_HOSTED_ENABLED (default true). See docs/mcp-hosted.md.
+try:
+    from api.mcp_http import mount_mcp_app
+    mount_mcp_app(app)
+    loaded_routers.append("mcp_http")
+except Exception as e:  # pragma: no cover - import-time failure
+    failed_routers.append({"name": "mcp_http", "error": str(e)})
+    logger.warning(f"Optional mount skipped: mcp_http - {e}")
+
 
 
 # === CORE API ENDPOINTS ===
@@ -392,12 +460,23 @@ async def health_check():
         streaming_audioop_ok = True
 
     degraded = has_failures or not streaming_audioop_ok
+
+    # MCP hosted-endpoint health. "disabled" (env-gated off) is not a
+    # degraded state; "error" is.
+    mcp_status = "disabled"
+    try:
+        from api.mcp_http import mcp_health_status as _mcp_health
+        mcp_status = _mcp_health()
+    except Exception:  # pragma: no cover - api.mcp_http failed to import
+        mcp_status = "disabled"
+
     return {
         "status": "degraded" if degraded else "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "routers_loaded": len(loaded_routers),
         "routers_failed": failed_routers if has_failures else [],
         "streaming_audioop": "ok" if streaming_audioop_ok else "missing",
+        "mcp": mcp_status,
     }
 
 
