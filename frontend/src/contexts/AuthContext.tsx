@@ -97,6 +97,12 @@ interface AuthContextType {
   // while /api/auth/me is in flight or for anonymous callers.
   tier: Tier;
   tierFeatures: TierFeatures;
+  /**
+   * True when a 401 was observed during an active recording. The forced
+   * logout/redirect was suppressed so the recording UI stays alive. UI
+   * surfaces a non-blocking banner; user re-authenticates after stop.
+   */
+  authStaleDuringRecording: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -113,6 +119,31 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
+// Returns true iff the user is mid-recording (always-on or live) per
+// localStorage. Used to short-circuit forced-logout-on-401 paths so a
+// transient backend hiccup (deploy, network blip, oauth2-proxy session
+// refresh) doesn't tear down a live meeting UI. Aaron 2026-05-30:
+// "page refreshed and interrupted my recording. Not the first time."
+function isRecordingActiveLocally(): boolean {
+  try {
+    const raw = localStorage.getItem('activeRecordingSession');
+    if (raw) {
+      const s = JSON.parse(raw);
+      if (s && s.isRecording && s.id) return true;
+    }
+    // AlwaysOnContext persists its own state under this key.
+    const aoRaw = localStorage.getItem('alwaysOnRecorderState');
+    if (aoRaw) {
+      const ao = JSON.parse(aoRaw);
+      // Any non-idle / non-stopped state counts as "do not yank the UI".
+      const live = ao && typeof ao.state === 'string' &&
+        !['idle', 'stopped', 'paused', undefined, null].includes(ao.state);
+      if (live) return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -120,6 +151,10 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+  // Becomes true when a 401 arrived during a recording — we suppress
+  // the forced redirect and surface a non-blocking banner instead so
+  // the user can finish the meeting before re-authing.
+  const [authStaleDuringRecording, setAuthStaleDuringRecording] = useState(false);
   const authApi = (path: string) => `${config.apiUrl}${path}`;
 
   // Initialize tokens from localStorage safely
@@ -160,9 +195,25 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
             const refreshSuccess = await refreshAccessToken();
             if (!refreshSuccess) {
               console.warn('Token refresh failed during auth check');
-              // Don't call logout here as refreshAccessToken already handled it
+              // Don't call logout here as refreshAccessToken already handled it.
+              // BUT: if a recording is live, also surface a non-blocking
+              // banner so the user knows re-auth is needed at stop-time.
+              if (isRecordingActiveLocally()) {
+                setAuthStaleDuringRecording(true);
+                console.warn('[auth] 401 during active recording — deferred logout');
+                return;
+              }
             }
           } else {
+            // 401 with no refresh token (or worse) would normally force a
+            // logout + redirect. If a recording is in progress that wipes
+            // the user's live meeting UI and the chunks-flush state — see
+            // Aaron's 2026-05-30 ticket. Defer instead.
+            if (response.status === 401 && isRecordingActiveLocally()) {
+              setAuthStaleDuringRecording(true);
+              console.warn('[auth] 401 during active recording — deferred logout');
+              return;
+            }
             // Clear invalid tokens
             logout();
           }
@@ -425,6 +476,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         error,
         tier,
         tierFeatures,
+        authStaleDuringRecording,
       }}
     >
       {children}
