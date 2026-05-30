@@ -25,8 +25,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "035_processing_job_id"
-down_revision = "034_merge_integrations_stripe"
+revision = "036_processing_job_id"
+down_revision = "035_invite_requests"
 branch_labels = None
 depends_on = None
 
