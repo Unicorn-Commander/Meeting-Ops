@@ -9,10 +9,13 @@ describe('Landing', () => {
       'fetch',
       vi.fn(),
     );
+    // Reset hash between tests so the redirect assertion is reliable.
+    window.location.hash = '';
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    window.location.hash = '';
   });
 
   it('renders hero copy, three product points, and the invite form', () => {
@@ -35,10 +38,10 @@ describe('Landing', () => {
     expect(screen.getByText(/optional pro server pass/i)).toBeInTheDocument();
     expect(screen.getByText(/bring-your-own ecosystem/i)).toBeInTheDocument();
 
-    // Form
+    // Form — v3.21.0: CTA button is now "Continue" (full-path to /signup).
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: /request invite/i }),
+      screen.getByRole('button', { name: /continue/i }),
     ).toBeInTheDocument();
 
     // Sign-in escape hatch
@@ -54,7 +57,7 @@ describe('Landing', () => {
     ).toBeInTheDocument();
   });
 
-  it('submits the invite request and shows the success state', async () => {
+  it('submits the invite request (fire-and-forget) and redirects to /signup with the email', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -70,7 +73,7 @@ describe('Landing', () => {
 
     const input = screen.getByLabelText(/email address/i);
     fireEvent.change(input, { target: { value: 'aaron@example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: /request invite/i }));
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -83,11 +86,9 @@ describe('Landing', () => {
       email: 'aaron@example.com',
     });
 
-    // Success message replaces the form
+    // Full-path CTA: hash router navigates to /signup?email=...
     await waitFor(() => {
-      expect(
-        screen.getByText(/thanks — your request is in/i),
-      ).toBeInTheDocument();
+      expect(window.location.hash).toMatch(/^#\/signup\?email=aaron%40example\.com$/);
     });
   });
 
@@ -103,7 +104,7 @@ describe('Landing', () => {
 
     const input = screen.getByLabelText(/email address/i);
     fireEvent.change(input, { target: { value: 'not-an-email' } });
-    fireEvent.click(screen.getByRole('button', { name: /request invite/i }));
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
 
     await waitFor(() => {
       expect(
@@ -111,14 +112,14 @@ describe('Landing', () => {
       ).toBeInTheDocument();
     });
     expect(fetchMock).not.toHaveBeenCalled();
+    // No redirect on validation failure.
+    expect(window.location.hash).toBe('');
   });
 
-  it('shows the rate-limit message when the server returns 429', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 429,
-      json: async () => ({ detail: 'Too many requests.' }),
-    });
+  it('redirects to /signup even when the invite-request POST fails (fire-and-forget)', async () => {
+    // Server is down / rate-limited / 500'd — the redirect still
+    // happens because v3.21.0 makes the invite log fire-and-forget.
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
     vi.stubGlobal('fetch', fetchMock);
 
     render(
@@ -130,12 +131,10 @@ describe('Landing', () => {
     fireEvent.change(screen.getByLabelText(/email address/i), {
       target: { value: 'flood@example.com' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /request invite/i }));
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/too many requests from this network/i),
-      ).toBeInTheDocument();
+      expect(window.location.hash).toMatch(/^#\/signup\?email=flood%40example\.com$/);
     });
   });
 });

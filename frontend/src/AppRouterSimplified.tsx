@@ -27,6 +27,7 @@ import AdminBulkImport from './pages/AdminBulkImport';
 import Signup from './pages/Signup';
 import Pricing from './pages/Pricing';
 import Landing from './pages/Landing';
+import Contact from './pages/Contact';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
@@ -83,6 +84,18 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         {children}
+        {/* v3.21.0: ecosystem-wide support link. Renders inside the
+            authed shell so every page exposes it without coupling to
+            any specific page layout. Anonymous /contact still works
+            for the unauthed marketing surfaces (Landing footer, etc). */}
+        <footer className="mt-12 border-t border-zinc-800/60 px-4 py-4 text-center text-xs text-zinc-500">
+          <a
+            href="#/contact"
+            className="text-zinc-400 underline-offset-4 transition-colors hover:text-fuchsia-300 hover:underline"
+          >
+            Contact Support
+          </a>
+        </footer>
       </main>
     </div>
   );
@@ -338,6 +351,11 @@ export function AppRouterSimplified() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/pricing" element={<Pricing />} />
+      {/* /contact is public — renders for authed AND unauthed visitors.
+          The page itself reads useAuth() and adjusts copy + nav back-link
+          accordingly. Submitting posts to /api/support/contact which
+          accepts both. */}
+      <Route path="/contact" element={<Contact />} />
 
       {/*
         Public invite-only landing at `/`. Behavior is build-time gated

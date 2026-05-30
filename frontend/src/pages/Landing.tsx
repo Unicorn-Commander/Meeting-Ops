@@ -35,25 +35,30 @@ export const Landing: React.FC = () => {
     }
 
     setState('submitting');
+    // v3.21.0 full-path CTA: always fire-and-forget the invite-request
+    // log (so manual follow-up still has the email captured + the
+    // existing rate-limit + Postmark notify path keeps working), then
+    // immediately redirect to /signup?email=. The Signup page detects
+    // the 403 "registration closed" reply gracefully and shows the
+    // friendly invite-confirmation copy when self-serve isn't open.
     try {
       const apiBase = config.apiBaseUrl.replace(/\/$/, '');
       const url = `${apiBase}/api/landing/invite-request`;
-      const resp = await fetch(url, {
+      // Fire-and-forget — we don't await success. Even a 429 doesn't
+      // block the user from trying to sign up. Failures are silent on
+      // the UI; the invite-only flow logs server-side.
+      void fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmed }),
+      }).catch(() => {
+        /* intentional: the redirect below is the user-facing path */
       });
-      if (resp.status === 429) {
-        setErrorMsg('Too many requests from this network. Try again in an hour.');
-        setState('error');
-        return;
-      }
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        setErrorMsg(body?.detail || `Could not submit (HTTP ${resp.status}).`);
-        setState('error');
-        return;
-      }
+      const encoded = encodeURIComponent(trimmed);
+      // Hash router — setting location.hash to `/signup?email=...` makes
+      // the URL `<origin>/#/signup?email=...`, which is what HashRouter
+      // reads. (Setting it with a leading `#` would double-up.)
+      window.location.hash = `/signup?email=${encoded}`;
       setState('success');
       setEmail('');
     } catch (err) {
@@ -106,7 +111,7 @@ export const Landing: React.FC = () => {
               href="#invite"
               className="inline-flex items-center gap-2 rounded-lg bg-fuchsia-500 px-5 py-3 text-sm font-medium text-white shadow-lg shadow-fuchsia-500/20 transition-colors hover:bg-fuchsia-400"
             >
-              Request an invite
+              Get started
               <ArrowRight className="h-4 w-4" />
             </a>
           </div>
@@ -150,11 +155,12 @@ export const Landing: React.FC = () => {
         <section id="invite" className="mt-24">
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 sm:p-8">
             <h3 className="text-xl font-semibold text-white">
-              Request an invite
+              Get started
             </h3>
             <p className="mt-2 text-sm text-zinc-400">
-              We're rolling out to a small group of early users. Drop
-              your email and we'll reach out as slots open.
+              Drop your email and we'll take you to account setup. If
+              self-serve signup isn't open yet, we'll log your interest
+              and get back to you as slots open.
             </p>
 
             {state === 'success' ? (
@@ -163,7 +169,7 @@ export const Landing: React.FC = () => {
                 aria-live="polite"
                 className="mt-6 rounded-lg border border-emerald-700/40 bg-emerald-900/20 px-4 py-3 text-sm text-emerald-300"
               >
-                Thanks — your request is in. We'll be in touch.
+                Taking you to account setup…
               </div>
             ) : (
               <form
@@ -193,7 +199,7 @@ export const Landing: React.FC = () => {
                   disabled={state === 'submitting'}
                   className="rounded-lg bg-fuchsia-500 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-fuchsia-400 disabled:opacity-60"
                 >
-                  {state === 'submitting' ? 'Submitting…' : 'Request invite'}
+                  {state === 'submitting' ? 'Submitting…' : 'Continue'}
                 </button>
               </form>
             )}
@@ -223,6 +229,16 @@ export const Landing: React.FC = () => {
                 href="mailto:enterprise@meeting-ops.unicorncommander.ai"
               >
                 enterprise@meeting-ops.unicorncommander.ai
+              </a>
+              .
+            </p>
+            <p className="mt-2">
+              Questions?{' '}
+              <a
+                className="text-zinc-400 underline-offset-4 hover:text-fuchsia-300 hover:underline"
+                href="#/contact"
+              >
+                Contact Support
               </a>
               .
             </p>
