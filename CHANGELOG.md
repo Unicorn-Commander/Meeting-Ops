@@ -1,6 +1,10 @@
 ## [Unreleased]
 
-### Added (v3.21.0 staging — feat/v3.21.0-auth-features)
+## [3.21.0] - 2026-05-30
+
+Multi-feature release on top of v3.20.1 — Founding 100 cohort mechanic (rename + atomic cap), password reset (self-serve), landing CTA full-path (form → /signup), and customer support contact form. Four parallel-agent streams merged via no-op alembic merge migration. Three follow-on Aaron-led items are still parked (Stripe live env paste on VPS, Postmark token on VPS, `ALLOW_REGISTRATION` flip) — those involve live secrets/public-flip and stay manual.
+
+### Founding 100 cohort mechanic (renamed from "Founders 100")
 
 - **Founding 100 cohort mechanic (renamed from "Founders 100")**: explicit cohort label + atomic grant-on-Stripe-annual-upfront.
   - `users.is_founder` renamed to `users.is_founding_member`; new `users.founding_cohort` (varchar(64), nullable). Old `is_founder` column FULLY removed (alembic 037 + every callsite swept).
@@ -25,6 +29,28 @@
 - **Login**: new "Forgot your password?" link under the Sign-in button.
 - Frontend types swept: `services/billingApi.ts.SubscriptionState.is_founder` → `is_founding_member`, optional `founding_cohort`; `__tests__/Sessions.test.tsx` mock user updated.
 - Tests: `tests/test_founders_100.py` rewritten for the new cohort semantics + admin-close gate + public status endpoint. New `tests/test_password_reset.py` (7 scenarios: 202 on unknown, token-issue, validate states, happy-path, weak-password rejection, rate limit). `tests/test_billing_api.py` + `tests/test_stripe_webhook.py` updated for env + response-field rename.
+
+### Landing CTA full-path
+- `pages/Landing.tsx`: invite form now fire-and-forget posts to `/api/landing/invite-request` AND redirects to `/#/signup?email=<encoded>` on submit. The email is logged either way (invite-request still writes the row), so manual approval still works for the first cohort.
+- `pages/Signup.tsx`: reads `?email=` from URL on mount, pre-fills email. Detects 403 "registration closed" from `/api/auth/register` and renders a friendly "Thanks — we got your invite request" panel instead of the signup form (relogs to invite-request as belt-and-braces). CTA copy: "Request an invite" → "Get started".
+- Frontend tests rewritten — 4 Landing assertions now check the full-path redirect.
+
+### Customer support contact form
+- New `pages/Contact.tsx` at `/contact`. Public (renders for authed AND unauthed). Authed callers get name+email pre-filled from `AuthContext`. Fields: name, email, subject, message.
+- New `api/support.py`: `POST /api/support/contact` writes a row to new `support_requests` table (alembic 037 in the frontend-polish branch), rate-limited 3/hour/email via Redis SETEX with in-proc fallback. Fires Postmark email to `support@magicunicorn.tech` with `ReplyTo` set to submitter email so support can reply directly from the inbox.
+- Footer link "Contact Support" added to `AppLayout` (every authed page), Help.tsx "Still stuck?" section, and Landing footer (unauthed visitors).
+
+### Per-org integration credentials UI
+- **Already shipped in v3.19.0** — verified by the frontend-polish agent and called out here for completeness. `backend/api/integrations_org.py` (GET masked + PUT encrypted + POST `/test` probe + DELETE clear, admin-gated) + `frontend/src/components/settings/IntegrationsPanel.tsx` (full UI for Brigade / Project-Ops / Contact-Ops / Accounting-Ops / Stable with test button, masked last-4, "Disable & clear" action). No code change needed.
+
+### Alembic head reconciliation
+- New `038_merge_v3_21_heads.py` no-op merge migration with tuple `down_revision = ("037_founding_member_and_password_reset", "037_support_requests")`. Single head restored.
+
+### Verified
+- Frontend `npm run build`: 0 TS errors. PWA precache built.
+- Backend focused tests (founders + password_reset + support_contact + landing_invite + auth + health + free_tier + consumer_signup): 74/74 pass.
+- Frontend vitest: 109/109 pass.
+- Streaming tests still error on the pre-existing prometheus_client local-env Counter import issue. Production Docker has the right version.
 
 ## [3.20.1] - 2026-05-30
 
