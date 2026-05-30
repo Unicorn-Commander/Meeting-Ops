@@ -181,7 +181,7 @@ def test_mcp_valid_pat_initializes_session(client, valid_pat):
 
 
 def test_mcp_list_tools_returns_all_registered_tools(client, valid_pat):
-    """The tools/list RPC over HTTP returns all 8 read-only tools."""
+    """The tools/list RPC over HTTP returns every canonical read-only tool."""
     headers = {
         "Authorization": f"Bearer {valid_pat}",
         "Accept": "application/json, text/event-stream",

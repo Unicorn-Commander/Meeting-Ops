@@ -1,5 +1,36 @@
 ## [Unreleased]
 
+### Added — cross-app reference hints in MCP results
+
+Meeting-Ops MCP tool responses now carry optional, best-effort handles to sibling Unicorn Commander apps (Contact-Ops, Project-Ops, Crisis-Ops) so the user's AI client (Claude Desktop, Cursor, Cline, etc.) can navigate between apps without Meeting-Ops calling them server-side. The AI client IS the integration layer — Meeting-Ops just emits hints.
+
+- New module `backend/services/mcp_cross_app.py` (pure functions, no I/O):
+  - `build_cross_app_references(session)` derives `mentioned_contacts` / `mentioned_projects` / `mentioned_cases` from data the backend already returns (participants list, diarized speakers, `project_app` pointer, title + summary text scan).
+  - `render_cross_app_section(refs)` emits a markdown section with a fenced JSON block carrying the structured payload for AI clients to parse.
+  - Sibling URLs configurable via `CROSS_APP_CONTACT_OPS_URL` / `CROSS_APP_PROJECT_OPS_URL` / `CROSS_APP_CRISIS_OPS_URL`. Defaults: `https://contacts.magicunicorn.dev`, `https://project-ops.unicorncommander.ai`, `https://crisis.magicunicorn.dev`.
+  - Confidence levels: `0.95` for structured fields (participant with email, `project_app` pointer), `0.70` for diarized-speaker names, `0.40` for keyword-only text matches. Generic `Speaker 1` / `SPK_00` labels are dropped.
+- `services/mcp_app.py`:
+  - `get_meeting_details` and `get_meeting_transcript` now append a `## Cross-App References` section (with embedded JSON block) when any hint was derived.
+  - `search_meetings` docstring points AI clients at the new tool for per-result hint resolution (kept lightweight — no N×detail-fetches).
+  - New `get_cross_app_hints(session_id)` tool returns the `cross_app_references` block standalone as JSON. Returns the canonical empty shape on backend error so AI clients can rely on the schema unconditionally.
+  - `READONLY_TOOL_NAMES` bumped from 8 → 9 (added `get_cross_app_hints`). Both stdio (`mcp/meeting_ops_mcp.py`) and hosted-HTTP (`backend/api/mcp_http.py`) transports inherit the new tool through the shared FastMCP instance.
+- Tests: new `backend/tests/test_mcp_cross_app.py` (14 cases) covers the pure-function populator, markdown rendering, the three MCP tools, and the empty-shape fallback. `tests/test_mcp_app_shared.py` count assertion updated 8 → 9.
+
+Schema:
+
+```
+"cross_app_references": {
+  "mentioned_contacts": [{"name", "email", "confidence",
+                          "contact_ops_hint": {"app", "url", "query"}}],
+  "mentioned_projects": [{"name", "confidence",
+                          "project_ops_hint": {"app", "url", "query"}}],
+  "mentioned_cases":    [{"name", "confidence",
+                          "crisis_ops_hint": {"app", "url", "query"}}]
+}
+```
+
+No new alembic migrations, no Stripe/diarization/founders-100/password-reset paths touched.
+
 ## [3.21.2] - 2026-05-30
 
 Second hotfix in the v3.21.x series. Bigboy (dev) had the legacy `ix_users_is_founder` index from an earlier dev migration; VPS (prod) did not — so VPS hit the next trap: in Postgres, `op.drop_index` wrapped in a Python `try/except` does not actually "ignore" a missing-index error. Postgres aborts the entire transaction on the failed DDL, the Python `except` catches the exception but the transaction stays in `InFailedSqlTransaction` state, and the very next DDL (`ALTER TABLE users RENAME is_founder TO is_founding_member`) fails with "current transaction is aborted, commands ignored until end of transaction block." Backend crash-looped on VPS.
