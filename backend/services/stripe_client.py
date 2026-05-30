@@ -98,33 +98,61 @@ def price_id_to_tier(price_id: Optional[str]) -> str:
     price IDs default to 'free' so a misconfigured webhook can't silently
     upgrade someone.
 
-    Aaron's pricing decisions (locked):
+    Aaron's pricing decisions (locked 2026-05-29):
       Free        = $0,  browser-only
-      Pro         = $12, individual
+      Pro         = $12, individual — Meeting-Ops only
+      Suite       = $25, individual — Meeting-Ops + Project-Ops + Contact-Ops
       Enterprise  = custom, on-prem
+
+    The Suite tier carries the same effective TIER_FEATURES as Pro
+    (canonical_reprocess, brigade_integration, cross_device_sync, etc.) — the
+    difference is access to the sister apps (Project-Ops + Contact-Ops),
+    which is enforced at those apps' auth layers, not here. Within Meeting-Ops
+    a Suite subscriber and a Pro subscriber experience the same product.
     """
     if not price_id:
         return "free"
     pro = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
+    suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
     ent = os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip()
     if pro and price_id == pro:
+        return "pro"
+    if suite and price_id == suite:
+        # Suite subscribers map to "pro" inside Meeting-Ops — same tier features.
+        # The Suite-vs-Pro distinction lives on the User.is_suite_subscriber
+        # flag (used by Project-Ops / Contact-Ops to gate cross-app access)
+        # so a single Meeting-Ops tier lookup stays simple.
         return "pro"
     if ent and price_id == ent:
         return "enterprise"
     logger.warning(
         "Unknown Stripe price_id=%s; defaulting to 'free'. "
-        "Set STRIPE_PRO_PRICE_ID / STRIPE_ENTERPRISE_PRICE_ID.",
+        "Set STRIPE_PRO_PRICE_ID / STRIPE_SUITE_PRICE_ID / STRIPE_ENTERPRISE_PRICE_ID.",
         price_id,
     )
     return "free"
 
 
+def price_id_is_suite(price_id: str) -> bool:
+    """True iff the price ID matches the configured Suite tier price.
+
+    Used by the webhook handler to set User.is_suite_subscriber alongside
+    User.tier — needed for the Project-Ops / Contact-Ops cross-app gates."""
+    if not price_id:
+        return False
+    suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
+    return bool(suite) and price_id == suite
+
+
 def tier_to_price_id(tier: str) -> Optional[str]:
     """Reverse of price_id_to_tier — used by /billing/checkout to translate
-    the plan name from the request body into the Stripe price ID."""
+    the plan name from the request body into the Stripe price ID. Accepts
+    "pro" (Meeting-Ops only), "suite" (UC Suite), and "enterprise"."""
     tier = (tier or "").lower()
     if tier == "pro":
         return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
+    if tier == "suite":
+        return os.getenv("STRIPE_SUITE_PRICE_ID", "").strip() or None
     if tier == "enterprise":
         return os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip() or None
     return None
