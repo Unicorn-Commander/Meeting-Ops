@@ -17,7 +17,8 @@ def test_mcp_app_module_imports():
     from services.mcp_app import mcp, READONLY_TOOL_NAMES, set_pat, reset_pat
     assert mcp is not None
     assert mcp.name == "Meeting-Ops"
-    assert len(READONLY_TOOL_NAMES) == 8
+    # 8 original read-only tools + get_cross_app_hints (v3.22).
+    assert len(READONLY_TOOL_NAMES) == 9
     # set_pat / reset_pat must round-trip without raising.
     tok = set_pat("mops_pat_unit_test")
     try:
@@ -27,8 +28,8 @@ def test_mcp_app_module_imports():
         reset_pat(tok)
 
 
-def test_mcp_readonly_tools_match_original_eight():
-    """The 8 canonical read-only tools must be registered on the shared instance."""
+def test_mcp_readonly_tools_match_canonical_set():
+    """Every canonical read-only tool must be registered on the shared instance."""
     from services.mcp_app import mcp, READONLY_TOOL_NAMES
 
     tools = asyncio.run(mcp.list_tools())

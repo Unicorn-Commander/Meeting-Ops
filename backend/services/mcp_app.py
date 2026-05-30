@@ -34,6 +34,12 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from services.mcp_cross_app import (
+    build_cross_app_references,
+    empty_cross_app_references,
+    render_cross_app_section,
+)
+
 
 logger = logging.getLogger("meeting-ops-mcp")
 
@@ -164,7 +170,9 @@ async def search_meetings(query: str, limit: int = 5) -> str:
 
     Finds meetings by topic, speaker names, keywords, or any content
     mentioned in transcripts and summaries. Returns matching meetings
-    ranked by relevance.
+    ranked by relevance. To resolve mentioned contacts/projects/cases
+    against sibling Unicorn Commander apps (Contact-Ops, Project-Ops,
+    Crisis-Ops), call ``get_cross_app_hints(session_id)`` per result.
 
     Args:
         query: Natural language search query (e.g., "budget discussion",
@@ -306,6 +314,11 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
 async def get_meeting_details(session_id: str) -> str:
     """Get full details for a specific meeting session.
 
+    Returns meeting details plus cross-app reference hints for related
+    contacts/projects/cases in the UC ecosystem (Contact-Ops, Project-Ops,
+    Crisis-Ops). AI clients can call those sibling MCP servers to resolve
+    the handles into full records.
+
     Args:
         session_id: The session ID (UUID or integer ID) of the meeting
     """
@@ -349,12 +362,26 @@ async def get_meeting_details(session_id: str) -> str:
             except (json.JSONDecodeError, TypeError):
                 lines.append(f"\n## Summary\n{summary}")
 
+    # Cross-app reference hints — best-effort. The sibling apps are not
+    # contacted here; we just emit handles for the AI client to chase.
+    try:
+        refs = build_cross_app_references(data)
+        section = render_cross_app_section(refs)
+        if section:
+            lines.append(section)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("cross-app reference build failed", exc_info=True)
+
     return "\n".join(lines)
 
 
 @mcp.tool()
 async def get_meeting_transcript(session_id: str, max_chars: int = 10000) -> str:
     """Get the transcript for a specific meeting.
+
+    Returns the transcript plus cross-app reference hints (Contact-Ops /
+    Project-Ops / Crisis-Ops) so AI clients can resolve mentioned people,
+    projects, and cases against sibling MCP servers.
 
     Args:
         session_id: The session ID (UUID or integer ID) of the meeting
@@ -404,7 +431,17 @@ async def get_meeting_transcript(session_id: str, max_chars: int = 10000) -> str
             f"Full transcript is {len(transcript)} characters.]"
         )
 
-    return f"# Transcript: {title}\n\n{transcript}"
+    out = f"# Transcript: {title}\n\n{transcript}"
+
+    try:
+        refs = build_cross_app_references(data)
+        section = render_cross_app_section(refs)
+        if section:
+            out = out + section
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("cross-app reference build failed", exc_info=True)
+
+    return out
 
 
 @mcp.tool()
@@ -558,6 +595,50 @@ async def get_meeting_insights(session_id: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+async def get_cross_app_hints(session_id: str) -> str:
+    """Get cross-app reference hints for a meeting.
+
+    Returns just the ``cross_app_references`` block (mentioned contacts,
+    projects, cases) without the full meeting payload. Use this when the
+    AI client already has the meeting context loaded and only wants the
+    handles to query sibling Unicorn Commander MCP servers (Contact-Ops,
+    Project-Ops, Crisis-Ops). The hints are best-effort — Meeting-Ops
+    never contacts the sibling apps server-side, the AI client does.
+
+    Schema:
+        {
+          "session_id": "...",
+          "cross_app_references": {
+            "mentioned_contacts": [{"name", "email", "confidence",
+                                    "contact_ops_hint": {"app", "url", "query"}}],
+            "mentioned_projects": [{"name", "confidence",
+                                    "project_ops_hint": {"app", "url", "query"}}],
+            "mentioned_cases":    [{"name", "confidence",
+                                    "crisis_ops_hint": {"app", "url", "query"}}]
+          }
+        }
+
+    Args:
+        session_id: The session ID (UUID or integer ID) of the meeting
+    """
+    try:
+        data = await _api("get", f"/api/simple/recording-sessions/{session_id}")
+    except Exception:
+        # Never break the AI's workflow on a missing/forbidden session —
+        # emit the empty shape so the schema is still stable.
+        return _fmt({
+            "session_id": session_id,
+            "cross_app_references": empty_cross_app_references(),
+        })
+
+    refs = build_cross_app_references(data)
+    return _fmt({
+        "session_id": session_id,
+        "cross_app_references": refs,
+    })
+
+
 # ── MCP Tools (propose → confirm; mutate-via-confirmation) ─────────────
 
 
@@ -699,6 +780,10 @@ READONLY_TOOL_NAMES: tuple[str, ...] = (
     "chat_with_meeting",
     "get_analytics",
     "get_meeting_insights",
+    # v3.22 — cross-app reference resolver. Returns the lightweight
+    # ``cross_app_references`` block standalone so AI clients can fetch
+    # it without pulling the full meeting payload.
+    "get_cross_app_hints",
 )
 
 
