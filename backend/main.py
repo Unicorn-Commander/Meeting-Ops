@@ -312,6 +312,13 @@ _load_router(app, "digests", "api.digests")
 _load_router(app, "agent_actions", "api.agent_actions")
 _load_router(app, "personal_access_tokens", "api.personal_access_tokens")
 
+# === PUBLIC LANDING PAGE (invite-only beta) ===
+# Single endpoint /api/landing/invite-request, no auth, rate-limited per-IP.
+# Powers the v3.19 public landing at meeting-ops.unicorncommander.ai/.
+# Inert in dev if VITE_LANDING_PAGE_ENABLED=false on the frontend; the
+# backend endpoint still loads either way so direct curl smoke works.
+_load_router(app, "landing", "api.landing")
+
 # === BILLING (Stripe Subscriptions) ===
 # Webhook + checkout/portal/subscription endpoints. Inert until
 # STRIPE_API_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PRO_PRICE_ID are set —

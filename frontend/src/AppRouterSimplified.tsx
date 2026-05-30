@@ -26,6 +26,7 @@ import StreamingTest from './pages/StreamingTest';
 import AdminBulkImport from './pages/AdminBulkImport';
 import Signup from './pages/Signup';
 import Pricing from './pages/Pricing';
+import Landing from './pages/Landing';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
@@ -293,6 +294,26 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <AppLayout>{children}</AppLayout>;
 }
 
+/**
+ * `/` route. Three behaviors gated by build-time
+ * `VITE_LANDING_PAGE_ENABLED` and runtime auth state:
+ *   - Authenticated user → /dashboard (always).
+ *   - Anonymous + flag === "true" → Landing page (public, no API call).
+ *   - Anonymous + flag !== "true" → /dashboard (historical dev behavior;
+ *     ProtectedRoute will bounce to oauth2-proxy sign-in).
+ */
+function RootRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
+  if (isAuthenticated) {
+    return <Navigate to="/dashboard" replace />;
+  }
+  const landingEnabled =
+    String(import.meta.env.VITE_LANDING_PAGE_ENABLED || '').toLowerCase() === 'true';
+  if (landingEnabled) {
+    return <Landing />;
+  }
+  return <Navigate to="/dashboard" replace />;
+}
+
 // Main Router
 export function AppRouterSimplified() {
   const { isAuthenticated, isLoading } = useAuth();
@@ -308,7 +329,15 @@ export function AppRouterSimplified() {
       <Route path="/signup" element={<Signup />} />
       <Route path="/pricing" element={<Pricing />} />
 
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      {/*
+        Public invite-only landing at `/`. Behavior is build-time gated
+        by VITE_LANDING_PAGE_ENABLED so bigboy dev (the historical
+        `/` → `/dashboard` redirect) keeps working; the VPS prod build
+        at meeting-ops.unicorncommander.ai sets the flag to `true` and
+        gets the Landing page for anonymous visitors. Authenticated
+        users always land on /dashboard regardless of the flag.
+       */}
+      <Route path="/" element={<RootRoute isAuthenticated={isAuthenticated} />} />
 
       <Route path="/dashboard" element={
         <ProtectedRoute>
