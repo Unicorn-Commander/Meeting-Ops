@@ -164,11 +164,33 @@ def _build_user_response(
     )
 
 # Routes
+from auth.dependencies import get_current_user_optional
+
+
+async def _optional_caller_for_register(
+    caller: Optional[User] = Depends(get_current_user_optional),
+) -> Optional[User]:
+    """Self-serve signup dependency.
+
+    `register()` accepts either an authenticated admin (legacy invite-only
+    path) OR an anonymous caller (self-serve when ALLOW_REGISTRATION=true).
+    The actual access check happens inside `register()` against
+    `auth_config.ALLOW_REGISTRATION`.
+
+    Replaces the v3.2.0 inline ternary `Depends(require_admin) if not
+    auth_config.ALLOW_REGISTRATION else None` which FastAPI/Pydantic
+    rejected at module import when ALLOW_REGISTRATION=true (the `None`
+    branch left `current_user: Optional[User]` with no Depends and
+    Pydantic tried to treat User as a response field).
+    """
+    return caller
+
+
 @router.post("/register", response_model=UserResponse)
 async def register(
     user_data: UserCreate,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(require_admin) if not auth_config.ALLOW_REGISTRATION else None
+    current_user: Optional[User] = Depends(_optional_caller_for_register),
 ):
     """Register a new user"""
     # Check if registration is allowed
