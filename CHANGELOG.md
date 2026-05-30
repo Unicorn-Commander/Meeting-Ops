@@ -1,8 +1,15 @@
 ## [Unreleased]
 
-### Added — cross-app reference hints in MCP results
+## [3.22.0] - 2026-05-30
 
-Meeting-Ops MCP tool responses now carry optional, best-effort handles to sibling Unicorn Commander apps (Contact-Ops, Project-Ops, Crisis-Ops) so the user's AI client (Claude Desktop, Cursor, Cline, etc.) can navigate between apps without Meeting-Ops calling them server-side. The AI client IS the integration layer — Meeting-Ops just emits hints.
+Strategic ecosystem release. The big idea: **the user's AI is the integration layer.** Two narrow changes that compound:
+
+1. **Project-Ops action-item bridge promoted from dark to release-shipped** — the one deterministic event-time integration that earns its own code path (meeting ends → action items become PO tasks).
+2. **Cross-app reference hints in Meeting-Ops MCP results** — every MCP tool result now carries optional handles to sibling UC apps so the user's AI client (Claude Desktop, Cursor, etc.) can navigate Meeting-Ops ↔ Contact-Ops ↔ Project-Ops ↔ Crisis-Ops without us coding hard integrations.
+
+This is the "thin server-side glue + smart MCP" pattern. We don't build N×N connectors. We give the AI enough structured references to do the cross-app reasoning itself.
+
+### Cross-app reference hints in MCP results
 
 - New module `backend/services/mcp_cross_app.py` (pure functions, no I/O):
   - `build_cross_app_references(session)` derives `mentioned_contacts` / `mentioned_projects` / `mentioned_cases` from data the backend already returns (participants list, diarized speakers, `project_app` pointer, title + summary text scan).
@@ -13,7 +20,7 @@ Meeting-Ops MCP tool responses now carry optional, best-effort handles to siblin
   - `get_meeting_details` and `get_meeting_transcript` now append a `## Cross-App References` section (with embedded JSON block) when any hint was derived.
   - `search_meetings` docstring points AI clients at the new tool for per-result hint resolution (kept lightweight — no N×detail-fetches).
   - New `get_cross_app_hints(session_id)` tool returns the `cross_app_references` block standalone as JSON. Returns the canonical empty shape on backend error so AI clients can rely on the schema unconditionally.
-  - `READONLY_TOOL_NAMES` bumped from 8 → 9 (added `get_cross_app_hints`). Both stdio (`mcp/meeting_ops_mcp.py`) and hosted-HTTP (`backend/api/mcp_http.py`) transports inherit the new tool through the shared FastMCP instance.
+  - `READONLY_TOOL_NAMES` bumped from 8 → 9. Both stdio (`mcp/meeting_ops_mcp.py`) and hosted-HTTP (`backend/api/mcp_http.py`) transports inherit the new tool through the shared FastMCP instance.
 - Tests: new `backend/tests/test_mcp_cross_app.py` (14 cases) covers the pure-function populator, markdown rendering, the three MCP tools, and the empty-shape fallback. `tests/test_mcp_app_shared.py` count assertion updated 8 → 9.
 
 Schema:
@@ -29,7 +36,43 @@ Schema:
 }
 ```
 
-No new alembic migrations, no Stripe/diarization/founders-100/password-reset paths touched.
+### Project-Ops action-item bridge — release-shipped The bridge code itself landed dark in v3.17.0 (2026-05-28) — best-effort one-way write from Meeting-Ops to Project-Ops on meeting completion, with `is_live` gating on `PROJECTOPS_API_KEY` and idempotent `raw_payload.po_task_id` stamping. v3.19.0 layered per-org integration toggles (`integrations.project_ops.enabled` + encrypted-at-rest credentials) and an `org_override` source. v3.22.0 ships nothing new on the code path — it consolidates the release line so the integration can be activated cleanly on prod (VPS + bigboy) by env-paste alone.
+
+### Activation (no code deploy needed beyond bumping to v3.22.0)
+
+The bridge is fully inert until `PROJECTOPS_API_KEY` is present. To turn it on per node:
+
+- `PROJECTOPS_API_KEY` — Keycloak service-account JWT for an `ADMIN` or `MANAGER` identity on Project-Ops (NOT an X-API-Key; Project-Ops uses `JwtAuthGuard`). Required to flip `ProjectOpsClient.is_live` to True.
+- `PROJECTOPS_BASE_URL` — optional; defaults to `http://project-ops-backend:3201/api/v1` (the in-cluster NestJS service + `/api/v1` global prefix). Override only for cross-host or external Project-Ops.
+
+Then set a per-org target project either via:
+- Org-scoped: `Organization.settings.projectops_default_project_number = "P-XXXXX"` (set via the v3.19.0 integration credentials UI, or the backfill script's `--set-default-project ORG=P-XXXXX` helper).
+- Or attach a Meeting-Ops session to a PO project via the existing `session.project_app = "project-ops"` + `session.project_id = <PO project UUID>` link; the writer honors it as the most-specific resolution source.
+- Or per-meeting override: `session.processing_metadata.po_project_override = "P-XXXXX"`.
+
+### Inert-when-unconfigured guarantee
+
+`ProjectOpsClient.is_live` returns False when `PROJECTOPS_API_KEY` is unset (`backend/services/projectops_client.py:154-158`). The writer checks `is_live` before any HTTP call and returns `ProjectOpsWriteResult(ok=True, mode="no-op")` (`backend/services/projectops_writer.py:328-334`). All callsites in `backend/api/recording.py` (reprocess Stage 7 line 1850; live finalize background task line 998) and `backend/api/action_items.py` PATCH line 333 are wrapped in top-level try/except that swallow into `logger.warning`. Result: a deployment without the env var completes every meeting cleanly with no PO HTTP traffic and no exceptions.
+
+### Project-Ops API contract — verified
+
+- `Authorization: Bearer <JWT>` (not `X-API-Key`).
+- `POST /api/v1/tasks` body uses `projectId: <UUID>` (not number). Number → UUID resolution pages `GET /api/v1/projects?page=&limit=` client-side because Project-Ops exposes no by-number REST route. Per-client cache memoizes resolutions for the batch.
+- `PATCH /api/v1/tasks/{id}/status` propagates Meeting-Ops `done`/`cancelled`/`doing` → `COMPLETED`/`CANCELLED`/`IN_PROGRESS` when the user updates a bridged action item.
+
+### Idempotency
+
+Each created PO task stamps `action_items.raw_payload` with `po_task_id`, `po_project_number`, `po_synced_at`. The writer treats any row already carrying `po_task_id` as bridged — never re-creates, only best-effort nudges status. Reprocess re-runs and the manual backfill script (`backend/scripts/backfill_action_items_to_projectops.py`) are both safe to run repeatedly.
+
+### Notes
+
+- Same risk posture as `services/brigade_writer` (best-effort, swallow-all, never blocks the meeting pipeline). Brigade and Project-Ops writes are independent fire-and-forget background tasks on the live finalize path so a PO outage cannot affect Brigade and vice versa.
+- No frontend changes in this version. The integration credentials UI (Brigade/Project-Ops/Contact-Ops/Accounting-Ops/Stable) shipped in v3.19.0 already exposes the per-org PO config surface.
+- No alembic migrations. The `raw_payload` JSONB column on `action_items` already exists; the org default lives inside the existing `Organization.settings` JSONB column.
+
+### Brigade federation deferred
+
+Survey this release found Brigade is NOT a federation broker today — has agent orchestration + A2A protocol surface + MCP tool catalog for its own agents + external MCP registry, but every piece of the federation broker pattern (JWKS, JWT mint, streamable-HTTP /mcp transport, /.well-known/mcps.json discovery, manifest loader, namespaced catalog, proxy forwarder, scope enforcement) is unbuilt. Estimated 9 engineering days for Phase 1 (skipping OIDC) or 3 days for a smaller "JWT mint + /mcp mount + ONE hardcoded tool" proof. Design doc at `~/Documents/brigade-federation-design.md`. Defer to a focused multi-day session.
 
 ## [3.21.2] - 2026-05-30
 
