@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import AuditLog, User
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from database.models import (
     RecordingSession,
@@ -491,6 +492,9 @@ async def create_speaker(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write paths gated by tier. Read paths
+    # (list/get) stay open so a downgraded org doesn't lose visibility.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     existing = (
         db.query(SpeakerProfile)
@@ -558,6 +562,8 @@ async def update_speaker(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     if payload.display_name is not None:
@@ -584,6 +590,8 @@ async def delete_speaker(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     # Detach session links so the deletion is a pure soft-unlink for transcripts.
@@ -606,6 +614,8 @@ async def upload_voice_sample(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
 
@@ -657,6 +667,8 @@ async def delete_voice_sample(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     sample = (
@@ -709,6 +721,8 @@ async def merge_speaker_profile(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
     _require_admin(active_org, current_user)
     org_id = active_org.organization.id
     source_id = payload.source_id
@@ -848,6 +862,10 @@ async def update_speaker_link(
 ):
     """Confirm (or change) the mapping from a raw_label to a Speaker.
     Accessible to any org member — this is the inline-tagger workflow."""
+    # v3.18.3: speaker_library write gate. Tagging a raw label to a Speaker
+    # mutates persistent library state, so free users (no speaker_library)
+    # don't get it.
+    gate_feature_for_caller(current_user, "speaker_library")
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     link = (
         db.query(SpeakerSessionLink)
@@ -1215,6 +1233,9 @@ async def enroll_speaker_from_session(
     turn of this cluster's audio, create (or reuse) a SpeakerProfile,
     save a voice sample (ECAPA embedding), and confirm the speaker_link.
     """
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
+
     import os
     import subprocess
     import tempfile
@@ -1425,6 +1446,9 @@ async def merge_speaker_links(
     preserved; source's segments and Transcription rows are relabeled
     to target. Source link row is deleted.
     """
+    # v3.18.3: speaker_library write gate.
+    gate_feature_for_caller(current_user, "speaker_library")
+
     from sqlalchemy.orm.attributes import flag_modified
 
     if payload.source_link_id == payload.target_link_id:
@@ -1538,6 +1562,8 @@ async def identify_speakers_endpoint(
 ):
     """Re-run speaker identification on a finished session. Useful after
     enrolling new speakers or to refresh stale mappings."""
+    # v3.18.3: speaker_library write gate (mutates speaker_links on the session).
+    gate_feature_for_caller(current_user, "speaker_library")
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     summary = identify_speakers(session, db)
     return IdentifyResponse(**summary)

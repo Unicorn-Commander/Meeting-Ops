@@ -85,13 +85,23 @@ Server-emitted frames
 from __future__ import annotations
 
 import asyncio
-import audioop
 import json
 import logging
 import os
 import struct
 import time
 from collections import defaultdict
+
+# v3.18.3: audioop was removed from the Python 3.13/3.14 stdlib (PEP 594).
+# Fall back to the PyPI `audioop-lts` back-port when stdlib is gone; if
+# neither is available, run in degraded mode and report via /health.
+try:
+    import audioop  # type: ignore
+except ImportError:  # pragma: no cover - py3.13+ path
+    try:
+        import audioop_lts as audioop  # type: ignore
+    except ImportError:
+        audioop = None  # type: ignore[assignment]
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -108,6 +118,13 @@ from auth.tier import get_tier_features, get_user_tier
 from database.database import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+if audioop is None:
+    logger.warning(
+        "audioop unavailable (stdlib removed in py3.13+, and audioop-lts "
+        "not installed). Streaming VAD silence-gate runs in degraded mode "
+        "(no audio-amplitude check); install `audioop-lts` to restore."
+    )
 
 router = APIRouter(tags=["streaming"])
 
@@ -277,6 +294,11 @@ def _is_silent(pcm: bytes, threshold: int = STREAM_VAD_RMS_THRESHOLD) -> bool:
     """
     if not pcm:
         return True
+    if audioop is None:
+        # v3.18.3: degraded mode — without audioop we can't compute RMS, so
+        # treat as non-silent and let upstream parakeet take the call. This
+        # keeps streaming functional on py3.14 if audioop-lts isn't installed.
+        return False
     try:
         return audioop.rms(pcm, 2) < threshold
     except audioop.error:

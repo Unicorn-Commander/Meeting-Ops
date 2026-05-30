@@ -36,6 +36,7 @@ from auth.device_auth import generate_device_secret, hash_device_secret
 from auth.models import User
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
+from config.features import ROOM_MODE_ENABLED
 from database.database import get_db
 from database.models import RecordingSession, SatelliteDevice
 from database.models_rooms import (
@@ -50,10 +51,35 @@ from database.models_rooms import (
 
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/rooms", tags=["rooms"])
+
+
+def _require_room_mode() -> None:
+    """v3.18.3: kill-switch for Conference Room mode.
+
+    Cloud / VPS deploys have no physical mic, so the room endpoints make no
+    sense there. When ``ROOM_MODE_ENABLED=false`` every room endpoint short-
+    circuits with 503 before any DB work or auth — including direct URLs
+    typed by curious users.
+    """
+    if not ROOM_MODE_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Room mode is disabled on this deployment.",
+        )
+
+
+router = APIRouter(
+    prefix="/api/rooms",
+    tags=["rooms"],
+    dependencies=[Depends(_require_room_mode)],
+)
 # Separate router for /api/system/audio-devices so it doesn't collide with
 # the rooms prefix routing. Loaded alongside in main.py via router_attr.
-system_router = APIRouter(prefix="/api/system", tags=["system"])
+system_router = APIRouter(
+    prefix="/api/system",
+    tags=["system"],
+    dependencies=[Depends(_require_room_mode)],
+)
 
 
 # === Pydantic models ====================================================

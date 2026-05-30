@@ -125,12 +125,22 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     { path: '/settings', label: 'Settings', icon: '⚙️' },
     { path: '/help', label: 'Help', icon: HelpCircle },
   ];
+  // v3.18.3: Room mode kill-switch. Cloud / VPS deploys have no physical
+  // mic, so the rooms surface is hidden when VITE_ROOM_MODE_ENABLED=false.
+  // Default ON (preserves bigboy appliance behavior). Backend also gates
+  // the endpoints — typing /rooms manually will land a 503 page.
+  const roomModeEnabled =
+    (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+      ?.VITE_ROOM_MODE_ENABLED?.toLowerCase() !== 'false';
+
   // Admin-only nav — entirely hidden for non-admin users. Even the
   // section heading goes away when isAdmin is false; an empty
   // labeled bucket is noisy and Aaron wants the cleaner non-admin
   // view to land for regular users.
   const adminNavItems: NavItem[] = [
-    { path: '/rooms', label: 'Rooms', icon: DoorOpen },
+    ...(roomModeEnabled
+      ? [{ path: '/rooms', label: 'Rooms', icon: DoorOpen } as NavItem]
+      : []),
     { path: '/speakers', label: 'Speakers', icon: '🗣️' },
     { path: '/admin/agents', label: 'Agents', icon: '🤖' },
     { path: '/admin/bulk-import', label: 'Bulk Import', icon: FolderUp },

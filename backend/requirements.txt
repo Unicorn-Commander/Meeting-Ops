@@ -114,3 +114,7 @@ netifaces==0.11.0
 
 # Session attachments object storage (Garage S3) — 025_session_attachments
 boto3==1.35.21
+
+# v3.18.3: audioop back-port for Python 3.13+ (PEP 594 removed stdlib audioop).
+# Used by api/streaming.py for RMS-based VAD silence detection.
+audioop-lts; python_version >= "3.13"
