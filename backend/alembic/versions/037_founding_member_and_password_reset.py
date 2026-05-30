@@ -67,12 +67,14 @@ def upgrade() -> None:
     )
 
     # Drop the old index before the column rename so the name doesn't
-    # collide with the new one we want to create.
-    try:
-        op.drop_index("ix_users_is_founder", table_name="users")
-    except Exception:
-        # Older dev DBs may not have the index; ignore.
-        pass
+    # collide with the new one we want to create. Use idempotent SQL
+    # rather than a Python try/except: in Postgres, a failed DDL aborts
+    # the whole transaction and `except` only catches the Python
+    # exception — every subsequent statement then fails with
+    # `InFailedSqlTransaction`. `DROP INDEX IF EXISTS` lets Postgres
+    # itself short-circuit when the index is missing, keeping the
+    # transaction healthy. SQLite supports the same syntax.
+    op.execute(sa.text("DROP INDEX IF EXISTS ix_users_is_founder"))
 
     # Column rename. alter_column is the portable path here (works on both
     # SQLite via batch + PostgreSQL).

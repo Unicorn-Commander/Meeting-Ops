@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+## [3.21.2] - 2026-05-30
+
+Second hotfix in the v3.21.x series. Bigboy (dev) had the legacy `ix_users_is_founder` index from an earlier dev migration; VPS (prod) did not — so VPS hit the next trap: in Postgres, `op.drop_index` wrapped in a Python `try/except` does not actually "ignore" a missing-index error. Postgres aborts the entire transaction on the failed DDL, the Python `except` catches the exception but the transaction stays in `InFailedSqlTransaction` state, and the very next DDL (`ALTER TABLE users RENAME is_founder TO is_founding_member`) fails with "current transaction is aborted, commands ignored until end of transaction block." Backend crash-looped on VPS.
+
+### Fixed
+- `037a_founding_pwreset.py`: replace `try: op.drop_index(...) except: pass` with idempotent SQL `DROP INDEX IF EXISTS ix_users_is_founder`. Postgres short-circuits cleanly when the index is missing, keeping the surrounding transaction healthy. SQLite supports the same syntax — no dialect split needed.
+
+This is the right portable fix. The earlier try/except pattern looked safe but was a Postgres footgun masquerading as defensive code.
+
 ## [3.21.1] - 2026-05-30
 
 Hotfix for v3.21.0: the auth-features migration `037_founding_member_and_password_reset` had a 38-char revision identifier, but Postgres `alembic_version.version_num` is `VARCHAR(32)`. Upgrades to v3.21.0 silently rolled back at COMMIT time (DDL applied inside the transaction, then the version-table INSERT exploded with `StringDataRightTruncation` and Postgres rolled the whole upgrade). Backend crash-looped on bigboy first-deploy attempt.
