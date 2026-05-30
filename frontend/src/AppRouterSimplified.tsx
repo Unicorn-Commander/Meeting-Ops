@@ -27,6 +27,9 @@ import AdminBulkImport from './pages/AdminBulkImport';
 import Signup from './pages/Signup';
 import Pricing from './pages/Pricing';
 import Landing from './pages/Landing';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import Founding100 from './pages/Founding100';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
@@ -338,6 +341,14 @@ export function AppRouterSimplified() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/pricing" element={<Pricing />} />
+      {/* v3.21.0 password-reset flow. Both routes are unauthenticated by
+          design — a logged-out user with a stale session needs to be
+          able to land here. */}
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+      {/* v3.21.0 Founding 100 cohort landing page. Public, server-cached
+          counter via /api/founding/status. */}
+      <Route path="/founding-100" element={<Founding100 />} />
 
       {/*
         Public invite-only landing at `/`. Behavior is build-time gated

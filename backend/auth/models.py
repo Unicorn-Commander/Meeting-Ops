@@ -112,12 +112,20 @@ class User(Base):
     # local user when subscription events arrive. Added in alembic 033.
     stripe_customer_id = Column(String(64), unique=True, nullable=True, index=True)
 
-    # Founders 100 flag. Aaron's pricing: founders pay the SAME $12/mo
-    # (NOT a discount) — the flag controls early-access + ecosystem
-    # bundle eligibility (Project-Ops, Accounting-Ops, etc.). Set at
-    # signup time when FOUNDERS_100_ACTIVE is on and the existing
-    # founder count is below FOUNDERS_100_LIMIT. Added in alembic 033.
-    is_founder = Column(Boolean, nullable=False, default=False)
+    # Founding 100 flag. Aaron's pricing: founding members pay the SAME
+    # $12/mo (NOT a discount) — the flag controls early-access + ecosystem
+    # bundle eligibility (Project-Ops, Accounting-Ops, etc.). Granted
+    # atomically at Stripe-checkout-completion time for annual-upfront
+    # subscriptions when the cohort is open and below FOUNDING_100_LIMIT.
+    # Renamed from `is_founder` in alembic 037 to make room for multiple
+    # cohorts in the future (meeting_ops_v1, crisis_ops_v1, etc.).
+    is_founding_member = Column(Boolean, nullable=False, default=False)
+
+    # Founding cohort label (e.g. "meeting_ops_v1"). NULL when the user is
+    # not a founding member. Allows future cohorts without a schema change
+    # and supports the "how many seats left in cohort X" hot path. Added
+    # in alembic 037.
+    founding_cohort = Column(String(64), nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -158,6 +166,36 @@ class PersonalAccessToken(Base):
     revoked_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="personal_access_tokens")
+
+class PasswordResetToken(Base):
+    """Single-use password-reset tokens (v3.21.0).
+
+    The user receives the plaintext (32-byte base64url) token via email.
+    We store only the sha256 hex of that token here, so a DB compromise
+    can't be used to reset accounts. Tokens expire 1 hour after issue
+    (POST /api/auth/password/forgot) and are marked `used_at` on first
+    successful reset (POST /api/auth/password/reset). The
+    `ix_password_reset_tokens_token_hash` unique index makes lookup O(1).
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash = Column(String(64), nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
 
 class UserOrganization(Base):
     __tablename__ = "user_organizations"

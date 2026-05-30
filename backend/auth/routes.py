@@ -1,4 +1,8 @@
-from datetime import datetime
+import hashlib
+import logging
+import os
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse
@@ -9,13 +13,15 @@ from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 from database.database import get_db
 from auth.service import AuthService
 from auth.dependencies import get_current_organization, get_current_user, require_admin, require_permission
-from auth.email import send_verification_email
-from auth.models import Organization, User, UserOrganization
+from auth.email import send_password_reset_email, send_verification_email
+from auth.models import Organization, PasswordResetToken, User, UserOrganization
 from auth.config import auth_config
 from auth.tier import get_tier_features, get_user_tier
 from auth.utils import (
     generate_email_verification_token,
+    get_password_hash,
     sanitize_email,
+    validate_password,
     verify_email_verification_token,
 )
 
@@ -58,9 +64,11 @@ class UserResponse(BaseModel):
     tier: str = "free"
     tier_features: dict[str, Any] = {}
     # Stripe billing surface — populated so the frontend can render the
-    # "Founders 100" badge + the right Pricing-page CTA on the very first
-    # render after login.
-    is_founder: bool = False
+    # "Founding 100" badge + the right Pricing-page CTA on the very first
+    # render after login. `founding_cohort` is the cohort label (e.g.
+    # "meeting_ops_v1") or None when the user is not a founding member.
+    is_founding_member: bool = False
+    founding_cohort: Optional[str] = None
     has_stripe_customer: bool = False
 
     model_config = ConfigDict(from_attributes=True)
@@ -159,7 +167,8 @@ def _build_user_response(
         active_organization=active_organization,
         tier=get_user_tier(user),
         tier_features=get_tier_features(user),
-        is_founder=bool(getattr(user, "is_founder", False)),
+        is_founding_member=bool(getattr(user, "is_founding_member", False)),
+        founding_cohort=getattr(user, "founding_cohort", None),
         has_stripe_customer=bool(getattr(user, "stripe_customer_id", None)),
     )
 
@@ -225,19 +234,11 @@ async def register(
                 user.email,
                 f"{auth_config.APP_BASE_URL}/api/auth/verify-email?token={token}",
             )
-        # Founders 100: grant access flag at signup time. Aaron's pricing
-        # is unchanged ($12/mo for everyone) — the flag governs early-
-        # access + ecosystem bundle eligibility. Idempotent; respects
-        # FOUNDERS_100_ACTIVE / FOUNDERS_100_LIMIT envs.
-        try:
-            from api.stripe_webhook import _maybe_grant_founder
-            _maybe_grant_founder(db, user)
-        except Exception:
-            # Never fail signup on a Founders-flag bookkeeping error.
-            import logging as _logging
-            _logging.getLogger(__name__).exception(
-                "Founders 100 grant failed for user_id=%s", user.id
-            )
+        # Founding 100 grant happens at Stripe-checkout-completion time
+        # (annual-upfront subscriptions only), not at signup. The grant
+        # is wired in api/stripe_webhook.py._maybe_grant_founding_member;
+        # it intentionally does NOT fire here so free-tier signups don't
+        # consume a cohort seat.
         return _build_user_response(user)
     except ValueError as e:
         raise HTTPException(
@@ -624,3 +625,258 @@ async def delete_user(
     db.commit()
     
     return {"message": "User deleted successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Password reset (v3.21.0)
+# ---------------------------------------------------------------------------
+
+_password_reset_logger = logging.getLogger(__name__ + ".password_reset")
+
+# Rate limit: max 3 forgot-password requests per email per hour.
+_PASSWORD_RESET_RATE_LIMIT_MAX = 3
+_PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_PASSWORD_RESET_TOKEN_TTL_HOURS = 1
+_PASSWORD_RESET_RL_INPROC: dict[str, list[float]] = {}
+
+
+def _hash_reset_token(plaintext: str) -> str:
+    """sha256 hex of the plaintext token. Used both at issue time
+    (what we persist) and at validation time (what we look up by)."""
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+def _public_url() -> str:
+    """Base URL the password-reset link points at. Mirrors billing._app_base_url:
+    APP_BASE_URL > FRONTEND_BASE_URL > localhost fallback."""
+    raw = (
+        os.getenv("APP_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or "http://localhost:7777"
+    ).rstrip("/")
+    return raw
+
+
+async def _password_reset_under_rate_limit(email_key: str) -> bool:
+    """3-per-hour per-email rate limit. Redis-first (SETEX counter), with
+    an in-proc fallback that matches the landing-page pattern. The key
+    space is namespaced so it doesn't collide with the landing limiter.
+    """
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if redis_url:
+        try:
+            import redis.asyncio as redis  # local import
+            client = await redis.from_url(redis_url, decode_responses=True)
+            try:
+                key = f"auth:pwreset:rl:{email_key}"
+                count = await client.incr(key)
+                if count == 1:
+                    await client.expire(
+                        key, _PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS
+                    )
+                return count <= _PASSWORD_RESET_RATE_LIMIT_MAX
+            finally:
+                await client.close()
+        except Exception as exc:  # noqa: BLE001
+            _password_reset_logger.warning(
+                "password-reset rate-limit: redis unavailable (%s); falling back to in-proc",
+                exc,
+            )
+
+    # In-proc fallback (per-pod, not cross-pod safe — same caveat as landing).
+    import time as _time
+    now = _time.time()
+    bucket = [
+        t for t in _PASSWORD_RESET_RL_INPROC.get(email_key, [])
+        if now - t < _PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS
+    ]
+    if len(bucket) >= _PASSWORD_RESET_RATE_LIMIT_MAX:
+        _PASSWORD_RESET_RL_INPROC[email_key] = bucket
+        return False
+    bucket.append(now)
+    _PASSWORD_RESET_RL_INPROC[email_key] = bucket
+    return True
+
+
+class PasswordResetForgotRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetSubmitRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+@router.post(
+    "/password/forgot",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def password_reset_forgot(
+    payload: PasswordResetForgotRequest,
+    db: Session = Depends(get_db),
+):
+    """Initiate a password reset.
+
+    Always returns 202 with the same body regardless of whether the
+    email matches a user — never leak account existence. When the email
+    matches an active user, we generate a single-use token, persist its
+    sha256, and email the plaintext link to the user. Rate limited to 3
+    requests per email per hour (Redis SETEX with in-proc fallback).
+    """
+    response_body = {
+        "message": (
+            "If an account matches that email, a reset link is on the way."
+        )
+    }
+
+    try:
+        email = sanitize_email(payload.email)
+    except ValueError:
+        email = None
+    if not email:
+        return response_body
+
+    # Rate-limit on the normalized email so attackers can't bypass by
+    # case-perturbing the address.
+    if not await _password_reset_under_rate_limit(email):
+        _password_reset_logger.info(
+            "password-reset: rate-limited email=%s", email
+        )
+        # Still return 202 — rate-limit existence is also a leak vector.
+        return response_body
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None or not user.is_active:
+        return response_body
+
+    # Cryptographically random 32-byte token, base64url encoded
+    # (token_urlsafe(32) returns ~43 chars).
+    plaintext = secrets.token_urlsafe(32)
+    token_hash = _hash_reset_token(plaintext)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=_PASSWORD_RESET_TOKEN_TTL_HOURS)
+
+    reset = PasswordResetToken(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        created_at=now,
+    )
+    db.add(reset)
+    db.commit()
+
+    reset_url = f"{_public_url()}/reset-password?token={plaintext}"
+    # send_password_reset_email is best-effort + non-raising.
+    send_password_reset_email(user.email, reset_url)
+    _password_reset_logger.info(
+        "password-reset: token issued user_id=%s expires_at=%s",
+        user.id, expires_at.isoformat(),
+    )
+    return response_body
+
+
+def _lookup_reset_token(db: Session, token: str) -> Optional[PasswordResetToken]:
+    """Resolve a plaintext token to its persisted row by sha256 hash.
+    Returns None when the token doesn't exist."""
+    if not token:
+        return None
+    token_hash = _hash_reset_token(token)
+    return (
+        db.query(PasswordResetToken)
+        .filter(PasswordResetToken.token_hash == token_hash)
+        .first()
+    )
+
+
+def _reset_token_state(record: Optional[PasswordResetToken]) -> str:
+    """Return one of 'missing' / 'used' / 'expired' / 'valid'."""
+    if record is None:
+        return "missing"
+    if record.used_at is not None:
+        return "used"
+    expires_at = record.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        # SQLite returns naive datetimes; treat as UTC.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at < datetime.now(timezone.utc):
+        return "expired"
+    return "valid"
+
+
+@router.get("/password/reset/validate")
+async def password_reset_validate(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Lightweight check that a reset token is still good before showing
+    the new-password form. 200 on valid; 410 on expired/used; 400 on
+    unknown/malformed."""
+    record = _lookup_reset_token(db, token)
+    state = _reset_token_state(record)
+    if state == "valid":
+        return {"valid": True}
+    if state in ("expired", "used"):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This password-reset link has expired.",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="This password-reset link is not valid.",
+    )
+
+
+@router.post("/password/reset")
+async def password_reset_submit(
+    payload: PasswordResetSubmitRequest,
+    db: Session = Depends(get_db),
+):
+    """Complete a password reset.
+
+    Validates the token (lookup by sha256 hash, not used, not expired),
+    enforces the existing password policy, updates the user's
+    hashed_password, and marks the token used. Returns 200 on success,
+    400 on invalid/malformed token or weak password, 410 on expired/used
+    token."""
+    record = _lookup_reset_token(db, payload.token)
+    state = _reset_token_state(record)
+    if state in ("expired", "used"):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This password-reset link has expired.",
+        )
+    if state != "valid" or record is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This password-reset link is not valid.",
+        )
+
+    ok, errors = validate_password(payload.new_password)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=" ".join(errors) or "Password does not meet policy.",
+        )
+
+    user = db.query(User).filter(User.id == record.user_id).first()
+    if user is None or not user.is_active:
+        # Same response shape as expired — don't leak whether the user
+        # was deleted between issue + submit.
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This password-reset link is no longer valid.",
+        )
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    record.used_at = datetime.now(timezone.utc)
+    db.add(user)
+    db.add(record)
+    db.commit()
+    AuthService.log_action(
+        db, user.id, "password_reset_completed",
+        resource_type="user", resource_id=str(user.id),
+    )
+    _password_reset_logger.info(
+        "password-reset: completed user_id=%s", user.id
+    )
+    return {"message": "Password updated. You can sign in with the new password."}

@@ -105,7 +105,7 @@ def test_subscription_returns_local_state_when_stripe_unconfigured(client, strip
     # reports the column-level tier (not the superuser override) so a
     # superuser without a subscription still sees the right "no sub" state.
     assert "tier" in body
-    assert body["is_founder"] is False
+    assert body["is_founding_member"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -40,8 +40,10 @@ def _stripe_env(monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_dummy")
     monkeypatch.setenv("STRIPE_PRO_PRICE_ID", "price_pro_test")
     monkeypatch.setenv("STRIPE_ENTERPRISE_PRICE_ID", "price_ent_test")
-    monkeypatch.setenv("FOUNDERS_100_ACTIVE", "true")
-    monkeypatch.setenv("FOUNDERS_100_LIMIT", "100")
+    monkeypatch.setenv("FOUNDING_100_ACTIVE", "true")
+    monkeypatch.setenv("FOUNDING_100_LIMIT", "100")
+    monkeypatch.delenv("FOUNDERS_100_ACTIVE", raising=False)
+    monkeypatch.delenv("FOUNDERS_100_LIMIT", raising=False)
     # Make absolutely sure no test bleeds real Redis state — leave REDIS_URL
     # alone; _redis_client returns None on import failure / unset URL,
     # which falls through to "always process".

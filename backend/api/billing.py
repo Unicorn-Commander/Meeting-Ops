@@ -17,7 +17,7 @@ Three routes:
       Portal product level — not here.
 
   GET /api/billing/subscription
-      Returns: {tier, is_founder, subscription_id, status, ...}
+      Returns: {tier, is_founding_member, founding_cohort, subscription_id, status, ...}
       Reports the current subscription state. Frontend uses this for
       the "View existing subscription" link on /pricing and for any
       future "your plan" banner.
@@ -70,7 +70,8 @@ class PortalResponse(BaseModel):
 
 class SubscriptionResponse(BaseModel):
     tier: str
-    is_founder: bool
+    is_founding_member: bool
+    founding_cohort: Optional[str] = None
     has_subscription: bool
     subscription_id: Optional[str] = None
     status: Optional[str] = None
@@ -213,7 +214,8 @@ async def get_subscription(
     """
     base_response = SubscriptionResponse(
         tier=current_user.tier or "free",
-        is_founder=bool(getattr(current_user, "is_founder", False)),
+        is_founding_member=bool(getattr(current_user, "is_founding_member", False)),
+        founding_cohort=getattr(current_user, "founding_cohort", None),
         has_subscription=False,
     )
     if not stripe_client.is_configured() or not current_user.stripe_customer_id:
@@ -237,7 +239,8 @@ async def get_subscription(
         end_iso = None
     return SubscriptionResponse(
         tier=sub.get("tier") or current_user.tier or "free",
-        is_founder=bool(getattr(current_user, "is_founder", False)),
+        is_founding_member=bool(getattr(current_user, "is_founding_member", False)),
+        founding_cohort=getattr(current_user, "founding_cohort", None),
         has_subscription=True,
         subscription_id=sub.get("subscription_id"),
         status=sub.get("status"),
