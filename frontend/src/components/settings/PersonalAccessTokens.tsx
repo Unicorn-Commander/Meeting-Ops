@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -10,6 +10,118 @@ import {
 } from 'lucide-react';
 import { config } from '../../config';
 import { Dialog } from '../ui/Dialog';
+
+// Hosted MCP base URL surfaced after token creation. Default to the
+// current origin so a self-hosted instance gets the right URL; allow
+// override via Vite env so dev builds can point at the cloud endpoint
+// without copying the SPA to that domain.
+const HOSTED_MCP_URL = (
+  (import.meta as ImportMeta & { env: Record<string, string | undefined> })
+    .env?.VITE_HOSTED_MCP_URL || `${window.location.origin}/mcp`
+);
+
+type ClientId = 'claude' | 'cursor' | 'continue' | 'zed' | 'cline' | 'stdio';
+
+interface ClientPreset {
+  id: ClientId;
+  label: string;
+  snippet: (pat: string) => string;
+  language: 'json' | 'yaml';
+}
+
+const CLIENT_PRESETS: ClientPreset[] = [
+  {
+    id: 'claude',
+    label: 'Claude Desktop',
+    language: 'json',
+    snippet: (pat) => `{
+  "mcpServers": {
+    "meeting-ops": {
+      "url": "${HOSTED_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${pat}"
+      }
+    }
+  }
+}`,
+  },
+  {
+    id: 'cursor',
+    label: 'Cursor',
+    language: 'json',
+    snippet: (pat) => `// .cursor/mcp.json
+{
+  "mcpServers": {
+    "meeting-ops": {
+      "url": "${HOSTED_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${pat}"
+      }
+    }
+  }
+}`,
+  },
+  {
+    id: 'continue',
+    label: 'Continue',
+    language: 'yaml',
+    snippet: (pat) => `# ~/.continue/config.yaml
+mcpServers:
+  - name: meeting-ops
+    url: ${HOSTED_MCP_URL}
+    headers:
+      Authorization: Bearer ${pat}`,
+  },
+  {
+    id: 'zed',
+    label: 'Zed',
+    language: 'json',
+    snippet: (pat) => `// ~/.config/zed/settings.json
+{
+  "context_servers": {
+    "meeting-ops": {
+      "url": "${HOSTED_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${pat}"
+      }
+    }
+  }
+}`,
+  },
+  {
+    id: 'cline',
+    label: 'Cline / Roo Code',
+    language: 'json',
+    snippet: (pat) => `// VS Code settings.json
+{
+  "mcp.servers": {
+    "meeting-ops": {
+      "url": "${HOSTED_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${pat}"
+      }
+    }
+  }
+}`,
+  },
+  {
+    id: 'stdio',
+    label: 'Self-hosted (stdio)',
+    language: 'json',
+    snippet: (pat) => `{
+  "mcpServers": {
+    "meeting-ops": {
+      "command": "python3",
+      "args": ["/path/to/UC-Meeting-Ops/mcp/meeting_ops_mcp.py"],
+      "env": {
+        "MEETING_OPS_URL": "${window.location.origin}",
+        "MEETING_OPS_PAT": "${pat}"
+      }
+    }
+  }
+}`,
+  },
+];
 
 interface PersonalAccessToken {
   id: number;
@@ -38,6 +150,12 @@ export default function PersonalAccessTokens() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [activeClient, setActiveClient] = useState<ClientId>('claude');
+
+  const activePreset = useMemo(
+    () => CLIENT_PRESETS.find((p) => p.id === activeClient) ?? CLIENT_PRESETS[0],
+    [activeClient],
+  );
 
   const loadTokens = async () => {
     setLoading(true);
@@ -251,20 +369,55 @@ export default function PersonalAccessTokens() {
               {created?.plaintext}
             </div>
             {created && (
-              <pre className="mt-3 overflow-x-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-300">
-{`{
-  "mcpServers": {
-    "meeting-ops": {
-      "command": "python3",
-      "args": ["/path/to/UC-Meeting-Ops/mcp/meeting_ops_mcp.py"],
-      "env": {
-        "MEETING_OPS_URL": "https://meetingops.magicunicorn.dev",
-        "MEETING_OPS_PAT": "${created.plaintext}"
-      }
-    }
-  }
-}`}
-              </pre>
+              <div className="mt-4">
+                <p className="text-sm font-medium text-zinc-200">
+                  Set up in your AI client
+                </p>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Pick a client; paste the snippet into its MCP config.
+                  Hosted endpoint:{' '}
+                  <code className="font-mono text-fuchsia-300">{HOSTED_MCP_URL}</code>
+                </p>
+                <div
+                  className="mt-3 flex flex-wrap gap-1 border-b border-zinc-800"
+                  role="tablist"
+                  aria-label="AI client preset"
+                >
+                  {CLIENT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={activeClient === preset.id}
+                      onClick={() => setActiveClient(preset.id)}
+                      className={`-mb-px rounded-t-md border-b-2 px-3 py-1.5 text-xs font-medium transition ${
+                        activeClient === preset.id
+                          ? 'border-fuchsia-500 text-fuchsia-200'
+                          : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <pre className="mt-3 overflow-x-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-300">
+{activePreset.snippet(created.plaintext)}
+                </pre>
+                <p className="mt-2 text-xs text-zinc-500">
+                  Hosted MCP works without a clone — point your client at{' '}
+                  <code className="font-mono">{HOSTED_MCP_URL}</code> with the
+                  Bearer header above. See{' '}
+                  <a
+                    href="/docs/mcp-hosted"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-fuchsia-300 hover:underline"
+                  >
+                    docs/mcp-hosted.md
+                  </a>{' '}
+                  for the full setup guide and troubleshooting.
+                </p>
+              </div>
             )}
           </div>
           <Dialog.Footer>

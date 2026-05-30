@@ -118,3 +118,9 @@ boto3==1.35.21
 # v3.18.3: audioop back-port for Python 3.13+ (PEP 594 removed stdlib audioop).
 # Used by api/streaming.py for RMS-based VAD silence detection.
 audioop-lts; python_version >= "3.13"
+
+# Model Context Protocol SDK. Shared between the stdio entry
+# (mcp/meeting_ops_mcp.py) and the hosted streamable-HTTP endpoint at
+# /mcp (backend/api/mcp_http.py). 1.2 is the first version that ships
+# the streamable-HTTP transport; 1.10+ pins the modern Context API.
+mcp>=1.10
