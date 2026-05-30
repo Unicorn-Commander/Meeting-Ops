@@ -422,6 +422,13 @@ class _SessionState:
     session_id: str
     user_email: str
     org_bucket: str = ""
+    # v3.20.1: per-user gate on the sortformer dispatch below. Even when the
+    # instance-wide ``STREAMING_USE_SORTFORMER`` env is on, we only fire
+    # sortformer for users whose effective tier features include
+    # ``live_diarization`` (enterprise + Founding 100). Pro users get the
+    # streaming transcript without live speaker labels; their completion
+    # pyannote pass at session end still gives them full speaker attribution.
+    live_diarization_allowed: bool = False
     sample_rate: int = 16000  # filled from first audio frame
     pcm_chunks: list[bytes] = field(default_factory=list)
     cumulative_audio_ms: int = 0
@@ -660,7 +667,7 @@ async def _flush_to_stt(
         # Failures here are non-blocking — we only annotate the partial JSON
         # with empty speakers, and the user gets the same transcript.
         sortformer_task: Optional[asyncio.Task] = None
-        if STREAMING_USE_SORTFORMER:
+        if STREAMING_USE_SORTFORMER and state.live_diarization_allowed:
             window_duration_ms = int(
                 len(pcm_at_call) / 2 / state.sample_rate * 1000
             )
@@ -1031,6 +1038,7 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         session_id=session_id,
         user_email=user_email,
         org_bucket=org_bucket,
+        live_diarization_allowed=bool(features.get("live_diarization")),
     )
     limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 

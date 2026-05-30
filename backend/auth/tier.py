@@ -34,6 +34,7 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
     "free": {
         "server_live": False,
         "diarization": False,
+        "live_diarization": False,
         "qwen36_summary": False,
         "speaker_library": False,
         "retention_controls": False,
@@ -57,6 +58,13 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
     "pro": {
         "server_live": True,
         "diarization": True,
+        # live_diarization (Sortformer streaming speaker labels during the
+        # meeting) is intentionally OFF for pro. v3.20.1: per Aaron — the
+        # value of live speaker labels is marginal vs the cost (always-on
+        # GPU per concurrent stream), and the completion-time pyannote
+        # pass already gives Pro full speaker-attributed transcripts at
+        # session end. Restricted to enterprise + Founding 100.
+        "live_diarization": False,
         "qwen36_summary": True,
         "speaker_library": True,
         "retention_controls": False,
@@ -75,6 +83,7 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
     "enterprise": {
         "server_live": True,
         "diarization": True,
+        "live_diarization": True,
         "qwen36_summary": True,
         "speaker_library": True,
         "retention_controls": True,
@@ -90,6 +99,18 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
         "max_sessions_per_month": None,
         "max_session_minutes": None,
     },
+}
+
+
+# v3.20.1: Founding 100 members inherit enterprise capabilities for the
+# features listed here, regardless of their base tier. Aaron's intent:
+# perks-only Founding cohort gets early-access compute features (live
+# diarization) without paying enterprise pricing. Keep this list TIGHT —
+# every flag here costs us on every Founding 100 customer at scale, so
+# only add features that are genuinely a "first-look" benefit, not the
+# full enterprise SKU. (Founding 100 is NOT a free upgrade to enterprise.)
+_FOUNDING_MEMBER_OVERLAY: dict[str, Any] = {
+    "live_diarization": True,
 }
 
 
@@ -117,8 +138,17 @@ def get_user_tier(user: User) -> str:
 
 
 def get_tier_features(user: User) -> dict[str, Any]:
-    """Return the feature dict for a user's effective tier."""
-    return TIER_FEATURES[get_user_tier(user)]
+    """Return the feature dict for a user's effective tier.
+
+    Applies the Founding 100 overlay (`_FOUNDING_MEMBER_OVERLAY`) on top of
+    the base tier features when ``user.is_founder`` is True. The base
+    tier dict is copied, not mutated — TIER_FEATURES stays the immutable
+    source of truth for what each plain tier gets.
+    """
+    base = TIER_FEATURES[get_user_tier(user)]
+    if getattr(user, "is_founder", False):
+        return {**base, **_FOUNDING_MEMBER_OVERLAY}
+    return base
 
 
 def require_tier(min_tier: str):

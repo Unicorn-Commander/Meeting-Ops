@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+## [3.20.1] - 2026-05-30
+
+Focused tier-gate + onboarding patch on top of the v3.20.0 prod launch. Two narrow product decisions:
+
+1. **Live Sortformer diarization is now Enterprise / Founding 100 only**, even when the instance-wide `STREAMING_USE_SORTFORMER` env is on. Pro users still get full server-live Parakeet streaming transcripts; the completion-time pyannote pass continues to give Pro full speaker-attributed transcripts at session end. The decision: unbounded per-stream GPU exposure (Sortformer runs continuously for every minute of every concurrent meeting) doesn't justify the marginal value of live speaker labels for the Pro tier. The completion pass already gives Pro everything they need.
+2. **First-run onboarding now warns about the browser-model download.** Pre-v3.20.1, a new user clicked Record for the first time and ~1.4 GB of weights (Parakeet 0.6B INT8 + Qwen 3 0.6B, or larger Gemma 4 E2B on WebGPU) downloaded silently while they waited. New first-position OnboardingChecklist card explains the download, cites the real size, and offers a "Start download now" CTA that pre-loads both models in the background so the first Record click is instant. Hidden entirely on capture-only mobile (those users are on the server-completion path, no browser models).
+
+### Backend
+- `auth/tier.py`: new `live_diarization` feature flag — free=False, **pro=False**, enterprise=True. Existing `diarization` flag (completion-time pyannote) unchanged, still Pro+.
+- `auth/tier.py`: new `_FOUNDING_MEMBER_OVERLAY` dict + `get_tier_features()` overlay. `is_founder=True` users inherit `live_diarization=True` regardless of base tier. Kept tight on purpose — Founding 100 is perks-only, not a free upgrade to enterprise. Only flags genuinely in the "first-look benefit" category go here.
+- `api/streaming.py`: `_SessionState.live_diarization_allowed` resolved at WS upgrade from the user's effective features. The per-chunk Sortformer dispatch (`if STREAMING_USE_SORTFORMER:`) is now `if STREAMING_USE_SORTFORMER and state.live_diarization_allowed:` — Pro users open WS streams normally, just never dispatch the sortformer side-task.
+
+### Frontend
+- `components/OnboardingChecklist.tsx`: new first-position card (`Download` lucide icon, sky palette). Body explains Parakeet ~890 MB + small LLM ~570 MB = ~1.4 GB on default Qwen, more on Gemma. CTA navigates to `/record` AND fires `inBrowserSTT.load()` + `inBrowserLLM.preloadModel(getStoredModelId())` in the background. New `onClick?` field on `ChecklistItem` interface lets any card optionally trigger a side-effect alongside navigation. Header now reads "Get set up in {N} quick steps" so the count tracks the actual card count (5 desktop / 4 capture-only mobile). Grid widened to `xl:grid-cols-5` so all 5 fit on a row at xl.
+- `pages/Help.tsx`: new card in the "Your computer does the real-time work" section explaining the ~1.4 GB total + breakdown, links to `docs/browser-models.md`. Footer paragraph also links to the same doc.
+
+### Docs
+- `docs/browser-models.md` (163 lines): canonical reference for what runs in the browser, per device class. Sections: what runs in your browser (Parakeet + LLM with real model sizes from source), device classes table (phones/tablets → capture-only; desktop fallback → Qwen; WebGPU desktop → Gemma 4 E2B), first-run download (~1.4 GB-3 GB depending on path, IndexedDB + CacheStorage caching, one-time), failure-mode recovery, what goes to the server vs stays local per tier, Privacy mode.
+
 ## [3.20.0] - 2026-05-30
 
 Single overnight arc that took Meeting-Ops from "polished dev" to "production live with revenue infrastructure + multi-AI-client integration story." Bundles the entire v3.18.3 (background-jobification + quality fixes) and v3.19+landing batches, plus: real Stripe products created in live mode, the centerdeep VPS prod stand-up at `meeting-ops.unicorncommander.ai`, hosted streamable-HTTP MCP at `/mcp`, dataintel auth re-pointed to commander Keycloak, and the auth-defer fix that stops backend hiccups from killing live meeting UIs.

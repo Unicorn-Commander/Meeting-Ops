@@ -3,9 +3,17 @@
 // Audit context (2026-05-29 Codex UX audit): new free-tier signups land on
 // the Dashboard with `0 sessions` and no signposts. The dashboard's existing
 // HeroActions/StatsRow tell them what they have, not what to do first.
-// This component shows four dismissible cards aimed at the four moves a
-// first-run user needs to make (mic check, record a short sample, learn
-// about privacy mode, see the upgrade path).
+// This component shows a row of dismissible cards aimed at the moves a
+// first-run user needs to make.
+//
+// On devices that run browser inference (desktop-capable / desktop-fallback)
+// the first card is the model-download prompt: Parakeet 0.6B INT8 (~890 MB)
+// for live STT + a small LLM (~570 MB Qwen 3 0.6B or ~1.5-3 GB Gemma 4 E2B
+// on WebGPU) for live summaries. ~1.4 GB on default Qwen settings, more on
+// Gemma. Pre-2026-05-30 the user hit Record and the download started
+// silently while they waited. The card lets them kick it off in advance,
+// or at least know it's coming. On capture-only mobile we hide the card
+// entirely because those users are on the server-completion path only.
 //
 // Visibility rule: only when the user has zero sessions, AND at least one
 // card hasn't been dismissed. Dismissals persist per-card in localStorage
@@ -13,7 +21,10 @@
 
 import { useMemo, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Mic, Radio, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { Download, Mic, Radio, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { detectDevice, shouldRunBrowserInference } from '../utils/deviceDetection';
+import { inBrowserSTT } from '../services/inBrowserSTT';
+import { inBrowserLLM, getStoredModelId } from '../services/inBrowserLLM';
 
 const STORAGE_KEY_PREFIX = 'meet:onboarding:dismissed:';
 
@@ -26,9 +37,50 @@ interface ChecklistItem {
   icon: React.ComponentType<{ className?: string }>;
   iconBg: string;
   iconColor: string;
+  /**
+   * Optional click handler. When present, fires alongside the Link
+   * navigation — used by the browser-models card to kick off STT + LLM
+   * weight downloads in the background so the user doesn't sit through
+   * them silently on their first Record click.
+   */
+  onClick?: () => void;
 }
 
-const ITEMS: ChecklistItem[] = [
+// Kicks off Parakeet 0.6B INT8 + the small browser LLM in the background.
+// We deliberately swallow errors here: if WebGPU is unavailable, the
+// network fails, or the user is on a forced-server path, the worst case is
+// the card "did nothing" — the existing on-Record-click load path will
+// still run and surface real errors there.
+function preloadBrowserModels(): void {
+  try {
+    void inBrowserSTT.load();
+  } catch {
+    /* preload best-effort */
+  }
+  try {
+    const modelId = getStoredModelId();
+    if (modelId && modelId !== 'server') {
+      void inBrowserLLM.preloadModel(modelId);
+    }
+  } catch {
+    /* preload best-effort */
+  }
+}
+
+const BROWSER_MODELS_ITEM: ChecklistItem = {
+  id: 'browser-models',
+  title: 'Download the AI models for live transcription',
+  body:
+    'Parakeet handles speech-to-text (~890 MB) and a small LLM writes live summaries (~570 MB Qwen, or larger Gemma 4 with WebGPU). About 1.4 GB total, one-time, cached forever.',
+  to: '/record',
+  cta: 'Start download now',
+  icon: Download,
+  iconBg: 'bg-sky-100',
+  iconColor: 'text-sky-600',
+  onClick: preloadBrowserModels,
+};
+
+const BASE_ITEMS: ChecklistItem[] = [
   {
     id: 'mic-test',
     title: 'Test your microphone',
@@ -71,6 +123,13 @@ const ITEMS: ChecklistItem[] = [
   },
 ];
 
+function buildItems(includeBrowserModels: boolean): ChecklistItem[] {
+  // browser-models goes FIRST when the device can actually run them. On
+  // capture-only mobile the LLM/STT cards never load locally so this card
+  // would be a lie.
+  return includeBrowserModels ? [BROWSER_MODELS_ITEM, ...BASE_ITEMS] : BASE_ITEMS;
+}
+
 function readDismissed(id: string): boolean {
   try {
     return window.localStorage.getItem(STORAGE_KEY_PREFIX + id) === '1';
@@ -92,12 +151,19 @@ interface Props {
 }
 
 export default function OnboardingChecklist({ sessionCount }: Props) {
+  // Detect device once per mount. The capability class is stable for the
+  // lifetime of the page, so a single read is enough.
+  const items = useMemo(() => {
+    const cap = detectDevice();
+    return buildItems(shouldRunBrowserInference(cap));
+  }, []);
+
   // Initialize from localStorage so the dismissals are persistent across
   // tab reloads. We can't put this in useMemo because we need to flip
   // state on user action.
   const [dismissed, setDismissed] = useState<Record<string, boolean>>(() => {
     const out: Record<string, boolean> = {};
-    for (const item of ITEMS) out[item.id] = readDismissed(item.id);
+    for (const item of items) out[item.id] = readDismissed(item.id);
     return out;
   });
 
@@ -106,18 +172,18 @@ export default function OnboardingChecklist({ sessionCount }: Props) {
   useEffect(() => {
     const next: Record<string, boolean> = {};
     let changed = false;
-    for (const item of ITEMS) {
+    for (const item of items) {
       const v = readDismissed(item.id);
       next[item.id] = v;
       if (v !== dismissed[item.id]) changed = true;
     }
     if (changed) setDismissed(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [items]);
 
   const visibleItems = useMemo(
-    () => ITEMS.filter((item) => !dismissed[item.id]),
-    [dismissed],
+    () => items.filter((item) => !dismissed[item.id]),
+    [items, dismissed],
   );
 
   const dismiss = (id: string) => {
@@ -133,6 +199,8 @@ export default function OnboardingChecklist({ sessionCount }: Props) {
   if (sessionCount > 0 && !hasUndismissed) return null;
   if (!hasUndismissed) return null;
 
+  const stepCount = items.length;
+
   return (
     <section
       aria-label="Getting started"
@@ -140,16 +208,32 @@ export default function OnboardingChecklist({ sessionCount }: Props) {
     >
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Get set up in 4 quick steps</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">
+            Get set up in {stepCount} quick steps
+          </h2>
           <p className="text-xs text-zinc-500">
             Dismiss any card you've already handled — they won't come back.
           </p>
         </div>
       </header>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {visibleItems.map((item) => {
           const Icon = item.icon;
+          // For cards with an onClick side-effect (browser-models preload),
+          // fire it on click AND dismiss the card; navigation still happens
+          // via the Link href. Cards without onClick behave exactly as
+          // before — Link nav only.
+          const handleCtaClick = () => {
+            if (item.onClick) {
+              try {
+                item.onClick();
+              } catch {
+                /* preload errors are non-fatal */
+              }
+              dismiss(item.id);
+            }
+          };
           return (
             <div
               key={item.id}
@@ -170,6 +254,7 @@ export default function OnboardingChecklist({ sessionCount }: Props) {
               <p className="text-xs leading-5 text-zinc-400">{item.body}</p>
               <Link
                 to={item.to}
+                onClick={handleCtaClick}
                 className="mt-auto inline-flex w-fit items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
               >
                 {item.cta}

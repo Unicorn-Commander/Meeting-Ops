@@ -298,6 +298,33 @@ export default function Help() {
               </span>
             </li>
           </ul>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-400">
+            <div className="flex items-start gap-3">
+              <Download className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-500" />
+              <div>
+                <div className="font-medium text-zinc-200">
+                  First-run model download
+                </div>
+                <div className="mt-1">
+                  About <span className="text-zinc-200">1.4 GB</span> total on
+                  default settings (Parakeet 0.6B INT8 at ~890 MB + Qwen 3 0.6B
+                  q4f16 at ~570 MB), cached in your browser and never
+                  re-downloaded. Switching the live summary to Gemma 4 E2B
+                  pulls another ~1.5 GB. Mobile devices skip the download
+                  entirely and use capture-only mode.
+                </div>
+                <div className="mt-2">
+                  Full breakdown — exact file sizes, device classes, what to do
+                  when a download fails, and what goes to the server vs stays
+                  local — in{' '}
+                  <code className="rounded bg-zinc-900 px-1 py-0.5 text-zinc-300">
+                    docs/browser-models.md
+                  </code>
+                  .
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="space-y-4">
@@ -586,6 +613,15 @@ export default function Help() {
             in the source tree. It covers the architecture in depth, the
             numbers behind the unit economics, and the principles we use for
             future architecture decisions.
+          </p>
+          <p className="text-zinc-400 text-sm">
+            For the operational companion — the exact model file sizes, where
+            they're cached, what to do when a first-run download fails, and
+            what data goes to the server vs stays local on each tier — see{' '}
+            <code className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300">
+              docs/browser-models.md
+            </code>
+            .
           </p>
           <p className="text-zinc-400 text-sm">
             If you want to switch the in-browser models (Qwen 3 0.6B vs Gemma 4
