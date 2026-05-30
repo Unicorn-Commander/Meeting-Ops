@@ -1,5 +1,41 @@
 ## [Unreleased]
 
+## [3.22.0] - 2026-05-30
+
+Project-Ops action-item bridge promoted from dark to release-shipped. The bridge code itself landed dark in v3.17.0 (2026-05-28) — best-effort one-way write from Meeting-Ops to Project-Ops on meeting completion, with `is_live` gating on `PROJECTOPS_API_KEY` and idempotent `raw_payload.po_task_id` stamping. v3.19.0 layered per-org integration toggles (`integrations.project_ops.enabled` + encrypted-at-rest credentials) and an `org_override` source. v3.22.0 ships nothing new on the code path — it consolidates the release line so the integration can be activated cleanly on prod (VPS + bigboy) by env-paste alone.
+
+### Activation (no code deploy needed beyond bumping to v3.22.0)
+
+The bridge is fully inert until `PROJECTOPS_API_KEY` is present. To turn it on per node:
+
+- `PROJECTOPS_API_KEY` — Keycloak service-account JWT for an `ADMIN` or `MANAGER` identity on Project-Ops (NOT an X-API-Key; Project-Ops uses `JwtAuthGuard`). Required to flip `ProjectOpsClient.is_live` to True.
+- `PROJECTOPS_BASE_URL` — optional; defaults to `http://project-ops-backend:3201/api/v1` (the in-cluster NestJS service + `/api/v1` global prefix). Override only for cross-host or external Project-Ops.
+
+Then set a per-org target project either via:
+- Org-scoped: `Organization.settings.projectops_default_project_number = "P-XXXXX"` (set via the v3.19.0 integration credentials UI, or the backfill script's `--set-default-project ORG=P-XXXXX` helper).
+- Or attach a Meeting-Ops session to a PO project via the existing `session.project_app = "project-ops"` + `session.project_id = <PO project UUID>` link; the writer honors it as the most-specific resolution source.
+- Or per-meeting override: `session.processing_metadata.po_project_override = "P-XXXXX"`.
+
+### Inert-when-unconfigured guarantee
+
+`ProjectOpsClient.is_live` returns False when `PROJECTOPS_API_KEY` is unset (`backend/services/projectops_client.py:154-158`). The writer checks `is_live` before any HTTP call and returns `ProjectOpsWriteResult(ok=True, mode="no-op")` (`backend/services/projectops_writer.py:328-334`). All callsites in `backend/api/recording.py` (reprocess Stage 7 line 1850; live finalize background task line 998) and `backend/api/action_items.py` PATCH line 333 are wrapped in top-level try/except that swallow into `logger.warning`. Result: a deployment without the env var completes every meeting cleanly with no PO HTTP traffic and no exceptions.
+
+### Project-Ops API contract — verified
+
+- `Authorization: Bearer <JWT>` (not `X-API-Key`).
+- `POST /api/v1/tasks` body uses `projectId: <UUID>` (not number). Number → UUID resolution pages `GET /api/v1/projects?page=&limit=` client-side because Project-Ops exposes no by-number REST route. Per-client cache memoizes resolutions for the batch.
+- `PATCH /api/v1/tasks/{id}/status` propagates Meeting-Ops `done`/`cancelled`/`doing` → `COMPLETED`/`CANCELLED`/`IN_PROGRESS` when the user updates a bridged action item.
+
+### Idempotency
+
+Each created PO task stamps `action_items.raw_payload` with `po_task_id`, `po_project_number`, `po_synced_at`. The writer treats any row already carrying `po_task_id` as bridged — never re-creates, only best-effort nudges status. Reprocess re-runs and the manual backfill script (`backend/scripts/backfill_action_items_to_projectops.py`) are both safe to run repeatedly.
+
+### Notes
+
+- Same risk posture as `services/brigade_writer` (best-effort, swallow-all, never blocks the meeting pipeline). Brigade and Project-Ops writes are independent fire-and-forget background tasks on the live finalize path so a PO outage cannot affect Brigade and vice versa.
+- No frontend changes in this version. The integration credentials UI (Brigade/Project-Ops/Contact-Ops/Accounting-Ops/Stable) shipped in v3.19.0 already exposes the per-org PO config surface.
+- No alembic migrations. The `raw_payload` JSONB column on `action_items` already exists; the org default lives inside the existing `Organization.settings` JSONB column.
+
 ## [3.21.2] - 2026-05-30
 
 Second hotfix in the v3.21.x series. Bigboy (dev) had the legacy `ix_users_is_founder` index from an earlier dev migration; VPS (prod) did not — so VPS hit the next trap: in Postgres, `op.drop_index` wrapped in a Python `try/except` does not actually "ignore" a missing-index error. Postgres aborts the entire transaction on the failed DDL, the Python `except` catches the exception but the transaction stays in `InFailedSqlTransaction` state, and the very next DDL (`ALTER TABLE users RENAME is_founder TO is_founding_member`) fails with "current transaction is aborted, commands ignored until end of transaction block." Backend crash-looped on VPS.
