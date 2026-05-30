@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -211,9 +211,10 @@ class SummaryTTSResponse(BaseModel):
     audio_url: str
 
 
-@router.post("/api/sessions/{session_id}/tts/summary", response_model=SummaryTTSResponse)
+@router.post("/api/sessions/{session_id}/tts/summary")
 async def synthesize_summary(
     session_id: str,
+    response: Response,
     voice: Optional[str] = Query(None),
     format: str = Query("mp3", pattern="^(mp3|wav)$"),
     regenerate: bool = Query(False),
@@ -221,6 +222,13 @@ async def synthesize_summary(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    """Render a single-voice TTS of the session summary.
+
+    v3.18.3 background-jobification: cache-hit still returns 200 with the
+    full payload (no work). Cache-miss enqueues an arq job and returns
+    202 + `{job_id, status_url}`; the frontend polls `/api/jobs/<id>` for
+    completion and then GETs `tts/summary.<ext>` for the bytes.
+    """
     session = _resolve_session(session_id, db, active_org.organization.id)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
@@ -234,18 +242,53 @@ async def synthesize_summary(
     provider = registry.get_tts(active_org.organization.id)
     provider_name = getattr(provider, "name", "unknown")
 
-    if not cached:
-        try:
-            audio_bytes = await provider.synthesize(text, voice=voice, format=format)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("TTS synthesize failed: %s", exc)
-            raise HTTPException(status_code=502, detail=f"TTS provider error: {exc}")
-        if not audio_bytes:
-            raise HTTPException(
-                status_code=502,
-                detail=f"TTS provider '{provider_name}' returned empty audio.",
-            )
-        out_path.write_bytes(audio_bytes)
+    if cached:
+        return SummaryTTSResponse(
+            session_id=session_id,
+            provider=provider_name,
+            voice=voice,
+            format=format,
+            bytes=out_path.stat().st_size,
+            cached=True,
+            audio_url=f"/api/sessions/{session_id}/tts/summary.{out_path.suffix.lstrip('.')}",
+        )
+
+    # v3.18.3: enqueue + 202. Fall back to inline if arq is unavailable.
+    try:
+        from services.job_runner import enqueue_job
+        job_id = await enqueue_job(
+            "render_tts_summary_job",
+            active_org.organization.id,
+            active_org.organization.slug,
+            session_id,
+            voice,
+            format,
+        )
+        response.status_code = 202
+        return {
+            "job_id": job_id,
+            "status_url": f"/api/jobs/{job_id}",
+            "session_id": session_id,
+            "provider": provider_name,
+            "voice": voice,
+            "format": format,
+            "cached": False,
+            "audio_url": f"/api/sessions/{session_id}/tts/summary.{out_path.suffix.lstrip('.')}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synthesize_summary: arq enqueue failed: %s — running inline", exc)
+
+    try:
+        audio_bytes = await provider.synthesize(text, voice=voice, format=format)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("TTS synthesize failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"TTS provider error: {exc}")
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=502,
+            detail=f"TTS provider '{provider_name}' returned empty audio.",
+        )
+    out_path.write_bytes(audio_bytes)
 
     return SummaryTTSResponse(
         session_id=session_id,
@@ -253,7 +296,7 @@ async def synthesize_summary(
         voice=voice,
         format=format,
         bytes=out_path.stat().st_size,
-        cached=cached,
+        cached=False,
         audio_url=f"/api/sessions/{session_id}/tts/summary.{out_path.suffix.lstrip('.')}",
     )
 
@@ -412,9 +455,10 @@ def _normalize_speaker_ids(
     return speakers
 
 
-@router.post("/api/sessions/{session_id}/tts/podcast", response_model=PodcastTTSResponse)
+@router.post("/api/sessions/{session_id}/tts/podcast")
 async def synthesize_podcast(
     session_id: str,
+    response: Response,
     format: str = Query("mp3", pattern="^(mp3|wav)$"),
     host_voice: Optional[str] = Query(None),
     analyst_voice: Optional[str] = Query(None),
@@ -423,6 +467,14 @@ async def synthesize_podcast(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    """Render a two-voice podcast TTS of the session summary.
+
+    v3.18.3 background-jobification: cache-hit returns 200. Cache-miss
+    enqueues an arq job and returns 202 + `{job_id, status_url}`. The
+    frontend polls `/api/jobs/<id>` for completion (`result.script` +
+    `result.speakers` are included in the job result so the UI can show
+    the script as soon as the worker finishes).
+    """
     session = _resolve_session(session_id, db, active_org.organization.id)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
@@ -458,6 +510,31 @@ async def synthesize_podcast(
             script=[PodcastTurn(**t) for t in script_payload],
             speakers=speakers,
         )
+
+    # v3.18.3: enqueue + 202. Fall back to inline if arq is unavailable.
+    try:
+        from services.job_runner import enqueue_job
+        job_id = await enqueue_job(
+            "render_tts_podcast_job",
+            active_org.organization.id,
+            active_org.organization.slug,
+            session_id,
+            host_voice,
+            analyst_voice,
+            format,
+        )
+        response.status_code = 202
+        return {
+            "job_id": job_id,
+            "status_url": f"/api/jobs/{job_id}",
+            "session_id": session_id,
+            "provider": getattr(provider, "name", "unknown"),
+            "format": format,
+            "cached": False,
+            "audio_url": f"/api/sessions/{session_id}/tts/podcast.{format}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synthesize_podcast: arq enqueue failed: %s — running inline", exc)
 
     script = await _build_podcast_script(registry, active_org.organization.id, text)
     if not script:

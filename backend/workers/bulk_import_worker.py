@@ -73,10 +73,28 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# v3.18.3 background-jobification: long-running handlers now enqueue
+# arq jobs instead of awaiting inline (Codex Performance Finding S1).
+# The workers themselves live in dedicated modules; we import them here
+# so the arq runner registers them on startup.
+from workers.finalize_workers import finalize_session_job  # noqa: E402
+from workers.digest_workers import generate_digest_job  # noqa: E402
+from workers.tts_workers import (  # noqa: E402
+    render_tts_summary_job,
+    render_tts_podcast_job,
+)
+
+
 class WorkerSettings:
     """Arq worker configuration."""
 
-    functions = [process_bulk_file]
+    functions = [
+        process_bulk_file,
+        finalize_session_job,
+        generate_digest_job,
+        render_tts_summary_job,
+        render_tts_podcast_job,
+    ]
     # Daily local-disk retention (Garage cutover housekeeping). 04:30 UTC is a
     # low-traffic window; the task is read-mostly + best-effort.
     # Session watchdog runs every 30 min on the half-hour to keep the active-

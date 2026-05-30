@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+### v3.18.3 — Background-jobification of long-running handlers (Codex Performance Finding S1)
+
+Four HTTP handlers that ran server-side LLM work inline (and could exceed Cloudflare's 100s edge timeout, throwing 524 mid-meeting) now enqueue an arq job and return 202 + `{job_id, status_url}` immediately. The frontend polls `GET /api/jobs/{job_id}` on exponential backoff (2s → 30s) until the worker finishes.
+
+- **New `services/job_runner.py`**: thin wrapper over the existing arq Redis pool (reuses `workers.bulk_import_worker.get_arq_pool`). `enqueue_job(function_name, *args, **kwargs)` returns the arq job_id; `get_job_status(job_id)` maps arq's `JobStatus` enum to `pending|running|completed|failed|not_found`. In-process 5-minute idempotency window swallows fast double-clicks.
+- **New `GET /api/jobs/{job_id}`** (router `api/jobs.py`): generic poll endpoint, auth-required, 404 on not_found.
+- **New worker modules** registered on `WorkerSettings.functions`:
+  - `workers/finalize_workers.py:finalize_session_job` — always-on finalize: summary + insights + Brigade + Project-Ops fan-out
+  - `workers/digest_workers.py:generate_digest_job` — time-window digest map-reduce (up to 11 LLM calls)
+  - `workers/tts_workers.py:render_tts_summary_job` + `render_tts_podcast_job` — TTS render
+- **Handlers that now return 202** (instead of awaiting in-request):
+  - `POST /api/recordings/sessions/{id}/finalize` (always-on stop)
+  - `GET /api/digests` (cache-miss + `force=true` paths; cached digest reads stay 200)
+  - `POST /api/sessions/{id}/tts/summary` (cache-miss; cache-hit stays 200)
+  - `POST /api/sessions/{id}/tts/podcast` (cache-miss; cache-hit stays 200)
+- **Alembic `035_processing_job_id`**: adds `recording_sessions.processing_job_id` (indexed) + `meeting_digest.generation_job_id` for worker drift checks.
+- **Drift safety**: worker re-reads the row at entry and compares its ctx `job_id` against `processing_job_id` / `generation_job_id`. Mismatch → skip side effects (no double-writes to Brigade / Project-Ops, no overwriting a fresher summary).
+- **Free-tier guards stay BEFORE the enqueue** — free users still see 403, never 202. Validated by `test_finalize_job_flow.py:test_free_user_still_blocked_before_enqueue` and `test_digest_job_flow.py:test_free_user_still_403s_before_enqueue`.
+- **Frontend `services/jobPoller.ts`**: `pollJob<T>(jobId, opts)` with exponential backoff to 30s cap, AbortSignal support, 404/5xx handling. `Digests.tsx` migrated to the new flow; `/finalize` callsite in `AlwaysOnContext.tsx` is already fire-and-forget so the 202 is transparent there.
+- **Inline-fallback**: every modified handler keeps the legacy in-band path as a fallback when arq is unavailable (test env without Redis, `ARQ_ENABLED=false`). The 202 + poll path is the production behavior; dev keeps working without Redis.
+- **Tests**: 19 new (`test_job_runner.py` × 9, `test_finalize_job_flow.py` × 5, `test_digest_job_flow.py` × 5). Pre-existing `test_free_tier_enforcement.py` still 24 pass / 1 skipped / 1 xfailed.
+- **Closes**: Codex audit Performance Finding S1. Cloudflare 524 risk window closed for the four named paths.
+
 ## [3.19.0] - 2026-05-29
 
 Single coordinated release from a 5-agent parallel swarm closing every UI/UX and revenue-readiness item in PO P-00055 task `622e44b8` acceptance criteria except the launch-day flip itself. All five batches landed independently on `fix/v3.19-*` worktrees, then merged sequentially through `main`; conflicts resolved manually on `Pricing.tsx`, `auth/models.py`, and `SessionDetails.tsx`. 105 frontend + 88 targeted backend tests pass.

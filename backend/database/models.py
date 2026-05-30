@@ -136,6 +136,13 @@ class RecordingSession(Base):
     # Free-tier audio never populates these (it stays in the browser).
     audio_storage_backend = Column(String(20), nullable=True)
     audio_object_key = Column(String(500), nullable=True)
+    # v3.18.3 background-jobs: arq job_id that is currently processing
+    # this session (finalize + summarize + insights + Brigade write).
+    # Frontend polls /api/jobs/<id> to resume after tab reload, and the
+    # worker drift-checks at entry — if this column changed since the
+    # worker was enqueued, a newer job is processing the row and we
+    # skip side effects to avoid double-writes.
+    processing_job_id = Column(String(64), nullable=True, index=True)
 
     def to_dict(self):
         return {
@@ -454,6 +461,10 @@ class MeetingDigest(Base):
     content = Column(Text, nullable=False)
     meeting_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # v3.18.3 background-jobs: arq job_id that is currently generating
+    # (or last generated) this digest. NULL on cached reads; set when
+    # a new generate kicks off.
+    generation_job_id = Column(String(64), nullable=True)
 
 
 class UploadJob(Base):
