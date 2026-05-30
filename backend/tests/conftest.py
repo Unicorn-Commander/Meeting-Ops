@@ -155,6 +155,7 @@ def app():
     from auth.models import (  # noqa: F401
         AuditLog,
         Organization,
+        PasswordResetToken,
         PersonalAccessToken,
         User,
         UserOrganization,

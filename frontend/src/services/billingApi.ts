@@ -21,7 +21,8 @@ export interface PortalResponse {
 
 export interface SubscriptionState {
   tier: string;
-  is_founder: boolean;
+  is_founding_member: boolean;
+  founding_cohort?: string | null;
   has_subscription: boolean;
   subscription_id?: string | null;
   status?: string | null;

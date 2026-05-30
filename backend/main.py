@@ -385,6 +385,12 @@ _load_router(app, "landing", "api.landing")
 _load_router(app, "stripe_webhook", "api.stripe_webhook")
 _load_router(app, "billing", "api.billing")
 
+# === FOUNDING 100 (v3.21.0) ===
+# Public cohort status (cached 60s, no auth) + admin close endpoint.
+# Powers the /founding-100 landing page + Aaron's hard-stop kill switch.
+_load_router(app, "founding", "api.founding")
+_load_router(app, "founding_admin", "api.founding", router_attr="admin_router")
+
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")
 

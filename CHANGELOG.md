@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+### Added (v3.21.0 staging — feat/v3.21.0-auth-features)
+
+- **Founding 100 cohort mechanic (renamed from "Founders 100")**: explicit cohort label + atomic grant-on-Stripe-annual-upfront.
+  - `users.is_founder` renamed to `users.is_founding_member`; new `users.founding_cohort` (varchar(64), nullable). Old `is_founder` column FULLY removed (alembic 037 + every callsite swept).
+  - Grant trigger moved from signup time to Stripe annual-upfront completion (`customer.subscription.created` with `recurring.interval == "year"` OR `checkout.session.completed` with `metadata.annual_upfront == "true"`). Monthly subscriptions never consume a seat.
+  - `api/stripe_webhook.py`: new `_maybe_grant_founding_member(db, user, cohort=...)` with PostgreSQL `SELECT ... FOR UPDATE` cohort-row lock so two concurrent webhooks can't both award seat 100. Logs structured event `founding_member_granted user_id=N cohort=meeting_ops_v1 seat_num=N capacity=100`. `_maybe_grant_founder` kept as a thin backward-compat alias through v3.21.x.
+  - Env rename: `FOUNDING_100_ACTIVE` / `FOUNDING_100_LIMIT` are now canonical. Legacy `FOUNDERS_100_*` names still read as a fallback so a stale env file boots cleanly through the transition.
+  - New `api/founding.py` (router + admin_router):
+    - `GET /api/founding/status?cohort=meeting_ops_v1` — public, 60s in-process cached, returns `{cohort, seats_taken, seats_total, is_open}`.
+    - `POST /api/admin/founding/close` (admin-only) — sticky kill-switch (process-local + Redis-mirrored) that stops future grants for the cohort even when nominally below cap. `FOUNDING_COHORT_CLOSED=true` env is the restart-safe escalation.
+  - `auth/tier.py`: `_FOUNDING_MEMBER_OVERLAY` now keys off `is_founding_member` (was `is_founder`).
+  - `auth/routes.py.UserResponse`: `is_founder` field removed; `is_founding_member: bool` + `founding_cohort: Optional[str]` added.
+  - `api/billing.py.SubscriptionResponse`: same rename; consumers of `/api/billing/subscription` must read `is_founding_member`.
+
+- **Password reset**: native email/password reset for the VPS auth path (no oauth2-proxy).
+  - New `password_reset_tokens` table (alembic 037): `id`, `user_id`, `token_hash` (sha256 of the 32-byte base64url plaintext), `expires_at`, `used_at`, `created_at`. Single-use, 1-hour TTL.
+  - `POST /api/auth/password/forgot` — body `{"email": "..."}`. Always returns 202 with the same body regardless of whether the email matches a user (never leak account existence). Rate-limited 3/hour/email via Redis SETEX (in-proc fallback when Redis unavailable). Sends the reset link via `send_password_reset_email()` (Postmark/SMTP, soft-fail).
+  - `GET /api/auth/password/reset/validate?token=...` — lightweight 200/400/410 token state check so the form can render before the user types.
+  - `POST /api/auth/password/reset` — body `{"token": "...", "new_password": "..."}`. 200 on success, 400 on weak/unknown, 410 on expired/used. Marks `used_at` so the same token can't double-reset.
+
+- **Founding 100 frontend page**: new public route `/founding-100` (`pages/Founding100.tsx`) — live seat counter via `GET /api/founding/status`, progress bar, six-perk grid (lifetime price-lock, private Discord, advisory council seat, quarterly roadmap vote, annual founders summit, cross-app early access), CTA to `/pricing` when `is_open`, "Cohort closed — thank you" when full.
+- **Password reset frontend**: new `/forgot-password` (`pages/ForgotPassword.tsx`) and `/reset-password?token=...` (`pages/ResetPassword.tsx`). Reset page calls the validate endpoint on mount and renders an "expired link" CTA on 400/410; on success bounces to `/login?password_reset=success`.
+- **Login**: new "Forgot your password?" link under the Sign-in button.
+- Frontend types swept: `services/billingApi.ts.SubscriptionState.is_founder` → `is_founding_member`, optional `founding_cohort`; `__tests__/Sessions.test.tsx` mock user updated.
+- Tests: `tests/test_founders_100.py` rewritten for the new cohort semantics + admin-close gate + public status endpoint. New `tests/test_password_reset.py` (7 scenarios: 202 on unknown, token-issue, validate states, happy-path, weak-password rejection, rate limit). `tests/test_billing_api.py` + `tests/test_stripe_webhook.py` updated for env + response-field rename.
+
 ## [3.20.1] - 2026-05-30
 
 Focused tier-gate + onboarding patch on top of the v3.20.0 prod launch. Two narrow product decisions:

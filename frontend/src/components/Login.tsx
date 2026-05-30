@@ -283,6 +283,15 @@ export const Login: React.FC = () => {
                 <ArrowRight className="h-4 w-4" />
                 {isSubmitting ? 'Signing in...' : 'Sign in'}
               </button>
+
+              <div className="flex justify-end pt-1 text-xs">
+                <Link
+                  to="/forgot-password"
+                  className="text-zinc-400 hover:text-fuchsia-200"
+                >
+                  Forgot your password?
+                </Link>
+              </div>
             </form>
 
             <div className="mt-5 space-y-3 border-t border-white/10 pt-5">

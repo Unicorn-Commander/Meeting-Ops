@@ -37,7 +37,7 @@ vi.mock('../contexts/OrgContext', () => ({
 // banner short-circuits invisibly during rendering.
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 1, email: 'test@example.com', tier: 'pro', is_founder: false },
+    user: { id: 1, email: 'test@example.com', tier: 'pro', is_founding_member: false },
     isAuthenticated: true,
     isLoading: false,
     login: vi.fn(),

@@ -46,6 +46,12 @@ from auth.models import User
 from database.database import get_db
 from services.stripe_client import _stripe, price_id_to_tier
 
+# Default cohort label for Meeting-Ops v1 Founding 100. Aaron's design
+# intent: future cohorts (e.g. crisis_ops_v1) get distinct labels rather
+# than overflowing the same 100.
+_FOUNDING_DEFAULT_COHORT = "meeting_ops_v1"
+_FOUNDING_COHORT_CLOSED_FLAG = "FOUNDING_COHORT_CLOSED"
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stripe", tags=["billing"])
@@ -167,7 +173,17 @@ def _handle_subscription_created(db: Session, sub: dict) -> None:
     user.tier = new_tier
     db.add(user)
     db.commit()
-    _maybe_grant_founder(db, user)
+    # Founding 100: annual-upfront subscribers get the cohort flag at
+    # checkout-completion time. Other intervals (monthly) never qualify
+    # by design — Aaron's spec.
+    if _is_annual_upfront(sub):
+        try:
+            _maybe_grant_founding_member(db, user)
+        except Exception:
+            logger.exception(
+                "founding 100 grant failed for user_id=%s on sub=%s",
+                user.id, sub.get("id"),
+            )
 
 
 def _handle_subscription_updated(db: Session, sub: dict) -> None:
@@ -253,36 +269,150 @@ def _handle_customer_created(db: Session, customer: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Founders 100
+# Founding 100 (renamed from "Founders 100" in v3.21.0)
 # ---------------------------------------------------------------------------
 
 
-def _maybe_grant_founder(db: Session, user: User) -> None:
-    """Idempotent: set is_founder=True if FOUNDERS_100_ACTIVE and below
-    the limit. Pricing is unaffected — see auth/models.py.User.is_founder
-    docstring + alembic 033 for the rationale.
-    """
-    if user.is_founder:
-        return
-    if os.getenv("FOUNDERS_100_ACTIVE", "true").strip().lower() not in ("1", "true", "yes", "on"):
-        return
+def _founding_cap() -> int:
+    """Cohort capacity. Defaults to 100. Reads FOUNDING_100_LIMIT first;
+    falls back to the legacy FOUNDERS_100_LIMIT name so an old env file
+    keeps working through the v3.21.0 transition."""
+    raw = os.getenv("FOUNDING_100_LIMIT") or os.getenv("FOUNDERS_100_LIMIT") or "100"
     try:
-        limit = int(os.getenv("FOUNDERS_100_LIMIT", "100"))
-    except ValueError:
-        limit = 100
-    count = db.query(User).filter(User.is_founder.is_(True)).count()
-    if count >= limit:
-        logger.info(
-            "Founders 100: at limit (%s/%s), not granting to user_id=%s",
-            count, limit, user.id,
-        )
-        return
-    user.is_founder = True
-    db.add(user)
-    db.commit()
+        return int(raw)
+    except (ValueError, TypeError):
+        return 100
+
+
+def _founding_active() -> bool:
+    """True iff the Founding 100 mechanic is allowed to grant new seats.
+    Env-gated (FOUNDING_100_ACTIVE / legacy FOUNDERS_100_ACTIVE) AND
+    not admin-closed. See POST /api/admin/founding/close + api.founding."""
+    if os.getenv(_FOUNDING_COHORT_CLOSED_FLAG, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return False
+    raw = (
+        os.getenv("FOUNDING_100_ACTIVE")
+        or os.getenv("FOUNDERS_100_ACTIVE")
+        or "true"
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _is_annual_upfront(sub: dict) -> bool:
+    """Detect the annual-upfront Founding 100 trigger.
+
+    Annual-upfront either comes through with
+        items.data[0].price.recurring.interval == "year"
+    or, on Checkout-session metadata, with
+        metadata.annual_upfront == "true"
+    (the Checkout client sets the latter when it kicks off the year
+    plan because Stripe doesn't echo recurring on every event shape).
+    """
+    md = sub.get("metadata") or {}
+    if str(md.get("annual_upfront", "")).strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        recurring = sub["items"]["data"][0]["price"].get("recurring") or {}
+    except (KeyError, IndexError, TypeError, AttributeError):
+        recurring = {}
+    return str(recurring.get("interval", "")).lower() == "year"
+
+
+def _maybe_grant_founding_member(
+    db: Session,
+    user: User,
+    *,
+    cohort: str = _FOUNDING_DEFAULT_COHORT,
+) -> bool:
+    """Atomically grant the user the Founding 100 flag if the cohort is
+    open and below capacity. Idempotent: re-grants for an already-flagged
+    user are a no-op.
+
+    Concurrency: uses `SELECT ... FOR UPDATE` on the existing-cohort row
+    set so two parallel Stripe webhooks can't both award seat 100. On
+    SQLite (tests) the SAVEPOINT acts as the same lock since there's no
+    concurrent writer.
+
+    Returns True if the flag was newly granted, False otherwise (already
+    flagged, cohort closed, or capacity hit). Logs a `founding_member_granted`
+    structured event on grant.
+    """
+    if not user:
+        return False
+    if getattr(user, "is_founding_member", False):
+        return False
+    if not _founding_active():
+        return False
+    # Admin-closed cohorts (POST /api/admin/founding/close) stop granting
+    # even when nominally below capacity. Imported lazily so api.founding
+    # stays an independent optional router.
+    try:
+        from api.founding import _is_cohort_closed  # type: ignore
+        if _is_cohort_closed(cohort):
+            logger.info(
+                "Founding 100: cohort %s admin-closed; not granting user_id=%s",
+                cohort, user.id,
+            )
+            return False
+    except Exception:  # pragma: no cover - founding router optional
+        pass
+
+    limit = _founding_cap()
+    is_postgres = db.bind is not None and db.bind.dialect.name == "postgresql"
+
+    # PostgreSQL: SELECT FOR UPDATE in a transaction so concurrent webhook
+    # workers serialize on the cohort row set. SQLite has no FOR UPDATE
+    # but tests are single-process so the plain SELECT is fine.
+    try:
+        if is_postgres:
+            # Lock the cohort rows. We don't need to lock the whole table —
+            # locking the rows that contribute to the count is enough,
+            # because INSERT-into-this-set is what we serialize against.
+            locked_count = (
+                db.query(User)
+                .filter(User.is_founding_member.is_(True))
+                .filter(User.founding_cohort == cohort)
+                .with_for_update()
+                .count()
+            )
+        else:
+            locked_count = (
+                db.query(User)
+                .filter(User.is_founding_member.is_(True))
+                .filter(User.founding_cohort == cohort)
+                .count()
+            )
+
+        if locked_count >= limit:
+            logger.info(
+                "Founding 100: cohort %s at capacity (%s/%s); not granting user_id=%s",
+                cohort, locked_count, limit, user.id,
+            )
+            db.commit()
+            return False
+
+        user.is_founding_member = True
+        user.founding_cohort = cohort
+        db.add(user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    seat_num = locked_count + 1
     logger.info(
-        "Founders 100: granted to user_id=%s (%s/%s)", user.id, count + 1, limit,
+        "founding_member_granted user_id=%s cohort=%s seat_num=%s capacity=%s",
+        user.id, cohort, seat_num, limit,
     )
+    return True
+
+
+# Backward-compat alias: older call sites + tests still import
+# `_maybe_grant_founder`. Keep until v3.22.0 cleanup.
+def _maybe_grant_founder(db: Session, user: User) -> None:  # pragma: no cover - thin shim
+    _maybe_grant_founding_member(db, user)
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +420,60 @@ def _maybe_grant_founder(db: Session, user: User) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _handle_checkout_session_completed(db: Session, session_obj: dict) -> None:
+    """Checkout-session.completed: alternative trigger for Founding 100 grant.
+
+    Stripe always sends customer.subscription.created for new subs, but the
+    Founding 100 spec wants the grant tied specifically to annual-upfront
+    Checkout completions (and the metadata.annual_upfront marker is set on
+    the Checkout Session, not always echoed onto the Subscription). We
+    consult session.metadata + session.mode and fire `_maybe_grant_founding_member`
+    when the conditions match.
+    """
+    if session_obj.get("mode") != "subscription":
+        return
+    customer_id = session_obj.get("customer")
+    md = session_obj.get("metadata") or {}
+    # Look up the user via the customer ID (preferred) or
+    # client_reference_id which we stamp with the local user id.
+    user = _find_user_by_customer(db, customer_id)
+    if user is None:
+        ref = session_obj.get("client_reference_id")
+        if ref:
+            try:
+                user = db.query(User).filter(User.id == int(ref)).first()
+            except (ValueError, TypeError):
+                user = None
+    if user is None:
+        logger.info(
+            "checkout.session.completed: no local user for customer=%s session=%s",
+            customer_id, session_obj.get("id"),
+        )
+        return
+
+    annual_marker = str(md.get("annual_upfront", "")).strip().lower() in (
+        "1", "true", "yes",
+    )
+    if not annual_marker:
+        # Not flagged as annual-upfront; the subscription.created handler
+        # will pick up the recurring=year case via _is_annual_upfront.
+        return
+
+    try:
+        _maybe_grant_founding_member(db, user)
+    except Exception:
+        logger.exception(
+            "founding 100 grant failed for user_id=%s on checkout=%s",
+            user.id, session_obj.get("id"),
+        )
+
+
 _DISPATCH = {
     "customer.subscription.created": _handle_subscription_created,
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
     "customer.created": _handle_customer_created,
+    "checkout.session.completed": _handle_checkout_session_completed,
 }
 
 

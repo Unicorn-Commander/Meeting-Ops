@@ -141,12 +141,12 @@ def get_tier_features(user: User) -> dict[str, Any]:
     """Return the feature dict for a user's effective tier.
 
     Applies the Founding 100 overlay (`_FOUNDING_MEMBER_OVERLAY`) on top of
-    the base tier features when ``user.is_founder`` is True. The base
-    tier dict is copied, not mutated — TIER_FEATURES stays the immutable
-    source of truth for what each plain tier gets.
+    the base tier features when ``user.is_founding_member`` is True. The
+    base tier dict is copied, not mutated — TIER_FEATURES stays the
+    immutable source of truth for what each plain tier gets.
     """
     base = TIER_FEATURES[get_user_tier(user)]
-    if getattr(user, "is_founder", False):
+    if getattr(user, "is_founding_member", False):
         return {**base, **_FOUNDING_MEMBER_OVERLAY}
     return base
 
