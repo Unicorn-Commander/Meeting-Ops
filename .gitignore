@@ -160,3 +160,4 @@ deploy/bigboy/*.bak
 
 !deploy/bigboy/STATUS.md
 deploy/bigboy/docker-compose.bigboy.yml.bak.*
+.claude/
