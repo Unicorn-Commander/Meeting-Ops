@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+## [3.22.2] - 2026-05-30
+
+Emergency hotfix. After v3.22.1 deploy, both bigboy + VPS users got stuck in a tight service-worker registration loop — browsers polling `GET /sw.js` 10+ times per second, pages never settling. Production was unusable.
+
+### Root cause (provisional)
+After the rapid chain of frontend rebuilds in this evening's arc (v3.20.x → v3.22.1 in a few hours) the workbox-window auto-update path interacted with `clientsClaim: true` + the `registerType: "prompt"` config in a way that pinned some clients in a "controller never stabilizes" state. PWAUpdate's `registerSW({immediate: true})` then kept re-firing, each call triggering a new `/sw.js` fetch, install attempt, activate, claim. Not yet root-caused — repro needs a clean session to study.
+
+### Fixed (production recovery, in order)
+1. Killed the loop by docker-cp'ing a self-unregistering kill-switch `/sw.js` directly into both running `meet-frontend` containers, then deleting it entirely so nginx serves `404` for `/sw.js`. Browser registrations failed cleanly; existing kill-switch SW had already cleared caches.
+2. Disabled the PWA plugin in `vite.config.ts` (`disable: true`, `injectRegister: false`). New builds emit NO sw.js, NO registerSW.js, NO PWA references in `index.html`. The SPA still works fully — just no precache, no offline.
+3. `PWAUpdate.tsx` left in source unchanged. Its dynamic import of `virtual:pwa-register` falls into its existing catch block when the plugin is disabled, so the component is a no-op without a code change. (Re-enabling PWA later flips one config flag.)
+4. New `frontend/public/sw-kill.js` shipped as documentation + a ready-to-deploy kill-switch for future operators who hit similar SW loops.
+
+### Side effects users will see
+- "Install Meeting-Ops as an app" PWA install prompt is gone (browsers won't offer it without a manifest + SW).
+- Offline page caching is gone (live network for everything; matches a normal SPA).
+- The "Update available — Reload now" banner won't appear (irrelevant without SW).
+
+### Re-enabling PWA
+Flip `disable: false` + `injectRegister: 'auto'` in `vite.config.ts`. Don't do that until the loop's root cause is reproduced + fixed.
+
 ## [3.22.1] - 2026-05-30
 
 ### Fixed

@@ -7,14 +7,27 @@ const backendUrl = process.env.VITE_BACKEND_URL || "http://localhost:9050";
 export default defineConfig({
   plugins: [
     VitePWA({
-      // "prompt" (not autoUpdate) so a freshly-deployed service worker
-      // parks in the waiting state instead of taking over the page. The
-      // PWAUpdate component decides WHEN to activate it (via updateSW(true)),
-      // which it defers while a recording is in progress — applying a new
-      // SW mid-capture can swap cached chunks out from under an active
-      // recording. See src/components/PWAUpdate.tsx.
+      // v3.22.2 hotfix 2026-05-30: PWA temporarily disabled. The workbox
+      // service worker on bigboy + VPS got stuck in a tight register/
+      // claim/re-register loop (10+ /sw.js polls per second, page never
+      // settled). Suspected interaction between workbox-window's update
+      // path + clientsClaim:true after a chain of fast deploys
+      // (v3.20.x -> v3.22.1). Production was unusable; we shipped a
+      // kill-switch sw.js + nginx 404 on /sw.js to break the loop.
+      //
+      // Permanent re-introduction needs root-cause: reproduce the loop
+      // in dev, narrow workbox version vs clientsClaim vs registerType,
+      // ship in a focused hotfix release. Until then, PWA build is OFF
+      // (injectRegister:false produces a build with no SW reference);
+      // the SPA still works fine, just no precache / no offline.
+      //
+      // Original `registerType: "prompt"` + PWAUpdate banner logic
+      // preserved in src/components/PWAUpdate.tsx — dynamic import of
+      // virtual:pwa-register falls into its catch block when the plugin
+      // is disabled, so the component is a no-op without further change.
       registerType: "prompt",
-      injectRegister: "auto",
+      injectRegister: false,
+      disable: true,
       manifest: false,
       includeAssets: [
         "manifest.webmanifest",
