@@ -29,6 +29,53 @@ MAX_TITLE_LEN = 200
 MAX_TAG_LEN = 40
 
 
+class DriftError(HTTPException):
+    """409 raised when live state has drifted from the proposal's before-snapshot.
+
+    The caller should re-propose. We subclass HTTPException so the FastAPI
+    layer renders it as a 409 the same way the existing
+    ``raise HTTPException(409, "state changed, please re-propose")`` calls do,
+    but tests + agents can match on ``DriftError`` specifically when they
+    need to distinguish drift from other 409s.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
+
+
+def _coerce_for_compare(value: Any) -> Any:
+    """Normalize values that round-trip through proposal JSON.
+
+    The before-snapshot in a proposal is serialized to JSON, so datetimes
+    become ISO strings and UUIDs become strings. When we re-fetch the
+    live row at confirm time those fields are still typed objects. Match
+    them by canonicalizing to JSON-friendly forms before comparing.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "hex") and not isinstance(value, (bytes, bytearray)):
+        # uuid.UUID etc.
+        return str(value)
+    return value
+
+
+def _assert_no_drift(before: dict[str, Any], current: dict[str, Any]) -> None:
+    """Confirm-time drift check.
+
+    Compares EVERY field captured in the proposal's ``before`` snapshot
+    against the live row. Any mismatch raises :class:`DriftError`, which
+    the propose/confirm machinery should surface to the agent so it
+    can re-propose with the fresh state.
+    """
+    for key, expected in before.items():
+        observed = current.get(key)
+        if _coerce_for_compare(observed) != _coerce_for_compare(expected):
+            raise DriftError(
+                f"Drift on field {key!r}: proposed={expected!r}, "
+                f"observed={observed!r}. Re-propose the action."
+            )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -757,9 +804,18 @@ def apply_delete_session(
     session = _resolve_session(db, org_id, payload.get("session_id"))
     if not _can_manage_session(db, user, org_id, session):
         raise HTTPException(status_code=403, detail="Not permitted to delete this session")
+    # v3.18.3: full-snapshot drift check — every field captured in `before`
+    # must still match. Previously only `status` was compared, which let a
+    # mutated `audio_object_key` (e.g. a re-upload between propose and
+    # confirm) slip through and get its blob purged.
     expected = proposal.get("before") or {}
-    if session.status != expected.get("status"):
-        raise HTTPException(status_code=409, detail="state changed, please re-propose")
+    current = {
+        "title": session.title,
+        "name": session.name,
+        "status": session.status,
+        "audio_object_key": session.audio_object_key,
+    }
+    _assert_no_drift(expected, current)
     if session.status == "recording":
         raise HTTPException(status_code=409, detail="Session began recording; stop it first.")
 
@@ -918,8 +974,15 @@ def apply_stop_recording(
     session = _resolve_session(db, org_id, payload.get("session_id"))
     if not _can_manage_session(db, user, org_id, session):
         raise HTTPException(status_code=403, detail="Not permitted to stop this recording")
-    if session.status != "recording":
-        raise HTTPException(status_code=409, detail="state changed, please re-propose")
+    # v3.18.3: full-snapshot drift check on the before-snapshot. Previously
+    # only `status` was compared, so a `started_at` shift (re-started session)
+    # would pass through and stop the wrong run.
+    expected = proposal.get("before") or {}
+    current = {
+        "status": session.status,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+    }
+    _assert_no_drift(expected, current)
 
     import os
     from services.working_audio_service import audio_service

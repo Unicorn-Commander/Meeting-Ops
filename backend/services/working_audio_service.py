@@ -111,8 +111,11 @@ class WorkingAudioService:
 
         return None
 
-    # Canonical recordings directory (single source of truth)
-    RECORDINGS_DIR = "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+    # Canonical recordings directory (single source of truth).
+    # v3.18.3: honor RECORDINGS_DIR env override so cloud / non-Linux deploys
+    # (macOS dev boxes, containers with bind-mounts elsewhere) don't break on
+    # the hardcoded /home/ucadmin path. Default keeps the appliance layout.
+    RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/var/lib/meet/recordings")
 
     def start_recording(self, session_id: str, output_dir: Optional[str] = None,
                         device_id: Optional[str] = None) -> tuple[bool, str]:

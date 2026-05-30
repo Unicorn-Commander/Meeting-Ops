@@ -273,21 +273,25 @@ _load_router(app, "session_move_org", "api.session_move_org")
 
 # === CORE ROUTERS (optional but expected) ===
 _load_router(app, "meeting_management", "api.meeting_management")
-_load_router(app, "ai_settings", "api.ai_settings")
+# v3.18.3: pass prefix="" explicitly to honor the routers' internal absolute
+# paths (e.g. APIRouter(prefix="/api"). The 4 admin routers below previously
+# had documentation drift suggesting a double-mount; passing prefix=""
+# explicitly closes that ambiguity and makes the mount behavior obvious.
+_load_router(app, "ai_settings", "api.ai_settings", prefix="")
 # === PHASE 3 ROUTERS ===
 _load_router(app, "agents", "api.agents")
 
-_load_router(app, "agent_management", "api.agent_management_api")
+_load_router(app, "agent_management", "api.agent_management_api", prefix="")
 _load_router(app, "websocket_transcription", "api.websocket_transcription")
 _load_router(app, "websocket_auto_summary", "api.websocket_auto_summary")
-_load_router(app, "unified_agent", "api.unified_agent_api")
+_load_router(app, "unified_agent", "api.unified_agent_api", prefix="")
 _load_router(app, "live_transcription", "api.live_transcription")
 _load_router(app, "analytics", "api.analytics_simple")
 _load_router(app, "ai_insights", "api.ai_insights")
 _load_router(app, "ai_chat", "api.ai_chat")
 _load_router(app, "vocabulary", "api.vocabulary")
 _load_router(app, "batch_export", "api.batch_export")
-_load_router(app, "simple_settings", "api.simple_settings")
+_load_router(app, "simple_settings", "api.simple_settings", prefix="")
 
 # === SATELLITE DEVICE ROUTERS (optional) ===
 _load_router(app, "satellite_api", "api.satellite_api")
@@ -377,11 +381,23 @@ async def root():
 async def health_check():
     """Health check with router status"""
     has_failures = len(failed_routers) > 0
+
+    # v3.18.3: report streaming-degraded state when neither stdlib audioop
+    # nor the audioop-lts back-port is available (py3.13+ moat).
+    streaming_audioop_ok = True
+    try:
+        from api import streaming as _streaming
+        streaming_audioop_ok = _streaming.audioop is not None
+    except Exception:  # pragma: no cover - streaming router not loaded
+        streaming_audioop_ok = True
+
+    degraded = has_failures or not streaming_audioop_ok
     return {
-        "status": "degraded" if has_failures else "healthy",
+        "status": "degraded" if degraded else "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "routers_loaded": len(loaded_routers),
         "routers_failed": failed_routers if has_failures else [],
+        "streaming_audioop": "ok" if streaming_audioop_ok else "missing",
     }
 
 

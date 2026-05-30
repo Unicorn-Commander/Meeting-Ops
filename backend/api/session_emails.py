@@ -17,6 +17,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from auth.models import User
 from database.models import (
@@ -246,6 +247,11 @@ async def email_attendees(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Send the meeting link / summary / transcript to selected speakers."""
+    # v3.18.3: defense-in-depth tier gate. Free users have no server-side
+    # summaries / canonical transcript to email out (browser-only tier), so
+    # this endpoint should never be reachable for them. Explicit gate
+    # prevents a future regression silently re-opening the surface.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
     session = _get_session_or_404(db, active_org.organization.id, session_id)
 
     # Auth: org admin/manager or session creator

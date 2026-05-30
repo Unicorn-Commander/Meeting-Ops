@@ -14,6 +14,7 @@ from database.database import get_db
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
+from auth.tier import gate_feature_for_caller
 from database.models import RecordingSession
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
@@ -121,6 +122,10 @@ async def create_batch_export(
     db: Session = Depends(get_db)
 ):
     """Create a batch export job for multiple sessions"""
+    # v3.18.3: defense-in-depth tier gate. Free users have no server-side
+    # canonical content to export (browser-only tier); explicit gate
+    # closes the surface in case server-side fallbacks ever land.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
     try:
         for session_id in request.sessionIds:
             if not _get_session_for_export(db, active_org.organization.id, session_id):
@@ -232,6 +237,9 @@ async def create_export_template(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Create a new export template"""
+    # v3.18.3: tier gate templates so free users can't seed configs that
+    # would only get exercised by the gated batch endpoint.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
     template.id = str(uuid.uuid4())
     export_templates.append(template)
     export_template_scope[template.id] = {
