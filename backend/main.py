@@ -376,6 +376,12 @@ _load_router(app, "personal_access_tokens", "api.personal_access_tokens")
 # backend endpoint still loads either way so direct curl smoke works.
 _load_router(app, "landing", "api.landing")
 
+# === CUSTOMER SUPPORT CONTACT FORM (v3.21.0) ===
+# Single endpoint /api/support/contact, accepts public + authed posts,
+# rate-limited per email. Postmark notify to SUPPORT_NOTIFY_EMAIL
+# (default support@magicunicorn.tech). Soft-fail if Postmark unconfigured.
+_load_router(app, "support", "api.support")
+
 # === BILLING (Stripe Subscriptions) ===
 # Webhook + checkout/portal/subscription endpoints. Inert until
 # STRIPE_API_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PRO_PRICE_ID are set —

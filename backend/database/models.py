@@ -903,3 +903,37 @@ class InviteRequest(Base):
     __table_args__ = (
         Index("ix_invite_requests_created_at", "created_at"),
     )
+
+
+class SupportRequest(Base):
+    """Customer support contact-form capture (v3.21.0).
+
+    Populated by `POST /api/support/contact` from the /contact page
+    (both authed and anonymous). Unlike `InviteRequest`, email is NOT
+    unique — repeat customers send multiple messages over time and the
+    triage workflow wants the full history. The Postmark notify path
+    is the canonical "ticket arrived" surface; this table doubles as a
+    durable archive.
+    """
+
+    __tablename__ = "support_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(Text, nullable=False)
+    name = Column(Text, nullable=True)
+    subject = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    user_id = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_support_requests_created_at", "created_at"),
+        Index("ix_support_requests_email", "email"),
+    )

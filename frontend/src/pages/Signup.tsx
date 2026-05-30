@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import {
   ArrowRight,
   CheckCircle2,
@@ -30,6 +30,7 @@ function extractApiError(payload: unknown, fallback: string): string {
 }
 
 export const Signup: React.FC = () => {
+  const location = useLocation();
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
@@ -37,7 +38,23 @@ export const Signup: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  // v3.21.0: when ALLOW_REGISTRATION=false the backend returns
+  // 403 "Registration is disabled" on /api/auth/register. The Landing
+  // CTA always lands us here, so we detect that case and switch to a
+  // friendly "thanks, we got your interest" surface instead of an
+  // error toast — the email was already captured by the Landing form
+  // posting to /api/landing/invite-request before redirecting.
+  const [registrationClosed, setRegistrationClosed] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Pre-fill email from `?email=` query (set by Landing CTA).
+  useEffect(() => {
+    const params = new URLSearchParams(location.search || '');
+    const fromQuery = params.get('email');
+    if (fromQuery) {
+      setEmail(fromQuery.trim());
+    }
+  }, [location.search]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -64,6 +81,24 @@ export const Signup: React.FC = () => {
           ...(fullName.trim() ? { full_name: fullName.trim() } : {}),
         }),
       });
+
+      if (response.status === 403) {
+        // Registration is closed (invite-only beta). Pivot to the
+        // friendly invite-confirmation surface — the Landing form has
+        // already logged the email server-side. Best-effort re-log
+        // here too in case the user typed a fresh email on the form.
+        try {
+          await fetch(`${config.apiUrl}/api/landing/invite-request`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: email.trim() }),
+          });
+        } catch {
+          /* soft-fail — the user-facing message is the same either way */
+        }
+        setRegistrationClosed(true);
+        return;
+      }
 
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -144,7 +179,36 @@ export const Signup: React.FC = () => {
           </section>
 
           <section className="rounded-3xl border border-white/10 bg-zinc-900/80 p-6 shadow-2xl shadow-black/30 backdrop-blur">
-            {success ? (
+            {registrationClosed ? (
+              <div className="space-y-5 rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-5 text-fuchsia-50">
+                <div className="flex items-start gap-3">
+                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
+                  <div>
+                    <h2 className="text-xl font-semibold text-white">Thanks — we got your invite request.</h2>
+                    <p className="mt-2 text-sm leading-6 text-fuchsia-100/90">
+                      Meeting-Ops is in private beta. We've logged your email
+                      {email.trim() ? <> (<span className="font-medium">{email.trim()}</span>)</> : null}
+                      {' '}and will reach out as slots open.
+                    </p>
+                    <p className="mt-3 text-sm leading-6 text-fuchsia-100/90">
+                      Already have an account? You can{' '}
+                      <Link to="/login" className="font-medium underline-offset-4 hover:underline">
+                        sign in here
+                      </Link>
+                      .
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <Link
+                    to="/pricing"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-zinc-100 transition hover:bg-white/10"
+                  >
+                    View pricing
+                  </Link>
+                </div>
+              </div>
+            ) : success ? (
               <div className="space-y-5 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-5 text-emerald-100">
                 <div className="flex items-start gap-3">
                   <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />

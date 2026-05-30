@@ -628,6 +628,20 @@ export default function Help() {
             E2B vs others), head to Settings → In-browser AI.
           </p>
         </section>
+
+        <section className="space-y-3 border-t border-zinc-800 pt-6">
+          <h2 className="text-lg font-semibold text-zinc-100">Still stuck?</h2>
+          <p className="text-zinc-400 text-sm">
+            Talk to a human. Tell us what you ran into and we'll reply on
+            your account email.{' '}
+            <a
+              href="#/contact"
+              className="text-fuchsia-300 underline-offset-4 hover:underline"
+            >
+              Contact Support →
+            </a>
+          </p>
+        </section>
       </div>
     </div>
   );
