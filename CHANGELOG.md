@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [3.21.1] - 2026-05-30
+
+Hotfix for v3.21.0: the auth-features migration `037_founding_member_and_password_reset` had a 38-char revision identifier, but Postgres `alembic_version.version_num` is `VARCHAR(32)`. Upgrades to v3.21.0 silently rolled back at COMMIT time (DDL applied inside the transaction, then the version-table INSERT exploded with `StringDataRightTruncation` and Postgres rolled the whole upgrade). Backend crash-looped on bigboy first-deploy attempt.
+
+### Fixed
+- Renamed alembic revision `037_founding_member_and_password_reset` → `037a_founding_pwreset` (21 chars). Filename unchanged for descriptiveness. Updated the merge migration's `down_revision` tuple to reference the new identifier.
+
+### Added
+- `039_widen_alembic_ver`: defensive migration that widens `alembic_version.version_num` from `VARCHAR(32)` to `VARCHAR(255)` (alembic's modern default for new projects). Prevents this entire failure mode for future migrations. Safe to run repeatedly — Postgres ALTER TYPE on VARCHAR-to-wider-VARCHAR is metadata-only.
+
 ## [3.21.0] - 2026-05-30
 
 Multi-feature release on top of v3.20.1 — Founding 100 cohort mechanic (rename + atomic cap), password reset (self-serve), landing CTA full-path (form → /signup), and customer support contact form. Four parallel-agent streams merged via no-op alembic merge migration. Three follow-on Aaron-led items are still parked (Stripe live env paste on VPS, Postmark token on VPS, `ALLOW_REGISTRATION` flip) — those involve live secrets/public-flip and stay manual.

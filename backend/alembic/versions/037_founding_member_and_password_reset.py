@@ -42,7 +42,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "037_founding_member_and_password_reset"
+revision = "037a_founding_pwreset"
 down_revision = "036_processing_job_id"
 branch_labels = None
 depends_on = None

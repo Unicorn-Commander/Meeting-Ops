@@ -11,7 +11,7 @@ Both forward migrations are independent — neither table touches the
 other's schema, so the merge is purely topological.
 
 Revision ID: 038_merge_v3_21
-Revises: 037_founding_member_and_password_reset, 037_support_requests
+Revises: 037a_founding_pwreset, 037_support_requests
 Create Date: 2026-05-30
 """
 
@@ -21,7 +21,7 @@ from alembic import op  # noqa: F401
 # revision identifiers, used by Alembic.
 revision = "038_merge_v3_21"
 down_revision = (
-    "037_founding_member_and_password_reset",
+    "037a_founding_pwreset",
     "037_support_requests",
 )
 branch_labels = None
