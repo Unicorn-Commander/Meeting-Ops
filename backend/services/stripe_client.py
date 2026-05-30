@@ -213,7 +213,12 @@ def create_checkout_session(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
-        allow_promotion_codes=False,
+        # Promotion codes are env-gated: STRIPE_ALLOW_PROMO_CODES=1 enables
+        # the "Add promotion code" field on Stripe Checkout (used for
+        # DEV_TEST_2026 testing + any future launch-day codes if we change
+        # mind on the no-discount Founders 100 stance). Default OFF so
+        # the production flow never accidentally surfaces a stale dev coupon.
+        allow_promotion_codes=os.getenv("STRIPE_ALLOW_PROMO_CODES", "").strip() == "1",
         client_reference_id=str(user.id),
         # Subscription metadata travels through to the
         # customer.subscription.created webhook so we can audit the
