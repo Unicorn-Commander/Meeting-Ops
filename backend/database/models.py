@@ -864,3 +864,31 @@ class BulkImportFile(Base):
     )
 
     job = relationship("BulkImportJob", back_populates="files")
+
+
+class InviteRequest(Base):
+    """Public landing-page invite request capture.
+
+    Populated by the unauthenticated `POST /api/landing/invite-request`
+    endpoint on the v3.19 polished launch landing page. Email is UNIQUE
+    so duplicate submissions become a 200 "ok" no-op (idempotent).
+    See `backend/api/landing.py` for the request handler and rate-limit
+    behavior, and migration `035_invite_requests.py` for the schema.
+    """
+
+    __tablename__ = "invite_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(Text, nullable=False, unique=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+    notes = Column(Text, nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_invite_requests_created_at", "created_at"),
+    )

@@ -10,6 +10,14 @@ FROM node:20-alpine as builder
 ARG VITE_API_URL
 ENV VITE_API_URL=$VITE_API_URL
 
+# v3.19 polished launch: when "true", `/` renders the public invite-only
+# Landing page (`pages/Landing.tsx`) for anonymous visitors. Default
+# stays "false" so existing dev deploys keep the historical
+# `/` → `/dashboard` redirect. Authenticated users always go to
+# /dashboard regardless of this flag.
+ARG VITE_LANDING_PAGE_ENABLED=false
+ENV VITE_LANDING_PAGE_ENABLED=$VITE_LANDING_PAGE_ENABLED
+
 WORKDIR /app
 
 # Copy package files
