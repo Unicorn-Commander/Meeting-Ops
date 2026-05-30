@@ -341,6 +341,8 @@ _load_router(app, "bulk_import_admin", "api.admin_imports")
 _load_router(app, "tts", "api.tts")
 _load_router(app, "tts_websocket", "api.tts", router_attr="ws_router")
 _load_router(app, "system_caps", "api.system_caps")
+# v3.18.3 background-jobs: generic poll endpoint for arq job status.
+_load_router(app, "jobs", "api.jobs")
 
 # === PHASE B.1 ROUTERS (server-live streaming scaffolding) ===
 # /ws/sessions/{session_id}/live — auth via oauth2-proxy forward headers,

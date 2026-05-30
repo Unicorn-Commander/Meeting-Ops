@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -841,10 +841,28 @@ async def append_client_text_chunk(
 async def finalize_always_on_session(
     session_id: str,
     background_tasks: BackgroundTasks,
+    response: Response,
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    """Finalize an always-on session.
+
+    v3.18.3 background-jobification: this used to await `_summarize_session`
+    + `_generate_ai_insights` + Brigade + PO writes inline. On real meetings
+    the LLM round-trip ran 60-180 seconds, which exceeded Cloudflare's edge
+    timeout (524 errors mid-finalize). The handler now:
+
+      1. Marks the session status='processing' + stamps ended_at/duration.
+      2. Enqueues `finalize_session_job` on arq.
+      3. Returns 202 with `{job_id, status_url, session}` immediately.
+
+    The frontend polls `GET /api/jobs/{job_id}` on exponential backoff
+    (2s -> 30s cap) until the job reports status='completed' or 'failed'.
+    On completion the session row will have summary + ai_insights + status
+    flipped to 'completed' and the Brigade + Project-Ops writes will have
+    fired (best-effort).
+    """
     gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
@@ -861,6 +879,35 @@ async def finalize_always_on_session(
     db.commit()
     db.refresh(session)
 
+    # Enqueue the long-running work. Falls back to the legacy in-band
+    # path if arq is unavailable (test env, ARQ_ENABLED=false) so the
+    # endpoint stays functional in dev without Redis.
+    job_id: str | None = None
+    try:
+        from services.job_runner import enqueue_job
+        job_id = await enqueue_job(
+            "finalize_session_job",
+            session.id,
+            user_id=current_user.id,
+            org_id=active_org.organization.id,
+        )
+        session.processing_job_id = job_id
+        db.commit()
+        db.refresh(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "finalize_always_on_session: arq enqueue failed session=%s: %s — falling back inline",
+            session_id, exc,
+        )
+
+    if job_id:
+        response.status_code = 202
+        payload = _session_payload(session)
+        payload["job_id"] = job_id
+        payload["status_url"] = f"/api/jobs/{job_id}"
+        return payload
+
+    # ----- Fallback: arq unavailable — run inline (legacy path) -----
     try:
         from api.uploads import _summarize_session
 

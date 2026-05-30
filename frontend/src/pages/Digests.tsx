@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Calendar, RefreshCw, FileText, Clock } from 'lucide-react';
 import { useOrg } from '../contexts/OrgContext';
 import { config } from '../config';
+import { pollJob, JobPollError } from '../services/jobPoller';
 
 interface DigestData {
   period: string;
@@ -27,6 +28,7 @@ export default function DigestsPage() {
   const [digest, setDigest] = useState<DigestData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [progressMsg, setProgressMsg] = useState('');
 
   const getHeaders = () => {
     const headers: Record<string, string> = {};
@@ -39,13 +41,34 @@ export default function DigestsPage() {
   const fetchDigest = async (force = false) => {
     setLoading(true);
     setError('');
+    setProgressMsg('');
     try {
       const params = new URLSearchParams({ period, date });
       if (force) params.set('force', 'true');
       const res = await fetch(`${config.apiBaseUrl}/api/digests?${params}`, {
         headers: getHeaders(),
       });
-      if (res.ok) {
+      if (res.status === 202) {
+        // v3.18.3: digest generation is queued — poll for the result.
+        const payload = await res.json();
+        setProgressMsg('Generating digest...');
+        try {
+          const result = await pollJob<DigestData>(payload.job_id, {
+            headers: getHeaders(),
+            onProgress: (s) => {
+              if (s.status === 'running') setProgressMsg('Summarizing meetings...');
+              else if (s.status === 'pending') setProgressMsg('Waiting in queue...');
+            },
+          });
+          setDigest(result);
+        } catch (err) {
+          if (err instanceof JobPollError) {
+            setError(err.originalError || 'Digest generation failed.');
+          } else {
+            setError('Digest generation failed.');
+          }
+        }
+      } else if (res.ok) {
         setDigest(await res.json());
       } else {
         setError('Failed to generate digest.');
@@ -54,6 +77,7 @@ export default function DigestsPage() {
       setError('Network error.');
     }
     setLoading(false);
+    setProgressMsg('');
   };
 
   useEffect(() => {
@@ -104,7 +128,7 @@ export default function DigestsPage() {
       {loading && (
         <div className="flex items-center gap-2 text-zinc-400 py-8">
           <RefreshCw className="w-4 h-4 animate-spin" />
-          <span>Generating digest...</span>
+          <span>{progressMsg || 'Generating digest...'}</span>
         </div>
       )}
 

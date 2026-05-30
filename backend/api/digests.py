@@ -1,7 +1,7 @@
 """
 Time-Window Digests API — map-reduce meeting summaries over time periods.
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -27,6 +27,15 @@ class DigestResponse(BaseModel):
     project_id: Optional[int] = None
     content: str
     meeting_count: int
+    cached: bool = False
+
+
+class DigestJobResponse(BaseModel):
+    """202 response: digest generation is queued; poll /api/jobs/{job_id}."""
+    job_id: str
+    status_url: str
+    period: str
+    date: str
     cached: bool = False
 
 
@@ -177,8 +186,9 @@ async def _generate_digest(
     )
 
 
-@router.get("", response_model=DigestResponse)
+@router.get("")
 async def get_digest(
+    response: Response,
     period: str = Query(..., description="day, week, month, quarter, year"),
     date: str = Query(None, description="YYYY-MM-DD (defaults to today)"),
     project_id: Optional[int] = Query(None),
@@ -187,6 +197,19 @@ async def get_digest(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    """Fetch a time-window digest.
+
+    Behavior:
+      - Cached digest exists AND `force=false`: return 200 with the cached
+        content (any tier).
+      - No cache OR `force=true`: tier-gate, then enqueue an arq job and
+        return 202 with `{job_id, status_url}`. The frontend polls
+        `GET /api/jobs/{job_id}` until the worker finishes.
+
+    v3.18.3 background-jobification: the inline path used to do up to 11
+    LLM calls (10 mini-summaries + 1 synthesis), routinely exceeding
+    Cloudflare's edge timeout. Heavy work now runs out-of-band.
+    """
     if period not in ("day", "week", "month", "quarter", "year"):
         raise HTTPException(status_code=400, detail="Invalid period")
     # Default date to today if not provided
@@ -222,5 +245,44 @@ async def get_digest(
     # chat calls to mini-summarize + synthesize). Cached digests above
     # are free for any tier to read; new generation is paid-tier.
     gate_feature_for_caller(current_user, "canonical_reprocess")
+
+    # v3.18.3: enqueue + 202 + poll. Fall back to inline if arq is
+    # unavailable so dev/test envs without Redis keep working.
+    try:
+        from services.job_runner import enqueue_job
+        job_id = await enqueue_job(
+            "generate_digest_job",
+            active_org.organization.id,
+            period,
+            date,
+            project_id=str(project_id) if project_id is not None else None,
+        )
+        # Stamp the digest row if one already exists so future workers
+        # can drift-check.
+        existing_row = (
+            db.query(MeetingDigest)
+            .filter(
+                MeetingDigest.organization_id == active_org.organization.id,
+                MeetingDigest.period == period,
+                MeetingDigest.date == date,
+            )
+            .first()
+        )
+        if existing_row is not None:
+            existing_row.generation_job_id = job_id
+            db.commit()
+        response.status_code = 202
+        return DigestJobResponse(
+            job_id=job_id,
+            status_url=f"/api/jobs/{job_id}",
+            period=period,
+            date=date,
+            cached=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "get_digest: arq enqueue failed period=%s date=%s: %s — running inline",
+            period, date, exc,
+        )
 
     return await _generate_digest(db, active_org.organization.id, period, date, project_id)
