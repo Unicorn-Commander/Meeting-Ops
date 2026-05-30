@@ -1,5 +1,51 @@
 ## [Unreleased]
 
+## [3.20.0] - 2026-05-30
+
+Single overnight arc that took Meeting-Ops from "polished dev" to "production live with revenue infrastructure + multi-AI-client integration story." Bundles the entire v3.18.3 (background-jobification + quality fixes) and v3.19+landing batches, plus: real Stripe products created in live mode, the centerdeep VPS prod stand-up at `meeting-ops.unicorncommander.ai`, hosted streamable-HTTP MCP at `/mcp`, dataintel auth re-pointed to commander Keycloak, and the auth-defer fix that stops backend hiccups from killing live meeting UIs.
+
+### Production infrastructure
+- `meeting-ops.unicorncommander.ai` LIVE on centerdeep VPS. Backend + frontend split via Traefik PathPrefix, dedicated `meet-postgres`, single-node Garage (both buckets bootstrapped + R/W/O keyed).
+- DNS via Cloudflare API; TLS via DNS-01 ACME through existing centerdeep Traefik.
+- Center Deep stack archived (11 containers stopped, volumes preserved). MinIO retired.
+- Dataintel re-pointed to commander `uchub-keycloak`. New `meeting-ops-prod` + `dataintel-prod` OIDC clients created via Keycloak admin API.
+- mem_limit + cpus retrofit on 16 unbounded centerdeep co-tenants.
+- Keycloak SMTP fix (port 465 SSL → port 25 plaintext to internal `smtp2graph`).
+
+### Stripe live mode
+- Products created via Stripe API: Meeting-Ops Pro $12 (`price_1TcbE0...`) + UC Suite $25 (`price_1TcbE1...`).
+- Webhook endpoint registered at `meetingops.magicunicorn.dev/api/stripe/webhook`.
+- Suite tier mapping in `services/stripe_client.py`.
+- `STRIPE_ALLOW_PROMO_CODES` env gate.
+- DEV_TEST_2026 internal coupon (100% off, max 5 redemptions).
+
+### Hosted MCP for external AI clients
+- Streamable-HTTP `/mcp` on both bigboy + VPS. PAT-based auth, per-user scoping.
+- Same FastMCP instance for stdio + HTTP transports (canonical in `backend/services/mcp_app.py`). Existing Claude Desktop user configs unaffected.
+- 16 tools (8 read + 6 propose/confirm/cancel from v3.13).
+- `docs/mcp-hosted.md` with snippets for Claude Desktop, Cursor, Continue, Zed, Cline.
+- 4 FastMCP gotchas documented in commit body (non-reentrant lifespan, mount root_path, DNS-rebinding gate, CORS bypass for arbitrary clients).
+
+### Auth-defer fix
+- `AuthContext` suppresses logout-on-401 when `localStorage.activeRecordingSession` or `alwaysOnRecorderState` indicates a live recording. New `authStaleDuringRecording` context field for future banner UI.
+- Caught after Aaron lost a meeting mid-v3.18.3 deploy cascade — each backend restart briefly 401'd `/api/auth/me` → forced redirect → tab destruction.
+
+### Public invite-only landing
+- New `frontend/src/pages/Landing.tsx` (hero + 3 product points + invite form). `VITE_LANDING_PAGE_ENABLED=true` on VPS, `false` on bigboy.
+- `POST /api/landing/invite-request` (alembic 035), rate-limited, idempotent, Postmark notify.
+
+### v3.18.3 background-jobification
+4 handlers (recording finalize, digest gen, TTS summary, TTS podcast) now return 202 + `{job_id, status_url}`; arq workers do the LLM/TTS work out-of-band; frontend polls `GET /api/jobs/{job_id}` with 2s→30s backoff. Closes Cloudflare 524 risk on those paths.
+
+### v3.18.3 quality fixes
+- Router prefix double-mount bug closed (simple_settings, ai_settings, agent_management, unified_agent now reachable).
+- `RECORDINGS_DIR` env honored in `working_audio_service.py`.
+- `audioop` guarded for Python 3.14 (`audioop_lts` fallback + `/health` degraded flag).
+- `ROOM_MODE_ENABLED` kill-switch (default ON for bigboy appliance, OFF for VPS cloud).
+- Full before-snapshot drift checks in `agent_write_tools.py`.
+- Defense-in-depth tier gates on session_emails / batch_export / 11 speakers write endpoints.
+
+
 ### v3.18.3 — Background-jobification of long-running handlers (Codex Performance Finding S1)
 
 Four HTTP handlers that ran server-side LLM work inline (and could exceed Cloudflare's 100s edge timeout, throwing 524 mid-meeting) now enqueue an arq job and return 202 + `{job_id, status_url}` immediately. The frontend polls `GET /api/jobs/{job_id}` on exponential backoff (2s → 30s) until the worker finishes.
