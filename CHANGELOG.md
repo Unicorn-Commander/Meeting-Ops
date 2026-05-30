@@ -1,8 +1,10 @@
 ## [Unreleased]
 
-### Changed
+## [3.22.1] - 2026-05-30
 
-- **Auth emails ported from SMTP to Postmark** (`backend/auth/email.py`). Both `send_verification_email` and `send_password_reset_email` now use the Postmark HTTP API — the same delivery path the v3.21.x landing-invite, support-contact, session-email, and session-permission flows already use. SMTP was never wired in prod, so signup verification silently no-op'd prior to this patch; password-reset emails likewise never went out. Token resolution (`POSTMARK_API_TOKEN` → `POSTMARK_SERVER_TOKEN`), message stream, and soft-fail-on-error semantics match the existing call sites. From address resolves `POSTMARK_FROM_EMAIL` (compose env, canonical) → `POSTMARK_FROM` (older call sites) → default `no-reply@meeting-ops.unicorncommander.ai`, with optional `POSTMARK_FROM_NAME` decoration. Function signatures unchanged so call sites in `auth/routes.py` need no update. SMTP code path removed — Postmark is the only transport now. Activation only requires `POSTMARK_API_TOKEN` to be set (it already is on bigboy + VPS prod); the sender signature must exist on the Postmark account.
+### Fixed
+
+- **Auth emails ported from SMTP to Postmark** (`backend/auth/email.py`). Both `send_verification_email` and `send_password_reset_email` now use the Postmark HTTP API — the same delivery path the v3.21.x landing-invite, support-contact, session-email, and session-permission flows already use. SMTP was never wired in prod, so signup verification silently no-op'd prior to this patch; password-reset emails likewise never went out (the v3.21.0 release notes incorrectly claimed Postmark for password reset — it was still on SMTP). Token resolution (`POSTMARK_API_TOKEN` → `POSTMARK_SERVER_TOKEN`), message stream, and soft-fail-on-error semantics match the existing call sites. From address resolves `POSTMARK_FROM_EMAIL` (compose env, canonical) → `POSTMARK_FROM` (older call sites) → default `no-reply@meeting-ops.unicorncommander.ai`, with optional `POSTMARK_FROM_NAME` decoration. Function signatures unchanged so call sites in `auth/routes.py` need no update. SMTP code path removed — Postmark is the only transport now. Requires `POSTMARK_API_TOKEN` (already set on both prod nodes) + a verified sender signature on the Postmark account matching `POSTMARK_FROM_EMAIL`.
 
 ## [3.22.0] - 2026-05-30
 
