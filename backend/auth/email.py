@@ -1,56 +1,109 @@
 """Transactional auth emails (verification, password reset).
 
-Self-contained on purpose: it reads SMTP settings from `auth_config` (the
-same place the rest of auth reads config) rather than depending on the
-meeting-summary `EmailService`, which has its own env names and templates.
+Delivery path: Postmark HTTP API, matching the rest of the v3.21.x email
+flows (`api/landing.py` invite-request, `api/support.py` contact form,
+`api/session_emails.py`, `api/session_permissions.py`). Same token resolution
+pattern (`POSTMARK_API_TOKEN` then `POSTMARK_SERVER_TOKEN`), same message
+stream, same soft-fail semantics. SMTP was the original transport; it was
+never wired in prod, so signup verification silently no-op'd until v3.22.1.
 
-Graceful degradation: if SMTP is not configured (no SMTP_HOST), we DON'T
-fail the request. We log the link at WARNING and return False. That keeps
-local dev + tests working without a mail server, and a misconfigured prod
-surfaces loudly in logs instead of 500-ing a signup. Callers treat send
-failure as non-fatal — the user can hit "resend" once mail is configured.
+From-address resolution (sender signature MUST match a Postmark verified
+signature or the API returns 422):
+  1. `POSTMARK_FROM_EMAIL` — canonical for the Meeting-Ops compose env
+     (`no-reply@meeting-ops.unicorncommander.ai` on VPS prod).
+  2. `POSTMARK_FROM` — back-compat with the older call sites in api/.
+  3. Default `no-reply@meeting-ops.unicorncommander.ai`.
+If `POSTMARK_FROM_NAME` is set we render `Name <email>`; bare email otherwise.
+
+Graceful degradation: if `POSTMARK_API_TOKEN`/`POSTMARK_SERVER_TOKEN` is
+not configured (local dev, tests) we log the link at WARNING and return
+False. We never raise — email is best-effort enrichment of the auth flow;
+a failed send must not 500 a signup or a password-reset request.
 """
 from __future__ import annotations
 
 import logging
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-
-from auth.config import auth_config
+import os
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "Meeting-Ops"
 
+_POSTMARK_TOKEN_ENVS = ("POSTMARK_API_TOKEN", "POSTMARK_SERVER_TOKEN")
+_DEFAULT_FROM_EMAIL = "no-reply@meeting-ops.unicorncommander.ai"
+
+
+def _postmark_token() -> str:
+    for name in _POSTMARK_TOKEN_ENVS:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _postmark_sender() -> str:
+    """Resolve the `From` header. Prefers POSTMARK_FROM_EMAIL (compose env),
+    falls back to POSTMARK_FROM (older call sites), then a hardcoded default
+    matching the Postmark sender signature."""
+    email = (
+        os.getenv("POSTMARK_FROM_EMAIL", "").strip()
+        or os.getenv("POSTMARK_FROM", "").strip()
+        or _DEFAULT_FROM_EMAIL
+    )
+    name = os.getenv("POSTMARK_FROM_NAME", "").strip()
+    if name:
+        return f"{name} <{email}>"
+    return email
+
 
 def _send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
-    """Send one email via auth_config SMTP. Returns True if handed to the
-    server, False (logged) if SMTP isn't configured or the send failed.
-    Never raises — email is best-effort enrichment of the auth flow."""
-    if not auth_config.SMTP_HOST:
+    """Send one transactional email via the Postmark HTTP API. Returns True
+    on a 2xx from Postmark, False (logged) otherwise. Never raises — a
+    failed send is a logged warning, the caller proceeds."""
+    token = _postmark_token()
+    if not token:
         logger.warning(
-            "SMTP not configured (SMTP_HOST unset); not sending %r to %s. "
-            "Body preview: %s",
+            "Postmark not configured (POSTMARK_API_TOKEN unset); not sending "
+            "%r to %s. Body preview: %s",
             subject, to_email, text_body[:200],
         )
         return False
+
+    sender = _postmark_sender()
+    stream = os.getenv("POSTMARK_MESSAGE_STREAM", "outbound").strip() or "outbound"
+
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = auth_config.SMTP_FROM_EMAIL
-        msg["To"] = to_email
-        msg.attach(MIMEText(text_body, "plain"))
-        msg.attach(MIMEText(html_body, "html"))
-        with smtplib.SMTP(auth_config.SMTP_HOST, auth_config.SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            if auth_config.SMTP_USER and auth_config.SMTP_PASSWORD:
-                server.login(auth_config.SMTP_USER, auth_config.SMTP_PASSWORD)
-            server.sendmail(auth_config.SMTP_FROM_EMAIL, [to_email], msg.as_string())
-        logger.info("Sent %r to %s", subject, to_email)
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                "https://api.postmarkapp.com/email",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-Postmark-Server-Token": token,
+                },
+                json={
+                    "From": sender,
+                    "To": to_email,
+                    "Subject": subject,
+                    "HtmlBody": html_body,
+                    "TextBody": text_body,
+                    "MessageStream": stream,
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(
+                "auth email: postmark non-200 (%s) sending %r to %s: %s",
+                resp.status_code, subject, to_email, resp.text[:300],
+            )
+            return False
+        logger.info("Sent %r to %s via Postmark", subject, to_email)
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to send %r to %s: %s", subject, to_email, exc)
+        logger.warning(
+            "auth email: postmark send failed for %r to %s: %s",
+            subject, to_email, exc,
+        )
         return False
 
 
