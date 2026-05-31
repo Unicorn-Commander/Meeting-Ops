@@ -568,10 +568,28 @@ export default function AlwaysOnControl() {
     [alwaysOn.summary.slices],
   );
   const latestSliceId = orderedSlices[0]?.id;
-  const thresholdLabel = useMemo(() => {
-    const match = LIVE_SUMMARY_THRESHOLDS.find((t) => t.id === alwaysOn.autoConfig.threshold);
-    return match?.label ?? '';
-  }, [alwaysOn.autoConfig.threshold]);
+  const thresholdSpec = useMemo(
+    () => LIVE_SUMMARY_THRESHOLDS.find((t) => t.id === alwaysOn.autoConfig.threshold),
+    [alwaysOn.autoConfig.threshold],
+  );
+  const thresholdLabel = thresholdSpec?.label ?? '';
+  // v3.22.3 progress hint. For word-based thresholds, surface
+  // "234 / 500 words to next summary" + a thin progress bar so the user
+  // can see how close the next slice is. For time-based thresholds we
+  // can't compute progress from context state (lastAutoFireRef is
+  // private to AlwaysOnContext) so we fall back to the existing total
+  // word count + threshold label. Cheap, additive — no state change.
+  const wordsSinceLastSummary = Math.max(
+    0,
+    alwaysOn.transcriptWordCount - alwaysOn.summary.lastWordCountAtSummary,
+  );
+  const isWordsBased = thresholdSpec?.kind === 'words';
+  const wordsToNext = isWordsBased && thresholdSpec
+    ? Math.max(0, thresholdSpec.value - wordsSinceLastSummary)
+    : null;
+  const wordProgressPct = isWordsBased && thresholdSpec
+    ? Math.min(100, Math.round((wordsSinceLastSummary / thresholdSpec.value) * 100))
+    : null;
 
   const toggleSlice = (id: string) => {
     setExpandedSliceIds((prev) => {
@@ -1074,15 +1092,32 @@ export default function AlwaysOnControl() {
       ) : (
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
           <div>
-            <div className="mb-2 flex items-center justify-between">
-              <label className="block text-sm font-medium text-zinc-300">Live summary</label>
-              <span className="text-xs text-zinc-500">
-                {alwaysOn.autoConfig.enabled
-                  ? `Auto-updates ${thresholdLabel.toLowerCase()}`
-                  : 'Manual mode'}
-                {' · '}
-                {alwaysOn.transcriptWordCount} words
-              </span>
+            <div className="mb-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-sm font-medium text-zinc-300">Live summary</label>
+                <span className="text-xs text-zinc-500">
+                  {alwaysOn.autoConfig.enabled
+                    ? isWordsBased && thresholdSpec
+                      ? `${wordsSinceLastSummary} / ${thresholdSpec.value} words to next${wordsToNext === 0 ? ' (firing…)' : ''}`
+                      : `Auto-updates ${thresholdLabel.toLowerCase()} · ${alwaysOn.transcriptWordCount} words total`
+                    : `Manual mode · ${alwaysOn.transcriptWordCount} words`}
+                </span>
+              </div>
+              {alwaysOn.autoConfig.enabled && isWordsBased && wordProgressPct !== null && (
+                <div
+                  className="mt-1 h-1 w-full overflow-hidden rounded bg-zinc-800"
+                  role="progressbar"
+                  aria-valuenow={wordProgressPct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label="Words until next live summary"
+                >
+                  <div
+                    className="h-full bg-sky-400 transition-all"
+                    style={{ width: `${wordProgressPct}%` }}
+                  />
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">

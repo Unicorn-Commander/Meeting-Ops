@@ -62,11 +62,29 @@ function isAudioSourceMode(value: unknown): value is AudioSourceMode {
   return value === 'mic' || value === 'tab' || value === 'mic+tab';
 }
 
+/**
+ * Smart device-class default. Aaron's instinct (v3.22.3 2026-05-30):
+ * desktop browsers usually mean "I'm on a Zoom/Meet/Teams call and want
+ * to capture the meeting audio plus my mic" — so the right default on
+ * desktops with getDisplayMedia is `mic+tab`. Phones/tablets can't
+ * capture tab audio anyway (Safari blocks getDisplayMedia audio capture
+ * on iOS as of 17; Android Chromium is hit-or-miss), and on mobile most
+ * meetings are in-person — so `mic` is the right default there.
+ *
+ * isTabCaptureSupported() is our proxy for "desktop with capability":
+ * Chromium-desktop returns true; mobile + Safari + Firefox-without-
+ * permission return false. Once the user explicitly picks a mode, their
+ * choice is stored and this default is moot.
+ */
+function defaultAudioSourceMode(): AudioSourceMode {
+  return isTabCaptureSupported() ? 'mic+tab' : 'mic';
+}
+
 export function getAudioSourceMode(): AudioSourceMode {
   const ls = safeLocalStorage();
-  if (!ls) return 'mic';
+  if (!ls) return defaultAudioSourceMode();
   const raw = ls.getItem(AUDIO_SOURCE_MODE_KEY);
-  return isAudioSourceMode(raw) ? raw : 'mic';
+  return isAudioSourceMode(raw) ? raw : defaultAudioSourceMode();
 }
 
 export function setAudioSourceMode(mode: AudioSourceMode): void {

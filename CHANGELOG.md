@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+## [3.22.3] - 2026-05-31
+
+Quality-of-life polish + smarter first-run defaults. Two narrow changes.
+
+### Changed
+- **Audio source default is now device-class aware** (`utils/audioSourceStream.ts`). On desktops with `getDisplayMedia` (Chromium-desktop) the first-run default flips from `mic` to `mic+tab` (Me + system audio), because most desktop users are on Zoom/Meet/Teams calls and want to capture the meeting plus their mic. On phones/tablets/Safari/older browsers (no tab capture support) the default stays `mic` — those users are typically in-person and tab capture isn't supported anyway. User's explicit choice is still remembered in localStorage; this only changes the very-first-time-they-open-the-app default.
+
+### Added
+- **Live-summary progress hint** (`components/AlwaysOnControl.tsx`). The "Live summary" header now shows `234 / 500 words to next` plus a thin progress bar that fills as you talk, instead of just "234 words". The data was already tracked (`transcriptWordCount` + `summary.lastWordCountAtSummary`); just surfacing it. Time-based thresholds (every 1 minute / 5 minutes) keep the existing total-word-count display since the live timer state lives in a ref we can't read from the component.
+
+### Notes
+- No backend changes, no alembic, no env, no compose. Pure frontend rebuild.
+- v3.22.3 ships on top of v3.22.2's PWA-disabled state — still no service worker.
+
 ## [3.22.2] - 2026-05-30
 
 Emergency hotfix. After v3.22.1 deploy, both bigboy + VPS users got stuck in a tight service-worker registration loop — browsers polling `GET /sw.js` 10+ times per second, pages never settling. Production was unusable.
