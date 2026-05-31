@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.22.4] - 2026-05-31
+
+### Added
+- **Refresh guard while recording** (`components/RecordingIndicator.tsx`). When `RecordingContext.isRecording` is true OR `AlwaysOnContext.state` is in `starting | recording | paused | stopping`, the page registers a `beforeunload` handler that triggers the browser's native "Leave site? Changes you made may not be saved" prompt on refresh / tab close / window close. Before this, hitting refresh during an active recording would silently kill the MediaRecorder (and the live transcript + current summary slice) with no warning. Chunks uploaded so far are safe on the server, but anything in flight or unsent is gone. The handler is a no-op when nothing is being captured so we don't nag during normal browsing.
+
 ## [3.22.3] - 2026-05-31
 
 Quality-of-life polish + smarter first-run defaults. Two narrow changes.
