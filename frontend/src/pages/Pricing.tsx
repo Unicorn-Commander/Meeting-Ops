@@ -16,6 +16,7 @@ import {
   startPortal,
   BillingUnavailableError,
 } from '../services/billingApi';
+import LegalFooter from '../components/LegalFooter';
 
 type Plan = {
   name: string;
@@ -352,6 +353,9 @@ export const Pricing: React.FC = () => {
             </div>
           </section>
         </main>
+
+        {/* v3.22.5 legal footer for unauthenticated marketing pages. */}
+        <LegalFooter />
       </div>
     </div>
   );

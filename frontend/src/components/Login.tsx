@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { config } from '../config';
 import { redirectToLogin } from '../utils/loginRedirect';
+import LegalFooter from './LegalFooter';
 
 type VerifyState = 'success' | 'invalid' | null;
 
@@ -312,6 +313,9 @@ export const Login: React.FC = () => {
             </div>
           </section>
         </main>
+
+        {/* v3.22.5 legal footer for unauthenticated marketing pages. */}
+        <LegalFooter />
       </div>
     </div>
   );

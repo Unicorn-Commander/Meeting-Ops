@@ -15,6 +15,7 @@
 import React, { useState } from 'react';
 import { Lock, Sparkles, Plug, ArrowRight } from 'lucide-react';
 import { config } from '../config';
+import LegalFooter from '../components/LegalFooter';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
 
@@ -244,6 +245,12 @@ export const Landing: React.FC = () => {
             </p>
           </div>
         </footer>
+
+        {/* v3.22.5 unified legal footer (Terms / Privacy / Acceptable
+            Use / Contact Support / copyright). Mirrors the authed
+            AppLayout footer so every public surface exposes the same
+            legal nav. */}
+        <LegalFooter />
       </div>
     </div>
   );

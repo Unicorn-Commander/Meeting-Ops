@@ -9,6 +9,7 @@ import {
   UserRoundPlus,
 } from 'lucide-react';
 import { config } from '../config';
+import LegalFooter from '../components/LegalFooter';
 
 function extractApiError(payload: unknown, fallback: string): string {
   if (!payload || typeof payload !== 'object') return fallback;
@@ -345,6 +346,9 @@ export const Signup: React.FC = () => {
             )}
           </section>
         </main>
+
+        {/* v3.22.5 legal footer for unauthenticated marketing pages. */}
+        <LegalFooter />
       </div>
     </div>
   );

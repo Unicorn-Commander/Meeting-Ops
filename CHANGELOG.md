@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- **Legal pages**: Terms of Service (`/terms`), Privacy Policy (`/privacy`), Acceptable Use Policy (`/aup`). Tailored for Magic Unicorn Unconventional Technology & Stuff Inc. (SC C-Corp): mandatory arbitration under SC law, liability cap at 12 months of fees ($100 for Free users), refund policy (7-day monthly / 30-day prorated annual), GDPR + CCPA compliance, HIPAA only on Enterprise + signed BAA. Recording Consent Disclosure in AUP makes the user solely responsible for participant consent under their jurisdiction's laws (critical for two-party-consent states). Footer with Terms / Privacy / Acceptable Use / Contact links added to authed AppLayout, Landing, Signup, Login, Pricing.
+
 ## [3.22.4] - 2026-05-31
 
 ### Added
