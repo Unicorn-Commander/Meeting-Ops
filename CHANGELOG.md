@@ -3,6 +3,18 @@
 ### Fixed
 - **Stuck-state recovery for AlwaysOn recording** (`contexts/AlwaysOnContext.tsx` + `components/AlwaysOnControl.tsx` + watchdog). When the page mounts with localStorage claiming an active recording but the server says the session is `failed`/`completed`/`stopped` (or doesn't exist), the client now wipes the local claim instead of blocking Record. A "Reset recording state" escape-hatch button surfaces when the client's recording state is `recording` but no MediaRecorder is actually capturing. Backend Arq watchdog now fails stale recording sessions at 30 minutes idle instead of 6 hours — catches phone-tab-eviction much faster.
 
+### Added
+- **Annual Pro pricing** — Pro tier now offers an annual billing cycle at **$120/year** ($10/mo billed annually, save $24 vs the $144/yr cost at the monthly rate). The Pricing page gains a Monthly / Annual toggle on the Pro card; default stays Monthly. Annual variant adds a small "Save 2 mo" badge and inline copy: "Annual saves $24 — billed yearly, cancel anytime." Subscribe passes `billing_cycle: "monthly" | "annual"` to `/api/billing/checkout`. Backend `tier_to_price_id` resolves `STRIPE_PRO_ANNUAL_PRICE_ID` when annual; safe-falls back to monthly with warn log if env is unset.
+- **Pro Annual price live in Stripe** — `price_1TdcTfDzk9HqAZnHl979Vv0M` (lookup key `pro_annual_2026`, $120/year). Needs `STRIPE_PRO_ANNUAL_PRICE_ID` env on both nodes before annual checkout works in production.
+
+### Changed
+- **Founding 100 page reframed to "Coming soon"** (`frontend/src/pages/Founding100.tsx`). Holds off promoting membership until a package worthy of it lands. Page leads with "Founding 100 — Coming soon", swaps CTA for a "Notify me" waitlist form posting to `/api/landing/invite-request`. Seat counter reframes "2 / 100" as "2 early supporters and counting". Perks reframed "What it will include." Backend grant gate stays armed.
+
+### Notes
+- Frontend version intentionally not bumped — rolls into v3.22.5 at merge time.
+- Deploy env required for full functionality: `STRIPE_PRO_ANNUAL_PRICE_ID=price_1TdcTfDzk9HqAZnHl979Vv0M` and `SESSION_WATCHDOG_MINUTES=30` on both nodes.
+- Founding 100 waitlist re-uses `InviteRequest` rows; when cohort opens, an operator can pull the waitlist before flipping `is_open`.
+
 ## [3.22.4] - 2026-05-31
 
 ### Added

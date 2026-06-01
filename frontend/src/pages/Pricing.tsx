@@ -15,6 +15,7 @@ import {
   startCheckout,
   startPortal,
   BillingUnavailableError,
+  type BillingCycle,
 } from '../services/billingApi';
 
 type Plan = {
@@ -106,18 +107,24 @@ export const Pricing: React.FC = () => {
   const navigate = useNavigate();
   const [checkoutBusy, setCheckoutBusy] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  // Pro tier billing cycle toggle. Default "monthly" — the upgrade journey
+  // we already know works. "annual" routes to the $120/year price (save $24).
+  const [proCycle, setProCycle] = useState<BillingCycle>('monthly');
   const loggedIn = isLoggedIn();
 
   const handleSubscribe = async (plan: 'pro') => {
     setCheckoutError(null);
     if (!loggedIn) {
       // Carry the intent through signup so the user lands back here.
-      navigate(`/signup?return_to=${encodeURIComponent('/pricing')}`);
+      // Preserve the cycle preference so the post-signup return doesn't
+      // silently drop them back to monthly.
+      const returnTo = `/pricing?cycle=${proCycle}`;
+      navigate(`/signup?return_to=${encodeURIComponent(returnTo)}`);
       return;
     }
     setCheckoutBusy(plan);
     try {
-      await startCheckout(plan);
+      await startCheckout(plan, plan === 'pro' ? proCycle : 'monthly');
       // startCheckout redirects on success; if we're still here, it failed.
     } catch (err) {
       const msg =
@@ -216,7 +223,14 @@ export const Pricing: React.FC = () => {
           )}
 
           <div className="mt-10 grid gap-4 lg:grid-cols-3">
-            {plans.map((plan) => (
+            {plans.map((plan) => {
+              const isPro = plan.name === 'Pro';
+              const isAnnualPro = isPro && proCycle === 'annual';
+              // Pro card swaps price + suffix based on the toggle. Annual:
+              // $120/year (save $24 vs $144 at monthly rate).
+              const displayPrice = isAnnualPro ? '$120' : plan.price;
+              const displaySuffix = isAnnualPro ? '/ year' : plan.priceSuffix;
+              return (
               <article
                 key={plan.name}
                 className={`rounded-3xl border p-6 shadow-xl shadow-black/20 ${
@@ -233,17 +247,70 @@ export const Pricing: React.FC = () => {
                     </div>
                     <div className="flex items-baseline gap-2">
                       <div className="text-3xl font-semibold tracking-tight text-white">
-                        {plan.price}
+                        {displayPrice}
                       </div>
-                      {plan.priceSuffix && (
-                        <div className="text-sm text-zinc-400">{plan.priceSuffix}</div>
+                      {displaySuffix && (
+                        <div className="text-sm text-zinc-400">{displaySuffix}</div>
                       )}
                     </div>
+                    {isPro && (
+                      <div
+                        className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-zinc-900/60 p-1 text-xs"
+                        role="tablist"
+                        aria-label="Pro billing cycle"
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={proCycle === 'monthly'}
+                          onClick={() => setProCycle('monthly')}
+                          className={`rounded-full px-3 py-1 transition ${
+                            proCycle === 'monthly'
+                              ? 'bg-white text-zinc-950'
+                              : 'text-zinc-300 hover:text-white'
+                          }`}
+                        >
+                          Monthly
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={proCycle === 'annual'}
+                          onClick={() => setProCycle('annual')}
+                          className={`inline-flex items-center gap-1 rounded-full px-3 py-1 transition ${
+                            proCycle === 'annual'
+                              ? 'bg-white text-zinc-950'
+                              : 'text-zinc-300 hover:text-white'
+                          }`}
+                        >
+                          Annual
+                          <span
+                            className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                              proCycle === 'annual'
+                                ? 'bg-emerald-500/15 text-emerald-700'
+                                : 'bg-emerald-500/20 text-emerald-200'
+                            }`}
+                          >
+                            Save 2 mo
+                          </span>
+                        </button>
+                      </div>
+                    )}
                     <div className="text-sm text-zinc-400">{plan.note}</div>
+                    {isAnnualPro && (
+                      <div className="text-xs text-emerald-200">
+                        Annual saves $24 — billed yearly, cancel anytime.
+                      </div>
+                    )}
+                    {isPro && proCycle === 'monthly' && (
+                      <div className="text-xs text-zinc-500">
+                        Switch to Annual to save $24 ($10/mo, billed yearly).
+                      </div>
+                    )}
                   </div>
                   {plan.highlight && (
                     <span className="rounded-full border border-fuchsia-400/40 bg-fuchsia-400/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-fuchsia-100">
-                      Most popular
+                      {isAnnualPro ? 'Best value' : 'Most popular'}
                     </span>
                   )}
                 </div>
@@ -311,7 +378,8 @@ export const Pricing: React.FC = () => {
                   )}
                 </div>
               </article>
-            ))}
+            );
+            })}
           </div>
 
           <section

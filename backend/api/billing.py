@@ -55,6 +55,14 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 class CheckoutRequest(BaseModel):
     plan: str = Field(default="pro", description="Plan name: 'pro' or 'enterprise'.")
+    billing_cycle: str = Field(
+        default="monthly",
+        description=(
+            "Billing cycle for the chosen plan: 'monthly' or 'annual'. "
+            "Pro is the only plan with an annual option in v3.22.5. "
+            "Annual on Pro is $120/year (save $24 vs monthly)."
+        ),
+    )
     # Optional return URLs — frontend usually omits and we use defaults.
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
@@ -119,7 +127,13 @@ async def create_checkout(
 ) -> CheckoutResponse:
     """Create a Stripe Checkout session for the current user."""
     _ensure_configured()
-    price_id = stripe_client.tier_to_price_id(payload.plan)
+    cycle = (payload.billing_cycle or "monthly").lower()
+    if cycle not in ("monthly", "annual"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown billing_cycle '{payload.billing_cycle}'. Use 'monthly' or 'annual'.",
+        )
+    price_id = stripe_client.tier_to_price_id(payload.plan, billing_cycle=cycle)
     if not price_id:
         # Enterprise has no public Checkout — it's a sales motion.
         if payload.plan == "enterprise":
