@@ -27,6 +27,7 @@ import {
   type OpenedAudioSource,
 } from '../utils/audioSourceStream';
 import {
+  isAlwaysOnActive,
   isRecordActive,
   setAlwaysOnActive,
 } from '../utils/recordingPresence';
@@ -284,6 +285,25 @@ export interface AlwaysOnContextValue {
   resumeOrphanSession: (sessionId: string) => Promise<void>;
   /** Drop the local chunks for an orphan without uploading. */
   discardOrphanSession: (sessionId: string) => Promise<void>;
+  /**
+   * v3.22.5 — True when the context claims an active recording but the
+   * underlying capture pipeline appears dead. AlwaysOnControl uses this
+   * to surface the "Reset recording state" escape hatch. Specifically:
+   * state is in ``recording`` / ``paused`` / ``starting`` / ``stopping``
+   * AND it's been more than ~60s since any audio chunk produced new
+   * activity. Returns ``false`` while idle, immediately after start
+   * (during the warm-up window), and during a healthy session where
+   * chunks are flowing.
+   */
+  isStuck: boolean;
+  /**
+   * v3.22.5 — Manual escape hatch for stuck recording state. AlwaysOnControl
+   * surfaces a "Reset recording state" button when ``isStuck`` is true.
+   * On click this wipes the local claim, marks the server-side session
+   * failed (best-effort POST /stop), and returns the context to idle.
+   * Safe to call when nothing is live — every step is idempotent.
+   */
+  resetStuckState: (sessionIdHint?: string | null) => Promise<void>;
 }
 
 const AlwaysOnContext = createContext<AlwaysOnContextValue | null>(null);
@@ -451,6 +471,16 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef<AlwaysOnState>('idle');
   const sessionRef = useRef<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  // v3.22.5 — stuck-state detection. We bump this whenever an audio
+  // chunk lands (any path — server-text, server-audio, local-only) by
+  // mirroring chunksUploaded into a ref via the effect below. The
+  // health check derives ``isStuck`` from now() - lastChunkAtRef vs a
+  // 60s threshold (longer than the engine's 30s silence timeout, so
+  // truly-silent rooms don't trip it; shorter than the 90s "phone tab
+  // probably got swapped" window). null = no chunk has ever landed in
+  // the current session (warm-up window).
+  const lastChunkAtRef = useRef<number | null>(null);
+  const [isStuck, setIsStuck] = useState<boolean>(false);
   const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
   const splitInFlightRef = useRef(false);
   const summarizeAbortRef = useRef<AbortController | null>(null);
@@ -1434,6 +1464,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     startedAtRef.current = Date.now();
     setSessionStartedAt(new Date().toISOString());
     setElapsedSeconds(0);
+    // v3.22.5 — reset stuck-state telemetry. Fresh session = warm-up
+    // window restarts; no chunks landed yet.
+    lastChunkAtRef.current = null;
+    setIsStuck(false);
 
     // Lock the privacy mode for this session at start. Free-tier users
     // do not have canonical_reprocess, so their effective mode is
@@ -2230,6 +2264,62 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     triggerSummarize,
   ]);
 
+  // v3.22.5 — bump the lastChunkAt ref on every chunk arrival. Mirroring
+  // the state into a ref keeps the chunk-upload hot path untouched (we
+  // don't have to thread a setter through every code path) — the
+  // monotonic `chunksUploaded` counter is the trigger.
+  useEffect(() => {
+    if (chunksUploaded > 0) {
+      lastChunkAtRef.current = Date.now();
+    }
+  }, [chunksUploaded]);
+
+  // v3.22.5 — stuck-state derivation. Active-but-silent for >60s while
+  // claiming to be in a recording-ish state means the MediaRecorder
+  // pipeline is dead (phone tab eviction, AudioContext closed, engine
+  // crashed silently). We tick every 5s and only flip true when the
+  // signals line up cleanly — false positives surface a destructive
+  // button to the user and Aaron explicitly said "the check has to be
+  // tight."
+  //
+  // We also require *some* warm-up has elapsed (15s minimum) so the
+  // button doesn't flicker on right after Start while the engine is
+  // still booting and no chunks have landed yet.
+  useEffect(() => {
+    const claimsActive =
+      state === 'recording' || state === 'paused'
+      || state === 'starting' || state === 'stopping';
+    if (!claimsActive) {
+      if (isStuck) setIsStuck(false);
+      return;
+    }
+    const STALE_AFTER_MS = 60_000;
+    const WARMUP_MS = 15_000;
+    const check = () => {
+      const sessionStart = startedAtRef.current;
+      const lastChunk = lastChunkAtRef.current;
+      const elapsedSinceStart = sessionStart ? Date.now() - sessionStart : 0;
+      // Warm-up: don't flip stuck within the first 15s of a session.
+      // The first chunk takes the engine boot + first speech detection
+      // window to land, which can be up to ~10s in pathological cases.
+      if (elapsedSinceStart < WARMUP_MS) {
+        if (isStuck) setIsStuck(false);
+        return;
+      }
+      // After warm-up: stuck = no engine, OR no chunk has ever landed,
+      // OR last chunk is older than 60s.
+      const noEngine = !engineRef.current;
+      const noChunkEver = lastChunk === null;
+      const chunkTooOld =
+        lastChunk !== null && Date.now() - lastChunk > STALE_AFTER_MS;
+      const stuckNow = noEngine || noChunkEver || chunkTooOld;
+      if (stuckNow !== isStuck) setIsStuck(stuckNow);
+    };
+    check();
+    const tick = window.setInterval(check, 5_000);
+    return () => window.clearInterval(tick);
+  }, [state, isStuck]);
+
   useEffect(() => () => {
     summarizeAbortRef.current?.abort();
     transcriptSocketRef.current?.close();
@@ -2255,6 +2345,241 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // the next mount shouldn't think a stale always-on session is live.
     setAlwaysOnActive(false);
   }, []);
+
+  // ---------------------------------------------------------------
+  // v3.22.5 — Stuck-state recovery on mount.
+  // ---------------------------------------------------------------
+  //
+  // The problem this solves: phones (and any tab the OS evicts hard)
+  // can be killed mid-recording WITHOUT firing the unmount cleanup. The
+  // ``meetingops.alwayson.active`` flag stays "true" in localStorage,
+  // and the next time the user opens the page, every Record surface
+  // (LiveRecording / DesktopBrowserRecorder / MobileLiveRecording) sees
+  // ``isAlwaysOnActive()=true`` via the cross-surface guard and refuses
+  // to start. Aaron hit this on 2026-06-01 — iPhone Chrome got evicted,
+  // server-side session 213 was stuck at status=recording for 21 min
+  // (the 6h watchdog hadn't fired yet), and Record was blocked on next
+  // visit until the row was manually cleared.
+  //
+  // The recovery: on mount, if the localStorage flag claims an active
+  // always-on session but our context just initialized to ``idle`` with
+  // no engine / no in-flight session, the previous tab clearly died
+  // without cleanup. We probe the server for any active recording
+  // sessions in this user's scope; if the server agrees there's nothing
+  // running (or the server says the most-recent claimed session is
+  // already failed/completed/stopped/has ended_at), we wipe the local
+  // claim. If the server probe FAILS (network error / 401 / 5xx) we
+  // leave the flag intact — could be a transient blip; user keeps their
+  // existing UX, and they can use the "Reset recording state" escape
+  // hatch in AlwaysOnControl.
+  //
+  // We do NOT touch persisted summary slices on disk — those belong to
+  // the dead session, not the active claim. The in-memory summary
+  // slices are already empty (we just mounted).
+  const stuckStateRanRef = useRef(false);
+  useEffect(() => {
+    if (stuckStateRanRef.current) return;
+    if (typeof window === 'undefined') return;
+    // Only run once per mount, and only if there's actually a stale
+    // claim to investigate.
+    if (!isAlwaysOnActive()) return;
+    if (stateRef.current !== 'idle') return;
+    if (engineRef.current) return;
+    if (sessionRef.current) return;
+    stuckStateRanRef.current = true;
+
+    // Defer the probe until after the first paint so we don't compete
+    // with the rest of the provider's init work.
+    const handle = window.setTimeout(() => {
+      void (async () => {
+        let token: string | null = null;
+        try {
+          token = window.localStorage?.getItem('access_token') ?? null;
+        } catch {
+          /* storage disabled — treat as missing token */
+        }
+
+        const wipe = (reason: string) => {
+          setAlwaysOnActive(false);
+          // eslint-disable-next-line no-console
+          console.info(
+            `[always-on] stuck-state recovery: ${reason}, wiping local claim`,
+          );
+        };
+
+        if (!token) {
+          // No auth token. Either the user just opened the app for the
+          // first time and never logged in, OR they got logged out
+          // while the flag was set. Either way, the alwayson claim is
+          // meaningless without an authenticated session — wipe it so
+          // the post-login Record button isn't blocked.
+          wipe('no auth token but local flag is set');
+          return;
+        }
+
+        // Probe the server for any user-scoped sessions still in
+        // status=recording. If the server agrees there's nothing
+        // running, the local claim is stale. Most-recent first so we
+        // can act on the first row that comes back.
+        const headers: Record<string, string> = {
+          Authorization: `Bearer ${token}`,
+        };
+        if (activeOrganization?.slug) {
+          headers['X-MeetingOps-Org'] = activeOrganization.slug;
+        }
+
+        let probeResp: Response;
+        try {
+          probeResp = await fetch(
+            `${config.apiUrl}/api/simple/recording-sessions?limit=25`,
+            { method: 'GET', headers, credentials: 'include' },
+          );
+        } catch (err) {
+          // Network blip — leave the flag intact, user can use the
+          // escape hatch. We log so future debugging is fast.
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[always-on] stuck-state probe network error; leaving local claim intact:',
+            err,
+          );
+          return;
+        }
+        if (!probeResp.ok) {
+          // 401 / 500 / etc. We can't tell from here whether the user is
+          // genuinely recording — fail safe (don't wipe).
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[always-on] stuck-state probe HTTP ${probeResp.status}; leaving local claim intact`,
+          );
+          return;
+        }
+
+        let rows: Array<{
+          session_id?: string;
+          id?: string;
+          status?: string;
+          ended_at?: string | null;
+        }> = [];
+        try {
+          const data = await probeResp.json();
+          rows = Array.isArray(data) ? data : (data?.sessions ?? []);
+        } catch {
+          // Bogus response — fail safe.
+          return;
+        }
+
+        const activeRecording = rows.find((r) => {
+          const status = String(r?.status ?? '').toLowerCase();
+          // A live row is status='recording' with no ended_at. Anything
+          // else (failed / completed / stopped / processing / etc.) is
+          // not actively capturing audio — even 'processing' means the
+          // server reprocess is running, and the browser surface for
+          // that session is already finalized.
+          if (status !== 'recording') return false;
+          if (r?.ended_at) return false;
+          return true;
+        });
+
+        if (!activeRecording) {
+          wipe(
+            `server returned ${rows.length} sessions, none in status=recording without ended_at`,
+          );
+        } else {
+          // Server agrees there's a live row. We can't reasonably
+          // recover the React state for it (no audio stream, no
+          // engine, no session id wired into the provider) — the
+          // localStorage flag is now correct insurance against the
+          // explicit Record button stomping on a still-running
+          // upstream session. Leave it alone; user explicitly
+          // resolves via the Reset button or stop UI elsewhere.
+          // eslint-disable-next-line no-console
+          console.info(
+            `[always-on] stuck-state recovery: server says session ${activeRecording.session_id ?? activeRecording.id} is recording, leaving local claim intact`,
+          );
+        }
+      })();
+    }, 250);
+
+    return () => window.clearTimeout(handle);
+  }, [activeOrganization]);
+
+  /**
+   * Manual escape hatch for the "Reset recording state" button in
+   * AlwaysOnControl. Wipes the cross-surface claim, drops any in-memory
+   * remnants of an old session, and best-effort POSTs /stop to the
+   * server for the claimed session id so the row is marked failed
+   * without waiting for the watchdog cron. Safe to call when nothing is
+   * actually live — every step is idempotent.
+   */
+  const resetStuckState = useCallback(async (sessionIdHint?: string | null) => {
+    // Best-effort server-side stop. Only fires when we have a session
+    // id to address. The endpoint is idempotent and tolerates an
+    // already-failed row.
+    const candidate = sessionIdHint || sessionRef.current;
+    if (candidate && !candidate.startsWith('local-')) {
+      try {
+        let token: string | null = null;
+        try {
+          token = window.localStorage?.getItem('access_token') ?? null;
+        } catch {
+          /* ignore */
+        }
+        const headers: Record<string, string> = {};
+        if (token) headers.Authorization = `Bearer ${token}`;
+        if (activeOrganization?.slug) {
+          headers['X-MeetingOps-Org'] = activeOrganization.slug;
+        }
+        await fetch(
+          `${config.apiUrl}/api/simple/recording-sessions/${candidate}/stop`,
+          { method: 'POST', headers, credentials: 'include' },
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[always-on] reset stuck state: server stop failed:', err);
+      }
+    }
+
+    // Tear down any half-alive engine + recorder. These are no-ops if
+    // they were never spun up.
+    try {
+      fullAudioRecorderRef.current?.stop().catch(() => undefined);
+    } catch {
+      /* ignore */
+    }
+    fullAudioRecorderRef.current = null;
+    try {
+      await engineRef.current?.stop();
+    } catch {
+      /* ignore */
+    }
+    engineRef.current = null;
+    if (openedSourceRef.current) {
+      try {
+        openedSourceRef.current.cleanup();
+      } catch {
+        /* ignore */
+      }
+      openedSourceRef.current = null;
+    }
+
+    sessionRef.current = null;
+    setCurrentSessionId(null);
+    setSessionStartedAt(null);
+    startedAtRef.current = null;
+    setSummary(EMPTY_SUMMARY);
+    setLiveTranscript([]);
+    setChunksUploaded(0);
+    setVadActive(false);
+    setState('idle');
+    setStatusText('Idle');
+    activeLocalOnlyRef.current = false;
+    setActiveLocalOnly(false);
+    setAlwaysOnActive(false);
+    lastChunkAtRef.current = null;
+    setIsStuck(false);
+    // eslint-disable-next-line no-console
+    console.info('[always-on] stuck-state manually reset by user');
+  }, [activeOrganization]);
 
   /**
    * Hard-delete the current session and reset to idle. Server-backed
@@ -2538,6 +2863,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     resumingOrphan,
     resumeOrphanSession,
     discardOrphanSession,
+    isStuck,
+    resetStuckState,
   }), [
     state,
     vadActive,
@@ -2585,6 +2912,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     resumingOrphan,
     resumeOrphanSession,
     discardOrphanSession,
+    isStuck,
+    resetStuckState,
   ]);
 
   return (

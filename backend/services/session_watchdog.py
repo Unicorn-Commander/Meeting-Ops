@@ -9,9 +9,16 @@ zombie pile-up on 2026-05-29: 7 sessions in ``status='recording'`` for
 2-9 days, leading to a 524 mid-meeting).
 
 Safe by construction:
-  - Only flips sessions whose ``updated_at`` is older than ``SESSION_WATCHDOG_HOURS``
-    (default 6). Real long-running always-on sessions get a new ``updated_at``
-    every time a chunk lands, so they don't trip this.
+  - Only flips sessions whose ``updated_at`` is older than the threshold.
+    The default is ``SESSION_WATCHDOG_MINUTES`` (default 30 minutes, v3.22.5),
+    superseding the legacy ``SESSION_WATCHDOG_HOURS`` knob (kept for back-compat
+    — if both are set, MINUTES wins; if only HOURS is set, we still honor it).
+    Real long-running always-on sessions get a new ``updated_at`` every time a
+    chunk lands (~every 30 s), so 30 min of zero activity is the right signal
+    that a phone tab got evicted or a desktop tab crashed — the original 6 h
+    threshold was sized for desktop "leave the laptop running overnight" use
+    and didn't catch phone-tab eviction (see 2026-06-01 incident: phone Chrome
+    tab evicted at 21 min stale, blocked Record on next visit).
   - Audio is preserved — the Garage object stays, ``audio_object_key`` stays
     on the row. Only ``status`` and ``ended_at`` flip; the watchdog never
     deletes data.
@@ -32,11 +39,39 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _hours() -> int:
-    try:
-        return max(1, int(os.getenv("SESSION_WATCHDOG_HOURS", "6")))
-    except ValueError:
-        return 6
+# Default idle threshold. Phones lose their service worker / MediaRecorder
+# the moment the OS swaps the tab out of foreground (often <5 min on iOS).
+# 30 minutes is "definitely dead, but won't trip a healthy chunk cadence" —
+# the FullAudioRecorder uploads every 30s, so a live session is touched
+# 60x within the window.
+DEFAULT_WATCHDOG_MINUTES = 30
+
+
+def _threshold_minutes() -> int:
+    """Resolved idle threshold, in minutes.
+
+    Precedence:
+      1. ``SESSION_WATCHDOG_MINUTES`` (new in v3.22.5; preferred)
+      2. ``SESSION_WATCHDOG_HOURS`` (legacy; multiplied by 60)
+      3. :data:`DEFAULT_WATCHDOG_MINUTES`
+
+    Always returns a value >= 1 minute. The MINUTES knob takes priority even
+    when HOURS is also set, so a deploy can opt in to the new default by just
+    unsetting HOURS (which most prod envs don't set explicitly anyway).
+    """
+    raw_minutes = os.getenv("SESSION_WATCHDOG_MINUTES")
+    if raw_minutes is not None:
+        try:
+            return max(1, int(raw_minutes))
+        except ValueError:
+            pass
+    raw_hours = os.getenv("SESSION_WATCHDOG_HOURS")
+    if raw_hours is not None:
+        try:
+            return max(1, int(raw_hours) * 60)
+        except ValueError:
+            pass
+    return DEFAULT_WATCHDOG_MINUTES
 
 
 def _max_per_pass() -> int:
@@ -65,13 +100,17 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
     from database.database import SessionLocal
     from database.models import RecordingSession
 
-    threshold_hours = _hours()
+    threshold_minutes = _threshold_minutes()
+    # Legacy field kept for back-compat with any caller / dashboard parsing
+    # the old key. New code should read ``threshold_minutes``.
+    threshold_hours_legacy = round(threshold_minutes / 60, 3)
     cap = _max_per_pass()
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=threshold_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
 
     summary = {
         "enabled": True,
-        "threshold_hours": threshold_hours,
+        "threshold_minutes": threshold_minutes,
+        "threshold_hours": threshold_hours_legacy,
         "candidates": 0,
         "marked_failed": 0,
         "skipped_cap": 0,
@@ -119,11 +158,25 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
                 md = dict(sess.processing_metadata or {})
                 md["auto_failed_reason"] = (
                     f"abandoned: status=recording with no updates for >"
-                    f"{threshold_hours}h (session_watchdog)"
+                    f"{threshold_minutes}m (session_watchdog)"
                 )
                 md["auto_failed_at"] = now.isoformat()
                 sess.processing_metadata = md
                 summary["marked_failed"] += 1
+                # Structured log line — prod monitoring (loki on centerdeep)
+                # greps for this prefix to count force-fail rate. Phone-tab
+                # eviction shows up here, so a sudden spike is the canary
+                # for "Free mobile users are losing recordings".
+                logger.warning(
+                    "session_watchdog.force_fail session_id=%s db_id=%s "
+                    "user_id=%s org_id=%s idle_minutes=%d threshold_minutes=%d",
+                    getattr(sess, "session_id", None),
+                    getattr(sess, "id", None),
+                    getattr(sess, "user_id", None),
+                    getattr(sess, "organization_id", None),
+                    threshold_minutes,
+                    threshold_minutes,
+                )
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 logger.warning(
