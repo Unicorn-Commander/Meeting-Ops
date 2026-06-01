@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+- **Annual Pro pricing** — Pro tier now offers an annual billing cycle at **$120/year** ($10/mo billed annually, save $24 vs the $144/yr cost at the monthly rate). The Pricing page (`frontend/src/pages/Pricing.tsx`) gains a Monthly / Annual toggle on the Pro card; default stays Monthly. Annual variant adds a small "Save 2 mo" badge and inline copy: "Annual saves $24 — billed yearly, cancel anytime." The Subscribe button on Pro now passes `billing_cycle: "monthly" | "annual"` to `/api/billing/checkout`. Backend `services/stripe_client.py::tier_to_price_id(tier, billing_cycle="monthly")` resolves `STRIPE_PRO_ANNUAL_PRICE_ID` when `billing_cycle="annual"` and `plan="pro"`; falls back to monthly with a warning if the annual env is unset (so a misconfigured node doesn't 400 the user). `price_id_to_tier` also recognises the annual price ID as `"pro"`. No annual option on Suite or Enterprise yet.
+- **Pro Annual price live in Stripe** — `price_1TdcTfDzk9HqAZnHl979Vv0M` (lookup key `pro_annual_2026`, $120/year, attached to existing product `prod_UborP589krk3ur`). Needs to be set as `STRIPE_PRO_ANNUAL_PRICE_ID` env on both bigboy + majiks-vps deploys before annual checkout works in production.
+- **Backend `CheckoutRequest.billing_cycle`** (`backend/api/billing.py`). New optional field, default `"monthly"`. Validated to `monthly | annual`; unknown values 400. Backwards compatible — existing callers that omit the field keep getting monthly Pro.
+- **Frontend `startCheckout(plan, billingCycle)`** (`frontend/src/services/billingApi.ts`). Adds a `BillingCycle = 'monthly' | 'annual'` exported type and second arg, default monthly. Pricing page passes the user's toggle selection.
+
+### Changed
+- **Founding 100 page reframed to "Coming soon"** (`frontend/src/pages/Founding100.tsx`). The cohort marketing isn't ready yet — Aaron's call is to hold off promoting the membership until we have a package worthy of it. The page now leads with "Founding 100 — Coming soon", swaps the "Become a Founding member" CTA for a "Notify me" waitlist form that POSTs the email to `/api/landing/invite-request` (idempotent, reused from the landing page). The seat counter stays visible but reframes "2 / 100 filled" as "2 early supporters and counting" so the two backfilled seats don't look weird while closed. Perks section now reads "What it will include / Six perks reserved for the first 100." The page still calls `GET /api/founding/status?cohort=meeting_ops_v1`; if the cohort flips open server-side ahead of marketing, a quiet inline "Already an annual customer? Go to pricing" link surfaces — but the public CTA stays the waitlist until packaging lands. **The backend grant gate stays armed and untouched**: the Stripe webhook still grants Founding 100 on annual checkout when the cohort is open. Aaron drives cohort open/close from the cohort-open kill switch, not from this page.
+
+### Notes
+- Frontend version intentionally not bumped — rolls into v3.22.5 at merge time.
+- Deploy env required for full functionality: `STRIPE_PRO_ANNUAL_PRICE_ID=price_1TdcTfDzk9HqAZnHl979Vv0M` on both bigboy + majiks-vps (`deploy/bigboy/.env.bigboy` and majiks equivalent). Without it, annual checkout transparently falls back to monthly with a warn log — safe-fail rather than 400.
+- Founding 100 waitlist re-uses `InviteRequest` rows; when we open the cohort, an operator can pull the waitlist from the `invite_requests` table to send the announce mail before flipping the `is_open` flag.
+
 ## [3.22.4] - 2026-05-31
 
 ### Added

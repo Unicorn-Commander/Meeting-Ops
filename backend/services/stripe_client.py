@@ -98,10 +98,11 @@ def price_id_to_tier(price_id: Optional[str]) -> str:
     price IDs default to 'free' so a misconfigured webhook can't silently
     upgrade someone.
 
-    Aaron's pricing decisions (locked 2026-05-29):
-      Free        = $0,  browser-only
-      Pro         = $12, individual — Meeting-Ops only
-      Suite       = $25, individual — Meeting-Ops + Project-Ops + Contact-Ops
+    Aaron's pricing decisions (locked 2026-05-29, annual added 2026-06-01):
+      Free        = $0,    browser-only
+      Pro         = $12,   individual — Meeting-Ops only (monthly)
+      Pro Annual  = $120,  individual — Meeting-Ops only ($10/mo billed annually, save $24)
+      Suite       = $25,   individual — Meeting-Ops + Project-Ops + Contact-Ops
       Enterprise  = custom, on-prem
 
     The Suite tier carries the same effective TIER_FEATURES as Pro
@@ -109,13 +110,20 @@ def price_id_to_tier(price_id: Optional[str]) -> str:
     difference is access to the sister apps (Project-Ops + Contact-Ops),
     which is enforced at those apps' auth layers, not here. Within Meeting-Ops
     a Suite subscriber and a Pro subscriber experience the same product.
+
+    Pro Annual maps to "pro" — same product, just different billing cadence.
+    The annual price ID is what triggers Founding 100 grant in the Stripe
+    webhook (recurring.interval == "year"), separate from tier mapping.
     """
     if not price_id:
         return "free"
     pro = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
+    pro_annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
     suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
     ent = os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip()
     if pro and price_id == pro:
+        return "pro"
+    if pro_annual and price_id == pro_annual:
         return "pro"
     if suite and price_id == suite:
         # Suite subscribers map to "pro" inside Meeting-Ops — same tier features.
@@ -144,12 +152,47 @@ def price_id_is_suite(price_id: str) -> bool:
     return bool(suite) and price_id == suite
 
 
-def tier_to_price_id(tier: str) -> Optional[str]:
+def tier_to_price_id(tier: str, billing_cycle: str = "monthly") -> Optional[str]:
     """Reverse of price_id_to_tier — used by /billing/checkout to translate
     the plan name from the request body into the Stripe price ID. Accepts
-    "pro" (Meeting-Ops only), "suite" (UC Suite), and "enterprise"."""
+    "pro" (Meeting-Ops only), "suite" (UC Suite), and "enterprise".
+
+    `billing_cycle`:
+      - "monthly" (default): returns the monthly recurring price.
+      - "annual":  for plan="pro", returns STRIPE_PRO_ANNUAL_PRICE_ID
+                   ($120/year, save $24 vs $144/yr at monthly rate).
+                   For other plans, annual is not offered yet — falls
+                   through to the monthly price (safe default).
+
+    `billing_cycle="annual"` on plan="pro" is the trigger that drives the
+    Founding 100 grant downstream in the Stripe webhook (the webhook
+    detects `recurring.interval == "year"`). The grant gate stays
+    server-side; this function only chooses the price.
+    """
     tier = (tier or "").lower()
+    cycle = (billing_cycle or "monthly").lower()
     if tier == "pro":
+        if cycle == "annual":
+            annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+            if annual:
+                return annual
+            # Annual env not set — fall through to monthly so a
+            # misconfigured node doesn't 400 the user.
+            logger.warning(
+                "billing_cycle='annual' requested for plan='pro' but "
+                "STRIPE_PRO_ANNUAL_PRICE_ID is unset; falling back to monthly."
+            )
+        return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
+    if tier == "pro_annual":
+        # Convenience alias: someone passing plan="pro_annual" directly
+        # gets the annual price without needing to also pass billing_cycle.
+        annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+        if annual:
+            return annual
+        logger.warning(
+            "plan='pro_annual' requested but STRIPE_PRO_ANNUAL_PRICE_ID "
+            "is unset; falling back to monthly pro price."
+        )
         return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
     if tier == "suite":
         return os.getenv("STRIPE_SUITE_PRICE_ID", "").strip() or None

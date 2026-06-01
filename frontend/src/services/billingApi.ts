@@ -71,18 +71,29 @@ async function postBilling<T>(path: string, body?: object): Promise<T> {
   return (await r.json()) as T;
 }
 
+export type BillingCycle = 'monthly' | 'annual';
+
 /**
  * Start a Stripe Checkout session for the given plan and redirect the
  * browser to the hosted Checkout URL.
  *
  * `plan` is "pro" (Aaron's only Checkout-able tier in v1).
+ * `billingCycle` defaults to 'monthly'. 'annual' on Pro maps to the
+ * $120/year price ($10/mo billed annually, save $24 vs the $144/yr
+ * cost of monthly).
  *
  * Returns void — the redirect happens synchronously. Callers wanting
  * to handle errors should `await startCheckout(...)` inside a try/catch
  * and toast on the rethrown error.
  */
-export async function startCheckout(plan: string): Promise<void> {
-  const data = await postBilling<CheckoutResponse>('/api/billing/checkout', { plan });
+export async function startCheckout(
+  plan: string,
+  billingCycle: BillingCycle = 'monthly',
+): Promise<void> {
+  const data = await postBilling<CheckoutResponse>('/api/billing/checkout', {
+    plan,
+    billing_cycle: billingCycle,
+  });
   if (data.url) {
     window.location.href = data.url;
   } else {

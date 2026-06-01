@@ -1,31 +1,34 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  ArrowRight,
   CalendarCheck2,
   Crown,
   Gift,
   Headphones,
   Lock,
+  Mail,
   MessageSquare,
   Sparkles,
   Vote,
 } from 'lucide-react';
 import { config } from '../config';
 
-// Public Founding 100 page (v3.21.0).
+// Public Founding 100 page (v3.21.0 → v3.22.5).
 //
 // Fetches GET /api/founding/status?cohort=meeting_ops_v1 (no auth, cached
-// 60s) and renders:
-//   - "X / 100 seats filled" headline
-//   - progress bar
-//   - perks list (lifetime price-lock, Discord, advisory council seat,
-//     quarterly roadmap vote, annual founders summit, cross-app early
-//     access)
-//   - CTA → /pricing when is_open, "Cohort closed" message otherwise
+// 60s).
 //
-// The Founding 100 cohort is grant-on-annual-upfront only. The /pricing
-// page owns the actual purchase flow; we just send people there.
+// v3.22.5 reframe: the Founding 100 cohort is "Coming soon" until the
+// packaging is ready. The backend grant mechanism stays armed — the
+// /api/founding/status endpoint still exposes `is_open`, and the Stripe
+// webhook still grants on annual checkout when the cohort flips open —
+// but we don't surface a Subscribe CTA here. Instead we collect a
+// waitlist via POST /api/landing/invite-request, same endpoint the
+// landing page uses. When we open the cohort, we re-mail the list
+// before turning the public CTA back on.
+//
+// The seat counter stays visible (reframed as "early supporters") so the
+// two already-backfilled seats don't look weird while "coming soon."
 
 interface FoundingStatus {
   cohort: string;
@@ -76,6 +79,11 @@ const PERKS: Perk[] = [
 export const Founding100: React.FC = () => {
   const [status, setStatus] = useState<FoundingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [waitlistEmail, setWaitlistEmail] = useState('');
+  const [waitlistState, setWaitlistState] = useState<
+    'idle' | 'submitting' | 'submitted' | 'error'
+  >('idle');
+  const [waitlistError, setWaitlistError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,9 +110,51 @@ export const Founding100: React.FC = () => {
   }, []);
 
   const seatsTaken = status?.seats_taken ?? 0;
-  const seatsTotal = status?.seats_total ?? 100;
-  const pct = Math.min(100, Math.round((seatsTaken / Math.max(1, seatsTotal)) * 100));
-  const isOpen = status?.is_open ?? true;
+  // While "coming soon" we still surface the seat count, but reframed
+  // as supporters and counting (not "/ 100 filled") so the backfilled
+  // seats don't read as awkward during the closed period.
+  const isOpen = status?.is_open ?? false;
+
+  async function handleWaitlistSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setWaitlistError(null);
+    const email = waitlistEmail.trim();
+    if (!email) {
+      setWaitlistError('Please enter a valid email address.');
+      return;
+    }
+    setWaitlistState('submitting');
+    try {
+      // POST to /api/landing/invite-request — the same endpoint the
+      // landing page uses. When we open the cohort, we'll re-mail this
+      // list before flipping the public CTA. The endpoint is idempotent
+      // server-side (silently no-ops on duplicates), so re-submits are safe.
+      const r = await fetch(`${config.apiBaseUrl}/api/landing/invite-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      if (!r.ok) {
+        if (r.status === 429) {
+          throw new Error('Too many requests — try again in a few minutes.');
+        }
+        let detail = `${r.status} ${r.statusText}`;
+        try {
+          const data = await r.json();
+          if (data?.detail) detail = data.detail;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      setWaitlistState('submitted');
+    } catch (err) {
+      setWaitlistState('error');
+      setWaitlistError(
+        err instanceof Error ? err.message : 'Could not submit. Try again in a moment.',
+      );
+    }
+  }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -131,33 +181,35 @@ export const Founding100: React.FC = () => {
 
         <main className="flex-1 py-10">
           <section className="space-y-6">
-            <div className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1 text-xs font-medium text-fuchsia-200">
+            <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-200">
               <Crown className="h-3.5 w-3.5" />
-              Meeting-Ops v1 cohort
+              Meeting-Ops v1 cohort · Coming soon
             </div>
             <div className="space-y-4">
               <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                The first 100 annual customers shape what gets built.
+                Founding 100 — Coming soon.
               </h1>
               <p className="max-w-2xl text-base leading-7 text-zinc-300">
-                We are running Meeting-Ops as a private-and-fast platform first. The
-                Founding 100 keep us honest — direct access, a real vote on the
-                roadmap, and the same price forever. No discount; just a seat at
-                the table.
+                We&rsquo;re putting together a package worthy of the first hundred
+                believers. The cohort opens when it&rsquo;s right. Stay close —
+                we&rsquo;ll announce it before we open seats.
               </p>
             </div>
 
             <div className="rounded-3xl border border-white/10 bg-zinc-900/80 p-6 shadow-2xl shadow-black/30 backdrop-blur">
               {error && (
                 <div className="mb-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                  We could not reach the seat counter ({error}). Try again in a minute.
+                  We could not reach the supporter counter ({error}). Try again in a minute.
                 </div>
               )}
               <div className="flex items-end justify-between gap-4">
                 <div>
-                  <div className="text-sm font-medium text-zinc-300">Seats filled</div>
+                  <div className="text-sm font-medium text-zinc-300">Early supporters</div>
                   <div className="mt-1 text-4xl font-semibold tracking-tight text-white">
-                    {seatsTaken} <span className="text-zinc-500">/ {seatsTotal}</span>
+                    {seatsTaken}{' '}
+                    <span className="text-base font-normal text-zinc-400">
+                      and counting
+                    </span>
                   </div>
                 </div>
                 <div className="text-right text-sm text-zinc-400">
@@ -165,42 +217,77 @@ export const Founding100: React.FC = () => {
                   <span className="font-mono text-zinc-200">meeting_ops_v1</span>
                 </div>
               </div>
-              <div
-                className="mt-5 h-3 w-full overflow-hidden rounded-full bg-white/5"
-                role="progressbar"
-                aria-valuenow={seatsTaken}
-                aria-valuemin={0}
-                aria-valuemax={seatsTotal}
-              >
-                <div
-                  className="h-full bg-gradient-to-r from-fuchsia-500 to-violet-500 transition-all"
-                  style={{ width: `${pct}%` }}
-                />
-              </div>
 
-              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                {isOpen ? (
-                  <>
-                    <div className="text-sm text-zinc-300">
-                      The cohort is open. Annual plans only — monthly plans are not part of Founding 100.
-                    </div>
-                    <Link
-                      to="/pricing"
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-500 to-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-fuchsia-500/20 transition hover:from-fuchsia-400 hover:to-violet-400"
-                    >
-                      <ArrowRight className="h-4 w-4" />
-                      Become a Founding member
-                    </Link>
-                  </>
-                ) : (
-                  <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    <strong className="font-semibold">Cohort closed — thank you.</strong>{' '}
-                    The Meeting-Ops v1 Founding 100 is now full. Annual customers
-                    can still join Pro, but cohort perks are reserved for the
-                    first 100.
-                  </div>
-                )}
-              </div>
+              <form
+                onSubmit={handleWaitlistSubmit}
+                className="mt-6 flex flex-col gap-3 sm:flex-row"
+              >
+                <label htmlFor="founding-waitlist-email" className="sr-only">
+                  Email address
+                </label>
+                <input
+                  id="founding-waitlist-email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  inputMode="email"
+                  value={waitlistEmail}
+                  onChange={(e) => setWaitlistEmail(e.target.value)}
+                  placeholder="you@work.com"
+                  disabled={waitlistState === 'submitting' || waitlistState === 'submitted'}
+                  className="flex-1 rounded-xl border border-white/10 bg-zinc-950/60 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-fuchsia-400/60 focus:outline-none focus:ring-1 focus:ring-fuchsia-400/40 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <button
+                  type="submit"
+                  disabled={waitlistState === 'submitting' || waitlistState === 'submitted'}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-500 to-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-fuchsia-500/20 transition hover:from-fuchsia-400 hover:to-violet-400 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Mail className="h-4 w-4" />
+                  {waitlistState === 'submitting'
+                    ? 'Saving…'
+                    : waitlistState === 'submitted'
+                      ? 'On the list'
+                      : 'Notify me'}
+                </button>
+              </form>
+
+              {waitlistState === 'submitted' && (
+                <div
+                  className="mt-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100"
+                  role="status"
+                >
+                  You&rsquo;re on the list. We&rsquo;ll email{' '}
+                  <span className="font-mono text-emerald-200">
+                    {waitlistEmail.trim()}
+                  </span>{' '}
+                  before we open the cohort.
+                </div>
+              )}
+              {waitlistState === 'error' && waitlistError && (
+                <div
+                  className="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+                  role="alert"
+                >
+                  {waitlistError}
+                </div>
+              )}
+
+              {isOpen && (
+                // Defensive: backend flipped the cohort open without us
+                // shipping the new package. Surface a quiet inline link
+                // rather than failing closed — Aaron's call to keep the
+                // grant gate armed, just not promoted here.
+                <div className="mt-4 text-sm text-zinc-400">
+                  Already an annual customer?{' '}
+                  <Link
+                    to="/pricing"
+                    className="text-fuchsia-200 underline-offset-4 hover:underline"
+                  >
+                    Go to pricing
+                  </Link>
+                  .
+                </div>
+              )}
             </div>
           </section>
 
@@ -208,10 +295,10 @@ export const Founding100: React.FC = () => {
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-200">
                 <Gift className="h-3.5 w-3.5" />
-                What you get
+                What it will include
               </div>
               <h2 className="text-2xl font-semibold tracking-tight text-white">
-                Six perks as part of the first 100.
+                Six perks reserved for the first 100.
               </h2>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
