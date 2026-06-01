@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, useEffect } from 'react';
 import {
   Activity,
+  AlertTriangle,
   ChevronDown,
   ChevronUp,
   Clock,
@@ -727,6 +728,41 @@ export default function AlwaysOnControl() {
           {alwaysOn.error && (
             <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
               {alwaysOn.error}
+            </div>
+          )}
+          {/* v3.22.5 — stuck-state escape hatch. Surfaces only when the
+              context's isStuck signal is set: state claims active +
+              >60s warm-up elapsed + (no engine OR no chunks ever OR
+              last chunk >60s stale). Tight check by design (Aaron's
+              "false positives are bad UX"); shouldn't flicker during
+              a healthy recording. */}
+          {alwaysOn.isStuck && (
+            <div
+              role="alert"
+              className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">Recording appears stuck</div>
+                  <p className="mt-0.5 text-xs leading-5 text-amber-200/90">
+                    The recorder is claiming to be active but no audio has
+                    been captured for over a minute. This usually means the
+                    browser tab was suspended (common on phones). Reset to
+                    free up Record for a fresh session.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void alwaysOn.resetStuckState(alwaysOn.currentSessionId);
+                    }}
+                    className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-100 hover:bg-zinc-700"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Reset recording state
+                  </button>
+                </div>
+              </div>
             </div>
           )}
           {alwaysOn.paidFeaturePrompt && (

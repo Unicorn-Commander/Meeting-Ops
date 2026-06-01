@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- **Stuck-state recovery for AlwaysOn recording** (`contexts/AlwaysOnContext.tsx` + `components/AlwaysOnControl.tsx` + watchdog). When the page mounts with localStorage claiming an active recording but the server says the session is `failed`/`completed`/`stopped` (or doesn't exist), the client now wipes the local claim instead of blocking Record. A "Reset recording state" escape-hatch button surfaces when the client's recording state is `recording` but no MediaRecorder is actually capturing. Backend Arq watchdog now fails stale recording sessions at 30 minutes idle instead of 6 hours — catches phone-tab-eviction much faster.
+
 ## [3.22.4] - 2026-05-31
 
 ### Added
