@@ -22,7 +22,7 @@
       // the rewrite the hash is set, so the guard is false.
       (function () {
         var path = window.location.pathname.replace(/\/+$/, '');
-        if (!window.location.hash && /^\/(pricing|signup|login)$/.test(path)) {
+        if (!window.location.hash && /^\/(pricing|signup|login|terms|privacy|aup|founding-100|contact|forgot-password|reset-password)$/.test(path)) {
           window.location.replace(
             window.location.origin + '/#' + path + window.location.search
           );
