@@ -44,6 +44,15 @@ export interface TierFeatures {
   bulk_import: boolean;
   max_sessions_per_month: number | null;
   max_session_minutes: number | null;
+  // v3.23.0 5-tier matrix gates. Backend may or may not return these yet;
+  // useTierFeatures + the hook default everything to false until the
+  // server-side TIER_FEATURES table grows the matching keys.
+  audio_upload: boolean;
+  server_text_storage: boolean;
+  ai_chat_over_corpus: boolean;
+  cross_meeting_search: boolean;
+  uc_suite_entitlement: boolean;
+  byok_models: boolean;
 }
 
 /**
@@ -66,6 +75,14 @@ export const DEFAULT_TIER_FEATURES: TierFeatures = {
   bulk_import: false,
   max_sessions_per_month: 50,
   max_session_minutes: 60,
+  // v3.23.0: default false on first paint so premium surfaces don't flash
+  // open before /api/auth/me lands. Pro+ users get them via tier_features.
+  audio_upload: false,
+  server_text_storage: false,
+  ai_chat_over_corpus: false,
+  cross_meeting_search: false,
+  uc_suite_entitlement: false,
+  byok_models: false,
 };
 
 export interface User {

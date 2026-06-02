@@ -25,11 +25,12 @@ describe('Landing', () => {
       </MemoryRouter>,
     );
 
-    // Hero
+    // Hero — v3.23.0 reposition to "meeting and conversation
+    // intelligence platform" category claim.
     expect(
       screen.getByRole('heading', {
         level: 1,
-        name: /meeting transcription that actually stays private\./i,
+        name: /meeting and conversation intelligence that stays private\./i,
       }),
     ).toBeInTheDocument();
 

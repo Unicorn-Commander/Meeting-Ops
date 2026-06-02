@@ -24,6 +24,7 @@ import { useOrg } from '../contexts/OrgContext';
 import { TagChip } from '../components/TagChip';
 import MobileSessionsList from '../components/MobileSessionsList';
 import { UpgradeBanner } from '../components/UpgradeBanner';
+import { useTierFeatures } from '../hooks/useTierFeatures';
 import {
   deleteLocalSession,
   isLocalSessionId,
@@ -599,6 +600,13 @@ export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const { startUploads } = useUploads();
   const { activeOrganization } = useOrg();
+  // v3.23.0 — gate the "Upload Audio/Video" surface on the new
+  // `audio_upload` tier flag. Free + Basic stay browser-only for audio;
+  // Pro+ keeps the existing upload path. The hook defaults to false
+  // while /api/auth/me is in flight so the button doesn't flash for
+  // free users on first paint.
+  const { hasFeature } = useTierFeatures();
+  const canUploadAudio = hasFeature('audio_upload');
   const [searchParams, setSearchParams] = useSearchParams();
   // Active tag filter chips (AND). Server applies the filter via ?tags=
   // so the UI never has to reason about which sessions to hide locally.
@@ -1541,13 +1549,19 @@ export const Sessions: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => uploadInputRef.current?.click()}
-              className="flex items-center gap-2 rounded-lg bg-cyan-600 px-5 py-3 text-white transition-colors hover:bg-cyan-500"
-            >
-              <Upload className="w-5 h-5" />
-              Upload Audio/Video
-            </button>
+            {/* v3.23.0: Upload Audio/Video only renders for Pro+ tiers
+                (audio_upload tier flag). Free + Basic users stay
+                browser-only for audio; the New Session path still
+                works for them. */}
+            {canUploadAudio && (
+              <button
+                onClick={() => uploadInputRef.current?.click()}
+                className="flex items-center gap-2 rounded-lg bg-cyan-600 px-5 py-3 text-white transition-colors hover:bg-cyan-500"
+              >
+                <Upload className="w-5 h-5" />
+                Upload Audio/Video
+              </button>
+            )}
             <button
               onClick={() => setShowCreator(true)}
               className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
@@ -1556,14 +1570,16 @@ export const Sessions: React.FC = () => {
               New Session
             </button>
           </div>
-          <input
-            ref={uploadInputRef}
-            type="file"
-            multiple
-            accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.flac,.opus,.aac,.mp4,.mov,.mkv,.webm,.avi"
-            onChange={handleUploadPicked}
-            className="hidden"
-          />
+          {canUploadAudio && (
+            <input
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.flac,.opus,.aac,.mp4,.mov,.mkv,.webm,.avi"
+              onChange={handleUploadPicked}
+              className="hidden"
+            />
+          )}
         </div>
 
         {/* Controls */}
