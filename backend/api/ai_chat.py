@@ -239,9 +239,12 @@ async def send_chat_message(
 ):
     """Send a message about a meeting and get an AI response using the real LLM."""
 
-    # v3.18.2 tier gate: per-session AI chat calls the server LLM with the
-    # meeting transcript as context. Free tier is browser-only.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    # v3.23.0 tier gate: per-session AI chat over the corpus is a TEXT
+    # operation (read transcript text, run the server LLM with it as
+    # context). Basic, Pro, Suite, Enterprise all get this — Free is
+    # still browser-only. Was canonical_reprocess until v3.22.x; switched
+    # so Basic users (text tier) can ask questions about their meetings.
+    gate_feature_for_caller(current_user, "ai_chat_over_corpus")
 
     # Look up the recording session
     session = db.query(DBRecordingSession).filter(
@@ -506,9 +509,10 @@ async def rag_query(
     and sends to Granite 3.3 2B for an answer citing which meeting each fact
     comes from. Uses chat history for query rewriting and conversational context.
     """
-    # v3.18.2 tier gate: cross-meeting RAG calls the server LLM with
-    # retrieved transcript chunks. Free tier is browser-only.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    # v3.23.0 tier gate: cross-meeting RAG is a TEXT-search-plus-LLM op
+    # over the user's existing server-stored transcript corpus. Basic
+    # tier ships with this enabled. Free is browser-only.
+    gate_feature_for_caller(current_user, "cross_meeting_search")
 
     import time
 

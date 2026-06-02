@@ -52,8 +52,61 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
         "agent_write_basic": True,
         "agent_write_reprocess": False,
         "agent_write_email_draft": False,
+        # v3.23.0 5-tier matrix gates. Free is fully browser-only: no
+        # audio upload, no server text storage, no server-corpus chat /
+        # search, no cross-app entitlement, no BYOK.
+        "audio_upload": False,
+        "server_text_storage": False,
+        "ai_chat_over_corpus": False,
+        "cross_meeting_search": False,
+        "uc_suite_entitlement": False,
+        "byok_models": False,
         "max_sessions_per_month": 50,
         "max_session_minutes": 60,
+    },
+    "basic": {
+        # v3.23.0 Basic tier ($7.99/mo, $79/yr). Architectural rule:
+        # Basic gets server-side TEXT processing (search, chat-over-corpus,
+        # cross-device sync of artifacts). Pro gets server-side AUDIO
+        # processing (canonical_reprocess, diarization, summary, speaker
+        # library, etc.). A Basic user records on-device just like a Free
+        # user, but their transcript/summary/action-items are stored on
+        # the server and synced across devices, and they can run AI Chat
+        # / search across their library.
+        "server_live": False,
+        "diarization": False,
+        "live_diarization": False,
+        # No server-side summary pass: Basic relies on the browser LLM
+        # for summarization, then ships the resulting text up to the
+        # server for storage + corpus retrieval.
+        "qwen36_summary": False,
+        # speaker_library depends on canonical_reprocess (server-side
+        # diarization + embeddings) — not in Basic.
+        "speaker_library": False,
+        "retention_controls": False,
+        "brigade_byok": False,
+        "hipaa": False,
+        # NO canonical server reprocess pass — that's the line between
+        # Basic (text) and Pro (audio).
+        "canonical_reprocess": False,
+        # No Brigade graph writes (depends on server-side processed
+        # speaker/entity extraction).
+        "brigade_integration": False,
+        # Text artifacts sync across devices; audio does NOT — that's
+        # the Pro-line moat.
+        "cross_device_sync": True,
+        "bulk_import": False,
+        "agent_write_basic": True,
+        "agent_write_reprocess": False,
+        "agent_write_email_draft": True,
+        "audio_upload": False,
+        "server_text_storage": True,
+        "ai_chat_over_corpus": True,
+        "cross_meeting_search": True,
+        "uc_suite_entitlement": False,
+        "byok_models": False,
+        "max_sessions_per_month": None,
+        "max_session_minutes": None,
     },
     "pro": {
         "server_live": True,
@@ -77,7 +130,47 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
         "agent_write_basic": True,
         "agent_write_reprocess": True,
         "agent_write_email_draft": True,
+        "audio_upload": True,
+        "server_text_storage": True,
+        "ai_chat_over_corpus": True,
+        "cross_meeting_search": True,
+        "uc_suite_entitlement": False,
+        "byok_models": False,
         "max_sessions_per_month": None,  # unlimited
+        "max_session_minutes": None,
+    },
+    "suite": {
+        # v3.23.0 Suite tier ($35/mo, $350/yr). Same Meeting-Ops surface
+        # as Pro — the "Suite" value-add is `uc_suite_entitlement`, which
+        # the sibling UC apps (Project-Ops, Contact-Ops) read to give the
+        # user Pro-tier benefits there. That cross-app sync is gated on
+        # Brigade federation deploy; until that lands, the entitlement is
+        # documentation-only and Meeting-Ops alone honors the flag.
+        "server_live": True,
+        "diarization": True,
+        # live_diarization stays Enterprise / Founding 100 only — Aaron's
+        # call on v3.20.1 was that the always-on Sortformer GPU cost only
+        # makes sense for the top tier.
+        "live_diarization": False,
+        "qwen36_summary": True,
+        "speaker_library": True,
+        "retention_controls": False,
+        "brigade_byok": False,
+        "hipaa": False,
+        "canonical_reprocess": True,
+        "brigade_integration": True,
+        "cross_device_sync": True,
+        "bulk_import": True,
+        "agent_write_basic": True,
+        "agent_write_reprocess": True,
+        "agent_write_email_draft": True,
+        "audio_upload": True,
+        "server_text_storage": True,
+        "ai_chat_over_corpus": True,
+        "cross_meeting_search": True,
+        "uc_suite_entitlement": True,
+        "byok_models": False,
+        "max_sessions_per_month": None,
         "max_session_minutes": None,
     },
     "enterprise": {
@@ -96,6 +189,12 @@ TIER_FEATURES: dict[str, dict[str, Any]] = {
         "agent_write_basic": True,
         "agent_write_reprocess": True,
         "agent_write_email_draft": True,
+        "audio_upload": True,
+        "server_text_storage": True,
+        "ai_chat_over_corpus": True,
+        "cross_meeting_search": True,
+        "uc_suite_entitlement": True,
+        "byok_models": True,
         "max_sessions_per_month": None,
         "max_session_minutes": None,
     },
@@ -122,7 +221,16 @@ _KNOWN_FEATURES: frozenset[str] = frozenset().union(
 
 
 # Ordinal rank for tier comparisons. Higher number = more capabilities.
-_TIER_RANK: dict[str, int] = {"free": 0, "pro": 1, "enterprise": 2}
+# v3.23.0: 5-tier matrix. Basic slots between free and pro; Suite slots
+# between pro and enterprise. Code that does `_TIER_RANK[user_tier] >=
+# _TIER_RANK[min_tier]` keeps working unchanged.
+_TIER_RANK: dict[str, int] = {
+    "free": 0,
+    "basic": 1,
+    "pro": 2,
+    "suite": 3,
+    "enterprise": 4,
+}
 
 
 def get_user_tier(user: User) -> str:

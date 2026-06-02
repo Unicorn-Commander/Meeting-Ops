@@ -325,7 +325,12 @@ async def start_upload(
         raise HTTPException(status_code=400, detail="action must be 'transcribe' or 'attach'.")
 
     if request.action == "transcribe":
-        gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
+        # v3.23.0 tier gate: switched from canonical_reprocess →
+        # audio_upload. Basic tier ($7.99) gets server text storage +
+        # corpus chat / search but NO audio upload (that's the line
+        # between Basic and Pro). Pro/Suite/Enterprise still pass; Free
+        # and Basic both 403 here.
+        gate_feature_for_caller(current_user, "audio_upload")
 
     # Per-org tier quota check (file size, concurrent uploads, monthly hours).
     # Raises HTTPException(402/429) with a structured detail payload so the

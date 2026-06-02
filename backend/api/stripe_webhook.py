@@ -173,10 +173,13 @@ def _handle_subscription_created(db: Session, sub: dict) -> None:
     user.tier = new_tier
     db.add(user)
     db.commit()
-    # Founding 100: annual-upfront subscribers get the cohort flag at
+    # Founding 100: annual-upfront Pro subscribers get the cohort flag at
     # checkout-completion time. Other intervals (monthly) never qualify
-    # by design — Aaron's spec.
-    if _is_annual_upfront(sub):
+    # by design — Aaron's spec. v3.23.0: Suite annual is also annual-upfront
+    # but does NOT consume a Founding 100 seat (per Aaron 2026-06-02 —
+    # keep the cohort tight to Pro buyers; a separate Suite cohort can be
+    # spun up later if it ever makes sense).
+    if _is_annual_upfront(sub) and new_tier == "pro":
         try:
             _maybe_grant_founding_member(db, user)
         except Exception:
@@ -457,6 +460,25 @@ def _handle_checkout_session_completed(db: Session, session_obj: dict) -> None:
     if not annual_marker:
         # Not flagged as annual-upfront; the subscription.created handler
         # will pick up the recurring=year case via _is_annual_upfront.
+        return
+
+    # v3.23.0: Founding 100 stays Pro-only. Suite annual checkouts hit
+    # this code path too (Suite has an annual price ID), but the cohort
+    # only counts Pro annual buyers (Aaron 2026-06-02). Three signals
+    # could tell us this is a Pro checkout (rather than Basic/Suite):
+    #   1) explicit metadata.plan stamp from the Pricing-page client
+    #   2) the user's resolved tier already flipped to "pro" by the
+    #      subscription.created handler that almost-always fired first
+    #   3) neither — give the grant the benefit of the doubt (legacy
+    #      behavior; Stripe webhooks predating v3.23.0 didn't stamp plan
+    #      into metadata). This will over-grant Suite annual until clients
+    #      ship a metadata.plan stamp.
+    plan_md = str(md.get("plan", "")).strip().lower()
+    if plan_md and plan_md != "pro":
+        return
+    if not plan_md and user.tier and user.tier.lower() not in ("pro", "free"):
+        # subscription.created already resolved the tier — anything non-Pro
+        # (e.g. "basic" or "suite") means this is not a Founding-Pro buyer.
         return
 
     try:

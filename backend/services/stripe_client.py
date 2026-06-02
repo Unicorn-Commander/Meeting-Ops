@@ -93,91 +93,171 @@ def is_configured() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _legacy_pro_price_ids() -> tuple[str, ...]:
+    """Legacy Stripe price IDs for pre-v3.23.0 Pro subscribers ($12/mo, $120/yr).
+
+    Kept alive so existing subscribers whose Stripe subscription is tied
+    to the old price IDs continue to resolve as `pro` in the webhook
+    (Stripe charges them at the original $12 / $120 forever until cancel
+    — there's no code-level grandfathering, just a "don't unmap these
+    price IDs" promise). New signups go through STRIPE_PRO_PRICE_ID
+    which the env points at the new $20 price.
+    """
+    return (
+        "price_1TcbE0Dzk9HqAZnHO3cv6mWN",  # legacy Pro $12/mo
+        "price_1TdcTfDzk9HqAZnHl979Vv0M",  # legacy Pro $120/yr
+    )
+
+
+def _legacy_suite_price_ids() -> tuple[str, ...]:
+    """Legacy Suite price IDs (archived $25/mo). Kept for the same
+    grandfather reason as legacy Pro."""
+    return (
+        "price_1TcbE1Dzk9HqAZnH9HVigcpm",  # legacy Suite $25/mo (archived)
+    )
+
+
 def price_id_to_tier(price_id: Optional[str]) -> str:
     """Map a Stripe price ID to a local tier name. Unknown / missing
     price IDs default to 'free' so a misconfigured webhook can't silently
     upgrade someone.
 
-    Aaron's pricing decisions (locked 2026-05-29, annual added 2026-06-01):
-      Free        = $0,    browser-only
-      Pro         = $12,   individual — Meeting-Ops only (monthly)
-      Pro Annual  = $120,  individual — Meeting-Ops only ($10/mo billed annually, save $24)
-      Suite       = $25,   individual — Meeting-Ops + Project-Ops + Contact-Ops
-      Enterprise  = custom, on-prem
+    Aaron's pricing decisions (locked 2026-05-29, v3.23.0 5-tier matrix
+    landed 2026-06-02):
+      Free        = $0,            browser-only
+      Basic       = $7.99 / $79,   server text storage + sync + AI Chat + search (NO audio upload)
+      Pro         = $20 / $200,    Meeting-Ops full server feature set incl. canonical_reprocess
+      Suite       = $35 / $350,    Pro + uc_suite_entitlement (Pro on Project-Ops + Contact-Ops via Brigade fed.)
+      Enterprise  = custom,        on-prem + BYOK + retention controls + HIPAA
 
-    The Suite tier carries the same effective TIER_FEATURES as Pro
-    (canonical_reprocess, brigade_integration, cross_device_sync, etc.) — the
-    difference is access to the sister apps (Project-Ops + Contact-Ops),
-    which is enforced at those apps' auth layers, not here. Within Meeting-Ops
-    a Suite subscriber and a Pro subscriber experience the same product.
-
-    Pro Annual maps to "pro" — same product, just different billing cadence.
-    The annual price ID is what triggers Founding 100 grant in the Stripe
-    webhook (recurring.interval == "year"), separate from tier mapping.
+    Legacy Pro price IDs ($12/mo + $120/yr) AND the legacy Suite $25 ID
+    are intentionally kept in the mapping so pre-v3.23.0 subscribers stay
+    grandfathered to their original price (Stripe keeps charging the old
+    rate against the old price ID until the subscription is cancelled).
     """
     if not price_id:
         return "free"
+    basic = os.getenv("STRIPE_BASIC_PRICE_ID", "").strip()
+    basic_annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
     pro = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
     pro_annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
     suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
+    suite_annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
     ent = os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip()
+    if basic and price_id == basic:
+        return "basic"
+    if basic_annual and price_id == basic_annual:
+        return "basic"
     if pro and price_id == pro:
         return "pro"
     if pro_annual and price_id == pro_annual:
         return "pro"
-    if suite and price_id == suite:
-        # Suite subscribers map to "pro" inside Meeting-Ops — same tier features.
-        # The Suite-vs-Pro distinction lives on the User.is_suite_subscriber
-        # flag (used by Project-Ops / Contact-Ops to gate cross-app access)
-        # so a single Meeting-Ops tier lookup stays simple.
+    if price_id in _legacy_pro_price_ids():
+        # v3.23.0 grandfather: existing $12/mo + $120/yr subscribers keep
+        # mapping to pro tier indefinitely (Stripe still charges their
+        # original price; the local tier resolution shouldn't change).
         return "pro"
+    if suite and price_id == suite:
+        return "suite"
+    if suite_annual and price_id == suite_annual:
+        return "suite"
+    if price_id in _legacy_suite_price_ids():
+        return "suite"
     if ent and price_id == ent:
         return "enterprise"
     logger.warning(
         "Unknown Stripe price_id=%s; defaulting to 'free'. "
-        "Set STRIPE_PRO_PRICE_ID / STRIPE_SUITE_PRICE_ID / STRIPE_ENTERPRISE_PRICE_ID.",
+        "Set STRIPE_BASIC_PRICE_ID[_ANNUAL] / STRIPE_PRO_PRICE_ID[_ANNUAL] "
+        "/ STRIPE_SUITE_PRICE_ID[_ANNUAL] / STRIPE_ENTERPRISE_PRICE_ID.",
         price_id,
     )
     return "free"
 
 
-def price_id_is_suite(price_id: str) -> bool:
-    """True iff the price ID matches the configured Suite tier price.
-
-    Used by the webhook handler to set User.is_suite_subscriber alongside
-    User.tier — needed for the Project-Ops / Contact-Ops cross-app gates."""
+def price_id_is_basic(price_id: str) -> bool:
+    """True iff the price ID matches a configured Basic-tier price (monthly
+    or annual). Used by the webhook + Pricing UI flags."""
     if not price_id:
         return False
-    suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
-    return bool(suite) and price_id == suite
+    monthly = os.getenv("STRIPE_BASIC_PRICE_ID", "").strip()
+    annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
+    return (bool(monthly) and price_id == monthly) or (
+        bool(annual) and price_id == annual
+    )
+
+
+def price_id_is_pro(price_id: str) -> bool:
+    """True iff the price ID matches a configured or legacy Pro-tier price.
+
+    Includes the legacy $12 / $120 grandfathered IDs so an existing
+    subscriber still flags as Pro for any code that asks."""
+    if not price_id:
+        return False
+    monthly = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
+    annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+    if monthly and price_id == monthly:
+        return True
+    if annual and price_id == annual:
+        return True
+    return price_id in _legacy_pro_price_ids()
+
+
+def price_id_is_suite(price_id: str) -> bool:
+    """True iff the price ID matches the configured Suite tier price
+    (monthly or annual), or the legacy $25 Suite ID.
+
+    Used by the webhook handler — needed for the Project-Ops / Contact-Ops
+    cross-app entitlement (`uc_suite_entitlement`) once Brigade federation
+    deploys. Today the flag is documentation-only on the sibling apps."""
+    if not price_id:
+        return False
+    monthly = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
+    annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
+    if monthly and price_id == monthly:
+        return True
+    if annual and price_id == annual:
+        return True
+    return price_id in _legacy_suite_price_ids()
 
 
 def tier_to_price_id(tier: str, billing_cycle: str = "monthly") -> Optional[str]:
     """Reverse of price_id_to_tier — used by /billing/checkout to translate
     the plan name from the request body into the Stripe price ID. Accepts
-    "pro" (Meeting-Ops only), "suite" (UC Suite), and "enterprise".
+    "basic", "pro", "suite", and "enterprise" (enterprise returns None so
+    /checkout can redirect to contact-sales).
 
     `billing_cycle`:
       - "monthly" (default): returns the monthly recurring price.
-      - "annual":  for plan="pro", returns STRIPE_PRO_ANNUAL_PRICE_ID
-                   ($120/year, save $24 vs $144/yr at monthly rate).
-                   For other plans, annual is not offered yet — falls
-                   through to the monthly price (safe default).
+      - "annual":  returns the annual price ID for that tier. If the
+                   annual env var is unset, falls back to monthly with a
+                   warn log so a misconfigured node doesn't 400 the user.
 
     `billing_cycle="annual"` on plan="pro" is the trigger that drives the
     Founding 100 grant downstream in the Stripe webhook (the webhook
-    detects `recurring.interval == "year"`). The grant gate stays
-    server-side; this function only chooses the price.
+    detects `recurring.interval == "year"` AND that the price is the Pro
+    annual price). The grant gate stays server-side; this function only
+    chooses the price. Per Aaron 2026-06-02: Suite annual does NOT
+    consume a Founding 100 seat — the cohort stays Pro-only.
     """
     tier = (tier or "").lower()
     cycle = (billing_cycle or "monthly").lower()
+
+    if tier == "basic":
+        if cycle == "annual":
+            annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
+            if annual:
+                return annual
+            logger.warning(
+                "billing_cycle='annual' requested for plan='basic' but "
+                "STRIPE_BASIC_ANNUAL_PRICE_ID is unset; falling back to monthly."
+            )
+        return os.getenv("STRIPE_BASIC_PRICE_ID", "").strip() or None
+
     if tier == "pro":
         if cycle == "annual":
             annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
             if annual:
                 return annual
-            # Annual env not set — fall through to monthly so a
-            # misconfigured node doesn't 400 the user.
             logger.warning(
                 "billing_cycle='annual' requested for plan='pro' but "
                 "STRIPE_PRO_ANNUAL_PRICE_ID is unset; falling back to monthly."
@@ -194,8 +274,18 @@ def tier_to_price_id(tier: str, billing_cycle: str = "monthly") -> Optional[str]
             "is unset; falling back to monthly pro price."
         )
         return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
+
     if tier == "suite":
+        if cycle == "annual":
+            annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
+            if annual:
+                return annual
+            logger.warning(
+                "billing_cycle='annual' requested for plan='suite' but "
+                "STRIPE_SUITE_ANNUAL_PRICE_ID is unset; falling back to monthly."
+            )
         return os.getenv("STRIPE_SUITE_PRICE_ID", "").strip() or None
+
     if tier == "enterprise":
         return os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip() or None
     return None

@@ -44,17 +44,29 @@ class FakeUser:
 # ---------------------------------------------------------------------------
 
 
-def test_tier_features_has_all_three_tiers():
-    """The three tier names must be present and only those three."""
-    assert set(TIER_FEATURES.keys()) == {"free", "pro", "enterprise"}
+def test_tier_features_has_all_five_tiers():
+    """The five tier names must be present and only those five
+    (v3.23.0 added basic + suite)."""
+    assert set(TIER_FEATURES.keys()) == {
+        "free",
+        "basic",
+        "pro",
+        "suite",
+        "enterprise",
+    }
 
 
 def test_tier_features_have_consistent_keys():
     """Every tier dict has the same capability keys, so frontend code
-    that iterates capabilities never crashes on missing keys."""
+    that iterates capabilities never crashes on missing keys.
+
+    v3.23.0 added: audio_upload, server_text_storage, ai_chat_over_corpus,
+    cross_meeting_search, uc_suite_entitlement, byok_models, live_diarization.
+    """
     expected_keys = {
         "server_live",
         "diarization",
+        "live_diarization",
         "qwen36_summary",
         "speaker_library",
         "retention_controls",
@@ -67,18 +79,27 @@ def test_tier_features_have_consistent_keys():
         "agent_write_basic",
         "agent_write_reprocess",
         "agent_write_email_draft",
+        "audio_upload",
+        "server_text_storage",
+        "ai_chat_over_corpus",
+        "cross_meeting_search",
+        "uc_suite_entitlement",
+        "byok_models",
         "max_sessions_per_month",
         "max_session_minutes",
     }
     for tier_name, features in TIER_FEATURES.items():
         assert set(features.keys()) == expected_keys, (
-            f"tier {tier_name!r} has wrong keys: {set(features.keys()) ^ expected_keys}"
+            f"tier {tier_name!r} has wrong keys: "
+            f"{set(features.keys()) ^ expected_keys}"
         )
 
 
 def test_tier_features_capabilities_escalate():
-    """free should have fewer enabled booleans than pro,
-    and pro should have fewer than enterprise."""
+    """free should have fewer enabled booleans than basic, which has
+    fewer than pro, which has fewer than suite, which has fewer than
+    enterprise. (Suite == Pro on the Meeting-Ops surface but adds
+    uc_suite_entitlement, so still > Pro by 1.)"""
     bool_keys = [
         "server_live",
         "diarization",
@@ -87,22 +108,94 @@ def test_tier_features_capabilities_escalate():
         "retention_controls",
         "brigade_byok",
         "hipaa",
+        "canonical_reprocess",
+        "brigade_integration",
+        "cross_device_sync",
+        "bulk_import",
+        "audio_upload",
+        "server_text_storage",
+        "ai_chat_over_corpus",
+        "cross_meeting_search",
+        "uc_suite_entitlement",
+        "byok_models",
     ]
     free_enabled = sum(1 for k in bool_keys if TIER_FEATURES["free"][k])
+    basic_enabled = sum(1 for k in bool_keys if TIER_FEATURES["basic"][k])
     pro_enabled = sum(1 for k in bool_keys if TIER_FEATURES["pro"][k])
+    suite_enabled = sum(1 for k in bool_keys if TIER_FEATURES["suite"][k])
     ent_enabled = sum(1 for k in bool_keys if TIER_FEATURES["enterprise"][k])
 
-    assert free_enabled < pro_enabled < ent_enabled
+    assert free_enabled < basic_enabled < pro_enabled < suite_enabled < ent_enabled
 
 
 def test_tier_features_quotas_unlimited_above_free():
-    """pro + enterprise should have None (unlimited) quotas, free has real numbers."""
+    """basic / pro / suite / enterprise should all have None (unlimited)
+    quotas, free has real numbers."""
     assert TIER_FEATURES["free"]["max_sessions_per_month"] == 50
     assert TIER_FEATURES["free"]["max_session_minutes"] == 60
-    assert TIER_FEATURES["pro"]["max_sessions_per_month"] is None
-    assert TIER_FEATURES["pro"]["max_session_minutes"] is None
-    assert TIER_FEATURES["enterprise"]["max_sessions_per_month"] is None
-    assert TIER_FEATURES["enterprise"]["max_session_minutes"] is None
+    for paid in ("basic", "pro", "suite", "enterprise"):
+        assert TIER_FEATURES[paid]["max_sessions_per_month"] is None
+        assert TIER_FEATURES[paid]["max_session_minutes"] is None
+
+
+def test_basic_tier_text_vs_audio_split():
+    """The defining v3.23.0 architectural rule: Basic gets server-side
+    TEXT processing (storage / search / chat-over-corpus). Pro gets
+    server-side AUDIO processing (canonical_reprocess / diarization /
+    speaker_library). This test pins the split so a future flag-juggle
+    doesn't accidentally let Basic upload audio."""
+    basic = TIER_FEATURES["basic"]
+    # Server text gates ON for Basic.
+    assert basic["server_text_storage"] is True
+    assert basic["ai_chat_over_corpus"] is True
+    assert basic["cross_meeting_search"] is True
+    assert basic["cross_device_sync"] is True
+    # Server audio gates OFF for Basic.
+    assert basic["audio_upload"] is False
+    assert basic["canonical_reprocess"] is False
+    assert basic["qwen36_summary"] is False
+    assert basic["speaker_library"] is False
+    assert basic["brigade_integration"] is False
+    assert basic["bulk_import"] is False
+    # uc_suite_entitlement is Suite/Enterprise-only.
+    assert basic["uc_suite_entitlement"] is False
+    # BYOK is enterprise-only.
+    assert basic["byok_models"] is False
+
+
+def test_suite_tier_carries_uc_suite_entitlement():
+    """Suite is Pro + uc_suite_entitlement on the Meeting-Ops surface.
+    The cross-app benefit is the Suite-vs-Pro differentiator."""
+    suite = TIER_FEATURES["suite"]
+    pro = TIER_FEATURES["pro"]
+    # uc_suite_entitlement is the differentiator.
+    assert suite["uc_suite_entitlement"] is True
+    assert pro["uc_suite_entitlement"] is False
+    # Otherwise Suite mirrors Pro on Meeting-Ops audio/text flags.
+    for shared in (
+        "audio_upload",
+        "server_text_storage",
+        "ai_chat_over_corpus",
+        "cross_meeting_search",
+        "canonical_reprocess",
+        "qwen36_summary",
+        "speaker_library",
+        "brigade_integration",
+        "bulk_import",
+    ):
+        assert suite[shared] == pro[shared], (
+            f"Suite and Pro should share flag {shared!r} on Meeting-Ops"
+        )
+
+
+def test_enterprise_has_byok_and_suite_entitlement():
+    """Enterprise inherits Suite's cross-app entitlement AND adds BYOK."""
+    ent = TIER_FEATURES["enterprise"]
+    assert ent["uc_suite_entitlement"] is True
+    assert ent["byok_models"] is True
+    # And only Enterprise should have BYOK.
+    for other in ("free", "basic", "pro", "suite"):
+        assert TIER_FEATURES[other]["byok_models"] is False
 
 
 def test_tier_features_agent_write_flags():
