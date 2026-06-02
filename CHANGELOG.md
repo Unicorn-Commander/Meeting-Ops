@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [3.23.1] - 2026-06-02
+
+### Fixed
+- **Silence-split was fragmenting single recordings into multiple session rows**. The AlwaysOn VAD engine's `silenceThresholdMs` was set to 30 seconds — a totally normal thinking pause in a real meeting. Aaron's 31-minute recording on bigboy got split into 6 separate `recording_sessions` rows (one real + 5 silence-gap orphans). Bumped the threshold to 30 minutes so normal meeting pauses never trigger; the always-on "capture all day, auto-split into separate meetings" use case still works because real meetings are typically separated by 30+ minutes (lunch, end-of-day, etc.). Future work: surface this as a user setting.
+- Cleaned up orphan sessions 280-284 on bigboy (marked `failed` with `[silence-split orphan, v3.23.1 cleanup]` name suffix). Real session 279 untouched.
+
 ## [3.23.0] - 2026-06-02
 
 **Strategic repricing + Basic tier shipped. Pro repriced from $12 to $20 to match the meeting-intelligence-platform positioning. New Basic $7.99 captures the mid-market wedge with text-only sync. New Suite $35 bundles Meeting-Ops Pro with sibling UC apps (cross-app entitlement lights up when Brigade federation deploys). All existing $12 subscribers grandfather automatically via Stripe.**

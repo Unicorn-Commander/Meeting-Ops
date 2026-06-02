@@ -1098,7 +1098,18 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     if (!engineRef.current) {
       engineRef.current = createVadEngine({
         getElapsedSeconds: getElapsed,
-        silenceThresholdMs: 30000,
+        // v3.23.1 hotfix 2026-06-02: silence-based session split was
+        // firing at 30s, which is a totally normal thinking pause in a
+        // real meeting. Result: one 31-min meeting fragmented into 6
+        // session rows (5 silence-gap splits). Aaron's recording was
+        // wrecked. Bumped threshold to 30 MINUTES — generous enough that
+        // normal meeting pauses never trigger, and the always-on
+        // "capture all day, split into separate meetings" use case still
+        // works since real meetings are usually separated by 30+ min of
+        // silence (lunch, end-of-day, etc.). The VAD engine's
+        // splitSession handler is unchanged; just the trigger threshold.
+        // Future work: make this a user setting with sensible UI.
+        silenceThresholdMs: 30 * 60 * 1000,
         // Read from localStorage at each start/swap so cross-tab Settings
         // edits propagate without a page reload.
         getPreferredDeviceId: () => getPreferredDeviceId(),
