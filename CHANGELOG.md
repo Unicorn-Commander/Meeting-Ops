@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.23.2] - 2026-06-02
+
+### Fixed
+- **In-recording silence-split disabled entirely**. v3.23.1 bumped the threshold from 30s → 30 min, but the right architecture is to NEVER auto-split during capture. The audio file should stay whole; splitting is a post-processing decision made AFTER the recording, in the session detail view, user-initiated by default. v3.23.2 sets `silenceThresholdMs: Number.MAX_SAFE_INTEGER` so the VAD engine's `splitSession` handler physically cannot fire mid-recording. Recording is always one session until the user presses Stop.
+
+### Roadmap filed
+- `docs/roadmap/post-process-split.md` — the full post-process "Split into meetings" feature design. Adds backend endpoints (`/proposed-splits` + `/split` + `/unsplit`), a SessionDetails timeline-scrubber modal UI for adjusting split points, and Settings → Audio toggles. Estimated 6-8 hours focused session. Scheduled for v3.25/v3.26 (after per-seat + before Brigade federation deploy).
+
 ## [3.23.1] - 2026-06-02
 
 ### Fixed
