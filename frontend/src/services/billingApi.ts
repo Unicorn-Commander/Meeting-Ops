@@ -74,22 +74,41 @@ async function postBilling<T>(path: string, body?: object): Promise<T> {
 export type BillingCycle = 'monthly' | 'annual';
 
 /**
+ * v3.23.0: the 5-tier matrix. Free has no checkout (it's the default
+ * on signup). Enterprise has no self-serve checkout — it routes to a
+ * sales mailto from the Pricing card. Basic / Pro / Suite are the only
+ * tiers that actually call `/api/billing/checkout`.
+ */
+export type CheckoutPlan = 'basic' | 'pro' | 'suite' | 'enterprise';
+
+/**
  * Start a Stripe Checkout session for the given plan and redirect the
  * browser to the hosted Checkout URL.
  *
- * `plan` is "pro" (Aaron's only Checkout-able tier in v1).
- * `billingCycle` defaults to 'monthly'. 'annual' on Pro maps to the
- * $120/year price ($10/mo billed annually, save $24 vs the $144/yr
- * cost of monthly).
+ * `plan` is one of the v3.23.0 paid tiers ('basic' | 'pro' | 'suite').
+ * Passing 'enterprise' is a no-op — Enterprise is a sales conversation,
+ * not a self-serve Checkout — and the Pricing page wires that CTA to a
+ * mailto directly instead of calling this function.
+ *
+ * `billingCycle` defaults to 'monthly'. 'annual' maps server-side to
+ * the matching annual price ID for the tier (each saves 2 months vs the
+ * monthly rate). Backend resolves the actual Stripe price ID; the
+ * frontend never references price IDs directly.
  *
  * Returns void — the redirect happens synchronously. Callers wanting
  * to handle errors should `await startCheckout(...)` inside a try/catch
  * and toast on the rethrown error.
  */
 export async function startCheckout(
-  plan: string,
+  plan: CheckoutPlan | string,
   billingCycle: BillingCycle = 'monthly',
 ): Promise<void> {
+  if (plan === 'enterprise') {
+    // Enterprise has no self-serve checkout. The Pricing page renders
+    // a mailto CTA for this tier; if a caller ends up here anyway, do
+    // nothing visible — never POST 'enterprise' to /api/billing/checkout.
+    return;
+  }
   const data = await postBilling<CheckoutResponse>('/api/billing/checkout', {
     plan,
     billing_cycle: billingCycle,

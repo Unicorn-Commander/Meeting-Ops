@@ -97,13 +97,14 @@ export const Landing: React.FC = () => {
             Private beta — request an invite
           </div>
           <h1 className="mt-6 text-4xl font-semibold leading-tight text-white sm:text-5xl">
-            Meeting transcription that actually stays private.
+            Meeting and conversation intelligence that stays private.
           </h1>
           <p className="mt-6 max-w-2xl text-lg text-zinc-400">
-            Browser-first AI meeting recording. Your audio never leaves
-            your device unless you decide it should. Optional opt-in
-            server pass for higher-accuracy transcription and AI chat
-            across meetings.
+            The browser-first meeting and conversation intelligence
+            platform. Your audio never leaves your device unless you
+            decide it should. Optional server pass for higher-accuracy
+            transcription, speaker recognition, and AI chat across your
+            entire meeting library.
           </p>
 
           {/* Primary CTA */}

@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- **Pricing page rebuild for 5-tier matrix** (`frontend/src/pages/Pricing.tsx`). Now shows Free / Basic / Pro / Suite / Enterprise. Single Monthly/Annual toggle at top of grid; annual shows "save 2 months" on every paid tier. Pro is the highlighted "Most popular" card. Suite card has an honest one-liner about cross-app sync rolling out as federation deploys — doesn't block the sale.
+- **Repositioning copy**: Landing + Pricing subheads now read "meeting and conversation intelligence platform" instead of "AI meeting transcription." Subtle but the category claim matters.
+- **`useTierFeatures` extended** with `audio_upload`, `server_text_storage`, `ai_chat_over_corpus`, `cross_meeting_search`, `uc_suite_entitlement`, `byok_models`.
+- **Audio upload UI gate**: Basic tier sees no "Upload an existing audio file" button on Sessions page (they can still browser-record). Pro+ unchanged.
+
 ### Fixed
 - **Stuck-state recovery for AlwaysOn recording** (`contexts/AlwaysOnContext.tsx` + `components/AlwaysOnControl.tsx` + watchdog). When the page mounts with localStorage claiming an active recording but the server says the session is `failed`/`completed`/`stopped` (or doesn't exist), the client now wipes the local claim instead of blocking Record. A "Reset recording state" escape-hatch button surfaces when the client's recording state is `recording` but no MediaRecorder is actually capturing. Backend Arq watchdog now fails stale recording sessions at 30 minutes idle instead of 6 hours — catches phone-tab-eviction much faster.
 

@@ -34,16 +34,49 @@ vi.mock('../contexts/OrgContext', () => ({
 
 // Stripe UpgradeBanner uses useAuth — stub the context so Sessions tests
 // don't need a full AuthProvider tree. Mirrors the pro-tier path so the
-// banner short-circuits invisibly during rendering.
-vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({
-    user: { id: 1, email: 'test@example.com', tier: 'pro', is_founding_member: false },
-    isAuthenticated: true,
-    isLoading: false,
-    login: vi.fn(),
-    logout: vi.fn(),
-  }),
-}));
+// banner short-circuits invisibly during rendering. v3.23.0: also exports
+// DEFAULT_TIER_FEATURES so useTierFeatures() resolves without importing
+// the real context, and supplies a pro-tier `tier_features` payload so
+// the Upload Audio/Video button still renders for these tests.
+vi.mock('../contexts/AuthContext', () => {
+  const TEST_TIER_FEATURES = {
+    server_live: true,
+    diarization: true,
+    qwen36_summary: true,
+    speaker_library: true,
+    retention_controls: true,
+    brigade_byok: false,
+    hipaa: false,
+    canonical_reprocess: true,
+    brigade_integration: true,
+    cross_device_sync: true,
+    bulk_import: true,
+    max_sessions_per_month: null,
+    max_session_minutes: null,
+    audio_upload: true,
+    server_text_storage: true,
+    ai_chat_over_corpus: true,
+    cross_meeting_search: true,
+    uc_suite_entitlement: false,
+    byok_models: false,
+  };
+  return {
+    DEFAULT_TIER_FEATURES: TEST_TIER_FEATURES,
+    useAuth: () => ({
+      user: {
+        id: 1,
+        email: 'test@example.com',
+        tier: 'pro',
+        tier_features: TEST_TIER_FEATURES,
+        is_founding_member: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      login: vi.fn(),
+      logout: vi.fn(),
+    }),
+  };
+});
 
 vi.mock('../services/localSessionStore', () => ({
   listLocalSessions: vi.fn().mockResolvedValue([]),
