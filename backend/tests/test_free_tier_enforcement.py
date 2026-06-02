@@ -32,25 +32,38 @@ from auth.utils import get_password_hash
 def test_tier_features_matrix_for_server_write_keys():
     from auth.tier import TIER_FEATURES
 
-    server_features = [
+    # Free + Basic must NOT have the server AUDIO/reprocess gates.
+    # Basic gets text-only server features (see test_basic_tier.py).
+    # Pro / Suite / Enterprise get the full server stack.
+    server_audio_features = [
         "canonical_reprocess",
         "brigade_integration",
-        "cross_device_sync",
         "bulk_import",
         "agent_write_reprocess",
-        "agent_write_email_draft",
     ]
-    for feat in server_features:
+    for feat in server_audio_features:
         assert TIER_FEATURES["free"][feat] is False, f"free should not have {feat}"
+        assert TIER_FEATURES["basic"][feat] is False, f"basic should not have {feat}"
         assert TIER_FEATURES["pro"][feat] is True, f"pro should have {feat}"
+        assert TIER_FEATURES["suite"][feat] is True, f"suite should have {feat}"
         assert TIER_FEATURES["enterprise"][feat] is True, f"enterprise should have {feat}"
+
+    # cross_device_sync + agent_write_email_draft are server-text features
+    # so Basic gets them too.
+    server_text_features = ["cross_device_sync", "agent_write_email_draft"]
+    for feat in server_text_features:
+        assert TIER_FEATURES["free"][feat] is False, f"free should not have {feat}"
+        assert TIER_FEATURES["basic"][feat] is True, f"basic should have {feat}"
+        assert TIER_FEATURES["pro"][feat] is True, f"pro should have {feat}"
 
 
 def test_tier_features_matrix_for_basic_agent_writes():
     from auth.tier import TIER_FEATURES
 
     assert TIER_FEATURES["free"]["agent_write_basic"] is True
+    assert TIER_FEATURES["basic"]["agent_write_basic"] is True
     assert TIER_FEATURES["pro"]["agent_write_basic"] is True
+    assert TIER_FEATURES["suite"]["agent_write_basic"] is True
     assert TIER_FEATURES["enterprise"]["agent_write_basic"] is True
 
 
@@ -609,7 +622,9 @@ def test_v3_18_2_free_blocked_from_ai_chat_messages(client):
         json={"message": "What was discussed?"},
     )
     assert resp.status_code == 403, resp.text
-    assert "canonical_reprocess" in resp.text
+    # v3.23.0: gate flipped from canonical_reprocess → ai_chat_over_corpus
+    # so Basic tier (text-corpus) can ask questions about meetings.
+    assert "ai_chat_over_corpus" in resp.text
 
 
 def test_v3_18_2_free_blocked_from_ai_chat_rag_query(client):
@@ -623,7 +638,9 @@ def test_v3_18_2_free_blocked_from_ai_chat_rag_query(client):
         json={"message": "any meeting"},
     )
     assert resp.status_code == 403, resp.text
-    assert "canonical_reprocess" in resp.text
+    # v3.23.0: gate flipped from canonical_reprocess → cross_meeting_search
+    # so Basic tier (text-corpus) gets cross-meeting RAG.
+    assert "cross_meeting_search" in resp.text
 
 
 def test_v3_18_2_free_blocked_from_insights_regenerate(client):

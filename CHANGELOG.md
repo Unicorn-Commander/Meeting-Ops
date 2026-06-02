@@ -4,16 +4,39 @@
 - **Stuck-state recovery for AlwaysOn recording** (`contexts/AlwaysOnContext.tsx` + `components/AlwaysOnControl.tsx` + watchdog). When the page mounts with localStorage claiming an active recording but the server says the session is `failed`/`completed`/`stopped` (or doesn't exist), the client now wipes the local claim instead of blocking Record. A "Reset recording state" escape-hatch button surfaces when the client's recording state is `recording` but no MediaRecorder is actually capturing. Backend Arq watchdog now fails stale recording sessions at 30 minutes idle instead of 6 hours — catches phone-tab-eviction much faster.
 
 ### Added
+- **Basic tier** ($7.99/mo, $79/yr) — server-side text storage + sync + cross-meeting search + AI Chat over corpus, NO audio upload, NO server completion pass. Architectural rule: Basic gets server text processing, Pro gets server audio processing. Stripe products + prices live (`prod_Ud0M1gmwuEKJjv`, `price_1TdkLWDzk9HqAZnHPMNKYsnC` + `price_1TdkLWDzk9HqAZnHNpgniogU`). Frontend `useTierFeatures()` already iterates `TIER_FEATURES.basic` once the matrix lands.
+- **Pro tier reprice to $20/mo $200/yr** — new Stripe prices `price_1TdkLVDzk9HqAZnHQyo3D6wG` + `price_1TdkLVDzk9HqAZnHab2lHN2m`. Old $12 and $120 prices kept alive on Stripe for any existing subscribers who grandfather (their existing Stripe subscriptions tied to the old price IDs continue at those prices indefinitely until cancelled). `services/stripe_client.price_id_to_tier` recognizes both new + legacy IDs so the webhook resolves either to `pro` tier.
+- **Suite tier** ($35/mo, $350/yr) — Meeting-Ops Pro features PLUS `uc_suite_entitlement` flag for Pro-tier benefits on sibling UC apps (Project-Ops, Contact-Ops). Today the cross-app entitlement is documentation-only; goes live when Brigade federation deploys. Suite checkouts work end-to-end; customers pay for the bundle and receive the Meeting-Ops Pro benefit immediately + the cross-app benefit when federation lands. Stripe products + prices live (`prod_Ud0Mf9oqRAN7Qq`, `price_1TdkLXDzk9HqAZnH3Wqb0srE` + `price_1TdkLXDzk9HqAZnHdJmdpiO6`).
+- New `tier_features` flags: `audio_upload`, `server_text_storage`, `ai_chat_over_corpus`, `cross_meeting_search`, `uc_suite_entitlement`, `byok_models`. Existing tiers backfilled.
+- New checkout helpers: `tier_to_price_id` resolves `basic` / `pro` / `suite` / `enterprise` × `monthly` / `annual`; `price_id_is_basic`, `price_id_is_pro`, `price_id_is_suite` reverse-lookups for the webhook. `/api/billing/checkout` accepts `plan` in `basic | pro | suite | enterprise` and returns 400 with a "contact sales" message for enterprise.
+- New `tests/test_basic_tier.py` covering the architectural split (Basic 403s on `/api/uploads`, 200s on per-meeting AI chat + cross-meeting semantic search). `tests/test_stripe_webhook.py` extended with basic/suite price-flip + legacy $12 grandfather + Founding-100-not-granted-on-Suite-annual coverage.
+
+### Changed
+- **`/api/uploads/start`** (action=`transcribe`) now gates on `audio_upload` instead of `canonical_reprocess`. Both flags are False for Free + Basic so the 403 behaviour for those tiers is unchanged; the new flag is the architecturally-correct name for "server audio ingest" and decouples it from "server completion pass".
+- **`/api/ai-chat/sessions/{id}/messages`** (per-meeting AI chat) now gates on `ai_chat_over_corpus` (Basic + higher) instead of `canonical_reprocess` (Pro + higher). Basic tier was the new "text-corpus" SKU and this is the line that opens AI Chat to it.
+- **`/api/ai-chat/rag/query`** (cross-meeting RAG chat) now gates on `cross_meeting_search` (Basic + higher) instead of `canonical_reprocess`.
+- **`/api/simple/recording-sessions/semantic-search`** now gates on `cross_meeting_search` (was un-gated for any logged-in user, which leaked the corpus surface to Free users).
+- **`_TIER_RANK`** widened from 3 levels (free=0, pro=1, enterprise=2) to 5 (free=0, basic=1, pro=2, suite=3, enterprise=4). Call sites using `>=` comparisons keep working.
+- **Founding 100 grant** explicitly Pro-only. The webhook still fires on annual-upfront detection, but now requires the resolved tier to be `pro` before calling `_maybe_grant_founding_member`. Suite annual checkouts ($350/yr) do NOT consume a Founding 100 seat per Aaron 2026-06-02 — a separate Suite cohort can be opened later if it ever makes sense.
 - **Annual Pro pricing** — Pro tier now offers an annual billing cycle at **$120/year** ($10/mo billed annually, save $24 vs the $144/yr cost at the monthly rate). The Pricing page gains a Monthly / Annual toggle on the Pro card; default stays Monthly. Annual variant adds a small "Save 2 mo" badge and inline copy: "Annual saves $24 — billed yearly, cancel anytime." Subscribe passes `billing_cycle: "monthly" | "annual"` to `/api/billing/checkout`. Backend `tier_to_price_id` resolves `STRIPE_PRO_ANNUAL_PRICE_ID` when annual; safe-falls back to monthly with warn log if env is unset.
 - **Pro Annual price live in Stripe** — `price_1TdcTfDzk9HqAZnHl979Vv0M` (lookup key `pro_annual_2026`, $120/year). Needs `STRIPE_PRO_ANNUAL_PRICE_ID` env on both nodes before annual checkout works in production.
 - **Legal pages**: Terms of Service (`/terms`), Privacy Policy (`/privacy`), Acceptable Use Policy (`/aup`). Tailored for Magic Unicorn Unconventional Technology & Stuff Inc. (SC C-Corp): mandatory arbitration under SC law, liability cap at 12 months of fees ($100 for Free users), refund policy (7-day monthly / 30-day prorated annual), GDPR + CCPA compliance, HIPAA only on Enterprise + signed BAA. Recording Consent Disclosure in AUP makes the user solely responsible for participant consent under their jurisdiction's laws (critical for two-party-consent states). Footer with Terms / Privacy / Acceptable Use / Contact links added to authed AppLayout, Landing, Signup, Login, Pricing.
-
-### Changed
 - **Founding 100 page reframed to "Coming soon"** (`frontend/src/pages/Founding100.tsx`). Holds off promoting membership until a package worthy of it lands. Page leads with "Founding 100 — Coming soon", swaps CTA for a "Notify me" waitlist form posting to `/api/landing/invite-request`. Seat counter reframes "2 / 100" as "2 early supporters and counting". Perks reframed "What it will include." Backend grant gate stays armed.
 
 ### Notes
-- Frontend version intentionally not bumped here — rolls into v3.22.5 at merge time.
-- Deploy env required for full functionality: `STRIPE_PRO_ANNUAL_PRICE_ID=price_1TdcTfDzk9HqAZnHl979Vv0M` and `SESSION_WATCHDOG_MINUTES=30` on both nodes.
+- Per-seat pricing is NOT in this release. Each subscription = 1 user. Multi-seat support (org invites + Stripe quantity-update flow) is a separate sprint. Pro/Suite headline pricing is "$20/user/mo" but the backend treats subscription as 1 user.
+- Existing $12 Pro subscribers (none yet at v3.23.0 cut, but any pre-2026-06-02 subscriber) automatically grandfather: their Stripe subscription is tied to the legacy price ID and continues at $12/$120 indefinitely until cancelled. `price_id_to_tier` keeps both legacy Pro IDs (`price_1TcbE0Dzk9HqAZnHO3cv6mWN` $12/mo, `price_1TdcTfDzk9HqAZnHl979Vv0M` $120/yr) and the legacy Suite ID (`price_1TcbE1Dzk9HqAZnH9HVigcpm` $25/mo) mapped to their respective tiers.
+- Founding 100 grant continues to fire only on annual-upfront Pro (not Suite). Suite buyers do not consume a Founding 100 seat.
+- Suite cross-app entitlement (`uc_suite_entitlement` flag → Pro on Project-Ops + Contact-Ops) is documentation-only until Brigade federation deploys. Suite checkouts work end-to-end today; the cross-app benefit lights up when federation lands.
+- Frontend version intentionally not bumped here — rolls into v3.23.0 at merge time.
+- Deploy env required on both nodes:
+  - `STRIPE_PRO_PRICE_ID=price_1TdkLVDzk9HqAZnHQyo3D6wG` (was $12 price, now $20)
+  - `STRIPE_PRO_ANNUAL_PRICE_ID=price_1TdkLVDzk9HqAZnHab2lHN2m` (was $120, now $200)
+  - `STRIPE_BASIC_PRICE_ID=price_1TdkLWDzk9HqAZnHPMNKYsnC`
+  - `STRIPE_BASIC_ANNUAL_PRICE_ID=price_1TdkLWDzk9HqAZnHNpgniogU`
+  - `STRIPE_SUITE_PRICE_ID=price_1TdkLXDzk9HqAZnH3Wqb0srE` (was $25 price, now $35)
+  - `STRIPE_SUITE_ANNUAL_PRICE_ID=price_1TdkLXDzk9HqAZnHdJmdpiO6`
+  - `SESSION_WATCHDOG_MINUTES=30`
 - Founding 100 waitlist re-uses `InviteRequest` rows; when cohort opens, an operator can pull the waitlist before flipping `is_open`.
 
 ## [3.22.4] - 2026-05-31

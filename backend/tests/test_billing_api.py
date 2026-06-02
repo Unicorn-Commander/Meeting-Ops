@@ -45,6 +45,11 @@ def _auth(client) -> dict[str, str]:
 def stripe_configured(monkeypatch):
     monkeypatch.setenv("STRIPE_API_KEY", "sk_test_000000000000000000000000")
     monkeypatch.setenv("STRIPE_PRO_PRICE_ID", "price_pro_test")
+    monkeypatch.setenv("STRIPE_PRO_ANNUAL_PRICE_ID", "price_pro_annual_test")
+    monkeypatch.setenv("STRIPE_BASIC_PRICE_ID", "price_basic_test")
+    monkeypatch.setenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "price_basic_annual_test")
+    monkeypatch.setenv("STRIPE_SUITE_PRICE_ID", "price_suite_test")
+    monkeypatch.setenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "price_suite_annual_test")
     monkeypatch.setenv("STRIPE_ENTERPRISE_PRICE_ID", "")
     yield
 
@@ -151,6 +156,111 @@ def test_checkout_enterprise_routes_to_sales(client, stripe_configured):
     )
     assert r.status_code == 400
     assert "sales" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# v3.23.0: Basic + Suite plans
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_basic_monthly_uses_basic_price(client, stripe_configured, monkeypatch):
+    """Basic monthly checkout sends STRIPE_BASIC_PRICE_ID to Stripe."""
+    captured = {}
+
+    def _fake_create(db, user, price_id, success_url, cancel_url):
+        captured["price_id"] = price_id
+        return "https://checkout.stripe.com/test/cs_basic"
+
+    monkeypatch.setattr(
+        "services.stripe_client.create_checkout_session", _fake_create
+    )
+    r = client.post(
+        "/api/billing/checkout",
+        json={"plan": "basic"},
+        headers=_auth(client),
+    )
+    assert r.status_code == 200, r.text
+    assert captured["price_id"] == "price_basic_test"
+
+
+def test_checkout_basic_annual_uses_basic_annual_price(client, stripe_configured, monkeypatch):
+    captured = {}
+
+    def _fake_create(db, user, price_id, success_url, cancel_url):
+        captured["price_id"] = price_id
+        return "https://checkout.stripe.com/test/cs_basic_yr"
+
+    monkeypatch.setattr(
+        "services.stripe_client.create_checkout_session", _fake_create
+    )
+    r = client.post(
+        "/api/billing/checkout",
+        json={"plan": "basic", "billing_cycle": "annual"},
+        headers=_auth(client),
+    )
+    assert r.status_code == 200, r.text
+    assert captured["price_id"] == "price_basic_annual_test"
+
+
+def test_checkout_suite_monthly_uses_suite_price(client, stripe_configured, monkeypatch):
+    """Suite checkout is allowed end-to-end even though the cross-app
+    benefit (Project-Ops / Contact-Ops Pro) goes live only after Brigade
+    federation deploys. Aaron's call: take the money, deliver the
+    Meeting-Ops Pro benefit now, cross-app later."""
+    captured = {}
+
+    def _fake_create(db, user, price_id, success_url, cancel_url):
+        captured["price_id"] = price_id
+        return "https://checkout.stripe.com/test/cs_suite"
+
+    monkeypatch.setattr(
+        "services.stripe_client.create_checkout_session", _fake_create
+    )
+    r = client.post(
+        "/api/billing/checkout",
+        json={"plan": "suite"},
+        headers=_auth(client),
+    )
+    assert r.status_code == 200, r.text
+    assert captured["price_id"] == "price_suite_test"
+
+
+def test_checkout_suite_annual_uses_suite_annual_price(client, stripe_configured, monkeypatch):
+    captured = {}
+
+    def _fake_create(db, user, price_id, success_url, cancel_url):
+        captured["price_id"] = price_id
+        return "https://checkout.stripe.com/test/cs_suite_yr"
+
+    monkeypatch.setattr(
+        "services.stripe_client.create_checkout_session", _fake_create
+    )
+    r = client.post(
+        "/api/billing/checkout",
+        json={"plan": "suite", "billing_cycle": "annual"},
+        headers=_auth(client),
+    )
+    assert r.status_code == 200, r.text
+    assert captured["price_id"] == "price_suite_annual_test"
+
+
+def test_checkout_pro_annual_uses_pro_annual_price(client, stripe_configured, monkeypatch):
+    captured = {}
+
+    def _fake_create(db, user, price_id, success_url, cancel_url):
+        captured["price_id"] = price_id
+        return "https://checkout.stripe.com/test/cs_pro_yr"
+
+    monkeypatch.setattr(
+        "services.stripe_client.create_checkout_session", _fake_create
+    )
+    r = client.post(
+        "/api/billing/checkout",
+        json={"plan": "pro", "billing_cycle": "annual"},
+        headers=_auth(client),
+    )
+    assert r.status_code == 200, r.text
+    assert captured["price_id"] == "price_pro_annual_test"
 
 
 # ---------------------------------------------------------------------------

@@ -552,6 +552,9 @@ async def semantic_search_sessions(
     """Semantic search across meetings using vector similarity.
     Understands meaning, not just keywords — e.g. 'meetings about budget planning'
     will match transcripts discussing finances even without the exact words."""
+    # v3.23.0 tier gate: cross-meeting semantic search is a TEXT-corpus
+    # operation. Basic + higher get it; Free is browser-only.
+    gate_feature_for_caller(current_user, "cross_meeting_search")
     try:
         from services.semantic_search_service import semantic_search
         results = semantic_search.search(

@@ -54,13 +54,21 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 
 class CheckoutRequest(BaseModel):
-    plan: str = Field(default="pro", description="Plan name: 'pro' or 'enterprise'.")
+    plan: str = Field(
+        default="pro",
+        description=(
+            "Plan name: 'basic', 'pro', 'suite', or 'enterprise'. "
+            "Enterprise returns a 400 'contact sales' message — there's no "
+            "public Checkout link for it. Basic / Pro / Suite all produce "
+            "live Checkout sessions."
+        ),
+    )
     billing_cycle: str = Field(
         default="monthly",
         description=(
             "Billing cycle for the chosen plan: 'monthly' or 'annual'. "
-            "Pro is the only plan with an annual option in v3.22.5. "
-            "Annual on Pro is $120/year (save $24 vs monthly)."
+            "All three paid tiers (Basic / Pro / Suite) have monthly + "
+            "annual options in v3.23.0. Annual saves 2 months on every tier."
         ),
     )
     # Optional return URLs — frontend usually omits and we use defaults.
@@ -133,17 +141,34 @@ async def create_checkout(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown billing_cycle '{payload.billing_cycle}'. Use 'monthly' or 'annual'.",
         )
-    price_id = stripe_client.tier_to_price_id(payload.plan, billing_cycle=cycle)
+    plan = (payload.plan or "").lower()
+    # v3.23.0: Suite checkouts are allowed end-to-end even though the
+    # cross-app entitlement (Project-Ops / Contact-Ops Pro benefits) goes
+    # live only when Brigade federation deploys. Aaron's call: take the
+    # money, deliver the Meeting-Ops Pro benefit immediately, deliver the
+    # cross-app benefit when federation lands.
+    known_plans = {"basic", "pro", "pro_annual", "suite", "enterprise"}
+    if plan not in known_plans:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unknown plan '{payload.plan}'. "
+                f"Valid plans: basic, pro, suite, enterprise."
+            ),
+        )
+    # Enterprise has no public Checkout — it's a sales motion. Trip this
+    # before tier_to_price_id so the message is the helpful "contact sales"
+    # one regardless of whether the env var is unset.
+    if plan == "enterprise":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Enterprise is contact-sales only. Email "
+                "hello@magicunicorn.dev to start an Enterprise conversation."
+            ),
+        )
+    price_id = stripe_client.tier_to_price_id(plan, billing_cycle=cycle)
     if not price_id:
-        # Enterprise has no public Checkout — it's a sales motion.
-        if payload.plan == "enterprise":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "Enterprise is contact-sales only. Email "
-                    "hello@magicunicorn.dev to start an Enterprise conversation."
-                ),
-            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"No Stripe price configured for plan '{payload.plan}'.",

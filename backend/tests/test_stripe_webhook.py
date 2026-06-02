@@ -39,6 +39,11 @@ def _stripe_env(monkeypatch):
     monkeypatch.setenv("STRIPE_API_KEY", "sk_test_000000000000000000000000")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_dummy")
     monkeypatch.setenv("STRIPE_PRO_PRICE_ID", "price_pro_test")
+    monkeypatch.setenv("STRIPE_PRO_ANNUAL_PRICE_ID", "price_pro_annual_test")
+    monkeypatch.setenv("STRIPE_BASIC_PRICE_ID", "price_basic_test")
+    monkeypatch.setenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "price_basic_annual_test")
+    monkeypatch.setenv("STRIPE_SUITE_PRICE_ID", "price_suite_test")
+    monkeypatch.setenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "price_suite_annual_test")
     monkeypatch.setenv("STRIPE_ENTERPRISE_PRICE_ID", "price_ent_test")
     monkeypatch.setenv("FOUNDING_100_ACTIVE", "true")
     monkeypatch.setenv("FOUNDING_100_LIMIT", "100")
@@ -376,6 +381,170 @@ def test_unhandled_event_type_is_200_not_500(client, monkeypatch):
     )
     assert r.status_code == 200
     assert r.json().get("handled") is False
+
+
+def test_subscription_created_basic_price_flips_to_basic(client, monkeypatch):
+    """v3.23.0: Basic price ID flips user to basic tier."""
+    user = _make_user(customer_id="cus_basic_new", tier="free")
+    event = {
+        "id": "evt_basic_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_basic_1",
+                "status": "active",
+                "customer": "cus_basic_new",
+                "items": {"data": [{"price": {"id": "price_basic_test"}}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    assert _refresh(user).tier == "basic"
+
+
+def test_subscription_created_basic_annual_flips_to_basic(client, monkeypatch):
+    user = _make_user(customer_id="cus_basic_yr", tier="free")
+    event = {
+        "id": "evt_basic_yr_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_basic_yr_1",
+                "status": "active",
+                "customer": "cus_basic_yr",
+                "items": {"data": [{"price": {"id": "price_basic_annual_test"}}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    assert _refresh(user).tier == "basic"
+
+
+def test_subscription_created_suite_price_flips_to_suite(client, monkeypatch):
+    """v3.23.0: Suite price ID flips user to suite tier (not pro)."""
+    user = _make_user(customer_id="cus_suite_new", tier="free")
+    event = {
+        "id": "evt_suite_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_suite_1",
+                "status": "active",
+                "customer": "cus_suite_new",
+                "items": {"data": [{"price": {"id": "price_suite_test"}}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    assert _refresh(user).tier == "suite"
+
+
+def test_subscription_created_legacy_pro_12_grandfathered_to_pro(client, monkeypatch):
+    """v3.23.0 grandfather: pre-reprice $12 Pro price ID still resolves to pro tier."""
+    user = _make_user(customer_id="cus_legacy_pro", tier="free")
+    event = {
+        "id": "evt_legacy_pro_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_legacy",
+                "status": "active",
+                "customer": "cus_legacy_pro",
+                "items": {"data": [{"price": {
+                    "id": "price_1TcbE0Dzk9HqAZnHO3cv6mWN",  # legacy $12/mo
+                }}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    assert _refresh(user).tier == "pro"
+
+
+def test_founding_100_not_granted_on_suite_annual(client, monkeypatch):
+    """v3.23.0 (Aaron 2026-06-02): Suite annual checkouts pay $350/yr
+    annual-upfront, but do NOT consume a Founding 100 seat. The cohort
+    stays Pro-only — a future Suite-cohort can be opened separately."""
+    user = _make_user(customer_id="cus_suite_annual", tier="free")
+    event = {
+        "id": "evt_suite_yr_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_suite_yr",
+                "status": "active",
+                "customer": "cus_suite_annual",
+                "items": {"data": [{"price": {
+                    "id": "price_suite_annual_test",
+                    "recurring": {"interval": "year"},
+                }}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    refreshed = _refresh(user)
+    assert refreshed.tier == "suite"
+    # Founding 100 grant is Pro-only — Suite annual does not qualify.
+    assert refreshed.is_founding_member is False
+
+
+def test_founding_100_granted_on_pro_annual(client, monkeypatch):
+    """Sanity-check the inverse: Pro annual still triggers the Founding 100 grant."""
+    user = _make_user(customer_id="cus_pro_annual_f100", tier="free")
+    event = {
+        "id": "evt_pro_yr_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_pro_yr_f100",
+                "status": "active",
+                "customer": "cus_pro_annual_f100",
+                "items": {"data": [{"price": {
+                    "id": "price_pro_annual_test",
+                    "recurring": {"interval": "year"},
+                }}]},
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    refreshed = _refresh(user)
+    assert refreshed.tier == "pro"
+    assert refreshed.is_founding_member is True
 
 
 def test_subscription_unknown_price_id_does_not_upgrade(client, monkeypatch):
