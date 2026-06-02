@@ -99,6 +99,16 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
 
     from database.database import SessionLocal
     from database.models import RecordingSession
+    # v3.23.3 fix: RecordingSession has a FK to organizations.id. Without
+    # the Organization model loaded into SQLAlchemy metadata BEFORE the
+    # commit, the worker process raises
+    #   NoReferencedTableError: Foreign key associated with column
+    #   'recording_sessions.organization_id' could not find table 'organizations'
+    # at flush time and the whole pass rolls back — so the watchdog has
+    # been firing-but-not-committing for an unknown period (110 zombie
+    # sessions accumulated on bigboy by 2026-06-02). Importing the model
+    # is enough to register it; we don't need to use the name.
+    from auth.models import Organization  # noqa: F401
 
     threshold_minutes = _threshold_minutes()
     # Legacy field kept for back-compat with any caller / dashboard parsing

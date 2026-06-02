@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [3.23.3] - 2026-06-02
+
+### Fixed
+- **Session watchdog wasn't committing — silent zombie pile-up**. The Arq `session_watchdog_task` cron was firing every 15 min and correctly identifying stuck recording sessions (logged `session_watchdog.force_fail session_id=...` for each candidate), but the commit at `session_watchdog.py:187` was raising `sqlalchemy.exc.NoReferencedTableError: Foreign key associated with column 'recording_sessions.organization_id' could not find table 'organizations'` and rolling back the entire pass. Cause: `mark_abandoned_recording_sessions()` imported `RecordingSession` but not `Organization`, so the worker process's SQLAlchemy metadata didn't have the `organizations` table registered when the FK resolution needed it at flush time. Added the import. Watchdog now commits cleanly. Found after bigboy accumulated 110 zombie sessions over the previous hours.
+- **Manual cleanup applied** to bigboy: 110 stuck rows (sessions in `recording`/`starting`/`paused`/`stopping` > 60 min idle + sessions in `processing` > 6 h idle) marked `failed` with `[stuck-cleanup v3.23.2]` name suffix. Real session 279 (Aaron's 31-min meeting from 16:16) untouched. VPS had 0 stuck sessions — clean.
+
 ## [3.23.2] - 2026-06-02
 
 ### Fixed
