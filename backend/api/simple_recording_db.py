@@ -78,7 +78,7 @@ def apply_vocabulary_replacements(text: str, db_session, organization_id: int) -
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
-from auth.models import User
+from auth.models import Organization, User, UserOrganization
 
 import redis.asyncio as aioredis
 
@@ -128,6 +128,8 @@ class SessionResponse(BaseModel):
     project_app: Optional[str] = None
     project_id: Optional[int] = None
     project_slug: Optional[str] = None
+    organization_id: Optional[int] = None
+    organization_name: Optional[str] = None
     # User-editable "when the meeting actually happened". ISO date /
     # 24h time. Backfilled from started_at / created_at by alembic 027.
     meeting_date: Optional[str] = None
@@ -370,10 +372,31 @@ async def list_sessions(
         None,
         description="Filter sessions created by this bulk import job (UUID)",
     ),
+    include_all_my_orgs: bool = Query(
+        False,
+        description="Return sessions from every organization the caller belongs to.",
+    ),
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
 
-    query = _scoped_session_query(db, active_org.organization.id)
+    org_names_by_id: dict[int, str] = {}
+    if include_all_my_orgs and not getattr(current_user, "is_superuser", False):
+        org_ids = [
+            row.organization_id
+            for row in db.query(UserOrganization.organization_id)
+            .filter(UserOrganization.user_id == current_user.id)
+            .all()
+        ]
+        if not org_ids:
+            query = db.query(DBRecordingSession).filter(False)
+        else:
+            query = db.query(DBRecordingSession).filter(
+                DBRecordingSession.organization_id.in_(org_ids)
+            )
+    elif include_all_my_orgs and getattr(current_user, "is_superuser", False):
+        query = db.query(DBRecordingSession)
+    else:
+        query = _scoped_session_query(db, active_org.organization.id)
     if tags:
         wanted = [t.strip() for t in tags.split(",") if t.strip()]
         if wanted:
@@ -424,6 +447,18 @@ async def list_sessions(
         query = query.order_by(desc(DBRecordingSession.created_at))
 
     sessions = query.limit(limit).all()
+    session_org_ids = sorted({
+        int(session.organization_id)
+        for session in sessions
+        if session.organization_id is not None
+    })
+    if session_org_ids:
+        org_names_by_id = {
+            int(org.id): org.name
+            for org in db.query(Organization)
+            .filter(Organization.id.in_(session_org_ids))
+            .all()
+        }
 
     result = []
     for session in sessions:
@@ -452,6 +487,8 @@ async def list_sessions(
             project_app=session.project_app,
             project_id=session.project_id,
             project_slug=session.project_slug,
+            organization_id=session.organization_id,
+            organization_name=org_names_by_id.get(session.organization_id),
             meeting_date=session.meeting_date.isoformat() if session.meeting_date else None,
             meeting_time=session.meeting_time.isoformat() if session.meeting_time else None,
         ))
@@ -746,6 +783,12 @@ async def get_session(
             "project_app": session.project_app,
             "project_id": session.project_id,
             "project_slug": session.project_slug,
+            "organization_id": session.organization_id,
+            "organization_name": (
+                db.query(Organization.name)
+                .filter(Organization.id == session.organization_id)
+                .scalar()
+            ),
             # Conference Room linkage. `room_id` is the canonical "this is a
             # room session" signal — non-null means the live-summary UI
             # should pull slices from the server-rolled store instead of

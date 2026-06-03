@@ -19,6 +19,7 @@ const BrigadeGraphViewer = React.lazy(
 );
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { toast } from 'react-toastify';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
@@ -37,10 +38,10 @@ import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
 import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
-import MoveSessionOrgModal from '../components/MoveSessionOrgModal';
 import SessionDetailsTabs, { type SessionDetailsTab } from '../components/SessionDetailsTabs';
 import { UpgradeBanner } from '../components/UpgradeBanner';
 import { config } from '../config';
+import { clearAllHydratedCaches } from '../utils/cachedState';
 import {
   deleteLocalSession,
   exportLocalSession,
@@ -200,6 +201,8 @@ interface Session {
   project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
   project_id?: string | null;
   project_slug?: string | null;
+  organization_id?: number | null;
+  organization_name?: string | null;
   participants?: Participant[];
   tags?: string[];
   /** True for local-only (privacy-mode) sessions loaded from IndexedDB. */
@@ -243,7 +246,7 @@ const PROJECT_APP_LABELS: Record<string, string> = {
 export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { getOrgQueryUrl, activeOrganization } = useOrg();
+  const { getOrgQueryUrl, activeOrganization, organizations = [] } = useOrg();
   const { startUploads } = useUploads();
   // v3.19 (audit §5). Brigade graph banner / inline 3D viewer surface
   // for the user only when their tier exposes `brigade_integration`.
@@ -276,7 +279,9 @@ export const SessionDetails: React.FC = () => {
   const [showReprocessModal, setShowReprocessModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
-  const [showMoveOrgModal, setShowMoveOrgModal] = useState(false);
+  const [moveOrgDropdownOpen, setMoveOrgDropdownOpen] = useState(false);
+  const [moveOrgTarget, setMoveOrgTarget] = useState<{ id: number; name: string; slug: string } | null>(null);
+  const [movingOrg, setMovingOrg] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   // Brigade Phase 2: collapsed by default so the Three.js bundle isn't
   // fetched until the user opens the section. SessionDetails is the
@@ -825,6 +830,51 @@ export const SessionDetails: React.FC = () => {
 
   const participantsBase = () =>
     `${config.apiUrl}/api/simple/recording-sessions/${session?.id || sessionId}/participants`;
+
+  const currentSessionOrgId = session?.organization_id ?? activeOrganization?.id ?? null;
+  const movableOrganizations = organizations.filter((org) => org.is_active);
+
+  const confirmMoveOrganization = async () => {
+    if (!session || !moveOrgTarget || movingOrg) return;
+    setMovingOrg(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+      const res = await fetch(
+        `${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/organization`,
+        {
+          method: 'PUT',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify({ organization_id: moveOrgTarget.id }),
+        },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(formatBackendError(body, res.status, 'Move failed'));
+      }
+
+      setSession((prev) => prev
+        ? {
+            ...prev,
+            organization_id: body.organization_id,
+            organization_name: body.organization_name || moveOrgTarget.name,
+          }
+        : prev);
+      clearAllHydratedCaches();
+      window.dispatchEvent(new CustomEvent('meetingops:sessions-invalidated'));
+      toast.success(`Moved to ${moveOrgTarget.name}`);
+      setMoveOrgTarget(null);
+      setMoveOrgDropdownOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Move failed');
+    } finally {
+      setMovingOrg(false);
+    }
+  };
 
   const addParticipant = async () => {
     const name = newParticipantName.trim();
@@ -2039,19 +2089,44 @@ export const SessionDetails: React.FC = () => {
                 <Mail className="w-4 h-4" />
                 Email
               </button>
-              {/* Move-to-org button — reassigns the entire session record
-                  (audio, transcripts, attachments, chat, search index)
-                  to a different org the user belongs to. Hidden for
-                  local-only sessions (nothing to move on the server). */}
-              {!session.is_local && (
-                <button
-                  onClick={() => setShowMoveOrgModal(true)}
-                  className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 flex items-center gap-2 text-sm"
-                  title="Move this session to a different organization"
-                >
-                  <Briefcase className="w-4 h-4" />
-                  Move
-                </button>
+              {!session.is_local && movableOrganizations.length > 1 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setMoveOrgDropdownOpen((open) => !open)}
+                    disabled={movingOrg}
+                    className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                    title="Move this meeting to a different organization"
+                    aria-haspopup="menu"
+                    aria-expanded={moveOrgDropdownOpen}
+                  >
+                    <Briefcase className="w-4 h-4" />
+                    Move to organization
+                    <ChevronDown className="w-4 h-4" />
+                  </button>
+                  {moveOrgDropdownOpen && (
+                    <div className="absolute right-0 mt-2 w-64 rounded-lg border border-gray-200 bg-white text-gray-900 shadow-lg z-20 py-1">
+                      {movableOrganizations.map((org) => {
+                        const isCurrent = org.id === currentSessionOrgId;
+                        return (
+                          <button
+                            key={org.id}
+                            type="button"
+                            disabled={isCurrent || movingOrg}
+                            onClick={() => {
+                              setMoveOrgTarget({ id: org.id, name: org.name, slug: org.slug });
+                              setMoveOrgDropdownOpen(false);
+                            }}
+                            className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                          >
+                            <span className="truncate">{org.name}</span>
+                            {isCurrent && <span className="text-xs text-gray-400">(current)</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               )}
               {/* Re-process button — re-runs transcribe/diarize/summarize against
                   the existing audio. Lets users change STT engine, speaker
@@ -3775,35 +3850,23 @@ export const SessionDetails: React.FC = () => {
         onClose={() => setShowEmailModal(false)}
       />
 
-      {/* Move-session-org modal — opens when the user clicks Move from
-          the action row. On success: switches the active org to the new
-          home (so the session is still visible in the same view) and
-          shows a toast with the move summary + any orphaned speaker
-          links the user may want to clean up. */}
-      <MoveSessionOrgModal
-        open={showMoveOrgModal}
-        sessionPublicId={sessionId || ''}
-        sessionName={session.name || session.title || 'this session'}
-        onClose={() => setShowMoveOrgModal(false)}
-        onMoved={(resp) => {
-          setShowMoveOrgModal(false);
-          const orphans = resp.orphaned_speaker_links?.length || 0;
-          const orphanNote = orphans > 0
-            ? ` ${orphans} speaker link${orphans === 1 ? '' : 's'} may need re-linking in the new org.`
-            : '';
-          // Best-effort toast. AppRouterSimplified mounts a ToastContainer
-          // at the root; if window has a global flash helper we use it,
-          // else fall back to alert() so the user gets feedback.
-          const msg = `Session moved.${orphanNote}`;
-          try {
-            window.dispatchEvent(new CustomEvent('app-toast', { detail: { kind: 'success', message: msg } }));
-          } catch {
-            // ignore
-          }
-          // Navigate back to /sessions so the list re-renders in the
-          // newly-active org context.
-          navigate('/sessions');
+      <ConfirmModal
+        isOpen={!!moveOrgTarget}
+        title="Move this meeting?"
+        description={
+          <span>
+            Move this meeting to{' '}
+            <span className="font-semibold text-zinc-50">{moveOrgTarget?.name}</span>?
+          </span>
+        }
+        confirmLabel={movingOrg ? 'Moving...' : 'Move meeting'}
+        cancelLabel="Cancel"
+        tone="primary"
+        onConfirm={confirmMoveOrganization}
+        onCancel={() => {
+          if (!movingOrg) setMoveOrgTarget(null);
         }}
+        icon={<Briefcase className="h-5 w-5 text-fuchsia-300" />}
       />
 
       {/* Re-process modal */}
