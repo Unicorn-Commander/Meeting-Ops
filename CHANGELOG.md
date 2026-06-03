@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Added
+- **Record-first UX** [v3.25.0] — authenticated users now land on the recorder (`/record`) instead of the dashboard, and the **Record** action is promoted to a prominent top-of-nav button. Getting into a recording is the default, zero-detour path; the dashboard stays one click away.
 - **Weekly email digest (automated)** [v3.24.4] — a weekly Arq cron generates a per-org digest and emails it via the existing sender; idempotent via new `meeting_digest.emailed_at` column (migration `040`). Empty windows are skipped.
 - **Per-user inline speaker assignment** [v3.24.4] — non-admins can create + link a new speaker on their own meeting (`POST /api/sessions/{session_id}/speaker-links/{link_id}/create-speaker` and `/enroll`), scoped to their org + session; admins keep speaker-library management.
 - **Fixed: always-on recorder empty-session pile-up** [v3.24.4] — the session watchdog now hard-deletes abandoned always-on sessions with no server audio AND no transcript, instead of marking them `failed`; real meetings are protected by the transcript guard.

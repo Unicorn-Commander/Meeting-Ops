@@ -124,6 +124,7 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     path: string;
     label: string;
     icon: string | React.ComponentType<{ className?: string }>;
+    primary?: boolean;
   };
 
   // Workspace-level nav — visible to everyone. Aaron's directive is
@@ -131,8 +132,8 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
   // section, so Speakers / Rooms (the multi-tenant configuration
   // surfaces) get pushed to the admin section below.
   const navItems: NavItem[] = [
+    { path: '/record', label: 'Record', icon: '🎙️', primary: true },
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
-    { path: '/record', label: 'Record', icon: '🎙️' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
     { path: '/import', label: 'Bulk Import', icon: FolderUp },
     { path: '/local-sessions', label: 'Local Sessions', icon: Lock },
@@ -171,6 +172,24 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
 
   const renderNavItem = (item: NavItem) => {
     const Icon = typeof item.icon === 'string' ? null : item.icon;
+    if (item.primary) {
+      const active = location.startsWith(item.path);
+      return (
+        <a
+          key={item.path}
+          href={`#${item.path}`}
+          onClick={onClose}
+          className={`flex items-center gap-3 px-3 py-3 mb-1 rounded-lg min-h-[48px] font-semibold text-white shadow-lg shadow-fuchsia-900/30 transition-colors ${
+            active
+              ? 'bg-gradient-to-r from-fuchsia-500 to-indigo-500'
+              : 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500'
+          }`}
+        >
+          {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
+          <span>{item.label}</span>
+        </a>
+      );
+    }
     return (
       <a
         key={item.path}
@@ -329,7 +348,8 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
  */
 function RootRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    // Record-first: authenticated users land on the recorder.
+    return <Navigate to="/record" replace />;
   }
   const landingEnabled =
     String(import.meta.env.VITE_LANDING_PAGE_ENABLED || '').toLowerCase() === 'true';

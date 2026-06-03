@@ -50,7 +50,7 @@ export const Login: React.FC = () => {
   }, [verifyStatus]);
 
   if (!isLoading && isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to="/record" replace />;
   }
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
