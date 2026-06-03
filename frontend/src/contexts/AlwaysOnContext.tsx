@@ -9,6 +9,7 @@ import React, {
   type ReactNode,
 } from 'react';
 import { config } from '../config';
+import { setRecordingActive } from '../utils/installFetchInterceptor';
 import { useOrg } from './OrgContext';
 import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk, type VadStreamOpenResult } from '../utils/vadEngine';
 import {
@@ -389,6 +390,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     canUseServerProcessingRef.current = canUseServerProcessing;
   }, [canUseServerProcessing]);
+
+  // Tell the fetch interceptor whether we're actively capturing — keeps a
+  // stale oauth2-proxy session refresh from yanking the page to /oauth2/start
+  // mid-meeting. Cleared on unmount so a remount doesn't leave a dead claim.
+  useEffect(() => {
+    const live = state === 'starting' || state === 'recording' || state === 'paused' || state === 'stopping';
+    setRecordingActive('alwaysOn', live);
+    return () => setRecordingActive('alwaysOn', false);
+  }, [state]);
 
   const showPaidFeaturePrompt = useCallback((message?: string) => {
     setPaidFeaturePrompt(
