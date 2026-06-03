@@ -1007,6 +1007,12 @@ export const Sessions: React.FC = () => {
 
       const params = new URLSearchParams();
       params.set('include_all_my_orgs', 'true');
+      // The backend list defaults to limit=100 (no Query()-enforced max). With
+      // power users carrying hundreds of meetings, the default silently
+      // chopped the tail off the list with no UI affordance to load more.
+      // Bump to 1000 — handles every real user today without making the
+      // payload silly. Real pagination ships in v3.25 (see Sessions roadmap).
+      params.set('limit', '1000');
       if (selectedTags.length > 0) {
         params.set('tags', selectedTags.map(encodeURIComponent).join(','));
       }
