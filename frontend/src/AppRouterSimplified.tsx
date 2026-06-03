@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useOrg } from './contexts/OrgContext';
@@ -35,15 +35,43 @@ import Terms from './pages/Terms';
 import Privacy from './pages/Privacy';
 import AUP from './pages/AUP';
 import LegalFooter from './components/LegalFooter';
-import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp } from 'lucide-react';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
+
+// Desktop sidebar collapsed-state persistence. Mobile open/close is
+// ephemeral (sidebarOpen), but the desktop collapse preference must
+// survive reloads, so it's mirrored to localStorage under this key.
+const SIDEBAR_COLLAPSED_KEY = 'mo-sidebar-collapsed';
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  } catch {
+    // Private-mode / disabled storage — default to expanded.
+    return false;
+  }
+}
 
 // Layout wrapper with simplified navigation
 function AppLayout({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const { organizations, activeOrganization, switchOrganization } = useOrg();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Desktop-only collapse. Lazy-init from localStorage so the first
+  // paint already reflects the persisted preference (no expand→collapse
+  // flash on reload).
+  const [collapsed, setCollapsed] = useState<boolean>(readSidebarCollapsed);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? 'true' : 'false');
+    } catch {
+      // ignore storage failures — collapse still works for the session.
+    }
+  }, [collapsed]);
+
+  const toggleCollapsed = useCallback(() => setCollapsed((value) => !value), []);
 
   return (
     <div className="flex h-screen bg-gradient-to-b from-zinc-950 to-black">
@@ -64,7 +92,12 @@ function AppLayout({ children }: { children: React.ReactNode }) {
         <Menu className="w-6 h-6" />
       </button>
 
-      <SimplifiedNavigation isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <SimplifiedNavigation
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        collapsed={collapsed}
+        onToggleCollapse={toggleCollapsed}
+      />
       <main className="flex-1 overflow-y-auto">
         <header className="sticky top-0 z-30 flex items-center justify-end gap-3 border-b border-zinc-800 bg-black/80 px-4 py-3 backdrop-blur">
           <div className="mr-auto pl-12 text-sm text-zinc-500 md:pl-0">
@@ -104,7 +137,17 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 }
 
 // Simplified Navigation Component
-function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+function SimplifiedNavigation({
+  isOpen,
+  onClose,
+  collapsed,
+  onToggleCollapse,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+}) {
   const { logout, user } = useAuth();
   const { activeOrganization } = useOrg();
   const { isRecording, recordingTime } = useRecording();
@@ -170,8 +213,18 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // When collapsed (desktop rail), each item centers its icon and hides
+  // the text label. The accessible name is preserved via title +
+  // aria-label so the icon-only rail stays usable/screenreadable. The
+  // mobile drawer always renders the full-width labelled item, so the
+  // collapsed styling is scoped to the md+ breakpoint only.
   const renderNavItem = (item: NavItem) => {
     const Icon = typeof item.icon === 'string' ? null : item.icon;
+    const glyph = Icon ? (
+      <Icon className="w-5 h-5 shrink-0" />
+    ) : (
+      <span className="shrink-0">{item.icon as string}</span>
+    );
     if (item.primary) {
       const active = location.startsWith(item.path);
       return (
@@ -179,14 +232,18 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
           key={item.path}
           href={`#${item.path}`}
           onClick={onClose}
+          title={collapsed ? item.label : undefined}
+          aria-label={item.label}
           className={`flex items-center gap-3 px-3 py-3 mb-1 rounded-lg min-h-[48px] font-semibold text-white shadow-lg shadow-fuchsia-900/30 transition-colors ${
+            collapsed ? 'md:justify-center md:px-0' : ''
+          } ${
             active
               ? 'bg-gradient-to-r from-fuchsia-500 to-indigo-500'
               : 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500'
           }`}
         >
-          {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
-          <span>{item.label}</span>
+          {glyph}
+          <span className={collapsed ? 'md:hidden' : ''}>{item.label}</span>
         </a>
       );
     }
@@ -195,23 +252,28 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
         key={item.path}
         href={`#${item.path}`}
         onClick={onClose}
+        title={collapsed ? item.label : undefined}
+        aria-label={item.label}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px] ${
+          collapsed ? 'md:justify-center md:px-0' : ''
+        } ${
           (item.path === '/' ? location === item.path : location.startsWith(item.path))
             ? 'bg-zinc-800 text-white'
             : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
         }`}
       >
-        {Icon ? <Icon className="w-5 h-5" /> : <span>{item.icon as string}</span>}
-        <span>{item.label}</span>
+        {glyph}
+        <span className={collapsed ? 'md:hidden' : ''}>{item.label}</span>
       </a>
     );
   };
 
   return (
     <nav
-      className={`fixed top-0 left-0 h-full w-64 bg-zinc-950 border-r border-zinc-800 p-4 z-50 transform transition-transform duration-200 ease-in-out
+      className={`fixed top-0 left-0 h-full w-64 bg-zinc-950 border-r border-zinc-800 p-4 z-50 transform transition-all duration-200 ease-in-out
         ${isOpen ? 'translate-x-0' : '-translate-x-full'}
-        md:relative md:translate-x-0 md:flex md:flex-col`}
+        md:relative md:translate-x-0 md:flex md:flex-col
+        ${collapsed ? 'md:w-16 md:px-2' : 'md:w-64'}`}
     >
       {/* Close button for mobile */}
       <button
@@ -222,29 +284,60 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
         <X className="w-5 h-5" />
       </button>
 
+      {/* Header: logo + brand. The brand text hides on the collapsed
+          desktop rail; the logo tile stays as the persistent anchor.
+          The desktop collapse/expand chevron lives top-right (md+ only)
+          and is the primary control for narrowing/restoring the rail. */}
       <div className="mb-8">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center">
+        <div className={`flex items-center gap-3 ${collapsed ? 'md:justify-center md:gap-0' : ''}`}>
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center shrink-0">
             <span className="text-white text-xl">✨</span>
           </div>
-          <div>
+          <div className={collapsed ? 'md:hidden' : ''}>
             <div className="text-white font-semibold">Meeting-Ops</div>
             <div className="text-xs text-zinc-400">AI Recording Suite</div>
           </div>
+          {/* Collapse chevron — desktop only, shown when expanded. */}
+          {!collapsed && (
+            <button
+              onClick={onToggleCollapse}
+              className="ml-auto hidden md:flex p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+          )}
         </div>
+        {/* Expand control on the collapsed rail — centered under the
+            logo so the rail always offers a one-click way back. */}
+        {collapsed && (
+          <button
+            onClick={onToggleCollapse}
+            className="mt-4 hidden md:flex w-full items-center justify-center p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
-      {/* Recording indicator in nav */}
+      {/* Recording indicator in nav. On the collapsed desktop rail this
+          shrinks to just the pulsing dot (the live timer + label are
+          hidden); the elapsed time stays available via the title
+          tooltip and is fully visible again on expand or on mobile. */}
       {isRecording && (
-        <div className="mb-4 px-3 py-2 bg-red-600/20 border border-red-500/30 rounded-lg">
+        <div className={`mb-4 py-2 bg-red-600/20 border border-red-500/30 rounded-lg ${collapsed ? 'md:px-0 px-3' : 'px-3'}`}>
           <a
             href="#/record"
             onClick={onClose}
-            className="flex items-center gap-2 text-red-400 hover:text-red-300 transition-colors"
+            title={collapsed ? `Recording — ${formatTime(recordingTime)}` : undefined}
+            className={`flex items-center gap-2 text-red-400 hover:text-red-300 transition-colors ${collapsed ? 'md:justify-center' : ''}`}
           >
-            <Circle className="w-3 h-3 fill-red-400 animate-pulse" />
-            <span className="text-sm font-medium">Recording</span>
-            <span className="ml-auto text-xs font-mono flex items-center gap-1">
+            <Circle className="w-3 h-3 fill-red-400 animate-pulse shrink-0" />
+            <span className={`text-sm font-medium ${collapsed ? 'md:hidden' : ''}`}>Recording</span>
+            <span className={`ml-auto text-xs font-mono flex items-center gap-1 ${collapsed ? 'md:hidden' : ''}`}>
               <Clock className="w-3 h-3" />
               {formatTime(recordingTime)}
             </span>
@@ -264,9 +357,9 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
       {isAdmin && (
         <div className="mt-6">
           <div className="mt-2 border-t border-zinc-800/70" />
-          <div className="mt-4 mb-2 flex items-center gap-2 px-3">
-            <ShieldCheck className="w-3.5 h-3.5 text-zinc-500" />
-            <span className="text-[11px] uppercase tracking-wider text-zinc-500">Admin</span>
+          <div className={`mt-4 mb-2 flex items-center gap-2 px-3 ${collapsed ? 'md:justify-center md:px-0' : ''}`}>
+            <ShieldCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+            <span className={`text-[11px] uppercase tracking-wider text-zinc-500 ${collapsed ? 'md:hidden' : ''}`}>Admin</span>
           </div>
           <div className="space-y-2">
             {adminNavItems.map(renderNavItem)}
@@ -274,12 +367,17 @@ function SimplifiedNavigation({ isOpen, onClose }: { isOpen: boolean; onClose: (
         </div>
       )}
 
-      <div className="absolute bottom-4 left-4 right-4">
+      <div className={`absolute bottom-4 left-4 right-4 ${collapsed ? 'md:left-2 md:right-2' : ''}`}>
         <button
           onClick={() => { logout(); onClose(); }}
-          className="w-full px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors text-sm min-h-[44px]"
+          title={collapsed ? 'Logout' : undefined}
+          aria-label="Logout"
+          className={`w-full flex items-center justify-center gap-2 px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors text-sm min-h-[44px] ${
+            collapsed ? 'md:px-0' : ''
+          }`}
         >
-          Logout
+          <LogOut className={`w-4 h-4 shrink-0 ${collapsed ? 'md:block hidden' : 'hidden'}`} />
+          <span className={collapsed ? 'md:hidden' : ''}>Logout</span>
         </button>
       </div>
     </nav>

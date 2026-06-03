@@ -4,21 +4,17 @@ import {
   MicOff, 
   Play, 
   Pause, 
-  FileText, 
-  ListChecks, 
-  Flag, 
-  Users, 
-  Clock, 
+  FileText,
+  ListChecks,
+  Flag,
   Sparkles,
   Cpu,
   HardDrive,
   CheckCircle,
   AlertCircle,
-  Volume2,
   Bot,
   Brain,
   Target,
-  MessageSquare,
   Zap,
   RotateCcw
 } from 'lucide-react';
@@ -177,20 +173,9 @@ export default function LiveRecording() {
   const [llmModelName, setLlmModelName] = useState<string>('Granite 3.3 2B');
   const [sttModelName, setSttModelName] = useState<string>('Whisper large-v3-turbo');
 
-  // Declutter: secondary controls collapse behind disclosures so the
-  // record control + live transcript + live summary + key metrics stay the
-  // focus. Nothing is removed — these just default to collapsed.
+  // Declutter: the summary-format toggles collapse behind a header
+  // disclosure so the record control stays the focus. Defaults collapsed.
   const [showFormats, setShowFormats] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-
-  // Auto-scroll (stick-to-bottom) for the live transcript + live summary
-  // panels. Each panel keeps a scroll container ref and a "is the user
-  // docked at the bottom" intent flag so streaming content tails the
-  // latest line, but pauses the instant the user scrolls up to read back.
-  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
-  const transcriptAtBottomRef = useRef(true);
-  const summaryScrollRef = useRef<HTMLDivElement | null>(null);
-  const summaryAtBottomRef = useRef(true);
 
   // Always-on recording mode
   const { token } = useAuth();
@@ -1013,85 +998,10 @@ export default function LiveRecording() {
     setSummaryFormats(prev => ({ ...prev, [format]: !prev[format] }));
   };
 
-  // Tail-follow handler factory: keeps the matching "docked at bottom"
-  // ref in sync as the user scrolls. 24px slack means "near the bottom"
-  // still counts as docked.
-  const makeScrollHandler =
-    (atBottomRef: React.MutableRefObject<boolean>) =>
-    (e: React.UIEvent<HTMLDivElement>) => {
-      const el = e.currentTarget;
-      atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    };
-
-  // Tail the live transcript panel to the newest line as segments stream
-  // in, unless the user has scrolled up.
-  useEffect(() => {
-    if (!transcriptAtBottomRef.current) return;
-    const el = transcriptScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [liveTranscript]);
-
-  // Tail the live summary panel when a fresh progressive summary lands.
-  useEffect(() => {
-    if (!summaryAtBottomRef.current) return;
-    const el = summaryScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [autoSummary]);
-
-  // The live /ws/transcription-auto stream carries transcription text +
-  // progressive summaries ONLY — no per-segment speaker labels and no VAD.
-  // (Verified in the message handlers above: liveTranscript is string[].)
-  // Live diarization (and therefore a real speaker count) is only available
-  // through the Pro server-live path rendered by <ServerLiveTranscript/>.
-  // So we surface the speaker count there and keep a graceful placeholder
-  // here: a dash unless that live-diarization mode is active.
-  const liveDiarizationActive = serverLiveEnabled && isRecording && Boolean(sessionData?.id);
-
-  // Words remaining until the next progressive summary fires. Cadence is a
-  // fixed 500-word interval (mirrors the existing progress bar at ~line
-  // 1349 and summarySettings.summaryWordCountInterval).
-  const summaryInterval = summarySettings.summaryWordCountInterval || 500;
-  const wordsToNextSummary = Math.max(0, summaryInterval - (wordCount % summaryInterval));
-
-  // Flatten whatever shape autoSummary arrives in (string | structured
-  // sections) into ordered, renderable blocks for the visible summary
-  // panel. Defensive: backend has shipped several shapes over time.
-  const summaryBlocks: Array<{ heading?: string; lines: string[] }> = (() => {
-    if (!autoSummary) return [];
-    if (typeof autoSummary === 'string') {
-      return [{ lines: [autoSummary] }];
-    }
-    const blocks: Array<{ heading?: string; lines: string[] }> = [];
-    const s = autoSummary as Record<string, any>;
-    if (typeof s.executive === 'string' && s.executive.trim()) {
-      blocks.push({ heading: 'Executive', lines: [s.executive.trim()] });
-    }
-    const toLines = (val: any): string[] => {
-      if (!val) return [];
-      if (Array.isArray(val)) {
-        return val
-          .map((v) =>
-            typeof v === 'string'
-              ? v
-              : v?.action || v?.task || v?.text || v?.decision || JSON.stringify(v),
-          )
-          .filter((x: string) => x && x.trim());
-      }
-      if (typeof val === 'string') return val.trim() ? [val.trim()] : [];
-      return [];
-    };
-    const bullets = toLines(s.bullets);
-    if (bullets.length) blocks.push({ heading: 'Key points', lines: bullets });
-    const decisions = toLines(s.decisions);
-    if (decisions.length) blocks.push({ heading: 'Decisions', lines: decisions });
-    const actions = toLines(s.actions ?? s.tasks);
-    if (actions.length) blocks.push({ heading: 'Action items', lines: actions });
-    // Unknown shape — show something rather than a blank panel.
-    if (blocks.length === 0) {
-      blocks.push({ lines: [JSON.stringify(autoSummary, null, 2)] });
-    }
-    return blocks;
-  })();
+  // Live transcript + live summary rendering (including the tail-follow
+  // scroll behaviour and the summary-block flattening) now lives entirely
+  // inside <AlwaysOnControl/>. The duplicate panels and their supporting
+  // helpers that used to sit here were removed.
 
   return (
     <>
@@ -1162,167 +1072,10 @@ export default function LiveRecording() {
         <div className="lg:col-span-2 space-y-4 md:space-y-6">
           <AlwaysOnControl />
 
-          {/* ── Focus row: key live metrics + VAD/listening pulse ──
-              Elapsed, words-to-next-summary, distinct-speaker count, and a
-              subtle voice-activity indicator. This is the at-a-glance row
-              the declutter pass promotes to the top of the layout. */}
-          {(isRecording || sessionData?.id || liveTranscript.length > 0) && (
-            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4">
-              <div className="flex flex-wrap items-center gap-2.5">
-                {/* Elapsed */}
-                <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-                  <Clock className="h-4 w-4 text-indigo-400" />
-                  <div className="leading-tight">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Elapsed</div>
-                    <div className="font-mono text-sm text-zinc-100">{formatDuration(duration)}</div>
-                  </div>
-                </div>
-
-                {/* Words to next summary */}
-                <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-                  <Sparkles className="h-4 w-4 text-fuchsia-400" />
-                  <div className="leading-tight">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Next summary</div>
-                    <div className="font-mono text-sm text-zinc-100">
-                      {summarySettings.enableLiveSummarization
-                        ? `${wordsToNextSummary} words`
-                        : 'Off'}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Distinct speaker count — live diarization only. The main
-                    live stream carries no speakers, so we show a quiet dash
-                    unless the Pro server-live diarization mode is active,
-                    where <ServerLiveTranscript/> surfaces the live count. */}
-                <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-                  <Users className="h-4 w-4 text-emerald-400" />
-                  <div className="leading-tight">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Speakers</div>
-                    <div className="font-mono text-sm text-zinc-100">
-                      {liveDiarizationActive ? (
-                        <span title="Live speaker count shown on the server live transcript">Live</span>
-                      ) : (
-                        <span className="text-zinc-600" title="Live diarization not active on this stream">—</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* VAD / listening pulse. Uses the real /ws/audio-levels
-                    signal when it reports activity; otherwise falls back to
-                    a steady mic-active pulse tied to the recording state. */}
-                <div className="ml-auto inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-                  {isRecording ? (
-                    <span className="relative inline-flex h-2.5 w-2.5">
-                      <span
-                        className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping"
-                        style={audioLevel > 0 ? { opacity: Math.min(0.35 + audioLevel, 0.9) } : undefined}
-                      />
-                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
-                    </span>
-                  ) : (
-                    <Volume2 className="h-4 w-4 text-zinc-600" />
-                  )}
-                  <span className={`text-xs ${isRecording ? 'text-emerald-300' : 'text-zinc-500'}`}>
-                    {isRecording ? 'Listening' : 'Idle'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── Live transcript (browser path) ──
-              Surfaces the previously-hidden `liveTranscript` from the
-              /ws/transcription-auto stream as a real, tail-following panel.
-              Auto-scrolls to the newest line; pauses when the user scrolls
-              up to read back. */}
-          {(isRecording || liveTranscript.length > 0) && (
-            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-6">
-              <div className="mb-3 flex items-center gap-2">
-                <MessageSquare className="h-4 w-4 text-indigo-400" />
-                <h3 className="text-sm font-semibold text-zinc-100">Live Transcript</h3>
-                {isRecording && (
-                  <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] text-emerald-300">
-                    <span className="relative inline-flex h-2 w-2">
-                      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                    </span>
-                    streaming
-                  </span>
-                )}
-              </div>
-              <div
-                ref={transcriptScrollRef}
-                onScroll={makeScrollHandler(transcriptAtBottomRef)}
-                className="max-h-64 overflow-y-auto pr-1 text-sm leading-relaxed text-zinc-300"
-              >
-                {liveTranscript.length === 0 ? (
-                  <p className="text-zinc-500">
-                    {isRecording ? 'Listening — transcript will appear here…' : 'No transcript yet.'}
-                  </p>
-                ) : (
-                  liveTranscript.map((line, i) => (
-                    <p key={i} className="mb-2 flex gap-2">
-                      <span className="shrink-0 font-mono text-[11px] text-zinc-600">
-                        {formatTranscriptTimestamp(i)}
-                      </span>
-                      <span>{line}</span>
-                    </p>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ── Live summary (progressive) ──
-              Surfaces the previously-hidden `autoSummary` as a real,
-              tail-following panel so the live AI summary is part of the
-              focus. Auto-scrolls; pauses when the user scrolls up. */}
-          {(autoSummary || (isRecording && summarySettings.enableLiveSummarization)) && (
-            <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-4 md:p-6">
-              <div className="mb-3 flex items-center gap-2">
-                <Brain className="h-4 w-4 text-fuchsia-400" />
-                <h3 className="text-sm font-semibold text-zinc-100">Live Summary</h3>
-                {isRecording && summarySettings.enableLiveSummarization && (
-                  <span className="ml-auto text-[11px] text-zinc-500">Every {summaryInterval} words</span>
-                )}
-              </div>
-              <div
-                ref={summaryScrollRef}
-                onScroll={makeScrollHandler(summaryAtBottomRef)}
-                className="max-h-72 overflow-y-auto pr-1 text-sm leading-relaxed text-zinc-300"
-              >
-                {summaryBlocks.length === 0 ? (
-                  <p className="flex items-center gap-2 text-zinc-500">
-                    <Brain className="h-3.5 w-3.5 animate-pulse text-fuchsia-400" />
-                    Analyzing… first summary lands at {summaryInterval} words.
-                  </p>
-                ) : (
-                  summaryBlocks.map((block, bi) => (
-                    <div key={bi} className="mb-3 last:mb-0">
-                      {block.heading && (
-                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-fuchsia-300/80">
-                          {block.heading}
-                        </div>
-                      )}
-                      {block.lines.length === 1 && !block.heading ? (
-                        <p className="whitespace-pre-wrap text-zinc-300">{block.lines[0]}</p>
-                      ) : block.lines.length === 1 ? (
-                        <p className="text-zinc-300">{block.lines[0]}</p>
-                      ) : (
-                        <ul className="list-disc space-y-1 pl-5 marker:text-zinc-600">
-                          {block.lines.map((line, li) => (
-                            <li key={li} className="text-zinc-300">{line}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
+          {/* The live metrics, listening pulse, live transcript and live
+              summary now render entirely inside <AlwaysOnControl/> above.
+              The duplicate focus-row + transcript + summary panels that
+              used to sit here were removed so there is one live surface. */}
 
           {/* The old "Record from this browser" (DesktopBrowserRecorder) card
               was removed: it duplicated AlwaysOnControl but uploaded straight
@@ -1633,56 +1386,6 @@ export default function LiveRecording() {
               </div>
             </div>
           )}
-
-          {/* Advanced — progressive-summary internals + pipeline model
-              names. Collapsed by default (declutter); the data is the same
-              progressiveData the live stream emits, just no longer front
-              and center. */}
-          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((v) => !v)}
-              aria-expanded={showAdvanced}
-              className="flex w-full items-center justify-between gap-2 px-4 py-3 text-sm text-zinc-300 hover:text-white"
-            >
-              <span className="inline-flex items-center gap-2">
-                <Cpu className="h-4 w-4 text-blue-400" />
-                Advanced
-              </span>
-              <span className="text-xs text-zinc-500">{showAdvanced ? 'Hide' : 'Show'}</span>
-            </button>
-            {showAdvanced && (
-              <div className="space-y-2 border-t border-zinc-800 px-4 py-3 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-500">STT model</span>
-                  <span className="font-mono text-zinc-300">{sttModelName}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-500">Summary model</span>
-                  <span className="font-mono text-zinc-300">{progressiveData?.modelSize || llmModelName}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-500">Words counted</span>
-                  <span className="font-mono text-zinc-300">{wordCount}</span>
-                </div>
-                {progressiveData && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <span className="text-zinc-500">Last interval</span>
-                      <span className="font-mono text-zinc-300">{progressiveData.intervalUsed} words</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-zinc-500">Next interval</span>
-                      <span className="font-mono text-zinc-300">{progressiveData.nextInterval} words</span>
-                    </div>
-                  </>
-                )}
-                {!progressiveData && (
-                  <div className="text-zinc-600">No progressive summary emitted yet.</div>
-                )}
-              </div>
-            )}
-          </div>
 
           {/* Session Info */}
           {sessionData && (

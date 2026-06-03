@@ -111,6 +111,45 @@ function formatDuration(seconds: number): string {
   return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
+/** Px of slack from the bottom that still counts as "at the bottom". A
+ *  little forgiveness so sub-pixel rounding / a half-line of new text
+ *  doesn't read as "the user scrolled up". */
+const TAIL_FOLLOW_SLACK_PX = 24;
+
+/**
+ * Tail-follow auto-scroll for a live, append-only panel (live summary,
+ * live transcript). Keeps the element pinned to the bottom as content
+ * grows, but pauses the moment the user scrolls up to read back, and
+ * resumes once they scroll back to within TAIL_FOLLOW_SLACK_PX of the
+ * bottom. Returns the ref to attach to the scroll container plus an
+ * onScroll handler.
+ *
+ * `dep` is the value that changes when content grows (e.g. transcript
+ * text or slice count) — the effect re-pins on each change when stuck.
+ */
+function useTailFollow<T extends HTMLElement>(dep: unknown) {
+  const ref = useRef<T | null>(null);
+  // Whether we're currently following the tail. Starts true so the first
+  // content lands pinned to the bottom; flipped by the user's scroll.
+  const stickRef = useRef(true);
+
+  const handleScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickRef.current = distanceFromBottom <= TAIL_FOLLOW_SLACK_PX;
+  };
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (!stickRef.current) return; // user scrolled up — leave them there
+    el.scrollTop = el.scrollHeight;
+  }, [dep]);
+
+  return { ref, handleScroll };
+}
+
 /**
  * Persisted flag — once the user clicks "Got it" on the audio-source
  * onboarding hint, we never show it again. Keyed under the existing
@@ -592,6 +631,14 @@ export default function AlwaysOnControl() {
     ? Math.min(100, Math.round((wordsSinceLastSummary / thresholdSpec.value) * 100))
     : null;
 
+  // Tail-follow auto-scroll for the two live panels. The summary panel
+  // grows by slices (+ a streaming draft); the transcript grows by text.
+  // Both re-pin to the bottom on growth unless the user has scrolled up.
+  const summaryScroll = useTailFollow<HTMLDivElement>(
+    `${orderedSlices.length}:${alwaysOn.summary.currentDraft ?? ''}`,
+  );
+  const transcriptScroll = useTailFollow<HTMLTextAreaElement>(transcriptText);
+
   const toggleSlice = (id: string) => {
     setExpandedSliceIds((prev) => {
       const next = new Set(prev);
@@ -600,6 +647,118 @@ export default function AlwaysOnControl() {
       return next;
     });
   };
+
+  // The live view — transcript + summary side-by-side (or the capture-only
+  // explainer on phones). Extracted to a variable so we can render it high
+  // in the layout, directly under the primary record controls (Aaron:
+  // "live transcript should be towards the top"). Transcript is the lead
+  // (left) column since it's the thing you watch while recording; the
+  // summary sits alongside. Grid stays single-column under lg.
+  const liveView = alwaysOn.isCaptureOnlyMode ? (
+    // Phase A mobile gate. Browser STT + LLM are skipped on phones
+    // and tablets — both panes would be empty anyway, so we render
+    // a friendly explainer in their place. Recording duration,
+    // audio meter, and the stop button stay above; the full
+    // transcript and summary land in the session ~60s after stop
+    // via the server reprocess pass.
+    <div className="mt-5 rounded-lg border border-sky-500/30 bg-sky-500/5 p-4">
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
+          <Smartphone className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="text-sm font-medium text-sky-100">Capture-only mode</div>
+          <p className="mt-1 text-sm text-zinc-300">
+            Your device captures audio and uploads it as you record. The
+            full transcript and AI summary will be ready about a minute
+            after the meeting ends, on the session page.
+          </p>
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div className="mt-5 grid gap-4 lg:grid-cols-2">
+      <div>
+        <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-transcript">
+          Live transcript
+        </label>
+        <textarea
+          id="always-on-transcript"
+          ref={transcriptScroll.ref}
+          onScroll={transcriptScroll.handleScroll}
+          readOnly
+          value={transcriptText}
+          placeholder="No transcript yet."
+          className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+        />
+      </div>
+      <div>
+        <div className="mb-2">
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-zinc-300">Live summary</label>
+            <span className="text-xs text-zinc-500">
+              {alwaysOn.autoConfig.enabled
+                ? isWordsBased && thresholdSpec
+                  ? `${wordsSinceLastSummary} / ${thresholdSpec.value} words to next${wordsToNext === 0 ? ' (firing…)' : ''}`
+                  : `Auto-updates ${thresholdLabel.toLowerCase()} · ${alwaysOn.transcriptWordCount} words total`
+                : `Manual mode · ${alwaysOn.transcriptWordCount} words`}
+            </span>
+          </div>
+          {alwaysOn.autoConfig.enabled && isWordsBased && wordProgressPct !== null && (
+            <div
+              className="mt-1 h-1 w-full overflow-hidden rounded bg-zinc-800"
+              role="progressbar"
+              aria-valuenow={wordProgressPct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Words until next live summary"
+            >
+              <div
+                className="h-full bg-sky-400 transition-all"
+                style={{ width: `${wordProgressPct}%` }}
+              />
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={summaryScroll.ref}
+          onScroll={summaryScroll.handleScroll}
+          className="space-y-3 max-h-[28rem] overflow-y-auto pr-1"
+        >
+          {alwaysOn.summary.currentDraft && (
+            <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
+              <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-sky-300">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Generating next slice
+              </div>
+              <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
+                {alwaysOn.summary.currentDraft}
+              </div>
+            </div>
+          )}
+
+          {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
+            <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
+              {alwaysOn.autoConfig.enabled
+                ? 'Live summary will appear once enough conversation has been captured.'
+                : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
+            </div>
+          )}
+
+          {orderedSlices.map((slice) => (
+            <SliceCard
+              key={slice.id}
+              slice={slice}
+              expanded={slice.id === latestSliceId ? !expandedSliceIds.has(slice.id) : expandedSliceIds.has(slice.id)}
+              onToggle={() => toggleSlice(slice.id)}
+              highlight={slice.id === latestSliceId}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-5 shadow-xl shadow-black/20">
@@ -728,6 +887,28 @@ export default function AlwaysOnControl() {
           {alwaysOn.error && (
             <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
               {alwaysOn.error}
+            </div>
+          )}
+          {/* Clean-stop confirmation. Set by stop() on a successful
+              finalize so the user gets positive feedback ("Saved —
+              processing your meeting.") instead of the empty surface the
+              orphan banner used to wrongly fill. Suppressed if an error is
+              showing — we never present success + failure together. */}
+          {alwaysOn.saveConfirmation && !alwaysOn.error && (
+            <div
+              role="status"
+              className="mt-3 flex items-start gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            >
+              <Sparkles className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-300" aria-hidden="true" />
+              <span className="min-w-0 flex-1">{alwaysOn.saveConfirmation}</span>
+              <button
+                type="button"
+                onClick={alwaysOn.dismissSaveConfirmation}
+                aria-label="Dismiss"
+                className="rounded p-0.5 text-emerald-300/70 transition hover:bg-emerald-500/20 hover:text-emerald-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
           )}
           {/* v3.22.5 — stuck-state escape hatch. Surfaces only when the
@@ -975,6 +1156,14 @@ export default function AlwaysOnControl() {
         </div>
       )}
 
+      {/* Live view — transcript (lead) + summary, hoisted directly under
+          the primary record controls so the thing you watch while
+          recording is high and prominent (Aaron: "live transcript should
+          be towards the top, no?"). Secondary controls (audio-source
+          picker), the mic meter, and the metrics/progress grid all sit
+          below this now. */}
+      {liveView}
+
       {/* Confirm modals for the destructive / disruptive controls.
           discardSession() hard-deletes the current session (audio +
           chunks + qdrant embeddings + DB row); restartSession() stops
@@ -1103,105 +1292,6 @@ export default function AlwaysOnControl() {
         </div>
       )}
 
-      {alwaysOn.isCaptureOnlyMode ? (
-        // Phase A mobile gate. Browser STT + LLM are skipped on phones
-        // and tablets — both panes would be empty anyway, so we render
-        // a friendly explainer in their place. Recording duration,
-        // audio meter, and the stop button stay above; the full
-        // transcript and summary land in the session ~60s after stop
-        // via the server reprocess pass.
-        <div className="mt-5 rounded-lg border border-sky-500/30 bg-sky-500/5 p-4">
-          <div className="flex items-start gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
-              <Smartphone className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-sm font-medium text-sky-100">Capture-only mode</div>
-              <p className="mt-1 text-sm text-zinc-300">
-                Your device captures audio and uploads it as you record. The
-                full transcript and AI summary will be ready about a minute
-                after the meeting ends, on the session page.
-              </p>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="mt-5 grid gap-4 lg:grid-cols-2">
-          <div>
-            <div className="mb-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-sm font-medium text-zinc-300">Live summary</label>
-                <span className="text-xs text-zinc-500">
-                  {alwaysOn.autoConfig.enabled
-                    ? isWordsBased && thresholdSpec
-                      ? `${wordsSinceLastSummary} / ${thresholdSpec.value} words to next${wordsToNext === 0 ? ' (firing…)' : ''}`
-                      : `Auto-updates ${thresholdLabel.toLowerCase()} · ${alwaysOn.transcriptWordCount} words total`
-                    : `Manual mode · ${alwaysOn.transcriptWordCount} words`}
-                </span>
-              </div>
-              {alwaysOn.autoConfig.enabled && isWordsBased && wordProgressPct !== null && (
-                <div
-                  className="mt-1 h-1 w-full overflow-hidden rounded bg-zinc-800"
-                  role="progressbar"
-                  aria-valuenow={wordProgressPct}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label="Words until next live summary"
-                >
-                  <div
-                    className="h-full bg-sky-400 transition-all"
-                    style={{ width: `${wordProgressPct}%` }}
-                  />
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
-              {alwaysOn.summary.currentDraft && (
-                <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-sky-300">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    Generating next slice
-                  </div>
-                  <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap">
-                    {alwaysOn.summary.currentDraft}
-                  </div>
-                </div>
-              )}
-
-              {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
-                <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
-                  {alwaysOn.autoConfig.enabled
-                    ? 'Live summary will appear once enough conversation has been captured.'
-                    : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
-                </div>
-              )}
-
-              {orderedSlices.map((slice) => (
-                <SliceCard
-                  key={slice.id}
-                  slice={slice}
-                  expanded={slice.id === latestSliceId ? !expandedSliceIds.has(slice.id) : expandedSliceIds.has(slice.id)}
-                  onToggle={() => toggleSlice(slice.id)}
-                  highlight={slice.id === latestSliceId}
-                />
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="mb-2 block text-sm font-medium text-zinc-300" htmlFor="always-on-transcript">
-              Live transcript
-            </label>
-            <textarea
-              id="always-on-transcript"
-              readOnly
-              value={transcriptText}
-              placeholder="No transcript yet."
-              className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
-            />
-          </div>
-        </div>
-      )}
     </section>
   );
 }

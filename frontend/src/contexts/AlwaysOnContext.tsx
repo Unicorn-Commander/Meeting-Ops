@@ -168,6 +168,15 @@ export interface AlwaysOnContextValue {
   summary: AlwaysOnSummary;
   liveTranscript: LiveTranscriptSegment[];
   error: string | null;
+  /**
+   * Transient success notice shown after a clean Stop & save (e.g.
+   * "Saved — processing your meeting."). Null when there's nothing to
+   * confirm. Cleared on the next start()/restart() or via
+   * dismissSaveConfirmation().
+   */
+  saveConfirmation: string | null;
+  /** Dismiss the post-stop save confirmation banner. */
+  dismissSaveConfirmation: () => void;
   paidFeaturePrompt: string | null;
   dismissPaidFeaturePrompt: () => void;
   statusText: string;
@@ -355,6 +364,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptSegment[]>([]);
   const [autoConfig, setAutoConfig] = useState<LiveSummaryAutoConfig>(() => getLiveSummaryAutoConfig());
   const [error, setError] = useState<string | null>(null);
+  // Transient success notice surfaced after a clean Stop & save so the
+  // user gets positive confirmation ("Saved — processing your meeting.")
+  // instead of an empty surface that an orphan banner used to fill. Set
+  // only when stop() finalizes without throwing; cleared on the next
+  // start()/restart() and when the user dismisses it.
+  const [saveConfirmation, setSaveConfirmation] = useState<string | null>(null);
   const [paidFeaturePrompt, setPaidFeaturePrompt] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Idle');
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
@@ -409,6 +424,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
   const dismissPaidFeaturePrompt = useCallback(() => {
     setPaidFeaturePrompt(null);
+  }, []);
+
+  const dismissSaveConfirmation = useCallback(() => {
+    setSaveConfirmation(null);
   }, []);
 
   const getServerProcessingError = useCallback(() => (
@@ -893,6 +912,42 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       console.warn('[always-on] finalize-audio kick-off failed:', err);
     }
   }, []);
+
+  /**
+   * Mark a just-finalized session's local IDB row as finalized, then wipe
+   * its chunks. Crucial for the orphan-banner false-positive: a successful
+   * server finalize doesn't otherwise touch the local row, so the
+   * state==='idle' orphan rescan would find `finalized:false && chunk_count>0`
+   * and surface "Found unfinished recording" right after a clean Stop.
+   *
+   * Setting `finalized:true` is awaited (synchronous w.r.t. stop()) so the
+   * getOrphanedSessions() filter (`!m.finalized`) already excludes the row
+   * even before the async wipe lands — i.e. the rescan can never flag it.
+   * The wipe is fire-and-forget so stop() still returns fast.
+   *
+   * Best-effort: any IDB error is swallowed (we already finalized
+   * server-side; a lingering local row at worst shows a stale banner the
+   * user can Discard, never data loss). No-op when local persistence is
+   * unavailable (mobile / desktop-fallback), where there's no IDB row.
+   */
+  const markLocalSessionFinalizedSafe = useCallback(async (sessionId: string) => {
+    if (deviceCapability.capabilityClass !== 'desktop-capable') return;
+    if (!localAudioStore.isAvailable()) return;
+    try {
+      const meta = await localAudioStore.getSessionMetadata(sessionId);
+      if (!meta || meta.finalized) return;
+      // Reuse the recorded client hash if we have one; the server has
+      // already accepted finalize so the value is informational here.
+      await localAudioStore.setSessionFinalized(sessionId, meta.client_sha256 ?? '');
+      void localAudioStore.wipeSession(sessionId).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[always-on] local wipe after finalize failed (non-fatal):', err);
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[always-on] mark local finalized failed (non-fatal):', err);
+    }
+  }, [deviceCapability]);
 
   // Audio-blob path: legacy + fallback when browser STT is not ready
   // (model still downloading) or has failed mid-meeting. Posts the WAV to
@@ -1484,6 +1539,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     setState('starting');
     setError(null);
+    setSaveConfirmation(null);
     setPaidFeaturePrompt(null);
     setStatusText('Starting microphone and VAD');
     setSummary(EMPTY_SUMMARY);
@@ -1634,10 +1690,26 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setState('stopping');
     setVadActive(false);
     setStatusText('Stopping');
+    // Clear any stale error from earlier in the session (e.g. a single
+    // dropped chunk's "Browser STT failed" toast). Otherwise a clean stop
+    // leaves a misleading red error sitting above a successfully-saved
+    // meeting. A genuine failure during this stop() re-sets it below.
+    setError(null);
+    setSaveConfirmation(null);
     summarizeAbortRef.current?.abort();
 
     const sessionId = sessionRef.current;
     const wasLocalOnly = activeLocalOnlyRef.current;
+    // Did the server-side finalize complete without throwing? Drives the
+    // post-stop "Saved — processing your meeting." confirmation. (The
+    // orphan rescan can't re-flag this session regardless, because the
+    // server paths now mark the local IDB row finalized before idle.)
+    // Stays false for local-only (handled inline) and any path that throws.
+    let finalizeSucceeded = false;
+    // Local synchronous failure flag — `error` state is captured in this
+    // closure and won't reflect a setError() we call below (React batches
+    // state), so we can't read `error` in finally to detect a failed stop.
+    let stopErrored = false;
     // Snapshot the slices we accumulated before clearing state.
     const slicesSnapshot = [...summary.slices];
 
@@ -1894,7 +1966,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
             }
           }
           if (!verificationOk) {
+            // Fallback path: the verify-then-confirm dance either threw
+            // or returned a non-complete status. The server /finalize +
+            // /finalize-audio still succeed here (backend enqueues the
+            // job) — but this path never marked the local IDB row
+            // finalized, so without the explicit mark below the
+            // state==='idle' orphan rescan would flag this very session
+            // as an "unfinished recording" right after a clean stop.
             await finalizeSession(sessionId);
+            await markLocalSessionFinalizedSafe(sessionId);
           } else {
             // Verification path already kicked the reprocess via the
             // /finalize-audio response. We still need to mark the
@@ -1912,12 +1992,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               // eslint-disable-next-line no-console
               console.warn('[always-on] /finalize kick-off failed:', err);
             }
+            // Belt-and-suspenders: the verify path already wiped on
+            // success, but if a wipe was skipped (e.g. status was
+            // complete with reprocessing already done) make sure the
+            // local row is flagged finalized so it can't orphan-flag.
+            await markLocalSessionFinalizedSafe(sessionId);
           }
+          // Server finalize accepted (no throw) — drives the clean
+          // confirmation + suppresses the orphan rescan for this session.
+          finalizeSucceeded = true;
         }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
+      stopErrored = true;
     } finally {
       const durationSeconds = startedAtRef.current
         ? Math.round((Date.now() - startedAtRef.current) / 1000)
@@ -1931,6 +2020,21 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setCurrentSessionId(null);
       setSessionStartedAt(null);
       startedAtRef.current = null;
+      // Clean-stop confirmation. The server path sets finalizeSucceeded
+      // once /finalize is accepted; local-only always saves via Stage-1
+      // endLocalSession (its Stage-2 failures are caught + only soft-warn,
+      // never throw). Either way the meeting is safe — surface a positive
+      // notice so the user isn't staring at an empty panel (which the
+      // orphan banner used to wrongly fill). Skipped if this stop threw a
+      // genuine error (setError ran in catch), so we never show "Saved"
+      // and a red error at the same time.
+      if (sessionId && !stopErrored) {
+        if (finalizeSucceeded) {
+          setSaveConfirmation('Saved — processing your meeting.');
+        } else if (wasLocalOnly) {
+          setSaveConfirmation('Saved on this device.');
+        }
+      }
       setState('idle');
       setStatusText('Idle');
       activeLocalOnlyRef.current = false;
@@ -1943,7 +2047,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       // reference so the GC can drop it.
       openedSourceRef.current = null;
     }
-  }, [finalizeSession, summary.slices]);
+  }, [finalizeSession, markLocalSessionFinalizedSafe, summary.slices]);
 
   // Wire stopRef now that stop is defined. Used by ensureEngine's
   // track-ended handler (which is constructed before stop in the file
@@ -2896,6 +3000,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summary,
     liveTranscript,
     error,
+    saveConfirmation,
+    dismissSaveConfirmation,
     paidFeaturePrompt,
     dismissPaidFeaturePrompt,
     statusText,
@@ -2945,6 +3051,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     summary,
     liveTranscript,
     error,
+    saveConfirmation,
+    dismissSaveConfirmation,
     paidFeaturePrompt,
     dismissPaidFeaturePrompt,
     statusText,
