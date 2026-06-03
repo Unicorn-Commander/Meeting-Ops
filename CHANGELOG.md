@@ -3,6 +3,7 @@
 ### Added
 - **PostHog product analytics**. Wired into App mount via `utils/posthog.ts`. Identifies user on login (id, email, tier, is_founding_member). Instruments key events: signup, recording start/stop, summary slice generated, subscription started/canceled, MCP PAT created, pricing viewed, landing invite requested, support submitted. Respects DNT, respects localStorage opt-out flag, no session replay (off by default; flip in PostHog dashboard if wanted), identified_only person profiles. New "Opt out of product analytics" checkbox in Settings → Privacy. Privacy Policy updated to disclose PostHog as a subprocessor.
 - Build env vars: `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`.
+- **Project-Ops bridge: client-credentials auto-refresh.** `ProjectOpsClient` now mints fresh service-account JWTs on demand when `PROJECTOPS_KC_TOKEN_URL` + `PROJECTOPS_KC_CLIENT_ID` + `PROJECTOPS_KC_CLIENT_SECRET` are set. Cached until ~30s before the JWT's own `exp` claim, with an `asyncio.Lock` so concurrent requests after expiry mint exactly once. Static `PROJECTOPS_API_KEY` still supported as the legacy / smoke-test path; auto-refresh wins when both are set. New `client.auth_mode` ∈ `auto-refresh|static|unconfigured` for diagnostics. 8 new tests in `tests/test_projectops_client_token.py` covering mint caching, expiry-driven re-mint, concurrent mint serialization, and 401 failure handling.
 
 ## [3.23.3] - 2026-06-02
 
