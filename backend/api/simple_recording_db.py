@@ -358,7 +358,11 @@ async def list_sessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
-    limit: int = 100,
+    # Sessions.tsx now requests limit=1000 by default (no real pagination
+    # yet — power users were silently losing the tail at the old 100 default).
+    # le=2000 caps the payload at something an admin tool can hit without
+    # being a DoS vector.
+    limit: int = Query(100, ge=1, le=2000),
     tags: Optional[str] = Query(None, description="Comma-separated tags; AND filter"),
     sort: Optional[str] = Query(
         None,
