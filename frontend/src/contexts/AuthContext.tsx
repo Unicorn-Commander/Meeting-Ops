@@ -10,6 +10,52 @@ import {
   type OrganizationMembership,
 } from '../utils/organization';
 import { clearAllHydratedCaches, HYDRATED_CACHE_CLEAR_EVENT } from '../utils/cachedState';
+import { identify, resetIdentity, track } from '../utils/posthog';
+
+const PAID_TIERS = new Set(['basic', 'pro', 'suite', 'enterprise']);
+const LAST_TIER_KEY = 'meetingops.posthog.last_tier';
+
+/**
+ * Best-effort frontend proxy for `subscription_canceled`. Cancellation is
+ * a Stripe-webhook → backend event the user often isn't present for
+ * (cancel-at-period-end fires days later). The accurate source is the
+ * webhook, which is out of scope (frontend-only task). Here we persist
+ * the last-seen tier and, the next time the user loads the app, fire the
+ * event if we observe a paid→free transition. Cleared on logout so a
+ * different user on the same device doesn't inherit a stale tier.
+ */
+function trackTierTransition(currentTier: string | undefined): void {
+  try {
+    const cur = currentTier || 'free';
+    const prev = window.localStorage.getItem(LAST_TIER_KEY);
+    if (prev && prev !== cur && PAID_TIERS.has(prev) && cur === 'free') {
+      track('subscription_canceled', { previous_plan: prev });
+    }
+    window.localStorage.setItem(LAST_TIER_KEY, cur);
+  } catch {
+    /* localStorage unavailable — skip */
+  }
+}
+
+/**
+ * Push the identified user into PostHog. Called wherever a fresh user
+ * object lands (password login, SSO probe, token refresh). Only id + a
+ * few tier/cohort traits — never transcripts, meeting names, or audio.
+ * `u` is loosely typed because the SSO/refresh payloads carry the same
+ * fields but aren't all the strict `User` shape at the call site.
+ */
+function identifyUser(u: any): void {
+  if (!u || u.id == null) return;
+  identify(String(u.id), {
+    email: u.email,
+    username: u.username,
+    tier: u.tier,
+    is_founding_member: u.is_founding_member ?? false,
+    founding_cohort: u.founding_cohort,
+    created_at: u.created_at,
+  });
+  trackTierTransition(u.tier);
+}
 
 /**
  * Wipe every hydrated-state cache and let live components know to
@@ -203,6 +249,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
             try {
               const userData = await response.json();
               setUser(userData);
+              identifyUser(userData);
             } catch (jsonError) {
               console.error('Failed to parse user data:', jsonError);
               logout();
@@ -261,7 +308,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         });
         const ct = r.headers.get('content-type') || '';
         if (r.ok && ct.includes('application/json')) {
-          try { setUser(await r.json()); } catch {}
+          try {
+            const ssoUser = await r.json();
+            setUser(ssoUser);
+            identifyUser(ssoUser);
+          } catch {}
         }
       } catch {}
       setIsLoading(false);
@@ -299,6 +350,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           setUser(data.user);
           localStorage.setItem('access_token', data.access_token);
           localStorage.setItem('refresh_token', data.refresh_token);
+          identifyUser(data.user);
           return true;
         } catch (jsonError) {
           console.error('Failed to parse refresh token response:', jsonError);
@@ -346,6 +398,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         setUser(data.user);
         localStorage.setItem('access_token', data.access_token);
         localStorage.setItem('refresh_token', data.refresh_token);
+        identifyUser(data.user);
         setError(null);
       } else {
         // Handle error response more robustly
@@ -398,6 +451,17 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     // doesn't see this user's data flash on screen first.
     broadcastHydratedCacheClear();
     setError(null);
+
+    // Drop the PostHog identity so the next user on this device starts
+    // a fresh anonymous→identified arc instead of inheriting this one.
+    // Also clear the last-seen tier so a different user doesn't trip a
+    // false paid→free `subscription_canceled` on next login.
+    try {
+      window.localStorage.removeItem('meetingops.posthog.last_tier');
+    } catch {
+      /* ignore */
+    }
+    resetIdentity();
 
     // SSO sign-out: clear oauth2-proxy session, then Keycloak session,
     // then bounce back to root (which will redirect to fresh SSO login).

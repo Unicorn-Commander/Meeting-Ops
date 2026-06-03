@@ -112,6 +112,15 @@ export const Privacy: React.FC = () => {
           DDoS-mitigation proxy in front of the Service.
         </li>
         <li>
+          <strong>PostHog, Inc.</strong> &mdash; product analytics
+          (anonymized event data; no audio or transcripts). You can opt
+          out in Settings &rarr; Privacy.
+        </li>
+        <li>
+          <strong>Umami.</strong> &mdash; pageview analytics, self-hosted
+          on Magic Unicorn infrastructure with no third-party trackers.
+        </li>
+        <li>
           <strong>Service providers</strong> bound by written data
           processing addenda or equivalent contractual safeguards
           (categories: hosting, observability, security). We will provide

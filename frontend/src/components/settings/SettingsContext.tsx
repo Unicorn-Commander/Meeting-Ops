@@ -15,6 +15,7 @@ import {
   Plug,
   Settings2,
   Share2,
+  ShieldCheck,
   Wifi,
 } from 'lucide-react';
 import type { SettingsSectionMeta } from './SettingsLayout';
@@ -69,6 +70,13 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     title: 'Hotkeys',
     icon: Keyboard,
     description: 'Keyboard shortcuts for recording',
+    category: 'preferences',
+  },
+  {
+    id: 'privacy',
+    title: 'Privacy',
+    icon: ShieldCheck,
+    description: 'Product-analytics opt-out',
     category: 'preferences',
   },
 
@@ -314,6 +322,9 @@ export interface SectionProps {
 export const PLACEHOLDER_SECTIONS = new Set<string>([
   'notifications',
   'hotkeys',
+  // 'privacy' persists its toggle immediately (localStorage) — no backend
+  // Save row needed, so we list it here to suppress the Save button.
+  'privacy',
   'recording-defaults',
   'integrations',
   'calendar-sync',

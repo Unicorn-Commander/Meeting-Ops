@@ -83,6 +83,7 @@ import {
   type LocalAudioSessionMeta,
 } from '../services/localAudioStore';
 import { useTierFeatures } from '../hooks/useTierFeatures';
+import { track } from '../utils/posthog';
 
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
@@ -497,6 +498,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   // standard-mode (server) sessions. Privacy mode keeps the legacy local
   // slice path (see triggerSummarize below).
   const sliceFetchAbortRef = useRef<AbortController | null>(null);
+  // PostHog `summary_slice_generated` dedup. The server polling loop
+  // re-GETs the full slice stack every 5s, so we track which slice ids
+  // have already been reported and only fire for genuinely-new ones.
+  // Reset on each start(). Shared with the browser/local slice path
+  // (they never run for the same session).
+  const trackedSliceIdsRef = useRef<Set<string>>(new Set());
+  // Mirror of transcriptWordCount so stop() (a memoized callback defined
+  // before transcriptWordCount) reads the current count, not a stale one.
+  const transcriptWordCountRef = useRef<number>(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -1478,6 +1488,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // window restarts; no chunks landed yet.
     lastChunkAtRef.current = null;
     setIsStuck(false);
+    // Fresh session — forget which slices we've reported to analytics.
+    trackedSliceIdsRef.current = new Set();
 
     // Lock the privacy mode for this session at start. Free-tier users
     // do not have canonical_reprocess, so their effective mode is
@@ -1573,6 +1585,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       }
       setState('recording');
       setStatusText('Listening');
+      track('recording_started', {
+        audio_source_mode: lockedMode,
+        device_class: deviceCapability.capabilityClass,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await engineRef.current?.stop().catch(() => undefined);
@@ -1893,6 +1909,14 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
     } finally {
+      const durationSeconds = startedAtRef.current
+        ? Math.round((Date.now() - startedAtRef.current) / 1000)
+        : 0;
+      track('recording_stopped', {
+        duration_seconds: durationSeconds,
+        transcript_word_count: transcriptWordCountRef.current,
+        slice_count: slicesSnapshot.length,
+      });
       sessionRef.current = null;
       setCurrentSessionId(null);
       setSessionStartedAt(null);
@@ -1928,6 +1952,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   );
 
   const transcriptWordCount = useMemo(() => countWords(transcriptText), [transcriptText]);
+
+  // Mirror into a ref so stop() (defined above, memoized) reads the
+  // live word count at stop-time rather than a stale closure value.
+  useEffect(() => {
+    transcriptWordCountRef.current = transcriptWordCount;
+  }, [transcriptWordCount]);
 
   // === Server-side slice polling (standard mode) =====================
   //
@@ -2006,6 +2036,18 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         paragraphs: latest ? paragraphsFromText(latest.text) : [],
         updatedAt: latest?.createdAt,
       });
+      // Fire analytics once per newly-seen slice (the poll re-GETs the
+      // whole stack every 5s, so dedup against ids we've already reported).
+      const spec = thresholdSpec(getLiveSummaryAutoConfig().threshold);
+      for (const slice of normalized) {
+        if (!slice.id || trackedSliceIdsRef.current.has(slice.id)) continue;
+        trackedSliceIdsRef.current.add(slice.id);
+        track('summary_slice_generated', {
+          threshold_kind: spec.kind,
+          threshold_value: spec.value,
+          llm_route: 'server',
+        });
+      }
     } catch (err) {
       if (controller.signal.aborted) return;
       // eslint-disable-next-line no-console
@@ -2178,6 +2220,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           updatedAt: slice.createdAt,
         };
       });
+      if (!trackedSliceIdsRef.current.has(slice.id)) {
+        trackedSliceIdsRef.current.add(slice.id);
+        const spec = thresholdSpec(getLiveSummaryAutoConfig().threshold);
+        track('summary_slice_generated', {
+          threshold_kind: spec.kind,
+          threshold_value: spec.value,
+          llm_route: 'browser',
+        });
+      }
       lastAutoFireRef.current = Date.now();
     } catch (err) {
       if (!controller.signal.aborted) {

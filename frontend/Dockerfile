@@ -18,6 +18,17 @@ ENV VITE_API_URL=$VITE_API_URL
 ARG VITE_LANDING_PAGE_ENABLED=false
 ENV VITE_LANDING_PAGE_ENABLED=$VITE_LANDING_PAGE_ENABLED
 
+# PostHog product analytics (v3.24). VITE_POSTHOG_KEY is the project API
+# key (phc_...) for the dedicated Meeting-Ops project; when empty,
+# utils/posthog.ts init() is a no-op so dev/CI builds with no key carry
+# zero analytics. VITE_POSTHOG_HOST defaults to the PostHog Cloud US
+# ingestion endpoint (matches the rest of the UC ecosystem). Both are
+# inlined at build time like every VITE_* var.
+ARG VITE_POSTHOG_KEY
+ENV VITE_POSTHOG_KEY=$VITE_POSTHOG_KEY
+ARG VITE_POSTHOG_HOST=https://us.i.posthog.com
+ENV VITE_POSTHOG_HOST=$VITE_POSTHOG_HOST
+
 WORKDIR /app
 
 # Copy package files

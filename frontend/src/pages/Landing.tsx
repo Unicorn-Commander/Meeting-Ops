@@ -16,6 +16,7 @@ import React, { useState } from 'react';
 import { Lock, Sparkles, Plug, ArrowRight } from 'lucide-react';
 import { config } from '../config';
 import LegalFooter from '../components/LegalFooter';
+import { track } from '../utils/posthog';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
 
@@ -55,6 +56,10 @@ export const Landing: React.FC = () => {
       }).catch(() => {
         /* intentional: the redirect below is the user-facing path */
       });
+      // Fired at submit (the request is fire-and-forget, so there's no
+      // 200 to await). No-op unless PostHog initialized (key present,
+      // not DNT/opted-out). No email/PII in the event.
+      track('landing_invite_requested', {});
       const encoded = encodeURIComponent(trimmed);
       // Hash router — setting location.hash to `/signup?email=...` makes
       // the URL `<origin>/#/signup?email=...`, which is what HashRouter

@@ -46,6 +46,7 @@ const PersonalAccessTokens = lazy(
   () => import('../components/settings/PersonalAccessTokens')
 );
 const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'));
+const PrivacySettings = lazy(() => import('../components/settings/PrivacySettings'));
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
 
@@ -234,6 +235,8 @@ export default function SettingsEnhanced() {
         return <InBrowserAISettings />;
       case 'theme':
         return <ThemeSettings />;
+      case 'privacy':
+        return <PrivacySettings />;
       case 'notifications':
         return (
           <EmptyPanel
