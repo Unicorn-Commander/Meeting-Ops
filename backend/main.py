@@ -457,9 +457,16 @@ async def root():
     }
 
 
+@app.get("/api/health")
 @app.get("/health")
 async def health_check():
-    """Health check with router status"""
+    """Health check with router status.
+
+    Mirrored at /api/health so external monitors can reach it through
+    the oauth2-proxy SKIP_AUTH_ROUTES list on bigboy without hitting
+    the SPA fallback at /health (which oauth2-proxy currently auth-gates
+    because /health isn't in the skip set, only /api/health is).
+    """
     has_failures = len(failed_routers) > 0
 
     # v3.18.3: report streaming-degraded state when neither stdlib audioop
