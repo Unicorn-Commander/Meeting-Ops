@@ -24,14 +24,23 @@ prefix ``/api/v1``):
     body: {status}  (PENDING|IN_PROGRESS|WAITING_FOR_CLIENT|COMPLETED|CANCELLED)
     200 -> the updated task. Used by the marked-done propagation path.
 
-Auth: ``Authorization: Bearer <token>``. Project-Ops authenticates every
-write with a Keycloak-issued JWT (Passport) — it does NOT accept an
-``X-API-Key`` service header the way Brigade does. ``PROJECTOPS_API_KEY``
-therefore holds a *bearer service token* (a Keycloak service-account JWT
-for an ADMIN/MANAGER identity), not an API key. When it is unset every
-method short-circuits to a log-only no-op and ``is_live`` is False, so a
-deployment without the token still completes the meeting pipeline
-cleanly — identical posture to ``brigade_client`` without BRIGADE_API_KEY.
+Auth — two modes, picked at client construction:
+
+  1. **Auto-refresh** (preferred): set ``PROJECTOPS_KC_TOKEN_URL`` +
+     ``PROJECTOPS_KC_CLIENT_ID`` + ``PROJECTOPS_KC_CLIENT_SECRET`` and the
+     client mints fresh service-account JWTs on demand via the
+     ``client_credentials`` grant, caches them until ~30s before exp, and
+     re-mints transparently. This is the production-grade shape — no
+     human in the loop when KC rotates a token; no annual ``.env`` paste.
+
+  2. **Static bearer** (legacy / smoke-test): set ``PROJECTOPS_API_KEY``
+     to a pre-minted JWT. The client uses it as-is and never refreshes.
+     Useful for one-shot scripts and as a fallback if KC is briefly
+     unreachable at startup, but the JWT's exp is your problem.
+
+If both are set, auto-refresh wins; the static value is ignored. If
+neither is set, the client is in log-only mode (``is_live`` False), all
+write methods short-circuit, and the writer reports mode='no-op'.
 
 Contract note (differs from brigade_client on purpose): the write methods
 RAISE ``ProjectOpsClientError`` on terminal HTTP / network failure. The
@@ -42,9 +51,12 @@ returns ``ok=False`` so the recording pipeline never sees an exception.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -75,6 +87,15 @@ DEFAULT_BACKOFF_MULTIPLIER = 2.0
 _RESOLVE_PAGE_SIZE = 100
 _RESOLVE_MAX_PAGES = 50
 
+# Re-mint a token this many seconds BEFORE its KC-declared exp, so an
+# in-flight request never goes out with an already-expired bearer.
+_TOKEN_REFRESH_SAFETY_SECONDS = 30.0
+
+# Fallback exp for the cached token when we can't decode the JWT (or it
+# has no exp). Conservative — re-mint frequently rather than carry a
+# token of unknown freshness.
+_TOKEN_FALLBACK_LIFETIME_SECONDS = 60.0
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -86,13 +107,9 @@ class ProjectOpsClientError(Exception):
     methods; caught + swallowed by ``projectops_writer``."""
 
 
-def _api_key() -> Optional[str]:
-    """Resolve the Project-Ops bearer service token from env.
-
-    Returns None when unset — that flips the client into log-only mode
-    (``is_live`` False), the writer's no-op path.
-    """
-    return os.getenv("PROJECTOPS_API_KEY") or None
+def _env(name: str) -> Optional[str]:
+    v = os.getenv(name)
+    return v.strip() if v and v.strip() else None
 
 
 def _base_url() -> str:
@@ -115,6 +132,154 @@ def _normalize_due_date(due_date: Any) -> Optional[str]:
     return text or None
 
 
+def _decode_jwt_exp(token: str) -> Optional[float]:
+    """Best-effort extract of the ``exp`` claim from a JWT. Returns the
+    epoch-seconds float, or None if the token is malformed / has no
+    exp claim. We deliberately do NOT verify the signature — this is a
+    self-issued cache-eviction hint, not an auth check."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload + padding)
+        data = json.loads(raw.decode("utf-8"))
+        exp = data.get("exp")
+        return float(exp) if exp is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class _TokenSource:
+    """Resolves bearer tokens for Project-Ops. Two modes, decided at
+    construction time so a long-running client doesn't flip behavior
+    mid-process when env vars are toggled.
+
+    Auto-refresh mode owns an httpx client for the KC token endpoint
+    independent of the main Project-Ops client (different host, often
+    different TLS posture). The mint flow is guarded by an asyncio.Lock
+    so a burst of concurrent requests after expiry mints exactly once.
+    """
+
+    def __init__(
+        self,
+        *,
+        static_token: Optional[str],
+        token_url: Optional[str],
+        client_id: Optional[str],
+        client_secret: Optional[str],
+        timeout_seconds: float,
+    ) -> None:
+        # Auto-refresh wins when both client_id and client_secret are set,
+        # and a token endpoint URL is available.
+        self._mode_auto = bool(token_url and client_id and client_secret)
+        self._static_token = static_token if not self._mode_auto else None
+        self._token_url = token_url
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._timeout = timeout_seconds
+        self._cached_token: Optional[str] = None
+        # Epoch seconds at which the cache is considered stale. Initialize
+        # in the past so the first call mints.
+        self._cached_until: float = 0.0
+        self._lock = asyncio.Lock()
+        self._http: Optional[httpx.AsyncClient] = None
+
+    @property
+    def mode(self) -> str:
+        return "auto-refresh" if self._mode_auto else (
+            "static" if self._static_token else "unconfigured"
+        )
+
+    @property
+    def is_configured(self) -> bool:
+        return self._mode_auto or bool(self._static_token)
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    async def get(self) -> str:
+        if not self._mode_auto:
+            if not self._static_token:
+                raise ProjectOpsClientError(
+                    "_TokenSource.get called while unconfigured"
+                )
+            return self._static_token
+
+        now = time.time()
+        if self._cached_token and now < self._cached_until:
+            return self._cached_token
+
+        async with self._lock:
+            # Re-check after lock — a peer may have just refreshed.
+            now = time.time()
+            if self._cached_token and now < self._cached_until:
+                return self._cached_token
+            await self._mint_locked()
+            assert self._cached_token is not None
+            return self._cached_token
+
+    async def _mint_locked(self) -> None:
+        """Hit KC's ``client_credentials`` token endpoint and cache the
+        result. Caller MUST hold ``self._lock``. Raises
+        ``ProjectOpsClientError`` on failure."""
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self._timeout)
+        assert self._token_url and self._client_id and self._client_secret
+        try:
+            resp = await self._http.post(
+                self._token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                },
+                headers={"Accept": "application/json"},
+            )
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+            raise ProjectOpsClientError(
+                f"KC token mint network error: {type(exc).__name__}: {exc}"
+            )
+        if resp.status_code != 200:
+            raise ProjectOpsClientError(
+                f"KC token mint HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        try:
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            raise ProjectOpsClientError(
+                f"KC token mint non-JSON 200: {exc}"
+            )
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not token:
+            raise ProjectOpsClientError(
+                f"KC token mint: no access_token in response: {str(payload)[:200]}"
+            )
+
+        # Trust the JWT's own exp claim over the response's expires_in,
+        # falling back through expires_in -> conservative default. The
+        # safety buffer makes the cache horizon strictly earlier than
+        # the token's actual exp, so an in-flight request never goes out
+        # with an already-expired bearer.
+        exp_epoch = _decode_jwt_exp(token)
+        if exp_epoch is None:
+            expires_in = payload.get("expires_in") if isinstance(payload, dict) else None
+            try:
+                lifetime = float(expires_in) if expires_in is not None else _TOKEN_FALLBACK_LIFETIME_SECONDS
+            except (TypeError, ValueError):
+                lifetime = _TOKEN_FALLBACK_LIFETIME_SECONDS
+            exp_epoch = time.time() + lifetime
+
+        self._cached_token = token
+        self._cached_until = max(
+            time.time() + 1.0,
+            exp_epoch - _TOKEN_REFRESH_SAFETY_SECONDS,
+        )
+
+
 class ProjectOpsClient:
     """Thin httpx wrapper for Project-Ops' task write endpoints.
 
@@ -134,13 +299,11 @@ class ProjectOpsClient:
         initial_backoff_seconds: float = DEFAULT_INITIAL_BACKOFF_SECONDS,
         backoff_multiplier: float = DEFAULT_BACKOFF_MULTIPLIER,
         _client: Optional[httpx.AsyncClient] = None,
+        token_url: Optional[str] = None,
+        kc_client_id: Optional[str] = None,
+        kc_client_secret: Optional[str] = None,
     ) -> None:
         self._base_url = (base_url or _base_url()).rstrip("/")
-        # Resolved at __init__ (not per-call) so tests can monkeypatch env
-        # once and reuse the client across the batch. None => log-only.
-        self._resolved_api_key = (
-            api_key if api_key is not None else _api_key()
-        )
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._initial_backoff = initial_backoff_seconds
@@ -150,17 +313,45 @@ class ProjectOpsClient:
         # project_number (or raw uuid) -> resolved project UUID.
         self._project_id_cache: dict[str, str] = {}
 
+        # Token source: kwargs win over env (test ergonomics + dependency
+        # injection); env-resolution at __init__ keeps tests' monkeypatch
+        # cycle predictable.
+        self._token_source = _TokenSource(
+            static_token=(
+                api_key if api_key is not None else _env("PROJECTOPS_API_KEY")
+            ),
+            token_url=(
+                token_url if token_url is not None else _env("PROJECTOPS_KC_TOKEN_URL")
+            ),
+            client_id=(
+                kc_client_id if kc_client_id is not None
+                else _env("PROJECTOPS_KC_CLIENT_ID")
+            ),
+            client_secret=(
+                kc_client_secret if kc_client_secret is not None
+                else _env("PROJECTOPS_KC_CLIENT_SECRET")
+            ),
+            timeout_seconds=timeout_seconds,
+        )
+
     @property
     def is_live(self) -> bool:
-        """True when a bearer token was resolved. False puts the client in
-        log-only mode (write methods become no-ops); the writer checks
-        this and reports mode='no-op' without making HTTP calls."""
-        return self._resolved_api_key is not None
+        """True when at least one auth mode is configured. False puts the
+        client in log-only mode (write methods become no-ops); the writer
+        checks this and reports mode='no-op' without making HTTP calls."""
+        return self._token_source.is_configured
+
+    @property
+    def auth_mode(self) -> str:
+        """``auto-refresh`` | ``static`` | ``unconfigured`` — useful for
+        diagnostics + the status endpoint."""
+        return self._token_source.mode
 
     async def aclose(self) -> None:
         if self._owned_client is not None:
             await self._owned_client.aclose()
             self._owned_client = None
+        await self._token_source.aclose()
 
     async def __aenter__(self) -> "ProjectOpsClient":
         return self
@@ -193,7 +384,8 @@ class ProjectOpsClient:
         """
         if not self.is_live:
             raise ProjectOpsClientError(
-                "create_task called while not configured (PROJECTOPS_API_KEY unset)"
+                "create_task called while not configured "
+                "(PROJECTOPS_API_KEY or KC credentials unset)"
             )
 
         project_id = await self._resolve_project_id(project_number)
@@ -293,9 +485,10 @@ class ProjectOpsClient:
             f"(searched up to {_RESOLVE_MAX_PAGES} pages)"
         )
 
-    def _headers(self) -> dict[str, str]:
+    async def _headers(self) -> dict[str, str]:
+        token = await self._token_source.get()
         return {
-            "Authorization": f"Bearer {self._resolved_api_key or ''}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -324,13 +517,14 @@ class ProjectOpsClient:
         last_detail: Optional[str] = None
         for attempt in range(self._max_retries):
             try:
+                headers = await self._headers()
                 async with self._client_ctx() as client:
                     resp = await client.request(
                         method,
                         url,
                         json=json,
                         params=params,
-                        headers=self._headers(),
+                        headers=headers,
                     )
                 if resp.status_code < 400:
                     if not resp.content:
