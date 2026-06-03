@@ -1007,17 +1007,16 @@ export default function LiveRecording() {
     <>
       <MobileLiveRecording />
       <div className="hidden md:block min-h-screen bg-gradient-to-b from-zinc-950 to-black text-zinc-100 p-4 pt-14 md:p-6 md:pt-6">
-      {/* Header */}
-      <div className="max-w-7xl mx-auto mb-6 md:mb-8">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      {/* Header — compact so the record screen leads with recording, not chrome */}
+      <div className="max-w-7xl mx-auto mb-3 md:mb-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div>
-            <h1 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center shrink-0">
-                <Sparkles className="w-6 h-6 text-white" />
+            <h1 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500 to-indigo-500 flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4 text-white" />
               </div>
               Live Recording
             </h1>
-            <p className="text-zinc-400 mt-1 text-sm md:text-base">AI-powered live meeting analysis and transcription</p>
           </div>
 
           {/* Format Toggles — collapsed behind a disclosure so the header
