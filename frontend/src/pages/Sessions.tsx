@@ -64,6 +64,8 @@ interface Session {
   project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
   project_id?: number | null;
   project_slug?: string | null;
+  organization_id?: number | null;
+  organization_name?: string | null;
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
@@ -454,6 +456,14 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                             Local
                           </span>
                         )}
+                        {!session.is_local && session.organization_name && (
+                          <span
+                            title={`Organization: ${session.organization_name}`}
+                            className="inline-flex items-center rounded-full border border-gray-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300"
+                          >
+                            {session.organization_name}
+                          </span>
+                        )}
                         <button
                           type="button"
                           onClick={() => onOpen(session.id)}
@@ -599,7 +609,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const { startUploads } = useUploads();
-  const { activeOrganization } = useOrg();
+  const { activeOrganization, organizations = [] } = useOrg();
   // v3.23.0 — gate the "Upload Audio/Video" surface on the new
   // `audio_upload` tier flag. Free + Basic stay browser-only for audio;
   // Pro+ keeps the existing upload path. The hook defaults to false
@@ -669,6 +679,7 @@ export const Sessions: React.FC = () => {
   // chip toggles between showing all, only local, or only synced
   // (server-stored). Default: all.
   const [sourceFilter, setSourceFilter] = useState<'all' | 'local' | 'synced'>('all');
+  const [orgFilter, setOrgFilter] = useState<number | 'all'>('all');
   // Sort state hydrates from URL ?sort=&order= so refresh keeps the
   // user's column choice. Falls back to date-desc if missing/invalid.
   const initialSort: SortKey = (() => {
@@ -963,8 +974,15 @@ export const Sessions: React.FC = () => {
   }, [selectedTags.join(','), activeOrganization?.slug]);
 
   useEffect(() => {
+    const onInvalidated = () => fetchSessions({ showSpinner: false });
+    window.addEventListener('meetingops:sessions-invalidated', onInvalidated);
+    return () => window.removeEventListener('meetingops:sessions-invalidated', onInvalidated);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTags.join(','), activeOrganization?.slug]);
+
+  useEffect(() => {
     filterSessions();
-  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, selectedFolder, sortBy, sortOrder, dateBasis]);
+  }, [sessions, searchQuery, searchResults, statusFilter, typeFilter, sourceFilter, orgFilter, selectedFolder, sortBy, sortOrder, dateBasis]);
 
   // showSpinner=false on polling refresh so the list doesn't flash
   // through the empty-loading state every 10 seconds. Initial mount + filter
@@ -987,9 +1005,14 @@ export const Sessions: React.FC = () => {
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
 
-      const tagsParam = selectedTags.length > 0 ? `?tags=${selectedTags.map(encodeURIComponent).join(',')}` : '';
+      const params = new URLSearchParams();
+      params.set('include_all_my_orgs', 'true');
+      if (selectedTags.length > 0) {
+        params.set('tags', selectedTags.map(encodeURIComponent).join(','));
+      }
+      const sessionsUrl = `${config.apiBaseUrl}/api/simple/recording-sessions?${params.toString()}`;
       const [serverRes, localList, attachCountsRes] = await Promise.allSettled([
-        fetch(`${config.apiBaseUrl}/api/simple/recording-sessions${tagsParam}`, { headers }),
+        fetch(sessionsUrl, { headers }),
         listLocalSessions(),
         // Per-session attachment count for the paperclip icon. Org-scoped
         // by the active-org header; safe to skip on failure (the rest of
@@ -1080,6 +1103,10 @@ export const Sessions: React.FC = () => {
       filtered = filtered.filter((session) => session.is_local === true);
     } else if (sourceFilter === 'synced') {
       filtered = filtered.filter((session) => session.is_local !== true);
+    }
+
+    if (orgFilter !== 'all') {
+      filtered = filtered.filter((session) => session.organization_id === orgFilter);
     }
 
     // Folder view: All sessions keeps the existing flat behavior.
@@ -1841,6 +1868,37 @@ export const Sessions: React.FC = () => {
         </div>
       )}
 
+        {organizations.length > 1 && (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-6 flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-500 uppercase tracking-wide mr-1">Orgs:</span>
+            <button
+              type="button"
+              onClick={() => setOrgFilter('all')}
+              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                orgFilter === 'all'
+                  ? 'border-purple-500 bg-purple-600/20 text-purple-100'
+                  : 'border-gray-700 bg-zinc-800 text-gray-300 hover:bg-gray-800'
+              }`}
+            >
+              All orgs
+            </button>
+            {organizations.filter((org) => org.is_active).map((org) => (
+              <button
+                key={org.id}
+                type="button"
+                onClick={() => setOrgFilter(org.id)}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  orgFilter === org.id
+                    ? 'border-purple-500 bg-purple-600/20 text-purple-100'
+                    : 'border-gray-700 bg-zinc-800 text-gray-300 hover:bg-gray-800'
+                }`}
+              >
+                {org.name}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Tag filter chip palette — multi-select AND. */}
         {orgTags.length > 0 && (
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-6 flex items-center gap-2 flex-wrap">
@@ -1992,12 +2050,12 @@ export const Sessions: React.FC = () => {
             <FolderOpen className="w-16 h-16 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-300 mb-2">No Sessions Found</h3>
             <p className="text-gray-500 mb-6">
-              {searchQuery || statusFilter !== 'all' || typeFilter !== 'all' 
+              {searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || orgFilter !== 'all'
                 ? 'Try adjusting your filters or search query.'
                 : 'Create your first session to get started.'
               }
             </p>
-            {!searchQuery && statusFilter === 'all' && typeFilter === 'all' && (
+            {!searchQuery && statusFilter === 'all' && typeFilter === 'all' && orgFilter === 'all' && (
               <button
                 onClick={() => setShowCreator(true)}
                 className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors mx-auto"
@@ -2084,6 +2142,14 @@ export const Sessions: React.FC = () => {
                       )}
                     </div>
                     <div className="flex flex-col items-end gap-1">
+                      {!session.is_local && session.organization_name && (
+                        <span
+                          title={`Organization: ${session.organization_name}`}
+                          className="rounded-full border border-gray-700 bg-zinc-800 px-2 py-1 text-xs text-gray-300"
+                        >
+                          {session.organization_name}
+                        </span>
+                      )}
                       <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
                         {getStatusLabel(session.status)}
                       </span>

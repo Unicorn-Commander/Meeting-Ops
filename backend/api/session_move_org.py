@@ -24,21 +24,20 @@ What moves:
     - upload_jobs.organization_id
     - tts_jobs.organization_id
     - session_attachments.organization_id
+    - transcriptions.organization_id, session_collaborators.organization_id,
+      agent_sessions.organization_id when those optional columns/tables exist
     - meeting_digest is NOT updated — digests are time-window summaries
       keyed off (org, period, date); the next digest run for either org
       will regenerate as needed.
-    - transcriptions has no organization_id column (inherits via session_id);
-      no action needed.
     - Qdrant points: best-effort `set_payload` to update organization_id.
       A failure here is logged but does not roll back — the API call still
       succeeds and the row-level move is preserved. The reindex_all
       surface remains available if a customer needs forced repair.
     - Audit log: one row in audit_logs with action='move_session_org'.
 
-This endpoint is intentionally NOT recursive over the SessionCollaborator
-table — magic-link grants are session-scoped (not org-scoped), so the
-collaborators list survives the move unchanged. Same for participants
-(stored as a JSONB column on the session row).
+Magic-link grants and participants remain attached to the same session.
+If a deployment has added organization_id to session_collaborators, that
+org scope is updated; otherwise the session-scoped grant survives unchanged.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import text as sa_text
+from sqlalchemy import inspect, text as sa_text
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
@@ -79,6 +78,24 @@ router = APIRouter(
 
 class MoveOrgRequest(BaseModel):
     target_organization_id: int = Field(..., gt=0)
+
+
+class ReassignOrganizationRequest(BaseModel):
+    organization_id: int = Field(..., gt=0)
+
+
+class UpdatedSessionResponse(BaseModel):
+    id: str
+    session_id: str
+    name: str
+    title: Optional[str] = None
+    description: str
+    created_at: Optional[str] = None
+    status: str
+    duration: float
+    organization_id: int
+    organization_name: Optional[str] = None
+    moved_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class OrphanedSpeakerLink(BaseModel):
@@ -135,6 +152,21 @@ def _resolve_session(
     return rec
 
 
+def _resolve_session_any_org(db: Session, session_id: str) -> Optional[RecordingSession]:
+    rec = (
+        db.query(RecordingSession)
+        .filter(RecordingSession.session_id == session_id)
+        .first()
+    )
+    if rec:
+        return rec
+    try:
+        pk = int(session_id)
+    except (TypeError, ValueError):
+        return None
+    return db.query(RecordingSession).filter(RecordingSession.id == pk).first()
+
+
 def _source_role_allows_move(
     *,
     session: RecordingSession,
@@ -169,7 +201,9 @@ def _target_membership_allows_receive(
         )
         .first()
     )
-    return membership is not None
+    if not membership:
+        return False
+    return (membership.role or "").lower() in {"admin", "manager", "member", "user"}
 
 
 # ---------------------------------------------------------------------------
@@ -275,81 +309,42 @@ def _cascade_update(
     pk = session.id
     legacy_sid = session.session_id  # string, used by audio_files/chat_history
 
-    # action_items (integer session_id)
-    res = db.execute(
-        sa_text(
-            "UPDATE action_items SET organization_id = :new_org "
-            "WHERE session_id = :sid"
-        ),
-        {"new_org": new_org_id, "sid": pk},
-    )
-    counts["action_items"] = res.rowcount or 0
+    inspector = inspect(db.bind)
+    existing_tables = set(inspector.get_table_names())
+    column_cache: dict[str, set[str]] = {}
 
-    # audio_files (string session_id — column is String(100))
-    if legacy_sid:
+    def has_columns(table: str, *columns: str) -> bool:
+        if table not in existing_tables:
+            return False
+        if table not in column_cache:
+            column_cache[table] = {
+                col["name"] for col in inspector.get_columns(table)
+            }
+        return all(column in column_cache[table] for column in columns)
+
+    def update_child(table: str, match_column: str, match_value: object) -> None:
+        if match_value is None or not has_columns(table, "organization_id", match_column):
+            counts[table] = 0
+            return
         res = db.execute(
             sa_text(
-                "UPDATE audio_files SET organization_id = :new_org "
-                "WHERE session_id = :sid"
+                f"UPDATE {table} SET organization_id = :new_org "
+                f"WHERE {match_column} = :sid"
             ),
-            {"new_org": new_org_id, "sid": legacy_sid},
+            {"new_org": new_org_id, "sid": match_value},
         )
-        counts["audio_files"] = res.rowcount or 0
-    else:
-        counts["audio_files"] = 0
+        counts[table] = res.rowcount or 0
 
-    # chat_history (string session_key — same legacy id)
-    if legacy_sid:
-        res = db.execute(
-            sa_text(
-                "UPDATE chat_history SET organization_id = :new_org "
-                "WHERE session_key = :sid"
-            ),
-            {"new_org": new_org_id, "sid": legacy_sid},
-        )
-        counts["chat_history"] = res.rowcount or 0
-    else:
-        counts["chat_history"] = 0
-
-    # speaker_session_link
-    res = db.execute(
-        sa_text(
-            "UPDATE speaker_session_link SET organization_id = :new_org "
-            "WHERE session_id = :sid"
-        ),
-        {"new_org": new_org_id, "sid": pk},
-    )
-    counts["speaker_session_link"] = res.rowcount or 0
-
-    # upload_jobs
-    res = db.execute(
-        sa_text(
-            "UPDATE upload_jobs SET organization_id = :new_org "
-            "WHERE session_id = :sid"
-        ),
-        {"new_org": new_org_id, "sid": pk},
-    )
-    counts["upload_jobs"] = res.rowcount or 0
-
-    # tts_jobs
-    res = db.execute(
-        sa_text(
-            "UPDATE tts_jobs SET organization_id = :new_org "
-            "WHERE session_id = :sid"
-        ),
-        {"new_org": new_org_id, "sid": pk},
-    )
-    counts["tts_jobs"] = res.rowcount or 0
-
-    # session_attachments
-    res = db.execute(
-        sa_text(
-            "UPDATE session_attachments SET organization_id = :new_org "
-            "WHERE session_id = :sid"
-        ),
-        {"new_org": new_org_id, "sid": pk},
-    )
-    counts["session_attachments"] = res.rowcount or 0
+    update_child("transcriptions", "session_id", pk)
+    update_child("action_items", "session_id", pk)
+    update_child("session_attachments", "session_id", pk)
+    update_child("session_collaborators", "session_id", pk)
+    update_child("agent_sessions", "meeting_session_id", pk)
+    update_child("audio_files", "session_id", legacy_sid)
+    update_child("chat_history", "session_key", legacy_sid)
+    update_child("speaker_session_link", "session_id", pk)
+    update_child("upload_jobs", "session_id", pk)
+    update_child("tts_jobs", "session_id", pk)
 
     # Parent last.
     session.organization_id = new_org_id
@@ -409,6 +404,140 @@ def _find_orphaned_speaker_links(
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
+
+
+def _updated_session_payload(
+    *,
+    db: Session,
+    session: RecordingSession,
+    moved_counts: Optional[dict[str, int]] = None,
+) -> UpdatedSessionResponse:
+    org_name = (
+        db.query(Organization.name)
+        .filter(Organization.id == session.organization_id)
+        .scalar()
+    )
+    public_id = session.session_id or str(session.id)
+    return UpdatedSessionResponse(
+        id=public_id,
+        session_id=public_id,
+        name=session.name or session.title or f"Session {session.id}",
+        title=session.title,
+        description=session.description or "",
+        created_at=session.created_at.isoformat() if session.created_at else None,
+        status=session.status or "completed",
+        duration=float(session.duration or 0.0),
+        organization_id=session.organization_id,
+        organization_name=org_name,
+        moved_counts=moved_counts or {},
+    )
+
+
+def _user_can_write_session(db: Session, session: RecordingSession, user: User) -> bool:
+    if getattr(user, "is_superuser", False):
+        return True
+    if session.user_id and session.user_id == user.id:
+        return True
+    from api.session_permissions import has_session_access
+
+    return has_session_access(session.id, user, db) == "edit"
+
+
+async def _move_session_org_impl(
+    *,
+    session: RecordingSession,
+    target_org_id: int,
+    request: Request,
+    db: Session,
+    current_user: User,
+) -> tuple[dict[str, int], bool, Optional[str]]:
+    source_org_id = session.organization_id
+
+    if source_org_id == target_org_id:
+        return {}, True, None
+
+    target_org = (
+        db.query(Organization).filter(Organization.id == target_org_id).first()
+    )
+    if not target_org:
+        raise HTTPException(status_code=404, detail="Target organization not found")
+    if not target_org.is_active:
+        raise HTTPException(status_code=400, detail="Target organization is not active")
+    if not _target_membership_allows_receive(
+        db=db, user=current_user, target_org_id=target_org_id
+    ):
+        raise HTTPException(status_code=403, detail="not_member_of_target_org")
+
+    try:
+        counts = _cascade_update(db=db, session=session, new_org_id=target_org_id)
+        db.add(
+            AuditLog(
+                user_id=current_user.id,
+                organization_id=source_org_id,
+                action="move_session_org",
+                resource_type="recording_session",
+                resource_id=str(session.id),
+                ip_address=_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                details={
+                    "source_organization_id": source_org_id,
+                    "target_organization_id": target_org_id,
+                    "session_legacy_id": session.session_id,
+                    "moved_counts": counts,
+                },
+            )
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.exception(
+            "move-org: cascade failed session=%s source=%s target=%s",
+            session.id,
+            source_org_id,
+            target_org_id,
+        )
+        raise HTTPException(status_code=500, detail=f"Move failed: {e}")
+
+    db.refresh(session)
+    qdrant_ok, qdrant_err = _retag_qdrant(session=session, new_org_id=target_org_id)
+    logger.info(
+        "session_org_reassigned session_id=%s from_org=%s to_org=%s user=%s counts=%s qdrant_ok=%s",
+        session.id,
+        source_org_id,
+        target_org_id,
+        current_user.id,
+        counts,
+        qdrant_ok,
+    )
+    return counts, qdrant_ok, qdrant_err
+
+
+@router.put(
+    "/{session_id}/organization",
+    response_model=UpdatedSessionResponse,
+)
+async def reassign_session_organization(
+    session_id: str,
+    payload: ReassignOrganizationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    session = _resolve_session_any_org(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not _user_can_write_session(db, session, current_user):
+        raise HTTPException(status_code=403, detail="not_authorized_for_session")
+
+    counts, _, _ = await _move_session_org_impl(
+        session=session,
+        target_org_id=payload.organization_id,
+        request=request,
+        db=db,
+        current_user=current_user,
+    )
+    return _updated_session_payload(db=db, session=session, moved_counts=counts)
 
 
 @router.post(
