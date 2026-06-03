@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { config } from '../../config';
 import { Dialog } from '../ui/Dialog';
+import { track } from '../../utils/posthog';
 
 // Hosted MCP base URL surfaced after token creation. Default to the
 // current origin so a self-hosted instance gets the right URL; allow
@@ -188,6 +189,12 @@ export default function PersonalAccessTokens() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setCreated(data);
+      // PATs are currently unscoped (full-access); scopes_count is 0
+      // until the backend grows a scopes model. Read defensively so the
+      // event stays correct if/when scopes land.
+      track('mcp_pat_created', {
+        scopes_count: Array.isArray(data?.scopes) ? data.scopes.length : 0,
+      });
       setName('');
       setDialogOpen(false);
       await loadTokens();

@@ -24,8 +24,23 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
+import { track } from '../utils/posthog';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
+
+/**
+ * Bucket a free-text subject line into a coarse category for analytics.
+ * Keyword match only — no message body, no PII leaves the browser.
+ * Falls back to 'other' when nothing matches.
+ */
+function deriveSubjectCategory(subject: string): 'billing' | 'support' | 'other' {
+  const s = subject.toLowerCase();
+  const billing = /\b(bill|billing|invoice|payment|charge|refund|subscription|subscribe|plan|pric|card|receipt|upgrade|downgrade|cancel)\w*/;
+  const support = /\b(bug|error|broken|crash|issue|problem|help|support|fail|trouble|stuck|wrong|can'?t|cannot)\w*/;
+  if (billing.test(s)) return 'billing';
+  if (support.test(s)) return 'support';
+  return 'other';
+}
 
 export const Contact: React.FC = () => {
   const { user, isAuthenticated } = useAuth();
@@ -99,6 +114,9 @@ export const Contact: React.FC = () => {
         setState('error');
         return;
       }
+      track('contact_support_submitted', {
+        subject_category: deriveSubjectCategory(subject.trim()),
+      });
       setState('success');
       setSubject('');
       setMessage('');

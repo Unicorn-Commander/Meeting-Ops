@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { config } from '../config';
 import LegalFooter from '../components/LegalFooter';
+import { track } from '../utils/posthog';
 
 function extractApiError(payload: unknown, fallback: string): string {
   if (!payload || typeof payload !== 'object') return fallback;
@@ -107,6 +108,10 @@ export const Signup: React.FC = () => {
       }
 
       setSuccess(true);
+      // `via` = 'invite' when the user arrived on a prefilled invite link
+      // (?email=...), 'direct' for an organic signup form hit.
+      const cameFromInvite = new URLSearchParams(location.search || '').has('email');
+      track('signup_completed', { tier: 'free', via: cameFromInvite ? 'invite' : 'direct' });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Signup failed');
     } finally {

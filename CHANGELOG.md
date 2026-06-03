@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+- **PostHog product analytics**. Wired into App mount via `utils/posthog.ts`. Identifies user on login (id, email, tier, is_founding_member). Instruments key events: signup, recording start/stop, summary slice generated, subscription started/canceled, MCP PAT created, pricing viewed, landing invite requested, support submitted. Respects DNT, respects localStorage opt-out flag, no session replay (off by default; flip in PostHog dashboard if wanted), identified_only person profiles. New "Opt out of product analytics" checkbox in Settings → Privacy. Privacy Policy updated to disclose PostHog as a subprocessor.
+- Build env vars: `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`.
+
 ## [3.23.3] - 2026-06-02
 
 ### Fixed

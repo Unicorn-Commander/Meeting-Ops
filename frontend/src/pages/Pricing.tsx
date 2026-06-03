@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
@@ -19,6 +19,11 @@ import {
   type CheckoutPlan,
 } from '../services/billingApi';
 import LegalFooter from '../components/LegalFooter';
+// PENDING_CHECKOUT_KEY: the sessionStorage key we stash {plan, cycle} into
+// before redirecting to Stripe so App.tsx can fire `subscription_started`
+// on the success redirect. Defined in utils/posthog so App can read it
+// without eagerly importing this lazy-loaded page.
+import { track, PENDING_CHECKOUT_KEY } from '../utils/posthog';
 
 /**
  * v3.23.0 — 5-tier Pricing rebuild.
@@ -235,6 +240,19 @@ export const Pricing: React.FC = () => {
   const [cycle, setCycle] = useState<BillingCycle>('monthly');
   const loggedIn = isLoggedIn();
 
+  useEffect(() => {
+    // `from_referrer` is the document referrer host (or 'direct'). We
+    // deliberately don't send the full URL — just where the visit came
+    // from at a coarse grain.
+    let fromReferrer = 'direct';
+    try {
+      if (document.referrer) fromReferrer = new URL(document.referrer).host || 'direct';
+    } catch {
+      /* malformed referrer — keep 'direct' */
+    }
+    track('pricing_viewed', { from_referrer: fromReferrer });
+  }, []);
+
   const handleSubscribe = async (plan: CheckoutPlan) => {
     setCheckoutError(null);
     if (plan === 'enterprise') {
@@ -252,6 +270,16 @@ export const Pricing: React.FC = () => {
     }
     setCheckoutBusy(plan);
     try {
+      // Stash intent so App.tsx can fire `subscription_started` on the
+      // post-Stripe success redirect with the plan + cycle attached.
+      try {
+        window.sessionStorage.setItem(
+          PENDING_CHECKOUT_KEY,
+          JSON.stringify({ plan, billing_cycle: cycle }),
+        );
+      } catch {
+        /* sessionStorage unavailable — the conversion event just won't fire */
+      }
       await startCheckout(plan, cycle);
       // startCheckout redirects on success; still here = failed.
     } catch (err) {
