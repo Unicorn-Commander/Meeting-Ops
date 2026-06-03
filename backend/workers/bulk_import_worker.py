@@ -61,16 +61,36 @@ async def media_retention_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Every-30-min cron: flip abandoned status=recording sessions to failed
-    so endpoints that iterate active recordings don't accumulate zombies and
-    trip Cloudflare's 120s edge timeout (see the 2026-05-29 524 incident).
-    Audio + transcripts + graph + Garage all stay intact — only status +
-    ended_at change. Configurable via SESSION_WATCHDOG_* env vars; ships
-    enabled by default with a 6h threshold."""
-    from services.session_watchdog import mark_abandoned_recording_sessions
-    result = await asyncio.to_thread(mark_abandoned_recording_sessions)
-    logger.info("arq cron: session_watchdog result=%s", result)
-    return result
+    """Every-30-min cron: clear two classes of zombies.
+
+    1. status='recording' with no chunk update past SESSION_WATCHDOG_MINUTES
+       (default 30 min) — phone tab evicted, dev tab crashed, etc. Flipped
+       to ``failed`` so endpoints iterating active recordings stay fast and
+       Cloudflare's 120 s edge timeout doesn't trip (see the 2026-05-29
+       524 incident).
+    2. status='processing' with no resolution past
+       SESSION_WATCHDOG_PROCESSING_MINUTES (default 360 min = 6 h) — worker
+       OOM, host restart mid-pass, Stage 7 exception that didn't bubble up.
+       Triaged by content: rows with transcript text → 'completed'
+       (preserve the work); rows with no transcript → 'failed'. Added
+       2026-06-03 after bigboy accumulated 101 stuck-processing rows from
+       a chain of rapid redeploys earlier the same day.
+
+    Audio + transcripts + graph + Garage all stay intact in both passes —
+    only status (+ ended_at + processing_metadata audit fields) change.
+    Configurable via SESSION_WATCHDOG_* env vars; both default-enabled."""
+    from services.session_watchdog import (
+        mark_abandoned_recording_sessions,
+        mark_abandoned_processing_sessions,
+    )
+    recording_result = await asyncio.to_thread(mark_abandoned_recording_sessions)
+    processing_result = await asyncio.to_thread(mark_abandoned_processing_sessions)
+    combined = {
+        "recording": recording_result,
+        "processing": processing_result,
+    }
+    logger.info("arq cron: session_watchdog result=%s", combined)
+    return combined
 
 
 # v3.18.3 background-jobification: long-running handlers now enqueue
