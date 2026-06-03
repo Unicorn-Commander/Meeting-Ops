@@ -87,6 +87,26 @@ def _enabled() -> bool:
     )
 
 
+# Post-processing (Parakeet 1.1B + pyannote 3.1 + summary LLM) typically
+# completes in 30-90 s per finished meeting. Anything stuck at
+# ``status='processing'`` for hours is a dead pipeline (worker OOM, host
+# restart mid-pass, server-side stage 7 exception that didn't bubble up
+# to flip the row). 6 hours is the conservative default — comfortably
+# past any legitimate large-file batch import and short enough that the
+# UI doesn't carry zombies into the next day.
+DEFAULT_PROCESSING_WATCHDOG_HOURS = 6
+
+
+def _processing_threshold_minutes() -> int:
+    raw = os.getenv("SESSION_WATCHDOG_PROCESSING_MINUTES")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_PROCESSING_WATCHDOG_HOURS * 60
+
+
 def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any]:
     """Find sessions stuck in ``status='recording'`` whose ``updated_at`` is
     older than the configured threshold and flip them to ``failed``.
@@ -199,6 +219,139 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
         return summary
     except Exception as exc:  # noqa: BLE001
         logger.exception("session_watchdog: top-level error: %s", exc)
+        summary["errors"] += 1
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return summary
+    finally:
+        db.close()
+
+
+def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, Any]:
+    """Sibling to :func:`mark_abandoned_recording_sessions` but for the
+    post-processing pipeline.
+
+    Sessions stuck at ``status='processing'`` whose ``created_at`` is older
+    than the threshold get triaged by content:
+
+      - has transcript text or ``transcript_diarized`` → flipped to
+        ``completed`` so the work surfaces in the UI; the summary stage
+        (the most likely culprit) can be re-kicked manually if wanted
+      - no transcript content → flipped to ``failed`` so the user sees the
+        truth instead of an indefinite spinner
+
+    Same safety posture as the recording watchdog: idempotent, bounded by
+    ``SESSION_WATCHDOG_MAX_PER_PASS``, audio + Garage object preserved,
+    never raises.
+
+    Threshold is ``SESSION_WATCHDOG_PROCESSING_MINUTES`` (default 360 min =
+    6 hours). The shorter recording-side default (30 min) doesn't apply
+    here: post-processing has legitimate multi-minute spans for a long
+    upload (bulk_import), so the cutoff has to be conservative enough that
+    a slow-but-alive pass isn't yanked out from under itself.
+    """
+    if not _enabled():
+        return {"enabled": False}
+
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    # Same FK-import gotcha as mark_abandoned_recording_sessions — the
+    # commit will fail without these models registered with SQLAlchemy
+    # metadata. Imported defensively; we don't reference the names.
+    from auth.models import Organization  # noqa: F401
+    try:
+        from database.models_rooms import RoomAudioSource  # noqa: F401
+    except Exception:
+        pass
+
+    threshold_minutes = _processing_threshold_minutes()
+    cap = _max_per_pass()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+
+    summary = {
+        "enabled": True,
+        "kind": "processing",
+        "threshold_minutes": threshold_minutes,
+        "candidates": 0,
+        "promoted_completed": 0,
+        "marked_failed": 0,
+        "skipped_cap": 0,
+        "errors": 0,
+        "dry_run": dry_run,
+    }
+
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.status == "processing",
+                RecordingSession.created_at < cutoff,
+            )
+            .order_by(RecordingSession.id)
+            .limit(cap + 1)
+            .all()
+        )
+        summary["candidates"] = min(len(candidates), cap)
+        if len(candidates) > cap:
+            summary["skipped_cap"] = len(candidates) - cap
+            candidates = candidates[:cap]
+
+        now = datetime.now(timezone.utc)
+        for sess in candidates:
+            try:
+                has_text = bool((sess.transcript or "").strip()) or bool(
+                    getattr(sess, "transcript_diarized", None)
+                )
+                if dry_run:
+                    if has_text:
+                        summary["promoted_completed"] += 1
+                    else:
+                        summary["marked_failed"] += 1
+                    continue
+                if has_text:
+                    sess.status = "completed"
+                    if not sess.ended_at:
+                        sess.ended_at = now
+                    summary["promoted_completed"] += 1
+                    outcome = "promoted_completed"
+                else:
+                    sess.status = "failed"
+                    summary["marked_failed"] += 1
+                    outcome = "marked_failed"
+                md = dict(sess.processing_metadata or {})
+                md["auto_resolved_reason"] = (
+                    f"stuck-processing: created_at>{threshold_minutes}m old "
+                    f"(session_watchdog_processing); outcome={outcome}"
+                )
+                md["auto_resolved_at"] = now.isoformat()
+                sess.processing_metadata = md
+                logger.warning(
+                    "session_watchdog.processing.%s session_id=%s db_id=%s "
+                    "user_id=%s org_id=%s age_minutes=%d",
+                    outcome,
+                    getattr(sess, "session_id", None),
+                    getattr(sess, "id", None),
+                    getattr(sess, "user_id", None),
+                    getattr(sess, "organization_id", None),
+                    threshold_minutes,
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                logger.warning(
+                    "session_watchdog.processing: failed to triage session=%s — %s",
+                    getattr(sess, "id", None), exc,
+                )
+        if not dry_run:
+            db.commit()
+        logger.info("session_watchdog processing pass: %s", summary)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "session_watchdog.processing: top-level error: %s", exc
+        )
         summary["errors"] += 1
         try:
             db.rollback()
