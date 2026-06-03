@@ -97,6 +97,10 @@ def empty_integration_block(integration_key: str) -> dict[str, Any]:
         base["shared_agent_id"] = ""
     elif integration_key == INTEGRATION_PROJECT_OPS:
         base["default_project_number"] = ""
+        # Auto-push of extracted action items to PO is opt-in (default
+        # OFF) so model-flagged noise doesn't create task spam. Manual /
+        # on-demand pushes are unaffected by this flag.
+        base["auto_push_action_items"] = False
     return base
 
 
@@ -228,6 +232,15 @@ def resolve_project_ops(
     override is set. This is the v3.19 home for the value that v3.17 put
     in ``Organization.settings.projectops_default_project_number`` — the
     writer falls back to that legacy field if the new one is absent.
+
+    ``extra["auto_push_action_items"]`` gates the AUTOMATIC outbound push
+    of extracted action items to PO on meeting completion. It defaults OFF
+    so model-flagged items don't create task noise; an org admin opts in
+    per-org. For orgs on the env-default path (no integration block) the
+    default comes from the ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS`` deploy
+    flag (also OFF by default). This flag does NOT affect extraction,
+    storage, in-app display, the on-demand status-propagation path, or any
+    future explicit review-then-push — only the auto-push.
     """
     block: Optional[dict[str, Any]] = None
     legacy_default: Optional[str] = None
@@ -250,7 +263,10 @@ def resolve_project_ops(
                 enabled=False,
                 api_base_url=None,
                 api_key=None,
-                extra={"default_project_number": None},
+                extra={
+                    "default_project_number": None,
+                    "auto_push_action_items": False,
+                },
                 source="disabled",
             )
         api_base_url = (block.get("api_base_url") or "").strip() or None
@@ -258,22 +274,36 @@ def resolve_project_ops(
         default_project = (block.get("default_project_number") or "").strip() or None
         if not default_project and legacy_default:
             default_project = legacy_default
+        # Per-org opt-in for the automatic action-item push. Absent key ->
+        # default OFF (matches empty_integration_block); explicit per-org
+        # value always wins over the deploy-level default.
+        auto_push = bool(block.get("auto_push_action_items", False))
         return IntegrationConfig(
             enabled=True,
             api_base_url=api_base_url,
             api_key=api_key,
-            extra={"default_project_number": default_project},
+            extra={
+                "default_project_number": default_project,
+                "auto_push_action_items": auto_push,
+            },
             source="org_override",
         )
 
-    # Env-default fallback.
+    # Env-default fallback. Orgs without an integration block inherit the
+    # deploy-level auto-push default (PROJECTOPS_AUTO_PUSH_ACTION_ITEMS,
+    # itself OFF by default) so the push stays deliberate out of the box.
+    from config.features import PROJECTOPS_AUTO_PUSH_ACTION_ITEMS
+
     env_key = os.getenv("PROJECTOPS_API_KEY")
     env_url = os.getenv("PROJECTOPS_BASE_URL")
     return IntegrationConfig(
         enabled=bool(env_key),
         api_base_url=env_url,
         api_key=env_key,
-        extra={"default_project_number": legacy_default},
+        extra={
+            "default_project_number": legacy_default,
+            "auto_push_action_items": bool(PROJECTOPS_AUTO_PUSH_ACTION_ITEMS),
+        },
         source="env_default",
     )
 

@@ -95,6 +95,10 @@ class IntegrationUpdate(BaseModel):
     shared_agent_id: Optional[str] = None
     # Project-Ops-only
     default_project_number: Optional[str] = None
+    # Whether extracted action items are auto-pushed to PO as tasks on
+    # meeting completion. Default OFF (opt-in) to avoid task noise; the
+    # writer only fires the automatic push when this is True.
+    auto_push_action_items: Optional[bool] = None
 
 
 class TestResult(BaseModel):
@@ -181,6 +185,9 @@ def _mask_block(integration_key: str, block: dict[str, Any]) -> IntegrationView:
         extra["shared_agent_id"] = block.get("shared_agent_id") or ""
     elif integration_key == INTEGRATION_PROJECT_OPS:
         extra["default_project_number"] = block.get("default_project_number") or ""
+        extra["auto_push_action_items"] = bool(
+            block.get("auto_push_action_items", False)
+        )
     return IntegrationView(
         key=integration_key,
         enabled=bool(block.get("enabled")),
@@ -307,6 +314,8 @@ async def update_integration(
     elif integration == INTEGRATION_PROJECT_OPS:
         if payload.default_project_number is not None:
             block["default_project_number"] = payload.default_project_number.strip()
+        if payload.auto_push_action_items is not None:
+            block["auto_push_action_items"] = bool(payload.auto_push_action_items)
 
     _write_block(org, integration, block)
     db.commit()

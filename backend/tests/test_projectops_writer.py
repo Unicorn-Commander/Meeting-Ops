@@ -29,10 +29,21 @@ Covers the contract for ``services.projectops_writer``:
    8. done_status_propagates        — on replay, an already-synced item now
                                        marked 'done' triggers a best-effort
                                        update_task_status(COMPLETED).
+   9. gated_off_when_auto_push       — default posture: with the v3.26.0
+      _disabled                        auto-push opt-in gate OFF the writer
+                                       returns mode="gated-off", created=0,
+                                       and makes zero client calls even when
+                                       a target + live client are present.
 
 The PO HTTP client is replaced by an injected stub (``_FakeProjectOpsClient``)
 passed via ``write_action_items_to_projectops(client=...)`` — the same
 dependency-injection seam the Brigade writer tests use. No network.
+
+The v3.26.0 auto-push opt-in gate is forced ON for the live-path tests by an
+autouse fixture (``_enable_auto_push``) that wraps
+``services.integrations.org_config.resolve_project_ops``; test 9 re-patches
+that seam back OFF to cover the default-disabled state. See
+``_patch_auto_push``.
 """
 
 from __future__ import annotations
@@ -117,10 +128,74 @@ class _FakeProjectOpsClient:
 
 @pytest.fixture(autouse=True)
 def _clear_projectops_env(monkeypatch):
-    """Tests must NOT hit a real Project-Ops. Strip env the host shell
-    might leak. Tests opt into is_live by injecting a stub client."""
-    monkeypatch.delenv("PROJECTOPS_API_KEY", raising=False)
-    monkeypatch.delenv("PROJECTOPS_BASE_URL", raising=False)
+    """Tests must NOT hit a real Project-Ops. Strip every env var that could
+    put ``ProjectOpsClient`` into live mode so the suite stays hermetic on a
+    deployed host (e.g. meet-backend ships with the PO Keycloak
+    client-credentials trio set — without clearing those, a brand-new
+    ``ProjectOpsClient()`` resolves is_live=True via the auto-refresh path
+    and ``test_noop_when_unconfigured`` flakes). Tests opt into is_live by
+    injecting a stub client.
+
+    Also strip ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS`` so the env-default
+    auto-push posture is deterministic; the gate is then driven explicitly
+    by ``_enable_auto_push`` / ``_patch_auto_push``."""
+    for var in (
+        "PROJECTOPS_API_KEY",
+        "PROJECTOPS_BASE_URL",
+        "PROJECTOPS_KC_TOKEN_URL",
+        "PROJECTOPS_KC_CLIENT_ID",
+        "PROJECTOPS_KC_CLIENT_SECRET",
+        "PROJECTOPS_AUTO_PUSH_ACTION_ITEMS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    yield
+
+
+def _patch_auto_push(monkeypatch, *, enabled: bool) -> None:
+    """Force the per-org auto-push opt-in gate (v3.26.0) on or off for the
+    duration of a test.
+
+    ``write_action_items_to_projectops`` short-circuits to mode="gated-off"
+    unless ``resolve_project_ops(...).extra['auto_push_action_items']`` is
+    True. The live-path tests in this module configure the *target project*
+    via ``Organization.settings`` (legacy field) rather than a full
+    ``integrations.project_ops`` block, so they land on the env-default
+    resolution branch where auto-push tracks the (default-OFF)
+    PROJECTOPS_AUTO_PUSH_ACTION_ITEMS deploy flag — leaving the gate shut.
+
+    We wrap the *real* resolver (preserving its enabled / source /
+    disabled / default_project_number semantics, which several tests rely
+    on) and only override the one ``extra`` key. The writer imports
+    ``resolve_project_ops`` lazily from ``services.integrations.org_config``
+    inside the function body, so we must patch it at the source module —
+    patching the name on ``services.projectops_writer`` would not be seen.
+    """
+    import dataclasses
+
+    from services.integrations import org_config
+
+    real = org_config.resolve_project_ops
+
+    def _wrapped(db, organization_id):
+        cfg = real(db, organization_id)
+        new_extra = dict(cfg.extra)
+        new_extra["auto_push_action_items"] = enabled
+        return dataclasses.replace(cfg, extra=new_extra)
+
+    monkeypatch.setattr(org_config, "resolve_project_ops", _wrapped)
+
+
+@pytest.fixture(autouse=True)
+def _enable_auto_push(monkeypatch):
+    """Open the v3.26.0 auto-push opt-in gate for every test by default so
+    the existing live-path contract tests exercise the real write/skip/
+    no-op/no-target behavior instead of returning mode="gated-off".
+
+    The dedicated default-OFF coverage test re-patches the same seam back
+    to disabled (see ``test_gated_off_when_auto_push_disabled``); because
+    monkeypatch applies that override after this fixture's setup and
+    restores on teardown, the two compose cleanly."""
+    _patch_auto_push(monkeypatch, enabled=True)
     yield
 
 
@@ -548,3 +623,54 @@ def test_done_status_propagates_on_replay(client):
     # Only the 'done' item triggers a status nudge; 'todo' -> PENDING is skipped.
     assert ("task-A", "COMPLETED") in stub.status_updates
     assert all(tid != "task-B" for tid, _ in stub.status_updates)
+
+
+# ---------------------------------------------------------------------------
+# 9. Auto-push opt-in OFF (default) — mode="gated-off", zero client calls
+# ---------------------------------------------------------------------------
+
+
+def test_gated_off_when_auto_push_disabled(client, monkeypatch):
+    """Default posture: the automatic action-item push is OPT-IN. With the
+    auto-push gate OFF the writer returns mode="gated-off" + created=0 and
+    makes ZERO create_task calls — even when a target project resolves and
+    a live client is injected. This is the inverse of every other live-path
+    test (which run with the gate forced ON by the autouse fixture); here we
+    re-patch the same resolver seam back to disabled so the opt-in gate has
+    explicit coverage in both states.
+    """
+    from services.projectops_writer import write_action_items_to_projectops
+    from database.database import SessionLocal
+
+    # Re-disable the gate (the autouse _enable_auto_push fixture turned it
+    # on); this monkeypatch override wins and is restored on teardown.
+    _patch_auto_push(monkeypatch, enabled=False)
+
+    # A resolvable target + a live stub: proves the gate — not a missing
+    # project or an unconfigured client — is what stops the push.
+    org_id, session_id = _seed(
+        org_settings={"projectops_default_project_number": "P-00055"}
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            write_action_items_to_projectops(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "gated-off"
+    assert result.created == 0
+    assert result.skipped == 0
+    # The push never fired: no task creates, no status nudges.
+    assert stub.created == []
+    assert stub.status_updates == []
+
+    # And nothing got stamped onto the action items.
+    for it in _items_for_session(session_id):
+        assert (it.raw_payload or {}).get("po_task_id") is None

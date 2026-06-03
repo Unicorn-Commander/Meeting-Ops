@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Users } from 'lucide-react';
 import { startPcm16Capture, type Pcm16Capture } from '../utils/audioWorkletCapture';
 
 // Mirror the 19-byte BE header layout from StreamingTest.tsx + the
@@ -216,6 +217,25 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
   const captureRef = useRef<Pcm16Capture | null>(null);
   const userTerminatedRef = useRef(false);
 
+  // Auto-scroll (stick-to-bottom). We tail the transcript to the latest
+  // content as it streams, but pause the moment the user scrolls up to
+  // read back, and resume once they return to the bottom. `atBottomRef`
+  // is the live intent flag (avoids a state round-trip per scroll event);
+  // `stickToBottom` mirrors it into state only to toggle the small
+  // "follow paused" affordance.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const atBottomRef = useRef(true);
+  const [stickToBottom, setStickToBottom] = useState(true);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 24px slack so "close enough to the bottom" still counts as docked.
+    const docked = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    atBottomRef.current = docked;
+    setStickToBottom((prev) => (prev === docked ? prev : docked));
+  }, []);
+
   // Compose the WS URL. Same pattern StreamingTest.tsx uses.
   const wsUrl = (() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -398,6 +418,32 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
     };
   }, [enabled, sessionId, wsUrl, teardown]);
 
+  // Tail-follow: scroll the transcript container to the bottom whenever
+  // its content grows, unless the user has scrolled up. Depends on every
+  // signal that adds height: utterance count, the trailing draft, and the
+  // legacy transcript entry count.
+  useEffect(() => {
+    if (!atBottomRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [utterances, currentDraft, transcript]);
+
+  // Distinct live-speaker count from Sortformer turns. This stream is the
+  // ONLY live source that carries per-segment speaker labels, so the count
+  // is meaningful here (the parent's browser transcript has none). We union
+  // spk_ids across both the utterance accumulator and the legacy entry
+  // list so the count holds steady regardless of which render path is live.
+  const speakerCount = (() => {
+    const ids = new Set<number>();
+    for (const u of utterances) {
+      for (const s of u.speakers ?? []) ids.add(s.spk_id);
+    }
+    for (const e of transcript) {
+      for (const s of e.speakers ?? []) ids.add(s.spk_id);
+    }
+    return ids.size;
+  })();
+
   if (!enabled) return null;
 
   return (
@@ -411,11 +457,49 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
         border: '1px solid #1f1f1f',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
         <strong style={{ fontSize: 14 }}>Server live transcript</strong>
         <span style={{ fontSize: 11, opacity: 0.5 }}>
           (Phase B.2 — Parakeet streaming + Sortformer speakers)
         </span>
+        {/* VAD / listening pulse — the mic is actively streaming PCM frames
+            to the server only while the WS is open, so an open connection
+            is a true "we are capturing + listening" signal. A subtle
+            animated dot rather than a banner. */}
+        {conn === 'open' && (
+          <span
+            title="Listening — streaming audio to the server"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#a7f3d0' }}
+          >
+            <span style={{ position: 'relative', width: 8, height: 8, display: 'inline-block' }}>
+              <span className="animate-ping" style={{ position: 'absolute', inset: 0, borderRadius: 9999, background: '#34d399', opacity: 0.75 }} />
+              <span style={{ position: 'absolute', inset: 0, borderRadius: 9999, background: '#10b981' }} />
+            </span>
+            Listening
+          </span>
+        )}
+        {/* Live distinct-speaker count (live diarization only). Sortformer
+            populates this; renders only once at least one speaker turn has
+            arrived so we never show "0 speakers" pre-roll. */}
+        {speakerCount > 0 && (
+          <span
+            title="Distinct speakers detected by live diarization"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 11,
+              padding: '1px 8px',
+              borderRadius: 9999,
+              background: 'rgba(217, 70, 239, 0.12)',
+              border: '1px solid rgba(217, 70, 239, 0.35)',
+              color: '#f0abfc',
+            }}
+          >
+            <Users size={12} strokeWidth={2} />
+            {speakerCount} {speakerCount === 1 ? 'speaker' : 'speakers'}
+          </span>
+        )}
         <span
           style={{
             fontSize: 11,
@@ -434,6 +518,30 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
         <span style={{ fontSize: 11, opacity: 0.5 }}>
           {transcript.length} entries
         </span>
+        {/* Tail-follow paused affordance — appears only when the user has
+            scrolled up off the bottom. One click re-docks + resumes. */}
+        {!stickToBottom && (
+          <button
+            type="button"
+            onClick={() => {
+              const el = scrollRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              atBottomRef.current = true;
+              setStickToBottom(true);
+            }}
+            style={{
+              fontSize: 11,
+              padding: '1px 8px',
+              borderRadius: 9999,
+              background: 'rgba(99, 102, 241, 0.15)',
+              border: '1px solid rgba(99, 102, 241, 0.4)',
+              color: '#c7d2fe',
+              cursor: 'pointer',
+            }}
+          >
+            Jump to latest
+          </button>
+        )}
       </div>
       {errorMsg && (
         <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 6 }}>
@@ -441,6 +549,8 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
         </div>
       )}
       <div
+        ref={scrollRef}
+        onScroll={handleScroll}
         style={{
           fontSize: 13,
           maxHeight: 200,

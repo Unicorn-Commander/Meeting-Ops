@@ -79,14 +79,15 @@ _LOCAL_TO_PO_STATUS = {
 class ProjectOpsWriteResult:
     """Lightweight return value for the writer's call sites.
 
-    ``ok`` is True for real writes AND the no-op / no-target paths (the
-    meeting completed; that's the user-facing contract). ``mode`` lets
-    callers + tests distinguish: "live" (real), "no-op" (PO unconfigured),
+    ``ok`` is True for real writes AND the no-op / no-target / gated-off
+    paths (the meeting completed; that's the user-facing contract).
+    ``mode`` lets callers + tests distinguish: "live" (real), "no-op" (PO
+    unconfigured or org-disabled), "gated-off" (auto-push opt-in is OFF),
     "no-target" (no project resolved), "error".
     """
 
     ok: bool
-    mode: str  # "live" | "no-op" | "no-target" | "error"
+    mode: str  # "live" | "no-op" | "gated-off" | "no-target" | "error"
     created: int = 0
     skipped: int = 0
     detail: Optional[str] = None
@@ -292,6 +293,31 @@ async def write_action_items_to_projectops(
                 session_pk,
             )
             return ProjectOpsWriteResult(ok=True, mode="no-op")
+
+        # Auto-push gate (v3.26.0): the automatic outbound push of
+        # extracted action items to Project-Ops is DELIBERATE, not
+        # automatic. Not everything the model flags is a real task, so a
+        # blanket auto-push creates task noise. The push only fires when
+        # it's been opted in — per-org via
+        # integrations.project_ops.auto_push_action_items, or (for orgs on
+        # the env-default path) via the PROJECTOPS_AUTO_PUSH_ACTION_ITEMS
+        # deploy flag. Both default OFF. This gate ONLY governs the
+        # automatic push driven by the recording/finalize pipeline; action
+        # item extraction, storage, and display are untouched, and the
+        # on-demand status-propagation path
+        # (``propagate_action_item_status``) and the raw client
+        # ``create_task`` remain available for an explicit
+        # review-then-push on demand.
+        if not po_cfg.extra.get("auto_push_action_items", False):
+            logger.info(
+                "projectops_writer org=%s auto-push disabled (opt-in OFF, "
+                "source=%s) — skipping automatic push session=%s mode=%s",
+                session.organization_id,
+                po_cfg.source,
+                session_pk,
+                completion_mode,
+            )
+            return ProjectOpsWriteResult(ok=True, mode="gated-off")
 
         target_ref, source = _resolve_target_project(db, session)
         # If the session+meta didn't yield a target but the per-org
