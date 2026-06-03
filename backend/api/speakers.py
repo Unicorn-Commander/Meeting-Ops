@@ -931,6 +931,144 @@ async def update_speaker_link(
     return _link_to_response(db, link)
 
 
+class CreateSpeakerForLinkRequest(BaseModel):
+    """Inline create-and-link payload for the non-admin tagger.
+
+    Just a name (plus optional light contact fields). Unlike /enroll this
+    does NOT require any usable audio turn — it creates a name-only
+    SpeakerProfile and binds it to an unassigned speaker_link. Used when a
+    cluster has no clean audio (short utterances / transcript-only imports)
+    so /enroll's 'no usable turn' path would otherwise dead-end the user.
+    """
+    display_name: str = Field(..., min_length=1, max_length=200)
+    email: Optional[str] = Field(default=None, max_length=320)
+    title: Optional[str] = Field(default=None, max_length=200)
+    company: Optional[str] = Field(default=None, max_length=200)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+@router.post(
+    "/api/sessions/{session_id}/speaker-links/{link_id}/create-speaker",
+    response_model=SpeakerLinkResponse,
+)
+async def create_speaker_for_link(
+    session_id: str,
+    link_id: int,
+    payload: CreateSpeakerForLinkRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Create a NEW (name-only) speaker in the caller's org and link it to an
+    unassigned speaker_link on this session.
+
+    Accessible to ANY org member (same inline-tagger surface as PATCH
+    /speaker-links/{id} and POST /speaker-links/{id}/enroll). It deliberately
+    does NOT require admin and does NOT open org-wide speaker management:
+    it can only create a brand-new profile in the caller's own org and bind
+    it to a link they can already see. It never edits/deletes existing
+    speakers and never crosses orgs.
+
+    Differs from /enroll in that it needs no audio turn / embedding — so it
+    works for transcript-only sessions and short clusters. If a speaker with
+    the same display_name already exists in this org it is reused (no
+    duplicate, no 409/500 from the org+name unique constraint).
+    """
+    # v3.18.3: speaker_library write gate (creates+links persistent library state).
+    gate_feature_for_caller(current_user, "speaker_library")
+
+    session = _get_session_or_404(db, active_org.organization.id, session_id)
+    link = (
+        db.query(SpeakerSessionLink)
+        .filter(
+            SpeakerSessionLink.id == link_id,
+            SpeakerSessionLink.session_id == session.id,
+        )
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Speaker link not found")
+    # Only fill an UNASSIGNED cluster, so we never silently relabel a cluster
+    # someone already tagged. To re-point a tagged link, clear it via PATCH first.
+    if link.speaker_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This speaker label is already linked. Clear it before creating a new speaker.",
+        )
+
+    # Find-or-reuse within THIS org only (org+display_name is unique; reuse
+    # avoids a DB IntegrityError and matches /enroll's behaviour).
+    speaker = (
+        db.query(SpeakerProfile)
+        .filter(
+            SpeakerProfile.organization_id == active_org.organization.id,
+            SpeakerProfile.display_name == payload.display_name,
+        )
+        .first()
+    )
+    if speaker is None:
+        speaker = SpeakerProfile(
+            organization_id=active_org.organization.id,
+            display_name=payload.display_name,
+            email=payload.email or None,
+            title=payload.title or None,
+            company=payload.company or None,
+            notes=payload.notes or None,
+            created_by_user_id=current_user.id,
+        )
+        db.add(speaker)
+        db.flush()
+
+    # Link + confirm (user-asserted match).
+    link.speaker_id = speaker.id
+    link.source = "manual"
+    link.confirmed = True
+    link.confirmed_by_user_id = current_user.id
+
+    # Rewrite transcript_diarized.segments so the SessionDetails view shows
+    # the new name everywhere this raw_label appears (mirrors /enroll step 6).
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    if isinstance(diarized, dict):
+        for seg in diarized.get("segments", []):
+            raw = seg.get("raw_label") or seg.get("speaker") or ""
+            if raw == link.raw_label:
+                seg["raw_label"] = raw
+                seg["speaker"] = speaker.display_name
+        if "speakers" in diarized:
+            seen, ordered = set(), []
+            for seg in diarized.get("segments", []):
+                s = seg.get("speaker", "Unknown")
+                if s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            diarized["speakers"] = ordered
+        session.transcript_diarized = diarized
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "transcript_diarized")
+
+    # Update Transcription rows carrying this raw_label (mirrors /enroll step 7).
+    rows = (
+        db.query(Transcription)
+        .filter(
+            Transcription.session_id == session.id,
+            Transcription.speaker == link.raw_label,
+        )
+        .all()
+    )
+    for row in rows:
+        row.speaker = speaker.display_name
+
+    _propagate_speaker_rename(session, [link.raw_label], speaker.display_name)
+    db.commit()
+    db.refresh(link)
+    logger.info(
+        "Inline-created speaker '%s' (id=%d) for session %s cluster %s (org %s, user %s)",
+        speaker.display_name, speaker.id, session.id, link.raw_label,
+        active_org.organization.id, current_user.id,
+    )
+    return _link_to_response(db, link)
+
+
 class RediarizeRequest(BaseModel):
     num_speakers: Optional[int] = None
     min_speakers: Optional[int] = None

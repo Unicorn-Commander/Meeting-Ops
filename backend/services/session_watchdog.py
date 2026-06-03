@@ -107,13 +107,126 @@ def _processing_threshold_minutes() -> int:
     return DEFAULT_PROCESSING_WATCHDOG_HOURS * 60
 
 
+def _alwayson_session_is_empty(sess: Any) -> bool:
+    """True iff ``sess`` is an always-on session that produced NOTHING worth
+    keeping: no server-side audio AND no transcript text.
+
+    This is the guard that lets the watchdog *delete* a zombie instead of
+    leaving a ``failed`` tombstone in the user's session list. It is
+    deliberately strict — every clause must hold:
+
+      - ``mode == 'always_on'``           (never upload/satellite/legacy rows)
+      - ``source_type == 'browser_always_on'`` (defense in depth)
+      - no audio: both ``audio_file`` (local working copy) and
+        ``audio_object_key`` (durable Garage copy) are empty/NULL
+      - no transcript: ``transcript_simple`` and ``transcript`` are empty AND
+        ``transcript_diarized`` carries zero segments
+
+    Verified against live meet_db (2026-06-03): real always-on meetings keep
+    a browser-produced transcript with NO server audio, so an audio-only
+    check would wipe real data — the transcript clause is load-bearing.
+    """
+    if getattr(sess, "mode", None) != "always_on":
+        return False
+    if getattr(sess, "source_type", None) != "browser_always_on":
+        return False
+    if (getattr(sess, "audio_file", None) or "").strip():
+        return False
+    if (getattr(sess, "audio_object_key", None) or "").strip():
+        return False
+    if (getattr(sess, "transcript_simple", None) or "").strip():
+        return False
+    if (getattr(sess, "transcript", None) or "").strip():
+        return False
+    diarized = getattr(sess, "transcript_diarized", None)
+    if isinstance(diarized, dict) and diarized.get("segments"):
+        return False
+    return True
+
+
+def _hard_delete_alwayson_session(db: Any, sess: Any) -> None:
+    """Server-side equivalent of the user clicking Discard on an always-on
+    session — the same cascade as ``DELETE /api/recordings/sessions/{id}``
+    in ``api/recording.py``:
+
+      1. DB rows: Transcription (keyed on int pk) + AudioFile (keyed on the
+         string ``session_id``) + the RecordingSession itself.
+      2. Disk: the per-session chunk directory under ``RECORDINGS_DIR/always_on``.
+      3. Vector store: Qdrant points for this ``session_id``.
+
+    The DB ``delete()`` calls are staged on the SAME session that the caller
+    commits once at the end of the pass (so it stays inside the watchdog's
+    single bounded transaction). Disk + Qdrant cleanup is best-effort and
+    import-on-use, mirroring the API handler; failures are logged, never
+    fatal, because the canonical "gone" signal is the row delete.
+    """
+    import os as _os
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    from database.models import AudioFile, Transcription
+    from auth.models import Organization
+
+    canonical_id = sess.session_id or str(sess.id)
+    org_id = sess.organization_id
+
+    # Resolve org slug for the on-disk path. Best-effort: if the org is gone
+    # the row delete still proceeds; only disk cleanup is skipped.
+    org_slug = None
+    try:
+        org = db.query(Organization).filter(Organization.id == org_id).first()
+        org_slug = getattr(org, "slug", None)
+    except Exception:  # noqa: BLE001
+        org_slug = None
+
+    # 1. DB rows (staged on the caller's session; committed by the pass).
+    db.query(Transcription).filter(Transcription.session_id == sess.id).delete()
+    db.query(AudioFile).filter(
+        AudioFile.session_id == canonical_id,
+        AudioFile.organization_id == org_id,
+    ).delete()
+    db.delete(sess)
+
+    # 2. Disk cleanup — best-effort. Same layout as api.recording._session_dir:
+    #    RECORDINGS_DIR/always_on/<org-slug>/<session-id>.
+    if org_slug:
+        try:
+            recordings_dir = _Path(_os.getenv("RECORDINGS_DIR", "/app/recordings"))
+            chunk_dir = recordings_dir / "always_on" / org_slug / canonical_id
+            if chunk_dir.exists():
+                _shutil.rmtree(chunk_dir, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "session_watchdog.delete: chunk-dir cleanup failed for %s — %s",
+                canonical_id, exc,
+            )
+
+    # 3. Vector store — best-effort, import-on-use (avoid qdrant on cold path).
+    try:
+        from services.semantic_search_service import semantic_search
+
+        semantic_search.delete_session(canonical_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "session_watchdog.delete: qdrant cleanup failed for %s — %s",
+            canonical_id, exc,
+        )
+
+
 def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any]:
     """Find sessions stuck in ``status='recording'`` whose ``updated_at`` is
-    older than the configured threshold and flip them to ``failed``.
+    older than the configured threshold and resolve them.
+
+    Two outcomes per row:
+      - Audio-less, transcript-less *always-on* zombies are HARD-DELETED
+        (rows + disk chunks + Qdrant), so the recorder stops accumulating
+        empty ``failed`` tombstones in the session list. See
+        :func:`_alwayson_session_is_empty` for the strict guard.
+      - Everything else is flipped to ``failed`` (audio + transcript + Garage
+        object preserved; only ``status`` + ``ended_at`` change).
 
     Returns a summary dict. Never raises — exceptions are logged and the
-    pass terminates cleanly. Idempotent. The Garage audio + transcripts +
-    everything else stays intact; only ``status`` + ``ended_at`` change."""
+    pass terminates cleanly. Idempotent."""
     if not _enabled():
         return {"enabled": False}
 
@@ -143,6 +256,7 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
         "threshold_hours": threshold_hours_legacy,
         "candidates": 0,
         "marked_failed": 0,
+        "deleted": 0,
         "skipped_cap": 0,
         "errors": 0,
         "dry_run": dry_run,
@@ -171,6 +285,32 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
         now = datetime.now(timezone.utc)
         for sess in candidates:
             try:
+                # Audio-less + transcript-less always-on zombies: delete the
+                # whole thing (rows + disk + Qdrant) instead of leaving a
+                # ``failed`` tombstone the user has to look at forever. The
+                # guard is strict — only browser_always_on rows with no audio
+                # AND no transcript ever reach this branch (see
+                # _alwayson_session_is_empty). Real meetings, sessions with
+                # any audio/transcript, and upload/satellite rows fall through
+                # to the mark-failed path below, byte-for-byte unchanged.
+                if _alwayson_session_is_empty(sess):
+                    if dry_run:
+                        summary["deleted"] += 1
+                        continue
+                    _sid = getattr(sess, "session_id", None)
+                    _dbid = getattr(sess, "id", None)
+                    _uid = getattr(sess, "user_id", None)
+                    _oid = getattr(sess, "organization_id", None)
+                    _hard_delete_alwayson_session(db, sess)
+                    summary["deleted"] += 1
+                    # Same loki-greppable prefix family as force_fail so the
+                    # centerdeep dashboard can chart delete-rate alongside it.
+                    logger.warning(
+                        "session_watchdog.delete_empty session_id=%s db_id=%s "
+                        "user_id=%s org_id=%s threshold_minutes=%d",
+                        _sid, _dbid, _uid, _oid, threshold_minutes,
+                    )
+                    continue
                 if dry_run:
                     summary["marked_failed"] += 1
                     continue

@@ -465,6 +465,13 @@ class MeetingDigest(Base):
     # (or last generated) this digest. NULL on cached reads; set when
     # a new generate kicks off.
     generation_job_id = Column(String(64), nullable=True)
+    # v3.24.0 weekly-email-digest: timestamp the scheduled weekly-digest
+    # cron emailed this row. NULL = never emailed (eligible to send). Set
+    # after the first successful Postmark send so a cron restart / re-run /
+    # two-worker race can't double-send. Only the "week" period rows are
+    # ever stamped today; on-demand day/month/quarter/year digests leave it
+    # NULL. See workers/weekly_digest_workers.py.
+    emailed_at = Column(DateTime, nullable=True)
 
 
 class UploadJob(Base):

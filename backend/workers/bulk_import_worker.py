@@ -99,6 +99,7 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
 # so the arq runner registers them on startup.
 from workers.finalize_workers import finalize_session_job  # noqa: E402
 from workers.digest_workers import generate_digest_job  # noqa: E402
+from workers.weekly_digest_workers import weekly_digest_cron  # noqa: E402
 from workers.tts_workers import (  # noqa: E402
     render_tts_summary_job,
     render_tts_podcast_job,
@@ -112,6 +113,7 @@ class WorkerSettings:
         process_bulk_file,
         finalize_session_job,
         generate_digest_job,
+        weekly_digest_cron,
         render_tts_summary_job,
         render_tts_podcast_job,
     ]
@@ -122,6 +124,12 @@ class WorkerSettings:
     cron_jobs = [
         cron(media_retention_task, hour={4}, minute={30}),
         cron(session_watchdog_task, minute={0, 30}),
+        # Weekly meeting digest email — Monday 13:00 UTC, summarizing the
+        # previous Mon-Sun week per opted-in org (see
+        # workers/weekly_digest_workers.py). Opt-in via
+        # Organization.settings["weekly_digest"]; idempotent via
+        # MeetingDigest.emailed_at.
+        cron(weekly_digest_cron, weekday="mon", hour={13}, minute={0}),
     ]
     max_jobs = get_bulk_import_concurrency()
     redis_settings = RedisSettings.from_dsn(
