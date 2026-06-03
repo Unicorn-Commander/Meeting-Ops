@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { setRecordingActive } from '../utils/installFetchInterceptor';
 
 interface TranscriptionSegment {
   id: string;
@@ -71,6 +72,13 @@ export const RecordingProvider: React.FC<{ children: ReactNode }> = ({ children 
     };
     localStorage.setItem('recordingState', JSON.stringify(state));
   }, [activeSession, isRecording, recordingTime, transcriptions]);
+
+  // Tell the fetch interceptor whether we're live, so a stale-session 302
+  // during the recording defers its redirect instead of killing the capture.
+  useEffect(() => {
+    setRecordingActive('recordingContext', isRecording);
+    return () => setRecordingActive('recordingContext', false);
+  }, [isRecording]);
 
   const addTranscription = (segment: TranscriptionSegment) => {
     setTranscriptions(prev => {

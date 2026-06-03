@@ -9,14 +9,44 @@
  * On detection: shows the ReconnectingOverlay and redirects through
  * /oauth2/start so the SPA gets a fresh KC session and lands back
  * on the same hash route.
+ *
+ * Active-recording guard
+ * -----------------------
+ * Long-running captures regularly outlive the oauth2-proxy cookie_refresh
+ * window (60 min on bigboy). The first audio-chunk save after refresh
+ * fails would otherwise force `window.location.href = /oauth2/start`,
+ * killing the recording mid-meeting. Instead, when the recording
+ * contexts have marked the session as live via `setRecordingActive(true)`
+ * we DEFER the redirect: the overlay surfaces with a "session expired —
+ * tap to resume" prompt, the failing fetch still returns 401 so the
+ * caller can buffer/retry locally, and the redirect only fires once
+ * recording actually stops (or the user explicitly opts in).
  */
 import { setReconnectingState } from '../components/ReconnectingOverlay';
 import { redirectToLogin } from './loginRedirect';
 
-const OAUTH2_PROXY_LOGIN_PATTERN = /\/oauth2\/(start|sign_out|callback)/i;
-const KEYCLOAK_PATTERN = /\/realms\/[^/]+\/protocol\/openid-connect/i;
-
 const _originalFetch = window.fetch.bind(window);
+
+// Module-level claim set the recording contexts flip — see AlwaysOnContext +
+// RecordingContext. Each context owns a distinct key (`alwaysOn`,
+// `recordingContext`) so neither one's stop-handler ever clears the
+// other's claim by mistake.
+const activeRecordingClaims = new Set<string>();
+let redirectDeferred = false;
+
+export function setRecordingActive(key: string, active: boolean): void {
+  const wasActive = activeRecordingClaims.size > 0;
+  if (active) activeRecordingClaims.add(key);
+  else activeRecordingClaims.delete(key);
+  const isActive = activeRecordingClaims.size > 0;
+  // Recording just stopped (no claims remaining) AND we had previously
+  // deferred a redirect → surface it now so the user re-auths instead of
+  // staring at a dead overlay.
+  if (wasActive && !isActive && redirectDeferred) {
+    redirectDeferred = false;
+    setTimeout(() => { redirectToLogin(); }, 50);
+  }
+}
 
 function isApiUrl(urlStr: string): boolean {
   // Same-origin /api/* OR absolute https://meetingops.../api/*
@@ -32,6 +62,15 @@ function isApiUrl(urlStr: string): boolean {
 
 function triggerReconnect() {
   try { setReconnectingState(true); } catch { /* component may not be mounted yet */ }
+  if (activeRecordingClaims.size > 0) {
+    // Hold the redirect — recording is live and we'd lose the capture if
+    // we kicked the user to /oauth2/start. The overlay stays up; the
+    // setRecordingActive(false) callback runs the redirect once recording
+    // actually stops. The failing fetch still returns 401, so any
+    // caller-side retry/buffer logic kicks in normally.
+    redirectDeferred = true;
+    return;
+  }
   // Use a small delay so React has a frame to render the overlay
   setTimeout(() => { redirectToLogin(); }, 50);
 }
