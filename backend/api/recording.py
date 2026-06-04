@@ -1603,6 +1603,22 @@ async def _run_session_reprocess(session_pk: int) -> None:
             metadata["reprocess_status"] = state
             row.processing_metadata = metadata
             flag_modified(row, "processing_metadata")
+            # v3.26.13: also flip the TOP-LEVEL session.status on terminal
+            # reprocess states. Previously the pipeline only tracked
+            # reprocess_status in processing_metadata and never touched
+            # row.status, so every always-on recording sat at
+            # status='processing' forever even after a clean 'complete' —
+            # the Sessions list showed a permanent spinner and the watchdog
+            # had to mass-resolve them hours later. Intermediate states
+            # (queued, in_progress) intentionally leave status as 'processing'.
+            if state == "complete" and row.status != "completed":
+                row.status = "completed"
+                if not row.ended_at:
+                    row.ended_at = _now()
+            elif state == "failed" and row.status not in ("completed", "failed"):
+                row.status = "failed"
+                if not row.ended_at:
+                    row.ended_at = _now()
             db.commit()
         except Exception:
             db.rollback()
