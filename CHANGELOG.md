@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Added
+- **Session Details header scrolls off** [v3.26.4] — the saved-session header + tab sub-bar no longer stay pinned (removed `sticky`); they scroll away with the page so the session content leads.
 - **Compact Session Details header** [v3.26.3] — the sticky saved-session header (title + action buttons) was too tall and stayed pinned; reduced its vertical padding + title size and re-docked the dependent sub-bar offset (top-[97px] -> top-[80px]) so the session view leads with content.
 - **Compact record-screen header** [v3.26.2] — shrank the oversized "Live Recording" page header (smaller title + icon, dropped the marketing subtitle, tighter margin) so the record screen leads with recording, not chrome.
 - **Record-screen fixes** [v3.26.1] — fixed live **summary + transcript auto-scroll** (the real AlwaysOnControl panels now stick-to-bottom; the prior pass had wired scroll to duplicate panels). Removed the **duplicate live panels + the second "Advanced"** from the record page so AlwaysOnControl is the single live surface. Moved the **live transcript toward the top**. Added a **collapsible + showable desktop sidebar** (icons-only rail, persists across reloads; mobile drawer unchanged).
