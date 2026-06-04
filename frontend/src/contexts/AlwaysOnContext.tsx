@@ -31,6 +31,7 @@ import {
   isAlwaysOnActive,
   isRecordActive,
   setAlwaysOnActive,
+  beatAlwaysOnActive,
 } from '../utils/recordingPresence';
 import { showToast } from '../components/Toast';
 import { toast as toastify } from 'react-toastify';
@@ -746,6 +747,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const tick = window.setInterval(() => {
       if (!startedAtRef.current) return;
       setElapsedSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      // Heartbeat the cross-surface presence flag while a session is live,
+      // so a crashed/killed tab leaves a STALE flag (readers self-heal)
+      // instead of a sticky one that blocks every future Start.
+      if (stateRef.current === 'recording' || stateRef.current === 'paused') {
+        beatAlwaysOnActive();
+      }
     }, 1000);
     return () => window.clearInterval(tick);
   }, [state]);

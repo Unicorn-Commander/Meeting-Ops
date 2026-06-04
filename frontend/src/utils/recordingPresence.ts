@@ -36,6 +36,12 @@ export const RECORD_ACTIVE_KEY = 'meetingops.record.active';
 export const ALWAYSON_ACTIVE_EVENT = 'meetingops:alwayson-active-changed';
 export const RECORD_ACTIVE_EVENT = 'meetingops:record-active-changed';
 
+// A presence flag is live only if its heartbeat timestamp is within this
+// window. The active surface beats every ~1s (see AlwaysOnContext); 90s is
+// ~90 missed beats before we declare a flag dead, so a real session is
+// never wrongly cleared but a crashed/killed tab self-heals.
+export const STALE_AFTER_MS = 90_000;
+
 function safeLocalStorage(): Storage | null {
   try {
     if (typeof window === 'undefined') return null;
@@ -48,14 +54,28 @@ function safeLocalStorage(): Storage | null {
 function readFlag(key: string): boolean {
   const ls = safeLocalStorage();
   if (!ls) return false;
-  return ls.getItem(key) === 'true';
+  const raw = ls.getItem(key);
+  if (!raw) return false;
+  // The flag value is a heartbeat timestamp (ms). A live surface refreshes
+  // it every second; a crashed/killed tab stops, so the value goes stale
+  // and we self-heal by clearing it. Legacy sticky 'true' values (or
+  // anything non-numeric) can't be aged, so we treat them as stale too —
+  // this clears a flag a killed tab left behind instead of blocking every
+  // future Start with "always-on already on".
+  const ts = Number(raw);
+  if (!Number.isFinite(ts) || Date.now() - ts >= STALE_AFTER_MS) {
+    ls.removeItem(key);
+    return false;
+  }
+  return true;
 }
 
 function writeFlag(key: string, value: boolean, eventName: string): void {
   const ls = safeLocalStorage();
   if (!ls) return;
   if (value) {
-    ls.setItem(key, 'true');
+    // Store the heartbeat timestamp, not a sticky 'true'. See readFlag.
+    ls.setItem(key, String(Date.now()));
   } else {
     ls.removeItem(key);
   }
@@ -64,6 +84,18 @@ function writeFlag(key: string, value: boolean, eventName: string): void {
       new CustomEvent<boolean>(eventName, { detail: value }),
     );
   }
+}
+
+/**
+ * Heartbeat: refresh the presence timestamp without re-dispatching the
+ * change event. The active recording surface calls this on its ~1s tick so
+ * the flag stays fresh; if the tab dies the heartbeat stops and readFlag's
+ * staleness check clears the flag after STALE_AFTER_MS.
+ */
+function beatFlag(key: string): void {
+  const ls = safeLocalStorage();
+  if (!ls) return;
+  ls.setItem(key, String(Date.now()));
 }
 
 export function isAlwaysOnActive(): boolean {
@@ -80,6 +112,14 @@ export function setAlwaysOnActive(active: boolean): void {
 
 export function setRecordActive(active: boolean): void {
   writeFlag(RECORD_ACTIVE_KEY, active, RECORD_ACTIVE_EVENT);
+}
+
+export function beatAlwaysOnActive(): void {
+  beatFlag(ALWAYSON_ACTIVE_KEY);
+}
+
+export function beatRecordActive(): void {
+  beatFlag(RECORD_ACTIVE_KEY);
 }
 
 /**
