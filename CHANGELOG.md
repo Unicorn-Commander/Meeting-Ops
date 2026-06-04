@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Added
+- **Compact Session Details header** [v3.26.3] — the sticky saved-session header (title + action buttons) was too tall and stayed pinned; reduced its vertical padding + title size and re-docked the dependent sub-bar offset (top-[97px] -> top-[80px]) so the session view leads with content.
 - **Compact record-screen header** [v3.26.2] — shrank the oversized "Live Recording" page header (smaller title + icon, dropped the marketing subtitle, tighter margin) so the record screen leads with recording, not chrome.
 - **Record-screen fixes** [v3.26.1] — fixed live **summary + transcript auto-scroll** (the real AlwaysOnControl panels now stick-to-bottom; the prior pass had wired scroll to duplicate panels). Removed the **duplicate live panels + the second "Advanced"** from the record page so AlwaysOnControl is the single live surface. Moved the **live transcript toward the top**. Added a **collapsible + showable desktop sidebar** (icons-only rail, persists across reloads; mobile drawer unchanged).
 - **Fixed: false error after ending an always-on recording** [v3.26.1] — stopping a recording showed a spurious error + "unfinished recording" banner even though the meeting finalized and processed (backend returned 202/200). Root cause: the stop fallback path never set the local IndexedDB `finalized` flag, so the orphan rescan re-flagged the just-saved session. A clean stop now clears stale errors, marks the session finalized before the rescan, and shows "Saved — processing your meeting." Genuine mid-upload-crash recovery is preserved.

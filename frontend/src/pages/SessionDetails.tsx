@@ -1752,7 +1752,7 @@ export const SessionDetails: React.FC = () => {
       {/* Header — sticky so title / project / primary actions stay
           reachable while users scroll the active tab panel. */}
       <div className="sticky top-0 z-30 bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 py-4">
+        <div className="max-w-7xl mx-auto px-4 py-2.5">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-4 min-w-0 flex-1">
               <button
@@ -1775,7 +1775,7 @@ export const SessionDetails: React.FC = () => {
                       }}
                       autoFocus
                       maxLength={200}
-                      className="text-2xl font-bold text-gray-900 border-b-2 border-purple-500 focus:outline-none bg-transparent flex-1 min-w-[200px]"
+                      className="text-xl font-bold text-gray-900 border-b-2 border-purple-500 focus:outline-none bg-transparent flex-1 min-w-[200px]"
                       placeholder="Meeting title..."
                     />
                     <button
@@ -1805,7 +1805,7 @@ export const SessionDetails: React.FC = () => {
                     className="flex items-center gap-2 text-left group"
                     title="Click to rename"
                   >
-                    <h1 className="text-2xl font-bold text-gray-900 break-words leading-tight">
+                    <h1 className="text-xl font-bold text-gray-900 break-words leading-tight">
                       {session.title || session.name || 'Meeting Session'}
                     </h1>
                     <Edit2 className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -2357,7 +2357,7 @@ export const SessionDetails: React.FC = () => {
       {/* Tab strip — desktop equivalent of the mobile pill-tab nav. Local
           sessions can't use the AI Chat tab (it depends on server-side
           RAG over indexed transcripts) so we disable it explicitly. */}
-      <div className="sticky top-[97px] z-20 border-b bg-white">
+      <div className="sticky top-[80px] z-20 border-b bg-white">
         <div className="mx-auto max-w-7xl px-4">
           <SessionDetailsTabs
             value={activeTab}
