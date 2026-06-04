@@ -76,6 +76,7 @@ import {
   detectDevice,
   shouldRunBrowserInference,
   shouldShowCaptureOnlyBanner,
+  supportsLocalPersistence,
   type DeviceCapability,
 } from '../utils/deviceDetection';
 import {
@@ -896,7 +897,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
    * unavailable (mobile / desktop-fallback), where there's no IDB row.
    */
   const markLocalSessionFinalizedSafe = useCallback(async (sessionId: string) => {
-    if (deviceCapability.capabilityClass !== 'desktop-capable') return;
+    if (!supportsLocalPersistence(deviceCapability)) return;
     if (!localAudioStore.isAvailable()) return;
     try {
       const meta = await localAudioStore.getSessionMetadata(sessionId);
@@ -1554,7 +1555,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       const stream = engineRef.current?.getActiveStream?.() ?? activeMicStream;
       const sessionIdForRecord = sessionRef.current;
       const idbAvailable =
-        deviceCapability.capabilityClass === 'desktop-capable'
+        supportsLocalPersistence(deviceCapability)
         && localAudioStore.isAvailable();
       // When IDB isn't the buffer (mobile / desktop-fallback without IDB),
       // accumulate in memory so we still have a whole-file blob to upload
@@ -1640,7 +1641,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const useInMemory = recorderInMemoryRef.current;
     const useLocalOnly = activeLocalOnlyRef.current;
     const idbAvailable =
-      deviceCapability.capabilityClass === 'desktop-capable'
+      supportsLocalPersistence(deviceCapability)
       && localAudioStore.isAvailable();
     // Detach the ref immediately so a second swap can't double-stop.
     fullAudioRecorderRef.current = null;
@@ -1799,7 +1800,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           let assembledForPass: Awaited<ReturnType<typeof localAudioStore.getAssembledBlob>> | null = null;
           // Mark the local audio session ended (privacy mode keeps it
           // in IndexedDB — user manages via the Local Sessions surface).
-          if (deviceCapability.capabilityClass === 'desktop-capable'
+          if (supportsLocalPersistence(deviceCapability)
             && localAudioStore.isAvailable()) {
             try {
               assembledForPass = await localAudioStore.getAssembledBlob(sessionId);
@@ -1967,7 +1968,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           // cleanly-stopped session.
           setStatusText('Uploading recording');
           const idbActive =
-            deviceCapability.capabilityClass === 'desktop-capable'
+            supportsLocalPersistence(deviceCapability)
             && localAudioStore.isAvailable();
 
           // Resolve the one assembled blob to upload.
@@ -2221,80 +2222,33 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     if (!currentSessionId) return;
     if (activeLocalOnlyRef.current) return;
     if (currentSessionId.startsWith('local-')) return;
-    // Initial fetch on mount / session swap.
+    // Browser-inference devices summarize on-device during recording, so
+    // there are no server-rolled live slices to poll for. We still do the
+    // one-shot initial fetch (a reviewer landing on a session sees any
+    // previously-persisted server slices), but skip the 5s recording poll.
     void refreshServerSlices(currentSessionId);
+    if (allowBrowserInference) return;
     if (state !== 'recording' && state !== 'paused') return;
     const tick = window.setInterval(() => {
       void refreshServerSlices(currentSessionId);
     }, 5_000);
     return () => window.clearInterval(tick);
-  }, [currentSessionId, state, refreshServerSlices]);
+  }, [currentSessionId, state, refreshServerSlices, allowBrowserInference]);
 
   const triggerSummarize = useCallback(async () => {
-    // Standard mode: ask the server to roll a slice now. POST returns
-    // the new slice; the polling loop above will reconcile if the server
-    // happened to auto-trigger one in the meantime.
-    if (!activeLocalOnlyRef.current) {
-      const sessionId = sessionRef.current;
-      if (!sessionId) return;
-      if (summarizingRef.current) return;
-      summarizingRef.current = true;
-      setSummarizing(true);
-      try {
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-        };
-        try {
-          const token = window.localStorage?.getItem('access_token');
-          if (token) headers['Authorization'] = `Bearer ${token}`;
-        } catch {
-          /* ignore */
-        }
-        if (activeOrganization?.slug) {
-          headers['X-MeetingOps-Org'] = activeOrganization.slug;
-        }
-        const resp = await fetch(
-          `${config.apiUrl}/api/recordings/sessions/${sessionId}/summary-slices`,
-          {
-            method: 'POST',
-            headers,
-            credentials: 'include',
-          },
-        );
-        if (resp.status === 422) {
-          // No new transcript since the last slice — not really an error.
-          // The polling loop will eventually pick up new slices when
-          // there's enough new content.
-          return;
-        }
-        if (!resp.ok) {
-          const detail = await resp.text().catch(() => '');
-          throw new Error(detail || `Summarize failed (${resp.status})`);
-        }
-        // Refresh once to surface the new slice immediately rather than
-        // waiting for the 5s poll tick.
-        await refreshServerSlices(sessionId);
-        lastAutoFireRef.current = Date.now();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setError(message);
-      } finally {
-        summarizingRef.current = false;
-        setSummarizing(false);
-      }
-      return;
-    }
-
-    // Privacy mode (local-only) — keeps the legacy browser Qwen 3 0.6B
-    // path. The server is forbidden in this mode, so we have no other
-    // choice. The slice quality is lower but at least nothing leaves the
-    // device.
-    //
-    // Phase A mobile gate: even if a user somehow enters local-only on
-    // mobile (privacyMode.localOnly toggled on AND WebGPU advertised by
-    // iOS 17+), we refuse to fire the browser LLM. The slice queue
-    // stays empty until they're on a desktop — capture-only is the
-    // contract on mobile.
+    // v3.26.10 LOCAL-LIVE-SUMMARY: the live summary ALWAYS runs on the
+    // on-device LLM now — standard sessions and privacy sessions alike.
+    // As of v3.26.9 nothing streams to the server during a recording (the
+    // live transcript is browser-STT-only), so the old standard-mode path
+    // that POSTed /summary-slices had no server-side transcript to roll
+    // and just 422'd: the user saw the x/500 meter advance but no summary
+    // appear. The server still produces the CANONICAL summary from the
+    // whole-file reprocess at Stop; these slices are the live, ephemeral
+    // on-screen gist. The only per-mode difference is persistence: privacy
+    // ALSO writes each slice to IndexedDB (no server record), standard
+    // sessions don't (the Stop reprocess owns the canonical record).
+    // Capture-only devices (no browser inference) get no live summary and
+    // fall through to the Stop-time server summary.
     if (!allowBrowserInference) {
       return;
     }
@@ -2417,7 +2371,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (state !== 'recording') return;
     if (!autoConfig.enabled) return;
-    if (!activeLocalOnly) return; // server-side trigger handles standard mode
+    if (!allowBrowserInference) return; // live summary runs on-device (standard + privacy)
 
     const spec = thresholdSpec(autoConfig.threshold);
     if (spec.kind === 'words') {
@@ -2459,7 +2413,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const spec = thresholdSpec(autoConfig.threshold);
     if (spec.kind !== 'time') return;
     if (!autoConfig.enabled) return;
-    if (!activeLocalOnly) return; // server-side trigger handles standard mode
+    if (!allowBrowserInference) return; // live summary runs on-device (standard + privacy)
     const tick = window.setInterval(() => {
       const sinceLast = Date.now() - lastAutoFireRef.current;
       if (sinceLast < spec.value) return;
@@ -2903,7 +2857,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   /** Re-query IDB and refresh the orphan banner. Cheap; called on
    *  mount and after every stop/discard so the banner stays accurate. */
   const refreshOrphanSessions = useCallback(async () => {
-    if (deviceCapability.capabilityClass !== 'desktop-capable') return;
+    if (!supportsLocalPersistence(deviceCapability)) return;
     if (!localAudioStore.isAvailable()) return;
     try {
       await localAudioStore.init();

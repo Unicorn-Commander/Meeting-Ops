@@ -310,8 +310,12 @@ export default function Help() {
                   default settings (Parakeet 0.6B INT8 at ~890 MB + Qwen 3 0.6B
                   q4f16 at ~570 MB), cached in your browser and never
                   re-downloaded. Switching the live summary to Gemma 4 E2B
-                  pulls another ~1.5 GB. Mobile devices skip the download
-                  entirely and use capture-only mode.
+                  pulls another ~1.5 GB. Phones and tablets with WebGPU (recent
+                  iPhone/iPad on iOS 18+, recent Android Chrome) download the
+                  models and run the live transcript and summary on-device
+                  just like the laptop; older phones without WebGPU skip the
+                  download and use capture-only mode (the server does the
+                  transcript and summary at Stop).
                 </div>
                 <div className="mt-2">
                   Full breakdown — exact file sizes, device classes, what to do
@@ -446,27 +450,27 @@ export default function Help() {
             </h2>
           </div>
           <p className="text-zinc-300">
-            On mobile devices, Meeting-Ops runs in capture-only mode. Your
-            phone records the audio and uploads it as you talk. About a
-            minute after the meeting ends, the server produces a full
-            transcript and AI summary that lands in your sessions list,
-            ready to read.
+            Phones and tablets that support WebGPU (recent iPhone and iPad on
+            iOS 18+, recent Android Chrome) now run the same on-device live
+            transcript and live summary as the laptop — the speech and
+            language models run right on your phone, and nothing streams to
+            the server while you record. The whole recording is buffered
+            locally and uploaded once when you tap Stop, then the server
+            produces the polished full transcript and AI summary.
           </p>
           <p className="text-zinc-300">
-            We don't do the live transcript and live summary in mobile
-            browsers right now. Today's phone browsers don't reliably have
-            the compute or memory headroom for the on-device speech and
-            language models the laptop version uses, and pretending
-            otherwise would give you stalled captions and a hot phone. So
-            we skip the live work and let the server polish pass do it
-            once, well, at the end.
+            Older phones without WebGPU stay in capture-only mode: the phone
+            records, and the server does the transcript and summary at Stop.
+            We don't force the on-device models onto hardware that can't keep
+            up — that would give you stalled captions and a hot phone. Either
+            way, the polished output lands in your sessions list about a
+            minute after you tap Stop.
           </p>
           <p className="text-zinc-300">
             Native iOS and Android apps are on the roadmap, with on-device
-            live captions sized for phone silicon. Server-side live
-            captions for mobile browsers will arrive as part of a paid
-            tier later. For now, mobile is a great way to capture
-            meetings, the quality output happens after you tap Stop.
+            live captions sized for phone silicon. For now, mobile is a great
+            way to capture meetings — on a WebGPU phone you get the live view
+            too, and the polished output always happens after you tap Stop.
           </p>
         </section>
 

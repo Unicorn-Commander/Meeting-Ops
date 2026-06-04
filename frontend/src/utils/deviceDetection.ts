@@ -24,7 +24,8 @@
 
 export type CapabilityClass =
   | 'desktop-capable'    // Modern desktop with WebGPU. Run browser STT + LLM.
-  | 'capture-only'       // Mobile/tablet. Audio capture + upload only.
+  | 'mobile-capable'     // Phone/tablet WITH WebGPU. Run browser STT + LLM (Phase A.6).
+  | 'capture-only'       // Mobile/tablet without WebGPU. Audio capture + upload only.
   | 'desktop-fallback';  // Desktop without WebGPU. Try browser inference but expect degraded perf.
 
 export interface DeviceCapability {
@@ -124,7 +125,12 @@ export function detectDevice(): DeviceCapability {
 
   let capabilityClass: CapabilityClass;
   if (isMobile) {
-    capabilityClass = 'capture-only';
+    // Phase A.6: phones/tablets that expose WebGPU run on-device STT +
+    // summary just like desktop (live transcript + live summary, IDB
+    // buffer). Older phones without WebGPU stay capture-only — WASM-only
+    // inference is too slow/hot to auto-enable; the server does the work
+    // at Stop for them.
+    capabilityClass = hasWebGPU ? 'mobile-capable' : 'capture-only';
   } else if (hasWebGPU) {
     capabilityClass = 'desktop-capable';
   } else {
@@ -148,12 +154,26 @@ export function detectDevice(): DeviceCapability {
 
 /**
  * Should this device attempt to load Parakeet 0.6B INT8 + the small
- * browser LLM? False on phones and tablets — they're capture-only.
- * True on desktop (with or without WebGPU; WASM fallback handles the
- * no-WebGPU desktop case).
+ * browser LLM? True on desktop (with or without WebGPU; WASM fallback
+ * handles the no-WebGPU desktop case) AND, as of Phase A.6, on
+ * WebGPU-capable phones/tablets (`mobile-capable`). False only on
+ * `capture-only` devices (phones/tablets without WebGPU).
  */
 export function shouldRunBrowserInference(cap: DeviceCapability): boolean {
   return cap.capabilityClass !== 'capture-only';
+}
+
+/**
+ * Should this device buffer the recording to IndexedDB (durable,
+ * survives a tab suspend/kill) rather than volatile memory? True for the
+ * devices that run full local inference — `desktop-capable` and, as of
+ * Phase A.6, `mobile-capable`. `capture-only` and `desktop-fallback`
+ * keep the in-memory buffer (the recording is uploaded whole at Stop; on
+ * those a kill mid-recording loses the in-memory buffer).
+ */
+export function supportsLocalPersistence(cap: DeviceCapability): boolean {
+  return cap.capabilityClass === 'desktop-capable'
+    || cap.capabilityClass === 'mobile-capable';
 }
 
 /**
