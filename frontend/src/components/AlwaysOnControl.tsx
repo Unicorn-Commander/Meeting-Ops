@@ -741,7 +741,7 @@ export default function AlwaysOnControl() {
           {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
             <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
               {alwaysOn.autoConfig.enabled
-                ? 'Live summary will appear once enough conversation has been captured.'
+                ? 'Your full summary, transcript, and speakers are generated when you stop recording.'
                 : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
             </div>
           )}
@@ -800,13 +800,14 @@ export default function AlwaysOnControl() {
         </div>
       )}
 
-      {/* Phase A.5 — orphan-session banner. On desktop-capable browsers
-          we mirror every audio chunk into IndexedDB. If a tab crashed
-          mid-meeting (or the user hard-refreshed), we'll have chunks
-          sitting locally with no live session to claim them. The banner
-          offers Resume Upload (verify + backfill or full-audio fallback)
-          or Discard (drop the local copy). Hidden when no orphans are
-          pending or while a recording is active. */}
+      {/* Orphan-session banner. On desktop-capable browsers we buffer the
+          whole recording into IndexedDB during capture (LOCAL-then-UPLOAD).
+          If a tab crashed mid-meeting (or the user hard-refreshed) before
+          Stop, we'll have a buffered recording sitting locally that was
+          never uploaded. The banner offers "Upload now" (single whole-file
+          /full-audio upload) or Discard (drop the local copy). A CLEAN Stop
+          never reaches here — it uploads + finalizes inline. Hidden when no
+          orphans are pending or while a recording is active. */}
       {alwaysOn.orphanSessions.length > 0 && alwaysOn.state === 'idle' && (
         <div className="mb-4 space-y-2">
           {alwaysOn.orphanSessions.map((orphan) => {
@@ -823,7 +824,7 @@ export default function AlwaysOnControl() {
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="font-medium">
-                      Found unfinished recording from {startedAgo}
+                      Recording from {startedAgo} wasn't uploaded
                     </div>
                     <div className="text-xs text-amber-200/80">
                       {orphan.chunk_count} chunks, {sizeMb} MB
@@ -837,7 +838,7 @@ export default function AlwaysOnControl() {
                       onClick={() => {
                         if (olderThan24h
                           && !window.confirm(
-                            'This recording is over 24 hours old. Resume upload anyway?',
+                            'This recording is over 24 hours old. Upload anyway?',
                           )) {
                           return;
                         }
@@ -850,7 +851,7 @@ export default function AlwaysOnControl() {
                       ) : (
                         <UploadCloud className="h-3 w-3" />
                       )}
-                      {isResuming ? 'Resuming...' : 'Resume Upload'}
+                      {isResuming ? 'Uploading...' : 'Upload now'}
                     </button>
                     <button
                       type="button"

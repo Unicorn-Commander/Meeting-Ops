@@ -284,13 +284,25 @@ def _session_payload(session: RecordingSession) -> dict[str, Any]:
 def _safe_ext(upload: UploadFile) -> str:
     name = Path(upload.filename or "").name
     ext = Path(name).suffix.lower()
-    if ext in {".wav", ".webm", ".ogg", ".mp3", ".m4a", ".aac", ".flac"}:
+    if ext in {".wav", ".webm", ".ogg", ".mp3", ".m4a", ".mp4", ".aac", ".flac"}:
         return ext
     ctype = (upload.content_type or "").lower()
     if "wav" in ctype:
         return ".wav"
     if "webm" in ctype:
         return ".webm"
+    # Safari / iOS always-on blobs are audio/mp4 (AAC). Label them
+    # correctly so the file extension matches the bytes; ffmpeg concat
+    # decodes by content either way, but a right label avoids confusion
+    # in logs + on disk. Check mp4 before the bare "mp" guards.
+    if "mp4" in ctype:
+        return ".mp4"
+    if "ogg" in ctype:
+        return ".ogg"
+    if "aac" in ctype:
+        return ".aac"
+    if "mpeg" in ctype or "mp3" in ctype:
+        return ".mp3"
     return ".wav"
 
 

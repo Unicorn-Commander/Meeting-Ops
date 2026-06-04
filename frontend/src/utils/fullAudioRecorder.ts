@@ -1,32 +1,41 @@
 /**
- * Parallel full-session audio capture for always-on recording.
+ * Full-session audio capture for always-on recording (LOCAL-then-UPLOAD).
  *
  * The VAD-driven chunk path (vadEngine.ts) gives the live transcript its
- * low-latency text feed. THIS module runs a SEPARATE `MediaRecorder` on
- * the same MediaStream that produces a continuous WebM/Opus stream — one
- * small chunk every ~30 seconds — and POSTs each chunk to
- * `/api/recordings/sessions/{id}/audio-chunks` as it lands.
+ * low-latency text feed via in-browser STT. THIS module runs a SEPARATE
+ * `MediaRecorder` on the same MediaStream that produces a continuous
+ * WebM/Opus (or MP4/AAC on Safari) stream — one small chunk every ~30s.
  *
- * Phase A.5 (desktop local-first): when the caller opts in, each chunk
- * is also persisted to IndexedDB via `localAudioStore` BEFORE the
- * upload queue picks it up. On stop, the caller can compute a SHA-256
- * + byte total against the local copy and POST a verification payload
- * to /finalize-audio; the server compares and either confirms (caller
- * wipes local) or returns the delta (caller backfills specific chunks
- * or POSTs the assembled blob to /full-audio).
+ * v3.26.9 LOCAL-then-UPLOAD rework: NOTHING streams to the server during
+ * a recording. The recorder BUFFERS the whole meeting on-device and the
+ * caller (AlwaysOnContext) uploads the assembled blob exactly ONCE at
+ * Stop via `postFullAudio()` → /full-audio, which fires the canonical
+ * server reprocess pipeline (transcribe → diarize → identify →
+ * summarize → title → Brigade → Project-Ops). There is no mid-meeting
+ * /audio-chunks POST, so a clean Stop can never leave a partially-
+ * uploaded server session and the "unprocessed chunks" prompt is gone.
  *
- * Why we need both:
+ * Two buffering backends, picked by the caller:
+ *   * Desktop (`localPersistence: true`): each ~30s chunk lands in
+ *     IndexedDB via `localAudioStore`. Survives a tab crash — the
+ *     orphan banner offers "Upload now" against the buffered blob.
+ *     `getAssembledBlob` lives on `localAudioStore` for this path.
+ *   * Mobile / no-IDB (`inMemory: true`): chunks accumulate in an
+ *     in-memory array on the handle. No crash recovery (a killed phone
+ *     tab loses the in-RAM buffer), but the same single /full-audio
+ *     upload-at-Stop works. Use the handle's own `getAssembledBlob()`.
+ *
+ * Why a continuous MediaRecorder (not the VAD slices):
  *   * VAD chunks are speech-bounded slices. They're not contiguous
  *     (silence is discarded), so concatenating them loses real timing.
  *   * The MediaRecorder stream is continuous, retains true wall-clock
  *     timing, and is what the server-side Parakeet 1.1B fp16 + pyannote
  *     diarization pipeline needs to do proper speaker matching.
  *
- * Privacy mode: callers MUST not call the server-upload codepath when
- * the session is in local-only mode. The recorder still streams chunks
- * into IndexedDB (so the user gets the same crash-recovery property
- * desktop users expect), but `localOnly: true` disables the network
- * fetch. The blob stays on the device for the local STT/LLM pipeline.
+ * Privacy / local-only mode: identical buffering, and the upload step is
+ * simply never invoked by the caller. The blob stays on the device for
+ * the local STT/LLM pipeline. `localOnly: true` is a belt-and-suspenders
+ * guard at this layer too (no network fetch ever fires).
  *
  * Browser support:
  *   * Chrome / Edge / Firefox: WebM/Opus is universally supported.
@@ -118,6 +127,22 @@ export interface FullAudioRecorderOptions {
   apiUrl: string;
   /** Org slug for the X-MeetingOps-Org header (org-scoping). */
   orgSlug: string | null;
+  /**
+   * First chunk_index this recorder should use. Defaults to 0. Set to a
+   * non-zero value when RE-ATTACHING after a device hot-swap so the new
+   * recorder continues the IDB sequence instead of overwriting the old
+   * recorder's chunk 0 (the IDB key is `[session_id, sequence_number]`).
+   * Pass the previous recorder's `chunksProduced()`.
+   */
+  startChunkIndex?: number;
+  /**
+   * In-memory parts to seed the buffer with on construction. Used only on
+   * the `inMemory` path when RE-ATTACHING after a hot-swap, so the new
+   * recorder's getAssembledBlob() still includes audio captured before
+   * the swap. Pass the previous recorder's getAssembledBlob() result
+   * wrapped in a single-element array.
+   */
+  initialInMemoryParts?: Blob[];
   /** How often the recorder emits a chunk via dataavailable. Default 30s. */
   timesliceMs?: number;
   /** Max retries per chunk before we surface a non-fatal warning. */
@@ -125,19 +150,41 @@ export interface FullAudioRecorderOptions {
   /** Initial backoff between retries (ms). Doubles each retry. Default 1s. */
   initialBackoffMs?: number;
   /**
-   * Persist each chunk to IndexedDB before queuing the server upload.
-   * Recommended on desktop browsers — gives crash recovery + the
-   * verification payload at stop. Default false; AlwaysOnContext flips
-   * this on when `capabilityClass === 'desktop-capable'`.
+   * Persist each chunk to IndexedDB (desktop crash-recovery buffer).
+   * Recommended on desktop browsers — the buffered blob is what the
+   * caller uploads ONCE at Stop via /full-audio, and what the orphan
+   * banner re-uploads after a tab crash. Default false; AlwaysOnContext
+   * flips this on when `capabilityClass === 'desktop-capable'` and IDB
+   * is available.
    */
   localPersistence?: boolean;
   /**
-   * Local-only / privacy mode. When true the recorder STILL writes
-   * each chunk to IndexedDB (so the local STT/LLM pipeline has source
-   * audio + we keep crash recovery) but skips the server upload path
-   * entirely. No /audio-chunks POSTs, no retries, nothing leaves the
-   * device. Mutually compatible with localPersistence (privacy mode
-   * implies local persistence by definition).
+   * v3.26.9 LOCAL-then-UPLOAD: buffer-only during recording. When true
+   * the recorder NEVER POSTs /audio-chunks mid-meeting — it only fills
+   * its local buffer (IndexedDB when localPersistence, in-memory when
+   * inMemory). The caller uploads the whole assembled blob once at Stop.
+   * This is the standard desktop + mobile path now. `localOnly` is the
+   * stricter privacy variant (no upload at all, ever); `bufferOnly` is
+   * "no STREAMING, but a single Stop-time upload is expected".
+   */
+  bufferOnly?: boolean;
+  /**
+   * In-memory accumulation backend for environments without IndexedDB
+   * (mobile / private-mode Safari). Each dataavailable Blob part is
+   * pushed onto an in-RAM array; `getAssembledBlob()` concatenates them.
+   * No crash recovery (a killed tab loses the buffer) but the same
+   * single /full-audio upload-at-Stop works on phones. Mutually
+   * exclusive with localPersistence in practice (the caller picks one
+   * based on `localAudioStore.isAvailable()`), though both being set is
+   * harmless — IDB persist + an in-RAM mirror.
+   */
+  inMemory?: boolean;
+  /**
+   * Local-only / privacy mode. When true the recorder buffers each
+   * chunk (IndexedDB and/or in-memory per the flags above) but skips
+   * the server upload path entirely. No /audio-chunks POSTs, no
+   * retries, nothing leaves the device. Implies bufferOnly. The blob
+   * stays on the device for the local STT/LLM pipeline.
    */
   localOnly?: boolean;
   /** Called once per uploaded chunk with the chunk_index that succeeded. */
@@ -165,11 +212,20 @@ export interface FullAudioRecorderHandle {
   /** Number of chunks the recorder has produced (regardless of upload state). */
   chunksProduced(): number;
   /** Bytes persisted locally so far. Cheap, in-memory counter — does
-   *  not query IndexedDB. Zero when localPersistence is off. */
+   *  not query IndexedDB. Counts IDB persists and/or in-memory parts. */
   localBytes(): number;
-  /** MIME the recorder picked. Useful for the /full-audio fallback so
+  /** MIME the recorder picked. Useful for the /full-audio upload so
    *  the caller can label the blob correctly. */
   mimeType(): string;
+  /**
+   * Assemble the in-memory buffered parts into a single Blob. Only
+   * meaningful when `inMemory: true` — the desktop IDB path uses
+   * `localAudioStore.getAssembledBlob(sessionId)` instead. Returns null
+   * when nothing was buffered in memory (e.g. desktop IDB-only path, or
+   * a stop before the first dataavailable). Call AFTER `stop()` so the
+   * final slice is included.
+   */
+  getAssembledBlob(): Blob | null;
 }
 
 /**
@@ -196,12 +252,27 @@ export function createFullAudioRecorder(
   const initialBackoff = options.initialBackoffMs ?? 1000;
   const localPersistence = options.localPersistence === true || options.localOnly === true;
   const localOnly = options.localOnly === true;
+  const inMemory = options.inMemory === true;
+  // v3.26.9: when bufferOnly (or localOnly) is set we NEVER POST a chunk
+  // mid-recording. The whole assembled blob is uploaded once at Stop.
+  const bufferOnly = options.bufferOnly === true || localOnly;
 
   let recorder: MediaRecorder | null = null;
   let started = false;
   let stopped = false;
-  let chunkIndex = 0;
+  // Continue the chunk sequence when re-attaching after a hot-swap so we
+  // don't overwrite the prior recorder's IDB chunk 0.
+  let chunkIndex = Math.max(0, Math.floor(options.startChunkIndex ?? 0));
   let localBytesAccumulated = 0;
+  // In-memory accumulation buffer for the no-IDB (mobile) path. Each
+  // dataavailable Blob part is pushed here in arrival order; the handle's
+  // getAssembledBlob() concatenates them at Stop for the single
+  // /full-audio upload. Empty (and unused) on the desktop IDB path. Seeded
+  // with pre-swap audio on a hot-swap re-attach.
+  const inMemoryParts: Blob[] = options.initialInMemoryParts
+    ? [...options.initialInMemoryParts]
+    : [];
+  for (const seed of inMemoryParts) localBytesAccumulated += seed.size;
   // Sequential upload queue. We chain promises so chunks land on the server
   // in arrival order even when the network is flaky. The server is
   // idempotent on chunk_index either way, so out-of-order isn't unsafe —
@@ -227,12 +298,24 @@ export function createFullAudioRecorder(
   };
 
   const persistLocally = async (indexAtCreation: number, blob: Blob): Promise<void> => {
+    // In-memory accumulation backend (mobile / no-IDB). Cheap synchronous
+    // push; getAssembledBlob() concatenates at Stop. Kept separate from
+    // the IDB path so a caller can in principle enable both.
+    if (inMemory) {
+      inMemoryParts.push(blob);
+      localBytesAccumulated += blob.size;
+      options.onChunkPersisted?.(indexAtCreation, blob.size);
+    }
     if (!localPersistence) return;
     if (!localAudioStore.isAvailable()) return;
     try {
       await localAudioStore.appendChunk(options.sessionId, indexAtCreation, blob, mime);
-      localBytesAccumulated += blob.size;
-      options.onChunkPersisted?.(indexAtCreation, blob.size);
+      // Avoid double-counting / double-notifying when the in-memory
+      // mirror already accounted for this chunk above.
+      if (!inMemory) {
+        localBytesAccumulated += blob.size;
+        options.onChunkPersisted?.(indexAtCreation, blob.size);
+      }
     } catch (err) {
       // Best-effort. We don't surface an error here because the server
       // upload (in non-privacy mode) is still the authoritative copy.
@@ -250,7 +333,10 @@ export function createFullAudioRecorder(
     indexAtCreation: number,
     blob: Blob,
   ): Promise<void> => {
-    if (localOnly) return;
+    // v3.26.9 LOCAL-then-UPLOAD: no mid-recording streaming. bufferOnly
+    // (and the stricter localOnly) skip the network entirely — the whole
+    // file is uploaded once at Stop. This is now the standard path.
+    if (bufferOnly) return;
     const form = new FormData();
     // Browser-side extension hint for the server's _safe_ext switch. We
     // base it on the recorder MIME; server stores under chunk_index.<ext>.
@@ -451,6 +537,14 @@ export function createFullAudioRecorder(
     mimeType(): string {
       return mime;
     },
+
+    getAssembledBlob(): Blob | null {
+      if (inMemoryParts.length === 0) return null;
+      // Raw concat of the MediaRecorder slices — same surface the server
+      // ffmpeg reassembly decodes by content. Type carries the recorder
+      // MIME so the /full-audio upload labels the blob correctly.
+      return new Blob(inMemoryParts, { type: mime || 'application/octet-stream' });
+    },
   };
 }
 
@@ -486,6 +580,13 @@ export interface VerifyAudioInput {
  * pipeline as usual. On mismatch it returns `{status: 'incomplete'}`
  * with the missing chunk indices so the caller can backfill or fall
  * back to /full-audio.
+ *
+ * DEPRECATED (v3.26.9 LOCAL-then-UPLOAD): nothing streams mid-meeting
+ * anymore, so there is never a partial server-side chunk set to
+ * reconcile. The Stop path and the orphan-resume path both upload the
+ * whole assembled blob once via {@link postFullAudio} instead. This
+ * helper is retained for one release for backward-compat and is no
+ * longer called by AlwaysOnContext.
  */
 export async function postFinalizeAudioWithVerification(
   input: VerifyAudioInput,
@@ -526,8 +627,13 @@ export async function postFinalizeAudioWithVerification(
 /**
  * Upload an entire assembled audio blob to /full-audio. The server
  * replaces any existing reassembled audio for the session and triggers
- * the reprocess pipeline. Use as the bulletproof fallback when chunk
- * verification says we can't repair via per-chunk backfill.
+ * the canonical reprocess pipeline (transcribe → diarize → identify →
+ * summarize → title → Brigade → Project-Ops).
+ *
+ * v3.26.9 LOCAL-then-UPLOAD: this is now the PRIMARY (and only) audio
+ * upload for always-on. The Stop path calls it once with the buffered
+ * blob; the orphan-resume path calls it once with the IDB blob after a
+ * crash. (It was previously only a chunk-gap recovery fallback.)
  */
 export async function postFullAudio(input: {
   apiUrl: string;

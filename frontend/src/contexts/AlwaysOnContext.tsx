@@ -69,7 +69,6 @@ import {
 } from '../services/localSessionStore';
 import {
   createFullAudioRecorder,
-  postFinalizeAudioWithVerification,
   postFullAudio,
   type FullAudioRecorderHandle,
 } from '../utils/fullAudioRecorder';
@@ -493,6 +492,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   // in ensureEngine() (defined before stop). Without this we'd have a
   // temporal-dead-zone reference.
   const stopRef = useRef<() => Promise<void>>(async () => undefined);
+  // Forward-ref to the hot-swap recorder re-attach. Called from the engine
+  // opener's onStreamChanged when a NEW MediaStream is bound mid-session
+  // (device / source swap). Defined below where it can close over the
+  // recorder factory + config. Held in a ref so ensureEngine doesn't churn.
+  const reattachRecorderRef = useRef<(stream: MediaStream) => void>(() => undefined);
   // Track the USB-swap toast so we don't pile up duplicates when the user
   // wiggles a cable. Keyed by deviceId.
   const usbToastShownRef = useRef<Set<string>>(new Set());
@@ -520,9 +524,16 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const summarizingRef = useRef(false);
   // Parallel full-session MediaRecorder. Lives alongside the VAD engine so
   // the server can re-run STT + diarization + speaker id + a quality final
-  // summary against the contiguous audio after the meeting ends. NULL in
-  // privacy mode (we never instantiate the recorder so audio cannot leak).
+  // summary against the contiguous audio after the meeting ends. v3.26.9
+  // LOCAL-then-UPLOAD: the recorder BUFFERS the whole meeting (IndexedDB
+  // on desktop, in-memory on mobile) and uploads it ONCE at Stop via
+  // /full-audio. It runs in privacy mode too (localOnly:true) but never
+  // hits the network there.
   const fullAudioRecorderRef = useRef<FullAudioRecorderHandle | null>(null);
+  // True when the active recorder buffers IN MEMORY (mobile / no-IDB)
+  // rather than IndexedDB. Drives which getAssembledBlob() stop() reads:
+  // the recorder handle's own (in-memory) vs localAudioStore's (IDB).
+  const recorderInMemoryRef = useRef<boolean>(false);
   // Slice polling — replaces the in-browser Qwen 3 0.6B slice rolling for
   // standard-mode (server) sessions. Privacy mode keeps the legacy local
   // slice path (see triggerSummarize below).
@@ -772,60 +783,14 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  useEffect(() => {
-    if (!currentSessionId) return;
-    // Local-only sessions never touch the server, so there's nothing on
-    // the other side of the websocket. Skip the connection entirely.
-    if (activeLocalOnlyRef.current || currentSessionId.startsWith('local-')) return;
-    const socket = new WebSocket(config.wsEndpoints.transcription(currentSessionId));
-    transcriptSocketRef.current = socket;
-    let closedByEffect = false;
-
-    const ping = window.setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, 25000);
-
-    socket.onopen = () => {
-      if (stateRef.current === 'recording') {
-        setStatusText('Listening');
-      }
-    };
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(String(event.data));
-        if (data.type !== 'transcription') return;
-        const segments = Array.isArray(data.segments)
-          ? data.segments
-          : data.segment
-            ? [data.segment]
-            : [];
-        appendTranscriptSegments(segments, currentSessionId);
-      } catch {
-        // Ignore keepalive/status payloads that are not transcript updates.
-      }
-    };
-    socket.onerror = () => {
-      if (!closedByEffect && stateRef.current === 'recording') {
-        setStatusText('Transcript stream reconnecting');
-      }
-    };
-    socket.onclose = () => {
-      if (transcriptSocketRef.current === socket) {
-        transcriptSocketRef.current = null;
-      }
-    };
-
-    return () => {
-      closedByEffect = true;
-      window.clearInterval(ping);
-      if (transcriptSocketRef.current === socket) {
-        transcriptSocketRef.current = null;
-      }
-      socket.close();
-    };
-  }, [appendTranscriptSegments, currentSessionId]);
+  // v3.26.9 LOCAL-then-UPLOAD: the live transcript is now driven entirely
+  // by in-browser STT (see uploadChunk → appendTranscriptSegments). We no
+  // longer open the server transcription websocket during recording —
+  // nothing streams to the server mid-meeting, so the socket would never
+  // receive a `transcription` broadcast. The server's canonical
+  // transcript is produced by the /full-audio reprocess at Stop and is
+  // viewed on the session detail page. `transcriptSocketRef` stays
+  // declared (null) so the unmount cleanup's `?.close()` is a safe no-op.
 
   const createSession = useCallback(async (): Promise<string> => {
     // Local-only mode skips the server entirely. Session id lives only
@@ -949,89 +914,26 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     }
   }, [deviceCapability]);
 
-  // Audio-blob path: legacy + fallback when browser STT is not ready
-  // (model still downloading) or has failed mid-meeting. Posts the WAV to
-  // the same `/chunks` endpoint that pre-Parakeet-in-browser code uses.
-  const uploadAudioChunk = useCallback(async (
-    chunk: VadAudioChunk,
-    sessionId: string,
-  ): Promise<void> => {
-    if (!canUseServerProcessingRef.current) {
-      showPaidFeaturePrompt();
-      throw new Error(getServerProcessingError());
-    }
-    const form = new FormData();
-    form.append('chunk', chunk.blob, `always-on-${Date.now()}.wav`);
-    form.append('elapsed_seconds', String(Math.max(0, chunk.elapsedSeconds)));
-    if (getDiarizationOff()) form.append('skip_diarization', 'true');
+  // v3.26.9 LOCAL-then-UPLOAD: the during-recording server-streaming
+  // helpers (uploadAudioChunk → /chunks, uploadTextChunk → /chunks-text)
+  // were REMOVED. Nothing is sent to the server while recording; the live
+  // transcript is browser-STT-only and the whole audio file is uploaded
+  // once at Stop via /full-audio. The backend /chunks + /chunks-text
+  // endpoints are left in place for one release for backward-compat but
+  // are no longer called from here.
 
-    const response = await fetch(`${config.apiUrl}/api/recordings/sessions/${sessionId}/chunks`, {
-      method: 'POST',
-      body: form,
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      if (response.status === 403) {
-        showPaidFeaturePrompt();
-        throw new Error(getServerProcessingError());
-      }
-      throw new Error(detail || 'Always-on chunk upload failed.');
-    }
-    const data = await response.json();
-    const segments = Array.isArray(data.segments) ? data.segments : [];
-    appendTranscriptSegments(segments, sessionId);
-  }, [appendTranscriptSegments]);
-
-  // Text path: browser already transcribed. We POST the text + provenance
-  // metadata, and *also* append the new segment to the local transcript
-  // immediately for the live view. The backend will broadcast the same
-  // segment via the websocket; the de-dup in appendTranscriptSegments
-  // (matching id) means we won't double-render.
-  const uploadTextChunk = useCallback(async (
-    chunk: VadAudioChunk,
-    text: string,
-    sessionId: string,
-  ): Promise<void> => {
-    if (!canUseServerProcessingRef.current) {
-      showPaidFeaturePrompt();
-      throw new Error(getServerProcessingError());
-    }
-    const response = await fetch(
-      `${config.apiUrl}/api/recordings/sessions/${sessionId}/chunks-text`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text,
-          duration_seconds: chunk.durationSeconds,
-          elapsed_seconds: Math.max(0, chunk.elapsedSeconds),
-          provenance: CLIENT_STT_PROVENANCE,
-          skip_diarization: getDiarizationOff(),
-        }),
-      },
-    );
-    if (!response.ok) {
-      const detail = await response.text();
-      if (response.status === 403) {
-        showPaidFeaturePrompt();
-        throw new Error(getServerProcessingError());
-      }
-      throw new Error(detail || 'Always-on text chunk upload failed.');
-    }
-    // Optimistic append for immediate feedback. If the websocket beats
-    // us, the segment id is stable enough that we'll dedupe.
-    const start = Math.max(0, chunk.elapsedSeconds);
-    appendTranscriptSegments(
-      [{
-        text,
-        start,
-        end: start + (chunk.durationSeconds || 0),
-        speaker: null,
-      }],
-      sessionId,
-    );
-  }, [appendTranscriptSegments]);
-
+  // v3.26.9 LOCAL-then-UPLOAD: during a recording we send NOTHING to the
+  // server. Every VAD utterance is transcribed IN-BROWSER and appended to
+  // the on-screen live transcript only. The whole audio file is uploaded
+  // once at Stop (stop() → postFullAudio → /full-audio), and the server's
+  // canonical reprocess overwrites whatever live text existed. There is
+  // no /chunks-text or /chunks (audio) POST mid-meeting anymore, so a
+  // clean Stop can never leave unprocessed server chunks.
+  //
+  // Browsers without WebGPU/browser-STT simply get no live captions on a
+  // paid account — the full transcript still arrives after Stop from the
+  // server reprocess. We surface a one-time status note in that case.
+  const liveOnlyStTUnavailableNotedRef = useRef(false);
   const uploadChunk = useCallback(async (chunk: VadAudioChunk): Promise<void> => {
     let sessionId = sessionRef.current;
     if (!sessionId) {
@@ -1040,18 +942,49 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     const localOnly = activeLocalOnlyRef.current;
 
-    // Local-only mode: STT MUST be browser-side. No server fallback.
-    // If transcription fails we surface a toast via setError and drop
-    // the chunk (the user keeps recording, no audio leaves the device).
-    if (localOnly) {
-      try {
-        const text = await inBrowserSTT.transcribe(chunk.blob);
-        const trimmed = (text || '').trim();
-        if (!trimmed) {
-          setChunksUploaded((count) => count + 1);
-          return;
-        }
-        const elapsed = Math.max(0, chunk.elapsedSeconds);
+    // Browser STT is the ONLY live-transcript source. It drives captions
+    // in BOTH local-only (privacy) and standard server-backed sessions.
+    // The only difference: local-only ALSO appends the text to the
+    // on-device local session store (localSessionStore) so the privacy
+    // pipeline has a transcript; standard sessions don't, because the
+    // server reprocess produces the canonical transcript at Stop.
+    const browserSttUsable =
+      sttModeRef.current === 'browser-parakeet'
+      && sttReadyRef.current
+      && !sttBrowserFailedRef.current;
+
+    if (!browserSttUsable) {
+      // No in-browser STT available for live captions.
+      if (localOnly) {
+        // Local-only REQUIRES browser STT — there is no server fallback
+        // and nothing leaves the device. Surface a clear error.
+        setError(
+          'Local STT is unavailable in this browser. Live captions and the on-device transcript need a WebGPU-capable browser such as current Chrome or Edge.',
+        );
+      } else if (!liveOnlyStTUnavailableNotedRef.current) {
+        // Standard session: live captions are unavailable but the full
+        // transcript still arrives after Stop from the server reprocess.
+        liveOnlyStTUnavailableNotedRef.current = true;
+        setStatusText('Live transcript unavailable — full transcript will be ready after Stop');
+      }
+      setChunksUploaded((count) => count + 1);
+      return;
+    }
+
+    try {
+      const text = await inBrowserSTT.transcribe(chunk.blob);
+      const trimmed = (text || '').trim();
+      if (!trimmed) {
+        // Browser model returned empty (likely a misfire or noise).
+        setChunksUploaded((count) => count + 1);
+        return;
+      }
+      const elapsed = Math.max(0, chunk.elapsedSeconds);
+      // Local-only sessions persist the live text to the on-device
+      // session store so the privacy STT/LLM pipeline has a transcript.
+      // Standard sessions skip this — the server reprocess at Stop owns
+      // the canonical transcript.
+      if (localOnly) {
         const localChunk: LocalTranscriptChunk = {
           text: trimmed,
           elapsedSeconds: elapsed,
@@ -1060,62 +993,39 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           createdAt: new Date().toISOString(),
         };
         await appendLocalChunk(sessionId, localChunk);
-        // Update the live transcript view for immediate feedback. The
-        // websocket isn't connected in local mode, so this is the only
-        // surface that shows the chunk.
-        appendTranscriptSegments(
-          [{
-            text: trimmed,
-            start: elapsed,
-            end: elapsed + (chunk.durationSeconds || 0),
-            speaker: null,
-          }],
-          sessionId,
-        );
-        setChunksUploaded((count) => count + 1);
-        return;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        // eslint-disable-next-line no-console
-        console.warn('[always-on] Local-only STT failed for chunk:', message);
-        setError(`Local STT failed: ${message.slice(0, 120)}. Chunk dropped (nothing leaves the device).`);
-        setChunksUploaded((count) => count + 1);
-        return;
       }
-    }
-
-    const wantBrowser =
-      sttModeRef.current === 'browser-parakeet'
-      && sttReadyRef.current
-      && !sttBrowserFailedRef.current;
-
-    if (wantBrowser) {
-      try {
-        const text = await inBrowserSTT.transcribe(chunk.blob);
-        const trimmed = (text || '').trim();
-        if (!trimmed) {
-          // Browser model returned empty (likely a misfire or noise) —
-          // don't waste a server round-trip on it. The chunk is dropped.
-          setChunksUploaded((count) => count + 1);
-          return;
-        }
-        await uploadTextChunk(chunk, trimmed, sessionId);
-        setChunksUploaded((count) => count + 1);
-        return;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        // eslint-disable-next-line no-console
-        console.warn('[always-on] Browser STT failed for chunk, falling back:', message);
+      // On-screen live transcript — the single live-view surface. No
+      // websocket, no server round-trip.
+      appendTranscriptSegments(
+        [{
+          text: trimmed,
+          start: elapsed,
+          end: elapsed + (chunk.durationSeconds || 0),
+          speaker: null,
+        }],
+        sessionId,
+      );
+      setChunksUploaded((count) => count + 1);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.warn('[always-on] Live browser STT failed for chunk:', message);
+      if (localOnly) {
+        // Nothing leaves the device; the chunk's live text is lost but
+        // the buffered audio is intact for the Stop-time local pass.
+        setError(`Local STT failed: ${message.slice(0, 120)}. Live caption dropped (nothing leaves the device).`);
+      } else {
+        // Standard session: the live caption is dropped, but the audio is
+        // buffered locally and the server reprocess at Stop will produce
+        // the full transcript regardless.
         setSttBrowserFailed(true);
-        setError(`Browser STT failed: ${message.slice(0, 120)}. Falling back to server.`);
-        // Intentional fallthrough to audio path so the user doesn't lose
-        // the chunk.
+        setStatusText('Live transcript paused — full transcript will be ready after Stop');
       }
+      setChunksUploaded((count) => count + 1);
+      return;
     }
-
-    await uploadAudioChunk(chunk, sessionId);
-    setChunksUploaded((count) => count + 1);
-  }, [appendTranscriptSegments, createSession, uploadAudioChunk, uploadTextChunk]);
+  }, [appendTranscriptSegments, createSession]);
 
   const queueChunkUpload = useCallback((chunk: VadAudioChunk) => {
     uploadQueueRef.current = uploadQueueRef.current
@@ -1267,6 +1177,13 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         },
         onStreamChanged: (stream) => {
           setActiveMicStream(stream);
+          // v3.26.9 — device/source hot-swap re-attach. The VAD engine
+          // rebuilds on switchDevice and binds a NEW MediaStream; the
+          // full-audio recorder was bound to the OLD stream and would go
+          // silent after the swap. Re-attach it to the new stream so the
+          // continuous buffer keeps filling. No-op on the initial start
+          // bind (the recorder doesn't exist yet at that point).
+          if (stream) reattachRecorderRef.current(stream);
         },
         onSpeechStart: () => {
           setVadActive(true);
@@ -1580,6 +1497,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     setIsStuck(false);
     // Fresh session — forget which slices we've reported to analytics.
     trackedSliceIdsRef.current = new Set();
+    // Re-arm the one-time "live transcript unavailable" status note.
+    liveOnlyStTUnavailableNotedRef.current = false;
 
     // Lock the privacy mode for this session at start. Free-tier users
     // do not have canonical_reprocess, so their effective mode is
@@ -1619,25 +1538,31 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       await createSession();
       await ensureEngine().start();
       // After the VAD engine boots we have an active MediaStream we can
-      // share with the parallel full-audio recorder.
+      // share with the full-audio recorder.
       //
-      // Phase A.5 — local-first on desktop: we spin the recorder up in
-      // BOTH standard and privacy modes when the device is desktop-
-      // capable. Standard mode still streams chunks to the server AND
-      // persists each one to IndexedDB (so a crash mid-meeting can
-      // recover up to the last chunk). Privacy mode skips the server
-      // upload entirely (`localOnly: true`) but keeps writing to IDB
-      // so the local STT/LLM pipeline has source audio. Mobile +
-      // desktop-fallback get the server-only path (no local persist)
-      // — phones don't have the storage budget and fallback browsers
-      // (no WebGPU) shouldn't need it either.
+      // v3.26.9 LOCAL-then-UPLOAD: the recorder NEVER streams to the
+      // server during a recording. It BUFFERS the whole meeting on-device
+      // and the Stop path uploads the assembled blob exactly ONCE via
+      // /full-audio. Two buffering backends:
+      //   * Desktop + IndexedDB available  → persist each ~30s chunk to
+      //     IDB (`localPersistence: true`). Survives a tab crash; the
+      //     orphan banner re-uploads the buffered blob.
+      //   * Mobile / no-IDB                → accumulate parts in memory
+      //     (`inMemory: true`). No crash recovery, but the same single
+      //     /full-audio upload-at-Stop works on phones.
+      // Privacy/local-only adds `localOnly: true` (buffer, never upload).
       const stream = engineRef.current?.getActiveStream?.() ?? activeMicStream;
       const sessionIdForRecord = sessionRef.current;
-      const desktopLocalFirst =
+      const idbAvailable =
         deviceCapability.capabilityClass === 'desktop-capable'
         && localAudioStore.isAvailable();
+      // When IDB isn't the buffer (mobile / desktop-fallback without IDB),
+      // accumulate in memory so we still have a whole-file blob to upload
+      // at Stop. This is the mobile always-on path.
+      const useInMemoryBuffer = !idbAvailable;
+      recorderInMemoryRef.current = useInMemoryBuffer;
       if (stream && sessionIdForRecord && (activeOrganization || useLocalOnly)) {
-        if (desktopLocalFirst) {
+        if (idbAvailable) {
           try {
             await localAudioStore.createSessionMetadata(
               sessionIdForRecord,
@@ -1656,17 +1581,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           apiUrl: config.apiUrl,
           orgSlug: activeOrganization?.slug ?? null,
           timesliceMs: 30_000,
-          maxRetries: 5,
-          initialBackoffMs: 1000,
-          localPersistence: desktopLocalFirst,
+          // No mid-recording streaming → buffer the whole file locally.
+          bufferOnly: true,
+          localPersistence: idbAvailable,
+          inMemory: useInMemoryBuffer,
           localOnly: useLocalOnly,
-          onChunkFailed: (idx, err) => {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `[always-on] Full-audio chunk ${idx} dropped after retries:`,
-              err.message,
-            );
-          },
         });
         if (recorder) {
           fullAudioRecorderRef.current = recorder;
@@ -1693,6 +1612,86 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       setError(message);
     }
   }, [createSession, ensureEngine, localOnlyPref, localOnlyAvailable, canUseServerProcessing, showPaidFeaturePrompt, deviceCapability, activeOrganization, activeMicStream]);
+
+  /**
+   * v3.26.9 — re-attach the full-audio buffer recorder to a NEW stream on
+   * a device / source hot-swap. The VAD engine tears down + rebuilds on
+   * switchDevice and binds a fresh MediaStream; the old MediaRecorder was
+   * bound to the (now-stopped) old stream and would capture nothing after
+   * the swap. We stop the old recorder (its buffered chunks are retained —
+   * IDB keys by session_id, so getAssembledBlob concatenates across
+   * recorder restarts) and start a new one on the new stream that
+   * CONTINUES the chunk sequence (startChunkIndex) so it never overwrites
+   * the old recorder's chunk 0. On the in-memory (mobile) path we carry
+   * the pre-swap audio forward via initialInMemoryParts.
+   *
+   * Best-effort: any failure just means the post-swap audio segment is
+   * missing from the final upload; the live transcript (browser STT) is
+   * unaffected because it rides the VAD engine, which already re-bound.
+   */
+  const reattachFullAudioRecorder = useCallback((stream: MediaStream) => {
+    const old = fullAudioRecorderRef.current;
+    // Only meaningful mid-session with an existing recorder. The initial
+    // start() bind has no recorder yet, so this is a clean no-op there.
+    if (!old) return;
+    if (stateRef.current !== 'recording' && stateRef.current !== 'paused') return;
+    const sessionId = sessionRef.current;
+    if (!sessionId) return;
+    const useInMemory = recorderInMemoryRef.current;
+    const useLocalOnly = activeLocalOnlyRef.current;
+    const idbAvailable =
+      deviceCapability.capabilityClass === 'desktop-capable'
+      && localAudioStore.isAvailable();
+    // Detach the ref immediately so a second swap can't double-stop.
+    fullAudioRecorderRef.current = null;
+    void (async () => {
+      // Flush + stop the old recorder so its trailing slice lands before
+      // we read the final chunk count / in-memory parts.
+      try {
+        await old.flush();
+      } catch {
+        /* best-effort */
+      }
+      try {
+        await old.stop();
+      } catch {
+        /* best-effort — old stream is already dead */
+      }
+      // Continue the IDB sequence from where the old recorder stopped so
+      // we don't collide on the composite [session_id, sequence_number].
+      const startChunkIndex = old.chunksProduced();
+      let carriedParts: Blob[] | undefined;
+      if (useInMemory) {
+        const carried = old.getAssembledBlob();
+        carriedParts = carried ? [carried] : [];
+      }
+      // If we've already moved past this session (stop/restart raced the
+      // swap), don't resurrect a recorder.
+      if (stateRef.current !== 'recording' && stateRef.current !== 'paused') return;
+      if (sessionRef.current !== sessionId) return;
+      const next = createFullAudioRecorder({
+        stream,
+        sessionId,
+        apiUrl: config.apiUrl,
+        orgSlug: activeOrganization?.slug ?? null,
+        timesliceMs: 30_000,
+        bufferOnly: true,
+        localPersistence: idbAvailable,
+        inMemory: useInMemory,
+        localOnly: useLocalOnly,
+        startChunkIndex,
+        initialInMemoryParts: carriedParts,
+      });
+      if (next) {
+        fullAudioRecorderRef.current = next;
+        next.start();
+      }
+    })();
+  }, [deviceCapability, activeOrganization]);
+
+  useEffect(() => {
+    reattachRecorderRef.current = reattachFullAudioRecorder;
+  }, [reattachFullAudioRecorder]);
 
   const pause = useCallback(async () => {
     if (stateRef.current !== 'recording') return;
@@ -1737,13 +1736,26 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // Snapshot the slices we accumulated before clearing state.
     const slicesSnapshot = [...summary.slices];
 
+    // Whether the active recorder buffered in memory (mobile / no-IDB).
+    // Snapshot before we clear the ref so the server branch below knows
+    // which getAssembledBlob() to read.
+    const recorderUsedInMemory = recorderInMemoryRef.current;
+    recorderInMemoryRef.current = false;
+    // In-memory assembled blob + its MIME, captured after the recorder
+    // flushes its final slice. Null on the desktop IDB path (which reads
+    // localAudioStore.getAssembledBlob instead) and when nothing buffered.
+    let inMemoryBlob: Blob | null = null;
+    let recorderMime = 'audio/webm';
+
     try {
-      // Tear down the full-audio recorder FIRST so it flushes the last
-      // chunk into the upload queue before we drain. The recorder owns its
-      // own internal sequential queue; stop() resolves once that's empty.
+      // Tear down the full-audio recorder FIRST so it flushes the final
+      // slice into its local buffer before we read the assembled blob.
+      // v3.26.9: bufferOnly recorder — there is no server upload queue to
+      // drain; stop() just makes sure the last dataavailable landed.
       const recorder = fullAudioRecorderRef.current;
       fullAudioRecorderRef.current = null;
       if (recorder) {
+        recorderMime = recorder.mimeType() || recorderMime;
         try {
           await recorder.flush();
         } catch {
@@ -1753,6 +1765,17 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           await recorder.stop();
         } catch {
           /* stop is best-effort — gap in audio is acceptable */
+        }
+        // Pull the in-memory assembled blob now (post-stop, so the final
+        // slice is included). Desktop IDB path returns null here and uses
+        // localAudioStore.getAssembledBlob below.
+        if (recorderUsedInMemory) {
+          try {
+            inMemoryBlob = recorder.getAssembledBlob();
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn('[always-on] in-memory assemble failed:', err);
+          }
         }
       }
       await engineRef.current?.stop();
@@ -1788,6 +1811,16 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               // eslint-disable-next-line no-console
               console.debug('[always-on] No local audio to finalize:', err);
             }
+          } else if (recorderUsedInMemory && inMemoryBlob && inMemoryBlob.size > 0) {
+            // No-IDB privacy device: feed the in-memory buffered blob to
+            // the Stage-2 local pass so phones still get a full-audio
+            // transcript. (sha256/chunkCount aren't needed downstream.)
+            assembledForPass = {
+              blob: inMemoryBlob,
+              sha256: '',
+              bytes: inMemoryBlob.size,
+              chunkCount: 1,
+            };
           }
           let liveFinalText: string | null = null;
           // Concatenate slice texts oldest-first for the live-slice
@@ -1923,105 +1956,92 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
             showPaidFeaturePrompt();
             throw new Error(getServerProcessingError());
           }
-          setStatusText('Generating final summary');
-          // Phase A.5 — verify-then-confirm. When local persistence is
-          // on we compute SHA-256 + byte count from IDB and POST those
-          // alongside the finalize call. Server compares to its on-disk
-          // chunk state; on match it returns status=complete and we
-          // wipe the local copy. On mismatch we POST the assembled
-          // blob to /full-audio as the bulletproof recovery path.
-          // Without local persistence (desktop-fallback, mobile), we
-          // fall back to the pre-A.5 finalize call.
-          const localFirstActive =
+          // v3.26.9 LOCAL-then-UPLOAD: a single whole-file upload. Nothing
+          // streamed during the meeting, so there is NOTHING to reconcile —
+          // the old verify-then-confirm (postFinalizeAudioWithVerification)
+          // dance is gone. We take the buffered blob (IndexedDB on desktop,
+          // in-memory on mobile), POST it ONCE to /full-audio (which fires
+          // the canonical transcribe → diarize → summarize → title
+          // reprocess), then POST /finalize, then mark the local IDB row
+          // finalized so the idle orphan rescan can't false-flag this
+          // cleanly-stopped session.
+          setStatusText('Uploading recording');
+          const idbActive =
             deviceCapability.capabilityClass === 'desktop-capable'
             && localAudioStore.isAvailable();
-          let verificationOk = false;
-          if (localFirstActive) {
+
+          // Resolve the one assembled blob to upload.
+          let uploadBlob: Blob | null = null;
+          let uploadMime = recorderMime;
+          if (idbActive) {
             try {
               const localMeta = await localAudioStore.getSessionMetadata(sessionId);
               if (localMeta && localMeta.chunk_count > 0) {
                 const assembled = await localAudioStore.getAssembledBlob(sessionId);
+                // Stamp the local row finalized up front so even if the
+                // upload is slow the orphan rescan won't fire for it.
                 await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
-                const verify = await postFinalizeAudioWithVerification({
-                  apiUrl: config.apiUrl,
-                  orgSlug: activeOrganization?.slug ?? null,
-                  sessionId,
-                  clientChunkCount: assembled.chunkCount,
-                  clientBytesTotal: assembled.bytes,
-                  clientSha256: assembled.sha256,
-                });
-                if (verify.status === 'complete' || verify.reprocessing_started) {
-                  verificationOk = true;
-                  // Server has it. Local copy is safe to drop; we
-                  // wipe asynchronously so stop() returns fast.
-                  void localAudioStore.wipeSession(sessionId).catch((err) => {
-                    // eslint-disable-next-line no-console
-                    console.warn('[always-on] local wipe failed (non-fatal):', err);
-                  });
-                } else if (verify.status === 'incomplete') {
-                  // Server is missing chunks. Fall back to the
-                  // assembled-blob path — simplest reliable recovery
-                  // surface; partial backfill is a v2.
-                  setStatusText('Recovering audio from local copy');
-                  // Recorder ref was cleared at the top of stop(); we kept
-                  // this ?. for symmetry but TS narrows .current to null
-                  // after that assignment. localMeta + 'audio/webm' fallback
-                  // is fine in practice.
-                  const fallbackMimeType: string =
-                    localMeta.mime_type || 'audio/webm';
-                  const recovery = await postFullAudio({
-                    apiUrl: config.apiUrl,
-                    orgSlug: activeOrganization?.slug ?? null,
-                    sessionId,
-                    blob: assembled.blob,
-                    mimeType: fallbackMimeType,
-                  });
-                  if (recovery.reprocessing_started) {
-                    verificationOk = true;
-                    void localAudioStore.wipeSession(sessionId).catch(() => undefined);
-                  }
-                }
+                uploadBlob = assembled.blob;
+                uploadMime = localMeta.mime_type || assembled.blob.type || recorderMime;
               }
             } catch (err) {
               // eslint-disable-next-line no-console
-              console.warn('[always-on] Local-first verify path failed:', err);
-              // Fall through to the legacy finalize path so the
-              // session still completes via server-side state.
+              console.warn('[always-on] reading IDB buffer at stop failed:', err);
             }
+          } else if (inMemoryBlob && inMemoryBlob.size > 0) {
+            uploadBlob = inMemoryBlob;
+            uploadMime = inMemoryBlob.type || recorderMime;
           }
-          if (!verificationOk) {
-            // Fallback path: the verify-then-confirm dance either threw
-            // or returned a non-complete status. The server /finalize +
-            // /finalize-audio still succeed here (backend enqueues the
-            // job) — but this path never marked the local IDB row
-            // finalized, so without the explicit mark below the
-            // state==='idle' orphan rescan would flag this very session
-            // as an "unfinished recording" right after a clean stop.
-            await finalizeSession(sessionId);
-            await markLocalSessionFinalizedSafe(sessionId);
+
+          if (uploadBlob && uploadBlob.size > 0) {
+            // ONE upload for the whole meeting. The server clears any
+            // chunk state, writes the blob as 000000.<ext>, and kicks the
+            // reprocess pipeline (returns reprocessing_started=true).
+            const result = await postFullAudio({
+              apiUrl: config.apiUrl,
+              orgSlug: activeOrganization?.slug ?? null,
+              sessionId,
+              blob: uploadBlob,
+              mimeType: uploadMime,
+            });
+            if (result.reprocessing_started && idbActive) {
+              // Server owns the audio now — drop the local buffer. Async
+              // so stop() stays snappy.
+              void localAudioStore.wipeSession(sessionId).catch((err) => {
+                // eslint-disable-next-line no-console
+                console.warn('[always-on] local wipe after upload failed (non-fatal):', err);
+              });
+            }
           } else {
-            // Verification path already kicked the reprocess via the
-            // /finalize-audio response. We still need to mark the
-            // session row "complete" on the server so the legacy
-            // /finalize endpoint runs (transcript_simple finalization,
-            // duration, etc.). The pre-A.5 finalizeSession() helper
-            // hits both /finalize AND /finalize-audio; we just hit
-            // /finalize here.
-            try {
-              await fetch(
-                `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
-                { method: 'POST' },
-              );
-            } catch (err) {
-              // eslint-disable-next-line no-console
-              console.warn('[always-on] /finalize kick-off failed:', err);
-            }
-            // Belt-and-suspenders: the verify path already wiped on
-            // success, but if a wipe was skipped (e.g. status was
-            // complete with reprocessing already done) make sure the
-            // local row is flagged finalized so it can't orphan-flag.
-            await markLocalSessionFinalizedSafe(sessionId);
+            // No audio buffered (e.g. the user stopped before the first
+            // ~30s slice landed). Nothing to upload; /finalize below still
+            // closes the session row cleanly. Make sure the local row
+            // can't orphan-flag.
+            // eslint-disable-next-line no-console
+            console.info('[always-on] Stop with no buffered audio — finalizing text-only.');
           }
+
+          // Finalize the session row (transcript_simple finalization,
+          // duration, status=completed). We hit /finalize directly rather
+          // than finalizeSession() so we DON'T also poke the legacy
+          // /finalize-audio reconcile endpoint — /full-audio already
+          // started the reprocess above.
+          setStatusText('Finalizing');
+          const finalizeResp = await fetch(
+            `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
+            { method: 'POST' },
+          );
+          if (!finalizeResp.ok) {
+            if (finalizeResp.status === 403) {
+              showPaidFeaturePrompt();
+              throw new Error(getServerProcessingError());
+            }
+            const detail = await finalizeResp.text().catch(() => '');
+            throw new Error(detail || 'Failed to finalize always-on session.');
+          }
+          // Mark the local IDB row finalized so the idle orphan rescan
+          // never false-flags this cleanly-stopped + uploaded session.
+          await markLocalSessionFinalizedSafe(sessionId);
           // Server finalize accepted (no throw) — drives the clean
           // confirmation + suppresses the orphan rescan for this session.
           finalizeSucceeded = true;
@@ -2746,6 +2766,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     fullAudioRecorderRef.current = null;
+    recorderInMemoryRef.current = false;
     try {
       await engineRef.current?.stop();
     } catch {
@@ -2807,6 +2828,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       // row and recreate the per-session directory.
       const recorder = fullAudioRecorderRef.current;
       fullAudioRecorderRef.current = null;
+      recorderInMemoryRef.current = false;
       if (recorder) {
         try {
           await recorder.stop();
@@ -2901,9 +2923,14 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     void refreshOrphanSessions();
   }, [refreshOrphanSessions]);
 
-  /** Resume Upload — re-runs the verification + recovery dance against
-   *  the server using the locally-buffered chunks. Idempotent; safe to
-   *  retry from a button click. */
+  /** Upload now — single whole-file upload of a buffered-but-never-
+   *  uploaded recording (the tab crashed mid-meeting before Stop).
+   *
+   *  v3.26.9 LOCAL-then-UPLOAD: nothing ever streamed to the server, so
+   *  there is no partial server-side chunk set to verify against. This is
+   *  now a flat getAssembledBlob → postFullAudio → /finalize → wipe. The
+   *  old verify/missing-chunks/backfill dance is gone. Idempotent; safe
+   *  to retry from the banner button. */
   const resumeOrphanSession = useCallback(async (sessionId: string) => {
     if (!canUseServerProcessingRef.current) {
       showPaidFeaturePrompt();
@@ -2911,7 +2938,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (!activeOrganization) {
-      setError('Pick an organization before resuming the upload.');
+      setError('Pick an organization before uploading.');
       return;
     }
     if (!localAudioStore.isAvailable()) return;
@@ -2919,42 +2946,27 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     try {
       const meta = await localAudioStore.getSessionMetadata(sessionId);
       if (!meta || meta.chunk_count === 0) {
-        // Nothing to upload — just clean up.
+        // Nothing buffered — just clean up the row.
         await localAudioStore.wipeSession(sessionId);
         await refreshOrphanSessions();
         return;
       }
       const assembled = await localAudioStore.getAssembledBlob(sessionId);
       await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
-      // Try verification first — server may already have most of
-      // the chunks if the crash happened after upload but before
-      // we wiped the local copy.
-      const verify = await postFinalizeAudioWithVerification({
+      // ONE upload of the whole buffered recording. Server clears any
+      // chunk state, writes the blob, and kicks the reprocess pipeline.
+      const recovery = await postFullAudio({
         apiUrl: config.apiUrl,
         orgSlug: activeOrganization.slug ?? null,
         sessionId,
-        clientChunkCount: assembled.chunkCount,
-        clientBytesTotal: assembled.bytes,
-        clientSha256: assembled.sha256,
+        blob: assembled.blob,
+        mimeType: meta.mime_type || assembled.blob.type || 'audio/webm',
       });
-      if (verify.status === 'complete' || verify.reprocessing_started) {
+      if (recovery.reprocessing_started) {
         await localAudioStore.wipeSession(sessionId);
-      } else {
-        // Server is missing chunks. POST the assembled blob via
-        // /full-audio for guaranteed recovery.
-        const recovery = await postFullAudio({
-          apiUrl: config.apiUrl,
-          orgSlug: activeOrganization.slug ?? null,
-          sessionId,
-          blob: assembled.blob,
-          mimeType: meta.mime_type || 'audio/webm',
-        });
-        if (recovery.reprocessing_started) {
-          await localAudioStore.wipeSession(sessionId);
-        }
       }
-      // Also kick the legacy /finalize so transcript_simple +
-      // duration are finalized server-side. Best-effort.
+      // Finalize the session row (transcript_simple + duration +
+      // status=completed). Best-effort — the reprocess already started.
       try {
         await fetch(
           `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
@@ -2965,7 +2977,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(`Resume upload failed: ${message.slice(0, 200)}`);
+      setError(`Upload failed: ${message.slice(0, 200)}`);
     } finally {
       setResumingOrphan(null);
       await refreshOrphanSessions();
