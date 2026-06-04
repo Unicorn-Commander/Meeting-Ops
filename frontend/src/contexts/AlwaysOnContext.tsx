@@ -1127,6 +1127,13 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       });
   }, [uploadChunk]);
 
+  // DORMANT as of the always-on fragmentation fix: this helper is no
+  // longer wired to the VAD engine's `onSilenceThreshold` (see
+  // ensureEngine), so it does NOT run automatically during a meeting.
+  // It finalizes the current session and opens a fresh one, and is kept
+  // intact as the building block for the planned post-process "Split
+  // into meetings" feature. The user-facing "Start new session" button
+  // does NOT call this — it goes through restartSession() (stop+start).
   const splitSession = useCallback(async () => {
     if (splitInFlightRef.current || stateRef.current !== 'recording') return;
     const sessionId = sessionRef.current;
@@ -1173,17 +1180,26 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     if (!engineRef.current) {
       engineRef.current = createVadEngine({
         getElapsedSeconds: getElapsed,
-        // v3.23.2 hotfix 2026-06-02: in-recording silence-split disabled
-        // entirely. The right architecture is to NEVER split during
-        // capture — the audio file stays whole, the user can review the
-        // recording in /sessions/{id} and apply splits as a post-process
-        // operation with full transcript context + a UI to adjust split
-        // points. v3.23.1 bumped this to 30 min as a conservative guard;
-        // v3.23.2 sets MAX_SAFE_INTEGER so the splitSession handler
-        // physically cannot fire while recording. The post-process
-        // "Split into meetings" feature is on the v3.24+ roadmap (see
+        // In-recording silence-split is disabled ENTIRELY by not wiring an
+        // `onSilenceThreshold` handler below — see the note there. The
+        // right architecture is to NEVER split during capture: the audio
+        // file stays whole, the user reviews the recording in
+        // /sessions/{id} and applies splits as a post-process operation
+        // with full transcript context. The post-process "Split into
+        // meetings" feature is on the v3.24+ roadmap (see
         // docs/roadmap/post-process-split.md).
-        silenceThresholdMs: Number.MAX_SAFE_INTEGER,
+        //
+        // NOTE (the v3.23.2 hotfix bug this replaces): the previous attempt
+        // set `silenceThresholdMs: Number.MAX_SAFE_INTEGER` intending the
+        // silence timer to "never" fire. But `window.setTimeout` truncates
+        // its delay to a signed 32-bit int — MAX_SAFE_INTEGER (9007199254740991)
+        // truncates to -1, which the HTML spec clamps to 0ms. So the timer
+        // fired on the NEXT TICK after every `onSpeechEnd`, calling
+        // splitSession after each utterance and fragmenting one meeting into
+        // dozens of one-utterance sessions. We keep a sane finite value here
+        // purely so the engine's internal timer math stays well-defined; the
+        // real guarantee is that nothing consumes the callback.
+        silenceThresholdMs: 30_000,
         // Read from localStorage at each start/swap so cross-tab Settings
         // edits propagate without a page reload.
         getPreferredDeviceId: () => getPreferredDeviceId(),
@@ -1264,7 +1280,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         onMisfire: () => {
           setVadActive(false);
         },
-        onSilenceThreshold: splitSession,
+        // DELIBERATELY NOT WIRED. Leaving `onSilenceThreshold` undefined is
+        // what guarantees a meeting = exactly one server session: the engine
+        // never auto-splits on silence, so the session created at start()
+        // receives EVERY chunk (chunks-text + audio-chunks) and is finalized
+        // exactly once, on the user's explicit Stop/Pause. The automatic
+        // splitSession() helper remains defined for a future post-process
+        // "Split into meetings" feature but is intentionally unreferenced
+        // here. The MANUAL "Start new session" button is a separate path
+        // (restartSession → stop()+start()) and is unaffected.
         onError: (message) => setError(message),
       });
     }
@@ -1272,7 +1296,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // `stop` is intentionally omitted from deps — it's a stable callback
     // and including it would re-create the engine on every state change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [getElapsed, queueChunkUpload, splitSession]);
+  }, [getElapsed, queueChunkUpload]);
 
   /**
    * Hot-swap the active mic mid-session. Does NOT touch the persisted
