@@ -1,6 +1,8 @@
 ## [Unreleased]
 
 ### Added
+- **Sessions multi-select + bulk delete** [v3.26.5] — the Sessions list now has per-row checkboxes, select-all, and a bulk-action bar to delete many sessions at once (`POST /api/simple/recording-sessions/bulk-delete`, org-scoped, same deletion path as single-delete).
+- **Auto-title for short sessions** [v3.26.5] — finalize now generates a real title from the transcript even when a session is too short to summarize, fixing always-on fragments stuck at "Always-on {date}"; plus a `backfill_session_titles.py` script (dry-run default, `--commit`) to retitle the ~77 existing ones.
 - **Session Details header scrolls off** [v3.26.4] — the saved-session header + tab sub-bar no longer stay pinned (removed `sticky`); they scroll away with the page so the session content leads.
 - **Compact Session Details header** [v3.26.3] — the sticky saved-session header (title + action buttons) was too tall and stayed pinned; reduced its vertical padding + title size and re-docked the dependent sub-bar offset (top-[97px] -> top-[80px]) so the session view leads with content.
 - **Compact record-screen header** [v3.26.2] — shrank the oversized "Live Recording" page header (smaller title + icon, dropped the marketing subtitle, tighter margin) so the record screen leads with recording, not chrome.

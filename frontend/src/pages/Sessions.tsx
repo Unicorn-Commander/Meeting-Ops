@@ -32,6 +32,7 @@ import {
   updateLocalSessionMeta,
   type LocalSession,
 } from '../services/localSessionStore';
+import { showToast } from '../components/Toast';
 
 interface Participant {
   id: string;
@@ -222,6 +223,10 @@ interface SessionsTableProps {
   onDelete: (id: string) => void;
   selectedSessionIds: string[];
   onToggleSessionSelection: (id: string) => void;
+  /** Toggle selection for every currently-visible (post column-filter) row.
+   *  Passed the ids the table is actually rendering so "select all" never
+   *  touches rows hidden by the status/speaker column filters. */
+  onToggleSelectVisible: (visibleIds: string[], selectAll: boolean) => void;
   formatDuration: (seconds?: number) => string;
   getStatusColor: (status: string) => string;
   getStatusLabel: (status: string) => string;
@@ -258,6 +263,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
   onDelete,
   selectedSessionIds,
   onToggleSessionSelection,
+  onToggleSelectVisible,
   formatDuration,
   getStatusColor,
   getStatusLabel,
@@ -277,6 +283,24 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
       return true;
     });
   }, [sessions, statusFilter, speakerFilter]);
+
+  // Ids the table is actually rendering (after column filters). "Select
+  // all" operates on exactly this set so it never reaches hidden rows.
+  const visibleIds = useMemo(() => filtered.map((s) => s.id), [filtered]);
+  const selectedSet = useMemo(() => new Set(selectedSessionIds), [selectedSessionIds]);
+  const visibleSelectedCount = useMemo(
+    () => visibleIds.reduce((acc, id) => (selectedSet.has(id) ? acc + 1 : acc), 0),
+    [visibleIds, selectedSet],
+  );
+  const allVisibleSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (selectAllRef.current) {
+      // indeterminate has no JSX attribute; set it imperatively.
+      selectAllRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
 
   const renderSortIcon = (key: SortKey) => {
     if (sortBy !== key) {
@@ -311,7 +335,16 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
           <thead className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur">
             <tr className="border-b border-gray-800">
               <th className="px-3 py-3 text-left w-10">
-                <span className="sr-only">Select</span>
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  disabled={visibleIds.length === 0}
+                  onChange={(e) => onToggleSelectVisible(visibleIds, e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-purple-500 focus:ring-purple-500 disabled:opacity-40"
+                  aria-label={allVisibleSelected ? 'Deselect all visible sessions' : 'Select all visible sessions'}
+                  title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
+                />
               </th>
               <th className="px-4 py-3 text-left">{headerBtn('name', 'Title')}</th>
               <th className="px-4 py-3 text-left whitespace-nowrap">{headerBtn('date', dateBasis === 'meeting' ? 'Meeting' : 'Uploaded')}</th>
@@ -606,6 +639,79 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
   );
 };
 
+/**
+ * One bulk action in the selection toolbar. Built as a list so additional
+ * bulk operations (move to folder, export, tag, …) can be added later by
+ * pushing more entries — Delete is the only one shipped today.
+ */
+interface BulkAction {
+  key: string;
+  label: string;
+  icon?: React.ReactNode;
+  onClick: () => void;
+  /** Visual emphasis. 'danger' is the destructive red treatment. */
+  variant?: 'default' | 'danger';
+  disabled?: boolean;
+  busy?: boolean;
+}
+
+interface BulkActionsToolbarProps {
+  selectedCount: number;
+  actions: BulkAction[];
+  onClear: () => void;
+}
+
+/**
+ * Sticky bulk-action bar shown whenever >= 1 session is selected. Pinned to
+ * the bottom of the (desktop) sessions surface so it stays reachable while
+ * the user scrolls a long list. Styling mirrors the existing Sessions
+ * Tailwind tokens (gray-900 surface, purple accent, red danger).
+ */
+const BulkActionsToolbar: React.FC<BulkActionsToolbarProps> = ({
+  selectedCount,
+  actions,
+  onClear,
+}) => {
+  if (selectedCount <= 0) return null;
+  return (
+    <div className="sticky bottom-0 z-30 mt-4 -mx-6 border-t border-gray-800 bg-gray-900/95 px-6 py-3 backdrop-blur supports-[backdrop-filter]:bg-gray-900/80">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="inline-flex items-center gap-2 text-sm font-medium text-white">
+          <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-purple-600 px-2 text-xs font-semibold text-white">
+            {selectedCount}
+          </span>
+          selected
+        </span>
+        <div className="h-5 w-px bg-gray-700" aria-hidden="true" />
+        {actions.map((action) => (
+          <button
+            key={action.key}
+            type="button"
+            onClick={action.onClick}
+            disabled={action.disabled || action.busy}
+            className={
+              action.variant === 'danger'
+                ? 'inline-flex items-center gap-2 rounded-lg border border-red-600/50 bg-red-600/20 px-3 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-600/30 disabled:cursor-not-allowed disabled:opacity-50'
+                : 'inline-flex items-center gap-2 rounded-lg bg-purple-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:opacity-50'
+            }
+          >
+            {action.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : action.icon}
+            {action.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={onClear}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
+        >
+          <X className="h-4 w-4" />
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const Sessions: React.FC = () => {
   const navigate = useNavigate();
   const { startUploads } = useUploads();
@@ -695,6 +801,9 @@ export const Sessions: React.FC = () => {
   const [openColumnFilter, setOpenColumnFilter] = useState<null | 'status' | 'speakers'>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  // True while a bulk operation (currently delete) is in flight; disables
+  // the toolbar buttons so the user can't double-fire it.
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string>('all');
   const [folderMutationBusy, setFolderMutationBusy] = useState(false);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
@@ -1177,6 +1286,134 @@ export const Sessions: React.FC = () => {
   const clearSessionSelection = useCallback(() => {
     setSelectedSessionIds([]);
   }, []);
+
+  // Clear any selection when the page unmounts so a stale set never leaks
+  // back in on remount.
+  useEffect(() => () => setSelectedSessionIds([]), []);
+
+  // Select-all that operates only on the ids actually visible (post column
+  // + tag + search filters). When selectAll is true it unions the visible
+  // ids into the current selection (so selections made under a different
+  // filter survive); when false it removes exactly the visible ids.
+  const toggleSelectVisible = useCallback((visibleIds: string[], selectAll: boolean) => {
+    setSelectedSessionIds((prev) => {
+      if (selectAll) {
+        return Array.from(new Set([...prev, ...visibleIds]));
+      }
+      const visibleSet = new Set(visibleIds);
+      return prev.filter((id) => !visibleSet.has(id));
+    });
+  }, []);
+
+  // Bulk delete. Local-only (IndexedDB) sessions can't hit the server
+  // endpoint, so split them out and delete locally; everything else POSTs
+  // to /api/simple/recording-sessions/bulk-delete and we reconcile the { deleted, failed }
+  // result. Successfully-removed ids are spliced out of the list in place
+  // (no full refetch) and the selection is cleared.
+  const bulkDeleteSelected = useCallback(async () => {
+    const ids = [...selectedSessionIds];
+    if (ids.length === 0) return;
+    if (!confirm(
+      ids.length === 1
+        ? 'Delete the selected session? This cannot be undone.'
+        : `Delete ${ids.length} selected sessions? This cannot be undone.`,
+    )) {
+      return;
+    }
+
+    setBulkDeleting(true);
+    try {
+      const localIds = ids.filter((id) => isLocalSessionId(id));
+      const serverIds = ids.filter((id) => !isLocalSessionId(id));
+
+      const deletedIds: string[] = [];
+      const failures: Array<{ id: string; reason: string }> = [];
+
+      // Local sessions first — best-effort, one IndexedDB delete each.
+      await Promise.all(localIds.map(async (id) => {
+        try {
+          await deleteLocalSession(id);
+          deletedIds.push(id);
+        } catch (err) {
+          failures.push({ id, reason: err instanceof Error ? err.message : 'local delete failed' });
+        }
+      }));
+
+      // Server sessions via the new bulk endpoint.
+      if (serverIds.length > 0) {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        const token = localStorage.getItem('access_token');
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+        const res = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/bulk-delete`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ session_ids: serverIds }),
+        });
+
+        if (!res.ok) {
+          // Whole call failed — every server id is a failure.
+          let detail = `${res.status} ${res.statusText}`;
+          try {
+            const errBody = await res.json();
+            if (errBody?.detail) detail = String(errBody.detail);
+          } catch { /* non-JSON error body */ }
+          for (const id of serverIds) failures.push({ id, reason: detail });
+        } else {
+          const data = await res.json().catch(() => ({}));
+          const failedList: Array<{ id?: string | number; reason?: string }> = Array.isArray(data?.failed)
+            ? data.failed
+            : [];
+          const failedIdSet = new Set(failedList.map((f) => String(f.id)));
+          for (const f of failedList) {
+            failures.push({ id: String(f.id), reason: f.reason || 'delete failed' });
+          }
+          // Anything we asked to delete that isn't in `failed` succeeded.
+          for (const id of serverIds) {
+            if (!failedIdSet.has(id)) deletedIds.push(id);
+          }
+        }
+      }
+
+      // Splice the confirmed-deleted ids out of the list in place.
+      if (deletedIds.length > 0) {
+        const deletedSet = new Set(deletedIds);
+        setSessions((prev) => prev.filter((s) => !deletedSet.has(s.id)));
+      }
+      // Drop deleted ids from the selection; keep any that failed so the
+      // user can retry without re-selecting them.
+      const stillSelectedSet = new Set(deletedIds);
+      setSelectedSessionIds((prev) => prev.filter((id) => !stillSelectedSet.has(id)));
+
+      // Surface the outcome.
+      if (failures.length === 0) {
+        showToast.success(
+          deletedIds.length === 1
+            ? 'Session deleted.'
+            : `${deletedIds.length} sessions deleted.`,
+        );
+      } else if (deletedIds.length === 0) {
+        showToast.error(
+          failures.length === 1
+            ? 'Failed to delete the session.'
+            : `Failed to delete ${failures.length} sessions.`,
+        );
+      } else {
+        showToast.warning(
+          `${deletedIds.length} deleted, ${failures.length} failed.`,
+        );
+      }
+      if (failures.length > 0) {
+        console.warn('Bulk delete partial failures:', failures);
+      }
+    } catch (error) {
+      console.error('Bulk delete failed:', error);
+      showToast.error('Bulk delete failed. Please try again.');
+    } finally {
+      setBulkDeleting(false);
+    }
+  }, [activeOrganization?.slug, selectedSessionIds, setSessions]);
 
   const selectFolder = useCallback((folder: string) => {
     setGroupingMode('folders');
@@ -2103,11 +2340,22 @@ export const Sessions: React.FC = () => {
             {filteredSessions.map(session => (
               <div
                 key={session.id}
-                className="bg-gray-900 border border-gray-800 rounded-lg hover:border-gray-700 transition-all p-6"
+                className={`bg-gray-900 border rounded-lg hover:border-gray-700 transition-all p-6 ${
+                  selectedSessionIds.includes(session.id)
+                    ? 'border-purple-500/70 ring-1 ring-purple-500/40'
+                    : 'border-gray-800'
+                }`}
               >
                 <div className="space-y-4">
                   {/* Header */}
-                  <div className="flex items-start justify-between">
+                  <div className="flex items-start justify-between gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedSessionIds.includes(session.id)}
+                      onChange={() => toggleSessionSelection(session.id)}
+                      className="mt-1 h-4 w-4 shrink-0 rounded border-gray-600 bg-gray-900 text-purple-500 focus:ring-purple-500"
+                      aria-label="Select session"
+                    />
                     <div className="flex-1">
                       <h3 className="font-semibold text-white text-lg break-words line-clamp-2 leading-tight flex items-center gap-2">
                         {session.is_local && (
@@ -2290,6 +2538,7 @@ export const Sessions: React.FC = () => {
               onDelete={deleteSession}
               selectedSessionIds={selectedSessionIds}
               onToggleSessionSelection={toggleSessionSelection}
+              onToggleSelectVisible={toggleSelectVisible}
               formatDuration={formatDuration}
               getStatusColor={getStatusColor}
               getStatusLabel={getStatusLabel}
@@ -2297,6 +2546,27 @@ export const Sessions: React.FC = () => {
             />
           )
         )}
+
+        {/* Bulk-action toolbar — visible whenever >= 1 session is selected.
+            Built around a BulkAction[] list so more bulk operations can be
+            added later; Delete is the shipped action. */}
+        <BulkActionsToolbar
+          selectedCount={selectedSessionIds.length}
+          onClear={clearSessionSelection}
+          actions={[
+            {
+              key: 'delete',
+              label: bulkDeleting
+                ? 'Deleting…'
+                : `Delete ${selectedSessionIds.length} selected`,
+              icon: <Trash2 className="h-4 w-4" />,
+              variant: 'danger',
+              onClick: () => { void bulkDeleteSelected(); },
+              disabled: bulkDeleting || selectedSessionIds.length === 0,
+              busy: bulkDeleting,
+            },
+          ]}
+        />
       </div>
 
 {pendingFiles.length > 0 && (

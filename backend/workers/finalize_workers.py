@@ -86,6 +86,54 @@ async def finalize_session_job(
             summary_error = str(exc)[:500]
             logger.exception("finalize_session_job: summary failed session=%s", session_pk)
 
+        # ---- Step 1b: auto-title fallback ----
+        # _summarize_session only assigns a real title when it successfully
+        # summarizes. Always-on sessions whose transcript is too short to
+        # summarize (or whose summarizer LLM failed) keep the default
+        # "Always-on YYYY-MM-DD HH:MM" title forever. Here we guarantee a
+        # real title for every finalized session that has any transcript:
+        # if the title is still a default placeholder AND the user hasn't
+        # set one, generate a concise title straight from the transcript via
+        # the same org-aware "fast" LLM route. Best-effort and fully
+        # isolated — a title failure must never fail finalize.
+        title_error: str | None = None
+        try:
+            from services.unified_agent_service import (
+                generate_title_from_transcript,
+                is_default_session_title,
+            )
+
+            transcript_for_title = (
+                session.transcript_simple or session.transcript or ""
+            ).strip()
+            if (
+                transcript_for_title
+                and not getattr(session, "title_user_set", False)
+                and is_default_session_title(getattr(session, "title", None))
+            ):
+                generated = await generate_title_from_transcript(
+                    session.organization_id,
+                    transcript_for_title,
+                )
+                # Re-check the guard: _summarize_session may have set a real
+                # title concurrently in the same session object above.
+                if generated and is_default_session_title(getattr(session, "title", None)):
+                    session.title = generated
+                    if not (session.name or "").strip() or is_default_session_title(
+                        getattr(session, "name", None)
+                    ):
+                        session.name = generated
+                    logger.info(
+                        "finalize_session_job: auto-titled session=%s -> %r",
+                        session_pk, generated,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            title_error = str(exc)[:500]
+            logger.warning(
+                "finalize_session_job: auto-title failed session=%s: %s",
+                session_pk, exc,
+            )
+
         # ---- Step 2: AI insights ----
         insights_error: str | None = None
         try:
@@ -123,6 +171,7 @@ async def finalize_session_job(
                 "job_id": own_job_id,
                 "summary_error": summary_error,
                 "insights_error": insights_error,
+                "title_error": title_error,
             }
             session.processing_metadata = metadata
             from sqlalchemy.orm.attributes import flag_modified
@@ -180,6 +229,7 @@ async def finalize_session_job(
             "session_id": session.session_id,
             "summary_error": summary_error,
             "insights_error": insights_error,
+            "title_error": title_error,
         }
     except asyncio.CancelledError:
         raise

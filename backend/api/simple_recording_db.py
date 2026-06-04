@@ -1653,20 +1653,20 @@ async def update_session_project_link(
     }
 
 
-@router.delete("/recording-sessions/{session_id}")
-async def delete_session(
+def _delete_session_record(
+    db: Session,
+    session: DBRecordingSession,
     session_id: str,
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
-    db: Session = Depends(get_db)
-):
-    """Delete a recording session"""
-    
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
+) -> None:
+    """Hard-delete one already-org-scoped session: local audio file, durable
+    Garage copies, transcriptions, then the row itself + commit.
+
+    This is the single source of truth for per-session deletion so the
+    single-delete endpoint and the bulk-delete endpoint stay byte-for-byte
+    identical. The caller MUST have resolved `session` via an org-scoped
+    lookup (e.g. `_get_session_for_org`) — this helper does no auth/org
+    checks of its own.
+    """
     # Delete audio file if it exists
     if session.audio_file and os.path.exists(session.audio_file):
         try:
@@ -1688,12 +1688,84 @@ async def delete_session(
     db.query(Transcription).filter(
         Transcription.session_id == session.id
     ).delete()
-    
+
     # Delete session
     db.delete(session)
     db.commit()
-    
+
+
+@router.delete("/recording-sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db)
+):
+    """Delete a recording session"""
+
+    session = _get_session_for_org(db, active_org.organization.id, session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    _delete_session_record(db, session, session_id)
+
     return {"message": "Session deleted successfully"}
+
+
+class BulkDeleteRequest(BaseModel):
+    session_ids: List[str]
+
+
+@router.post("/recording-sessions/bulk-delete")
+async def bulk_delete_sessions(
+    request: BulkDeleteRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Hard-delete many sessions at once (multi-select on the Sessions page).
+
+    Same auth + org-scoping as the single-session delete: every id is
+    resolved through `_get_session_for_org`, so only sessions in the
+    caller's ACTIVE organization are deletable. Ids that don't resolve in
+    this org (missing, already deleted, or belonging to another org) are
+    skipped and reported in `failed` rather than aborting the batch — we
+    never leak cross-org existence and one bad id never blocks the rest.
+
+    Reuses the EXACT same per-session deletion logic as the single delete
+    (`_delete_session_record`) in a loop, committing each row independently
+    so a mid-batch failure can't roll back already-deleted sessions.
+
+    Body: { "session_ids": ["<uuid-or-int>", ...] }
+    Returns: { "deleted": <int>, "failed": [{ "id": "...", "reason": "..." }] }
+    """
+    deleted = 0
+    failed: List[Dict[str, str]] = []
+
+    # De-dup while preserving order so a repeated id isn't double-counted
+    # (the second pass would 404 once the row is gone).
+    seen: set[str] = set()
+    for raw_id in request.session_ids:
+        session_id = (raw_id or "").strip()
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+
+        session = _get_session_for_org(db, active_org.organization.id, session_id)
+        if not session:
+            failed.append({"id": session_id, "reason": "not_found"})
+            continue
+
+        try:
+            _delete_session_record(db, session, session_id)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.warning(f"Bulk delete failed for session {session_id}: {exc}")
+            failed.append({"id": session_id, "reason": str(exc)[:200]})
+
+    return {"deleted": deleted, "failed": failed}
 
 # Export endpoints for audio download and transcript download
 @router.get("/recording-sessions/{session_id}/download/audio")

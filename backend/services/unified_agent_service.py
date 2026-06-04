@@ -8,6 +8,7 @@ configured LLM provider — no silent fallback to a default provider.
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
@@ -912,3 +913,186 @@ RESPOND WITH JSON:
 
 # Global instance
 unified_agent_service = UnifiedAgentService()
+
+
+# ---------------------------------------------------------------------------
+# Reusable, session-state-free meeting titler.
+#
+# `UnifiedAgentService._generate_meeting_title` is bound to the live
+# `active_sessions` map and re-reads the transcript via the live buffer, so
+# it only works while a meeting is being monitored in-process. Background
+# jobs (the always-on finalize worker) and the backfill script need to
+# title a *finished* session from its stored transcript without any live
+# state. These module-level helpers extract that LLM titling pattern into a
+# pure function that takes the transcript + org_id directly and routes
+# through the same org-aware ProviderRegistry "fast" task.
+# ---------------------------------------------------------------------------
+
+# The default auto-generated always-on title shape is
+# `f"Always-on {started_at.strftime('%Y-%m-%d %H:%M')}"` (see
+# api/recording.py start_always_on). A session still wearing this title
+# (or an empty/null/"untitled" placeholder) has never been given a real
+# title and is a candidate for (re)titling.
+_DEFAULT_TITLE_RE = re.compile(r"^\s*always-on\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*$", re.IGNORECASE)
+_PLACEHOLDER_TITLES = {"", "untitled", "meeting", "recording", "new recording", "new meeting"}
+
+
+def is_default_session_title(title: Optional[str]) -> bool:
+    """True when `title` is an auto-generated placeholder (the dated
+    "Always-on YYYY-MM-DD HH:MM" default, empty/null, or a generic
+    placeholder), i.e. the session has never received a real title."""
+    if title is None:
+        return True
+    stripped = title.strip()
+    if stripped.lower() in _PLACEHOLDER_TITLES:
+        return True
+    return bool(_DEFAULT_TITLE_RE.match(stripped))
+
+
+# Titles the LLM might echo back that are no better than the default; reject
+# them so we keep the existing default rather than overwrite it with noise.
+_REJECTED_TITLE_VALUES = {"untitled", "meeting", "recording", "title", "meeting title"}
+
+
+def _clean_generated_title(raw: Optional[str]) -> Optional[str]:
+    """Normalize an LLM title response: strip quotes/newlines/markdown,
+    drop a leading "Title:" label, cap length. Returns None when the
+    result is empty or a rejected placeholder value."""
+    if not raw:
+        return None
+    title = raw.replace('"', "").replace("'", "").replace("\n", " ").strip()
+    # Strip a leading "Title:" / "Meeting title:" label the model may add.
+    title = re.sub(r"^\s*(?:meeting\s+)?title\s*[:\-]\s*", "", title, flags=re.IGNORECASE).strip()
+    # Strip surrounding markdown emphasis / stray backticks.
+    title = title.strip("*`# ").strip()
+    if not title:
+        return None
+    if title.lower() in _REJECTED_TITLE_VALUES:
+        return None
+    return title[:200]
+
+
+def _build_title_prompt(transcript: str) -> str:
+    """Title prompt mirroring UnifiedAgentService._generate_meeting_title,
+    but tolerant of very short transcripts (best-effort title from
+    whatever was said)."""
+    snippet = transcript[:4000]
+    return (
+        "Based on this meeting transcript, generate a concise, descriptive "
+        "meeting title (4-8 words). The transcript may be very short — still "
+        "produce a sensible best-effort title from whatever was said.\n\n"
+        f"{snippet}\n\n"
+        "The title should capture the main purpose/topic. Examples:\n"
+        '- "Q4 Budget Planning Review"\n'
+        '- "Product Launch Strategy Meeting"\n'
+        '- "Weekly Team Standup"\n\n'
+        "RESPOND WITH ONLY THE TITLE:"
+    )
+
+
+async def generate_title_from_transcript(
+    org_id: int,
+    transcript: str,
+    *,
+    timeout: int = 30,
+) -> Optional[str]:
+    """Generate a concise meeting title from a stored transcript, routed
+    through the org's ProviderRegistry "fast" task.
+
+    Pure / session-state-free: safe to call from background jobs and
+    scripts. Returns a cleaned title, or None on empty transcript / LLM
+    failure / unusable response. Never raises — provider errors are
+    logged and swallowed (callers treat None as "leave the default").
+    """
+    if not transcript or not transcript.strip():
+        return None
+    if org_id is None:
+        logger.warning("generate_title_from_transcript: org_id is None; cannot route LLM call")
+        return None
+
+    prompt = _build_title_prompt(transcript)
+    system_prompt = "You generate concise meeting titles. Respond with ONLY the title."
+
+    def _do_call() -> Optional[str]:
+        db = SessionLocal()
+        try:
+            registry = get_provider_registry(db)
+            provider = registry.get_llm(org_id=org_id, task="fast")
+        except Exception as exc:
+            logger.error(
+                "generate_title_from_transcript: registry resolution failed for org %s: %s",
+                org_id, exc, exc_info=True,
+            )
+            return None
+        finally:
+            db.close()
+        try:
+            return provider.chat_sync(
+                system_prompt,
+                prompt,
+                max_tokens=30,
+                temperature=0.3,
+            )
+        except Exception as exc:
+            logger.error(
+                "generate_title_from_transcript: provider chat_sync failed for org %s: %s",
+                org_id, exc, exc_info=True,
+            )
+            return None
+
+    try:
+        raw = await asyncio.wait_for(asyncio.to_thread(_do_call), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error("generate_title_from_transcript: LLM call timed out after %ss (org %s)", timeout, org_id)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("generate_title_from_transcript: unexpected error for org %s: %s", org_id, exc, exc_info=True)
+        return None
+
+    return _clean_generated_title(raw)
+
+
+def generate_title_from_transcript_sync(
+    org_id: int,
+    transcript: str,
+    *,
+    timeout: int = 30,
+) -> Optional[str]:
+    """Synchronous wrapper around `generate_title_from_transcript` for use
+    from plain sync scripts (the backfill). Returns the same values."""
+    if not transcript or not transcript.strip():
+        return None
+    if org_id is None:
+        return None
+
+    prompt = _build_title_prompt(transcript)
+    system_prompt = "You generate concise meeting titles. Respond with ONLY the title."
+
+    db = SessionLocal()
+    try:
+        registry = get_provider_registry(db)
+        provider = registry.get_llm(org_id=org_id, task="fast")
+    except Exception as exc:
+        logger.error(
+            "generate_title_from_transcript_sync: registry resolution failed for org %s: %s",
+            org_id, exc, exc_info=True,
+        )
+        return None
+    finally:
+        db.close()
+
+    try:
+        raw = provider.chat_sync(
+            system_prompt,
+            prompt,
+            max_tokens=30,
+            temperature=0.3,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "generate_title_from_transcript_sync: provider chat_sync failed for org %s: %s",
+            org_id, exc, exc_info=True,
+        )
+        return None
+
+    return _clean_generated_title(raw)
