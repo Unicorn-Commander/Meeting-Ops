@@ -801,9 +801,10 @@ export const Sessions: React.FC = () => {
   const [openColumnFilter, setOpenColumnFilter] = useState<null | 'status' | 'speakers'>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
-  // True while a bulk operation (currently delete) is in flight; disables
+  // True while a bulk operation (delete/export) is in flight; disables
   // the toolbar buttons so the user can't double-fire it.
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkExporting, setBulkExporting] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string>('all');
   const [folderMutationBusy, setFolderMutationBusy] = useState(false);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
@@ -1414,6 +1415,87 @@ export const Sessions: React.FC = () => {
       setBulkDeleting(false);
     }
   }, [activeOrganization?.slug, selectedSessionIds, setSessions]);
+
+  // Bulk export. Local-only (IndexedDB) sessions have no server-side record
+  // to bundle, so they're skipped — only server ids are POSTed to
+  // /api/simple/recording-sessions/bulk-export, which streams back a ZIP.
+  // We read the response as a blob and trigger a browser download, preferring
+  // the Content-Disposition filename. The selection is intentionally KEPT so
+  // the user can immediately follow up with another action on the same set.
+  const bulkExportSelected = useCallback(async () => {
+    const ids = [...selectedSessionIds];
+    if (ids.length === 0) return;
+
+    const serverIds = ids.filter((id) => !isLocalSessionId(id));
+    const skippedLocal = ids.length - serverIds.length;
+    if (serverIds.length === 0) {
+      showToast.error('Local-only sessions can’t be exported from the server.');
+      return;
+    }
+
+    setBulkExporting(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+      const res = await fetch(`${config.apiBaseUrl}/api/simple/recording-sessions/bulk-export`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_ids: serverIds }),
+      });
+
+      if (!res.ok) {
+        let detail = `${res.status} ${res.statusText}`;
+        try {
+          const errBody = await res.json();
+          if (errBody?.detail) detail = String(errBody.detail);
+        } catch { /* non-JSON / binary error body */ }
+        showToast.error(`Export failed: ${detail}`);
+        return;
+      }
+
+      // Prefer the server-supplied filename from Content-Disposition.
+      let filename = 'meeting-ops-export.zip';
+      const disposition = res.headers.get('Content-Disposition');
+      if (disposition) {
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const quotedMatch = disposition.match(/filename="?([^";]+)"?/i);
+        if (utf8Match?.[1]) {
+          try { filename = decodeURIComponent(utf8Match[1]); } catch { /* keep default */ }
+        } else if (quotedMatch?.[1]) {
+          filename = quotedMatch[1].trim();
+        }
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } finally {
+        // Revoke on the next tick so the download has a chance to start.
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+
+      showToast.success(
+        skippedLocal > 0
+          ? `Exported ${serverIds.length} session${serverIds.length === 1 ? '' : 's'} (${skippedLocal} local-only skipped).`
+          : `Exported ${serverIds.length} session${serverIds.length === 1 ? '' : 's'}.`,
+      );
+      // Selection intentionally preserved (no clearSessionSelection here).
+    } catch (error) {
+      console.error('Bulk export failed:', error);
+      showToast.error('Bulk export failed. Please try again.');
+    } finally {
+      setBulkExporting(false);
+    }
+  }, [activeOrganization?.slug, selectedSessionIds]);
 
   const selectFolder = useCallback((folder: string) => {
     setGroupingMode('folders');
@@ -2555,6 +2637,16 @@ export const Sessions: React.FC = () => {
           onClear={clearSessionSelection}
           actions={[
             {
+              key: 'export',
+              label: bulkExporting
+                ? 'Exporting…'
+                : `Export ${selectedSessionIds.length} selected`,
+              icon: <Download className="h-4 w-4" />,
+              onClick: () => { void bulkExportSelected(); },
+              disabled: bulkExporting || bulkDeleting || selectedSessionIds.length === 0,
+              busy: bulkExporting,
+            },
+            {
               key: 'delete',
               label: bulkDeleting
                 ? 'Deleting…'
@@ -2562,7 +2654,7 @@ export const Sessions: React.FC = () => {
               icon: <Trash2 className="h-4 w-4" />,
               variant: 'danger',
               onClick: () => { void bulkDeleteSelected(); },
-              disabled: bulkDeleting || selectedSessionIds.length === 0,
+              disabled: bulkDeleting || bulkExporting || selectedSessionIds.length === 0,
               busy: bulkDeleting,
             },
           ]}

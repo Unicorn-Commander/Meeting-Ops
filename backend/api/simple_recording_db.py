@@ -1767,6 +1767,224 @@ async def bulk_delete_sessions(
 
     return {"deleted": deleted, "failed": failed}
 
+
+class BulkExportRequest(BaseModel):
+    session_ids: List[str]
+
+
+def _safe_export_filename(session: DBRecordingSession) -> str:
+    """Build a filesystem-safe ``<title>-<id>.md`` name for one session.
+
+    Mirrors how the rest of the app titles a session (``title`` first, then
+    legacy ``name``). The session id is always appended so two meetings that
+    share a title never collide inside the archive, and the whole stem is
+    sanitised down to ``[A-Za-z0-9._-]`` so the ZIP entry can't contain path
+    separators or anything that would break a download on Windows.
+    """
+    title = (session.title or session.name or "meeting").strip()
+    ident = session.session_id or str(session.id)
+    stem = f"{title}-{ident}"
+    # Collapse runs of unsafe chars to a single dash, trim the edges.
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-_.")
+    if not safe:
+        safe = f"meeting-{session.id}"
+    # Keep the name well under any filesystem limit (room for the .md).
+    return f"{safe[:120]}.md"
+
+
+def _session_action_items_markdown(db: Session, session: DBRecordingSession) -> str:
+    """Render the canonical ActionItem rows for one session as markdown.
+
+    Action items are a first-class table (`action_items`) — the source of
+    truth promoted out of `final_summary` — so we read them directly rather
+    than re-parsing the summary JSON. Scoped by BOTH the session pk and the
+    session's organization_id (defense in depth: the session was already
+    org-resolved, this just makes the row query explicit).
+    """
+    from database.models import ActionItem
+
+    items = (
+        db.query(ActionItem)
+        .filter(
+            ActionItem.session_id == session.id,
+            ActionItem.organization_id == session.organization_id,
+        )
+        .order_by(ActionItem.sort_order.asc(), ActionItem.id.asc())
+        .all()
+    )
+    if not items:
+        return ""
+
+    lines: List[str] = ["", "## Action Items", ""]
+    for item in items:
+        checked = "x" if (item.status or "").lower() in ("done", "completed") else " "
+        suffix: List[str] = []
+        if item.owner:
+            suffix.append(f"Owner: {item.owner}")
+        if item.due_date:
+            try:
+                suffix.append(f"Due: {item.due_date.date().isoformat()}")
+            except Exception:  # noqa: BLE001
+                pass
+        if item.status:
+            suffix.append(f"Status: {item.status}")
+        tail = f" ({', '.join(suffix)})" if suffix else ""
+        lines.append(f"- [{checked}] {(item.text or '').strip()}{tail}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_session_export_markdown(db: Session, session: DBRecordingSession) -> str:
+    """Full per-session markdown document for the bulk export.
+
+    Reuses the canonical single-session renderer
+    (`api.batch_export.export_to_markdown`) for the title / date / summary
+    (`final_summary`) / transcript body, then layers on the two things the
+    bulk-export spec wants that the shared renderer doesn't emit: the
+    session **status** and the **action items from the ActionItem table**.
+    """
+    from api.batch_export import export_to_markdown, ExportOptions
+
+    options = ExportOptions(
+        includeTranscript=True,
+        includeTimestamps=True,
+        includeSpeakers=True,
+    )
+    body = export_to_markdown(session, options)
+
+    # Inject a Status line right after the Date/Duration header block. The
+    # shared renderer emits "**Date:** ...  " then "**Duration:** ..."; we
+    # add status next to them rather than reformatting the document.
+    status = session.status or "unknown"
+    status_line = f"**Status:** {status}  "
+    marker = "**Duration:**"
+    idx = body.find(marker)
+    if idx != -1:
+        # Insert the status line just before the Duration line.
+        line_start = body.rfind("\n", 0, idx) + 1
+        body = body[:line_start] + status_line + "\n" + body[line_start:]
+    else:
+        # Fallback: prepend after the H1 title if the header drifted.
+        body = body.rstrip() + "\n\n" + status_line + "\n"
+
+    # Append the canonical action items (from the ActionItem table). The
+    # shared renderer only knows the final_summary JSON copy; this is the
+    # promoted, user-editable source of truth.
+    body = body.rstrip() + "\n" + _session_action_items_markdown(db, session)
+    return body.rstrip() + "\n"
+
+
+@router.post("/recording-sessions/bulk-export")
+async def bulk_export_sessions(
+    request: BulkExportRequest,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+):
+    """Export many sessions at once as a downloadable ZIP of markdown files.
+
+    Same auth + org-scoping as bulk-delete: every id is resolved through
+    `_get_session_for_org`, so only sessions in the caller's ACTIVE
+    organization are exported. Ids that don't resolve in this org (missing,
+    deleted, or belonging to another org) are skipped SILENTLY — we never
+    leak cross-org existence and one bad id never aborts the batch.
+
+    Each session becomes one markdown file (`<safe-title>-<id>.md`) holding
+    its title, date, status, summary (`final_summary`), transcript, and the
+    action items (from the `ActionItem` table). The archive is streamed
+    (zipfile writing into a `BytesIO` we drain per entry) so memory stays
+    bounded no matter how many sessions are requested.
+
+    Defense-in-depth tier gate matches the batch-export surface: free users
+    have no server-side canonical content to export (browser-only tier).
+
+    Body:    { "session_ids": ["<uuid-or-int>", ...] }
+    Returns: streaming ZIP, Content-Type application/zip,
+             Content-Disposition attachment; filename=
+             "meeting-ops-export-<YYYYMMDD>.zip"
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    gate_feature_for_caller(current_user, "canonical_reprocess")
+
+    org_id = active_org.organization.id
+
+    # Resolve (and de-dup) ids up front so we don't hold the request body
+    # open across the stream, and so an empty/all-cross-org request returns
+    # a valid (empty) zip rather than erroring.
+    sessions: List[DBRecordingSession] = []
+    seen_ids: set[str] = set()
+    for raw_id in request.session_ids:
+        session_id = (raw_id or "").strip()
+        if not session_id or session_id in seen_ids:
+            continue
+        seen_ids.add(session_id)
+        session = _get_session_for_org(db, org_id, session_id)
+        if session is None:
+            # Silently skip ids outside the caller's active org.
+            continue
+        sessions.append(session)
+
+    def _zip_stream():
+        """Yield ZIP bytes one session at a time (bounded memory).
+
+        We keep a single `BytesIO` + `ZipFile`, write one markdown entry,
+        then drain whatever bytes the zip has flushed so far and truncate
+        the buffer. Only one session's content is ever resident at once.
+        """
+        buffer = io.BytesIO()
+        zf = zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED)
+        used_names: set[str] = set()
+
+        def _drain() -> bytes:
+            data = buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+            return data
+
+        for session in sessions:
+            try:
+                markdown = _build_session_export_markdown(db, session)
+            except Exception as exc:  # noqa: BLE001
+                # Never let one bad session kill the whole download; emit a
+                # stub file so the user knows it was attempted.
+                logger.warning(
+                    f"Bulk export: failed to render session "
+                    f"{session.session_id or session.id}: {exc}"
+                )
+                markdown = (
+                    f"# {session.title or session.name or 'Untitled Meeting'}\n\n"
+                    f"Export failed for this session: {str(exc)[:200]}\n"
+                )
+
+            name = _safe_export_filename(session)
+            # Guarantee uniqueness inside the archive even after sanitising.
+            if name in used_names:
+                base = name[:-3]  # strip ".md"
+                name = f"{base}-{session.id}.md"
+            used_names.add(name)
+
+            zf.writestr(name, markdown)
+            chunk = _drain()
+            if chunk:
+                yield chunk
+
+        zf.close()
+        tail = _drain()
+        if tail:
+            yield tail
+
+    filename = f"meeting-ops-export-{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
+    return StreamingResponse(
+        _zip_stream(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
 # Export endpoints for audio download and transcript download
 @router.get("/recording-sessions/{session_id}/download/audio")
 async def download_audio(

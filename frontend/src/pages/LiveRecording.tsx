@@ -10,6 +10,7 @@ import {
   Sparkles,
   Cpu,
   HardDrive,
+  Check,
   CheckCircle,
   AlertCircle,
   Bot,
@@ -1046,19 +1047,24 @@ export default function LiveRecording() {
                   decisions: 'Decisions',
                   tasks: 'Tasks',
                   transcript: 'Transcript'
-                }).map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => toggleFormat(key as keyof SummaryFormats)}
-                    className={`px-3 py-1.5 text-xs rounded-full border transition-all min-h-[36px] ${
-                      summaryFormats[key as keyof SummaryFormats]
-                        ? 'bg-zinc-800 border-zinc-700 text-white'
-                        : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+                }).map(([key, label]) => {
+                  const selected = summaryFormats[key as keyof SummaryFormats];
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => toggleFormat(key as keyof SummaryFormats)}
+                      aria-pressed={selected}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-all min-h-[36px] ${
+                        selected
+                          ? 'bg-gradient-to-r from-fuchsia-500 to-indigo-500 border-fuchsia-400/60 text-white shadow-md shadow-fuchsia-500/25 ring-1 ring-inset ring-white/15'
+                          : 'bg-zinc-900/60 border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 hover:bg-zinc-800/60'
+                      }`}
+                    >
+                      {selected && <Check className="w-3.5 h-3.5 shrink-0" strokeWidth={3} />}
+                      {label}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

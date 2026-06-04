@@ -178,7 +178,7 @@ function SimplifiedNavigation({
     { path: '/record', label: 'Record', icon: '🎙️', primary: true },
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
-    { path: '/import', label: 'Bulk Import', icon: FolderUp },
+    { path: '/import', label: 'Import / Export', icon: FolderUp },
     { path: '/local-sessions', label: 'Local Sessions', icon: Lock },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
     { path: '/digests', label: 'Digests', icon: '📊' },
