@@ -155,6 +155,8 @@ async def get_agent(
         descriptor = await registry.get_agent(slug, request, db, org_id)
         if descriptor:
             return descriptor.to_dict()
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"Federated agent lookup failed for slug={slug}: {exc}")
 
@@ -262,6 +264,8 @@ async def import_agent(
         }
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON file")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -416,6 +420,8 @@ async def get_model_performance(
             "endpoint": health.get("endpoint", ""),
             "model": health.get("model", ""),
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.debug(f"Provider health probe failed: {exc}")
         llm_available = False

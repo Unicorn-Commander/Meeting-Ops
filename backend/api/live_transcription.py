@@ -38,6 +38,8 @@ async def start_live_transcription(current_user = Depends(get_current_user)):
     try:
         await live_transcription_service.start()
         return {"message": "Live transcription started", "status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -89,6 +91,8 @@ async def create_retroactive_session(
             title=request.title or f"Time-Shift Recording - Last {request.since_minutes} minutes"
         )
         return session_data
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

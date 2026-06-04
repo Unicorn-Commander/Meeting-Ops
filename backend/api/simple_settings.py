@@ -30,6 +30,8 @@ async def get_all_settings(current_user: User = Depends(get_current_user)):
     try:
         settings = SystemService.load_settings()
         return settings
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error loading settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -46,6 +48,8 @@ async def save_all_settings(settings: AllSettings, current_user: User = Depends(
             return {"success": True, "message": "Settings saved successfully"}
         else:
             raise HTTPException(status_code=500, detail="Failed to save settings")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error saving settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -57,6 +61,8 @@ async def get_audio_devices(current_user: User = Depends(get_current_user)):
     try:
         devices = SystemService.get_audio_devices()
         return devices
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting audio devices: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -70,6 +76,8 @@ async def set_audio_volume(request: AudioVolumeRequest, current_user: User = Dep
         if not response.success:
             raise HTTPException(status_code=500, detail="Failed to set volume")
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error setting audio volume: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -83,6 +91,8 @@ async def get_audio_volume(device: str, current_user: User = Depends(get_current
         device = device.replace('_', ':').replace('-', ',')
         volume = SystemService.get_audio_volume(device)
         return {"device": device, "volume": volume}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting audio volume: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -94,6 +104,8 @@ async def get_network_info(current_user: User = Depends(get_current_user)):
     try:
         network_info = SystemService.get_network_info()
         return network_info
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting network info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -119,6 +131,8 @@ async def update_network_settings(request: NetworkConfigRequest, current_user: U
                 "message": "Settings saved (some changes require sudo to apply)",
                 "requiresSudo": True
             }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error updating network settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -145,6 +159,8 @@ async def apply_system_settings(request: SystemApplyRequest, current_user: User 
                 "message": "Settings saved (some changes require sudo to apply)",
                 "requiresSudo": True
             }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error applying system settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -163,6 +179,8 @@ async def test_authentik_connection(request: AuthentikTestRequest, current_user:
             request.redirectUri
         )
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error testing Authentik connection: {e}")
         return AuthentikTestResponse(
@@ -186,6 +204,8 @@ async def get_recording_settings(current_user: User = Depends(get_current_user))
             "enableNoiseReduction": settings.enableNoiseReduction,
             "enableAutoGainControl": settings.enableAutoGainControl
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting recording settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -204,6 +224,8 @@ async def get_transcription_settings(current_user: User = Depends(get_current_us
             "enableVAD": settings.enableVAD,
             "vadThreshold": settings.vadThreshold
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting transcription settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -223,6 +245,8 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
             "enableLiveSummarization": settings.enableLiveSummarization,
             "summaryUpdateInterval": settings.summaryUpdateInterval
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting AI settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -241,6 +265,8 @@ async def reset_settings_to_defaults(current_user: User = Depends(get_current_us
             return {"success": True, "message": "Settings reset to defaults"}
         else:
             raise HTTPException(status_code=500, detail="Failed to reset settings")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error resetting settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -274,6 +300,8 @@ async def get_system_info(current_user: User = Depends(get_current_user)):
             "disk_used_gb": round(disk.used / (1024**3), 2),
             "disk_percent": disk.percent
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting system info: {e}")
         raise HTTPException(status_code=500, detail=str(e))

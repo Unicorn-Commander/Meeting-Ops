@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Added
+- **Fixed: superuser-gated admin routes returned 500 instead of a clean 403** [v3.26.7] — `simple_settings`, `agent_management`, and `live_transcription` had a bare `except Exception` that re-wrapped the inner `HTTPException(403)` as a 500. Added `except HTTPException: raise` guards so non-superusers get a proper 403 (access was always denied; the error was just ungraceful). Fixes the v3.18.1-audit `test_unauth_admin_routers_require_auth`.
 - **Bulk export** [v3.26.6] — "Export selected" on the Sessions multi-select downloads a zip of per-session markdown (title, date, status, summary, transcript, action items) via `POST /api/simple/recording-sessions/bulk-export` (org-scoped). Nav "Bulk Import" renamed to "Import / Export" to keep the menu uncluttered.
 - **Clearer summary-format toggles** [v3.26.6] — on the record screen, selected formats now show a fuchsia→indigo gradient with a check, unselected are muted zinc, so the selection state reads at a glance.
 - **Sessions multi-select + bulk delete** [v3.26.5] — the Sessions list now has per-row checkboxes, select-all, and a bulk-action bar to delete many sessions at once (`POST /api/simple/recording-sessions/bulk-delete`, org-scoped, same deletion path as single-delete).
