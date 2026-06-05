@@ -60,6 +60,10 @@ READ_SCOPE = os.getenv("FEDERATION_MEETINGS_READ_SCOPE", "meetings:read")
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 
+# Meeting-Ops action-item status -> the {open,in_progress,done,cancelled}
+# vocab the Customer-Ops signal derivation counts on (todo->open etc).
+_AI_STATUS_MAP = {"todo": "open", "doing": "in_progress", "done": "done", "cancelled": "cancelled"}
+
 
 # ── Tenant binding ─────────────────────────────────────────────────────
 
@@ -326,7 +330,7 @@ def list_action_items_for_contact(
                 "id": it.id,
                 "meeting_id": it.session_id,
                 "text": it.text,
-                "status": it.status,
+                "status": _AI_STATUS_MAP.get(it.status, it.status),
                 # owner is free-text today; we do not resolve owner ->
                 # contact_id yet, so this is null until that lands.
                 "assignee_contact_id": None,
@@ -350,8 +354,9 @@ async def rest_meetings(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    return list_meetings_for_contact(
-        db, ctx.org_id, contact_id, limit=limit, cursor=cursor
+    return _tool_envelope(
+        "list_meetings_for_contact",
+        list_meetings_for_contact(db, ctx.org_id, contact_id, limit=limit, cursor=cursor),
     )
 
 
@@ -363,7 +368,10 @@ async def rest_summaries(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    return list_summaries_for_contact(db, ctx.org_id, contact_id, limit=limit)
+    return _tool_envelope(
+        "list_summaries_for_contact",
+        list_summaries_for_contact(db, ctx.org_id, contact_id, limit=limit),
+    )
 
 
 @router.get("/v1/contacts/{contact_id}/action-items")
@@ -374,7 +382,10 @@ async def rest_action_items(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    return list_action_items_for_contact(db, ctx.org_id, contact_id, limit=limit)
+    return _tool_envelope(
+        "list_action_items_for_contact",
+        list_action_items_for_contact(db, ctx.org_id, contact_id, limit=limit),
+    )
 
 
 # ── MCP JSON-RPC transport ─────────────────────────────────────────────
@@ -429,6 +440,23 @@ def _rpc_ok(rpc_id: Any, result: Any) -> dict:
 
 def _rpc_err(rpc_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+
+
+def _tool_envelope(name: str, data: Any) -> Any:
+    """Map an internal tool result to the federation wire envelope the
+    Customer-Ops client reads: a {meetings|summaries|action_items: [...]}
+    object (NOT a bare list / `items`)."""
+    if name == "list_meetings_for_contact" and isinstance(data, dict):
+        return {
+            "meetings": data.get("items", []),
+            "count": data.get("count", 0),
+            "next_cursor": data.get("next_cursor"),
+        }
+    if name == "list_summaries_for_contact":
+        return {"summaries": data}
+    if name == "list_action_items_for_contact":
+        return {"action_items": data}
+    return data
 
 
 def _dispatch_tool(
@@ -496,9 +524,13 @@ async def federation_mcp(
             return _rpc_err(rpc_id, -32601, f"unknown tool: {name}")
         except HTTPException as exc:
             return _rpc_err(rpc_id, -32602, str(exc.detail))
+        envelope = _tool_envelope(str(name), data)
         return _rpc_ok(
             rpc_id,
-            {"content": [{"type": "text", "text": json.dumps(data, default=str)}]},
+            {
+                "structuredContent": envelope,
+                "content": [{"type": "text", "text": json.dumps(envelope, default=str)}],
+            },
         )
 
     return _rpc_err(rpc_id, -32601, f"unknown method: {method}")
