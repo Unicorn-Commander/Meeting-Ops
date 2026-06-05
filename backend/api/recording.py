@@ -2122,7 +2122,8 @@ async def finalize_audio(
     # GET /api/simple/recording-sessions/{id} and reads
     # metadata.reprocess_status to display progress.
     session_pk = session.id
-    background_tasks.add_task(_run_session_reprocess, session_pk)
+    from workers.reprocess_workers import enqueue_reprocess
+    await enqueue_reprocess(session_pk, background_tasks=background_tasks)
 
     return {
         "reprocessing_started": True,
@@ -2241,7 +2242,8 @@ async def post_full_audio(
     db.commit()
 
     session_pk = session.id
-    background_tasks.add_task(_run_session_reprocess, session_pk)
+    from workers.reprocess_workers import enqueue_reprocess
+    await enqueue_reprocess(session_pk, background_tasks=background_tasks)
 
     return {
         "reprocessing_started": True,

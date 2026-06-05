@@ -98,6 +98,10 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
 # The workers themselves live in dedicated modules; we import them here
 # so the arq runner registers them on startup.
 from workers.finalize_workers import finalize_session_job  # noqa: E402
+from workers.reprocess_workers import (  # noqa: E402
+    recover_reprocess_jobs,
+    reprocess_session_job,
+)
 from workers.digest_workers import generate_digest_job  # noqa: E402
 from workers.weekly_digest_workers import weekly_digest_cron  # noqa: E402
 from workers.tts_workers import (  # noqa: E402
@@ -116,6 +120,7 @@ class WorkerSettings:
         weekly_digest_cron,
         render_tts_summary_job,
         render_tts_podcast_job,
+        reprocess_session_job,
     ]
     # Daily local-disk retention (Garage cutover housekeeping). 04:30 UTC is a
     # low-traffic window; the task is read-mostly + best-effort.
@@ -217,6 +222,7 @@ async def start_arq_worker():
         await start_bulk_import_queue()
         return
     await recover_pending_jobs()
+    await recover_reprocess_jobs()
     logger.info("arq worker started: max_jobs=%d, redis_db=4", WorkerSettings.max_jobs)
 
 
