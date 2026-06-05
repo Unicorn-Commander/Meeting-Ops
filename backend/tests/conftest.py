@@ -18,6 +18,13 @@ os.environ["RECORDINGS_DIR"] = _rec_dir
 # tests have no network dependency. (Production leaves this unset.)
 os.environ["MEDIA_STORAGE_DISABLED"] = "1"
 
+# Tier-A reprocess queue: keep the legacy in-process direct-call path in tests
+# so the suite's monkeypatches of recording._run_session_reprocess still fire and
+# no test touches Redis/Arq. Production flips this on (default true) to use the
+# bounded fair queue + daily soft cap.
+os.environ["REPROCESS_ARQ_ENABLED"] = "false"
+
+
 # Ensure backend root is on sys.path
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend_dir not in sys.path:
