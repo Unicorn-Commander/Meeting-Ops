@@ -1,0 +1,246 @@
+"""Outbound Contact-Ops resolver — participant email -> Contact-Ops person_id.
+
+The OUTBOUND half of federation (the inbound verifier is
+``services.brigade_jwt_verifier``). Meeting-Ops stamps a participant with a
+Contact-Ops ``contact_id`` so the inbound Customer-Ops reads
+(``api.federation_meetings``) can find "this customer's meetings". To get that
+id, MO resolves the participant's email against Contact-Ops — the contact
+system-of-record — via the same Brigade RFC-8693 flow Customer-Ops uses to call
+Contact-Ops:
+
+    1. mint a ``meeting-ops`` client-credentials token (scope=contacts:read)
+       from the uchub Keycloak
+    2. exchange it at Brigade for an ``aud=contact-ops``, workspace-bound token
+       (Brigade preserves the scope as the ``scopes`` claim)
+    3. call Contact-Ops MCP ``find_person_by_identifier`` (namespace=email).
+       Contact-Ops maps contacts:read -> person:read + the CLIENT role, so the
+       read is authorized.
+
+Proven live 2026-06-05 (meeting-ops -> Brigade -> CO find_person_by_identifier
+-> 200). The meeting-ops KC client + ``meeting-ops`` Brigade actor grant are the
+identity foundation (Stage A).
+
+DORMANT-SAFE: when ``CONTACT_OPS_RESOLVER_ENABLED`` is false (default) or the
+required env is unset, every call returns ``None`` without a network hit. Any
+error (mint/exchange/MCP failure, ambiguous match) also returns ``None`` — a
+resolver miss must never break finalize. Tokens are cached ~30s before exp.
+
+JWT note: this module does not decode tokens (it only forwards them); the rest
+of the backend uses python-jose, not PyJWT — keep that if decode is ever added.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from typing import Any, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Token cache: key -> (token, exp_epoch). 'subject' = the MO client-creds token;
+# 'co:<workspace>' = the Brigade-exchanged contact-ops token per workspace.
+_token_cache: dict[str, tuple[str, float]] = {}
+_cache_lock = threading.Lock()
+_REFRESH_SKEW = 30.0
+_TIMEOUT = 8.0
+
+
+# ── config seam ────────────────────────────────────────────────────────
+
+
+def _enabled() -> bool:
+    raw = os.getenv("CONTACT_OPS_RESOLVER_ENABLED", "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _kc_token_url() -> str:
+    return os.getenv(
+        "MEETING_OPS_KC_TOKEN_URL",
+        "https://auth.unicorncommander.ai/realms/uchub/protocol/openid-connect/token",
+    ).strip()
+
+
+def _kc_client_id() -> str:
+    return os.getenv("MEETING_OPS_KC_CLIENT_ID", "meeting-ops").strip()
+
+
+def _kc_client_secret() -> str:
+    return os.getenv("MEETING_OPS_KC_CLIENT_SECRET", "").strip()
+
+
+def _brigade_exchange_url() -> str:
+    return os.getenv(
+        "BRIGADE_EXCHANGE_URL",
+        "https://brigade.unicorncommander.ai/api/v1/federation/token",
+    ).strip()
+
+
+def _contact_ops_mcp_url() -> str:
+    return os.getenv(
+        "CONTACT_OPS_MCP_URL", "https://mcp.contacts.magicunicorn.dev/mcp"
+    ).strip()
+
+
+def _resolver_scope() -> str:
+    # contacts:read is an OPTIONAL client scope on the meeting-ops KC client, so
+    # it must be requested explicitly; CO maps it to person:read + CLIENT.
+    return os.getenv("CONTACT_OPS_RESOLVER_SCOPE", "contacts:read").strip()
+
+
+def is_configured() -> bool:
+    """True when the resolver can actually run (flag on + secret present)."""
+    return _enabled() and bool(_kc_client_secret())
+
+
+# ── token plumbing ─────────────────────────────────────────────────────
+
+
+def _cached(key: str) -> Optional[str]:
+    with _cache_lock:
+        hit = _token_cache.get(key)
+        if hit and hit[1] - _REFRESH_SKEW > time.time():
+            return hit[0]
+    return None
+
+
+def _store(key: str, token: str, expires_in: float) -> None:
+    with _cache_lock:
+        _token_cache[key] = (token, time.time() + float(expires_in or 300))
+
+
+async def _post_form(client: httpx.AsyncClient, url: str, data: dict, label: str) -> Optional[dict]:
+    try:
+        r = await client.post(
+            url, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("resolver %s transport error: %s", label, exc)
+        return None
+    if r.status_code != 200:
+        logger.warning("resolver %s HTTP %s", label, r.status_code)
+        return None
+    try:
+        return r.json()
+    except ValueError:
+        logger.warning("resolver %s non-JSON response", label)
+        return None
+
+
+async def _subject_token(client: httpx.AsyncClient) -> Optional[str]:
+    hit = _cached("subject")
+    if hit:
+        return hit
+    j = await _post_form(client, _kc_token_url(), {
+        "grant_type": "client_credentials",
+        "client_id": _kc_client_id(),
+        "client_secret": _kc_client_secret(),
+        "scope": _resolver_scope(),
+    }, "client-credentials mint")
+    if not j or not j.get("access_token"):
+        return None
+    _store("subject", j["access_token"], j.get("expires_in", 300))
+    return j["access_token"]
+
+
+async def _contact_ops_token(client: httpx.AsyncClient, workspace_id: str) -> Optional[str]:
+    key = f"co:{workspace_id}"
+    hit = _cached(key)
+    if hit:
+        return hit
+    subject = await _subject_token(client)
+    if not subject:
+        return None
+    j = await _post_form(client, _brigade_exchange_url(), {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": subject,
+        "audience": "contact-ops",
+        "scope": _resolver_scope(),
+        "workspace_id": workspace_id,
+    }, "Brigade exchange")
+    if not j:
+        return None
+    token = j.get("access_token") or j.get("token")
+    if not token:
+        return None
+    _store(key, token, j.get("expires_in", 300))
+    return token
+
+
+# ── public API ─────────────────────────────────────────────────────────
+
+
+async def resolve_email(email: str, workspace_id: str) -> Optional[str]:
+    """Resolve a participant ``email`` to a Contact-Ops person_id within
+    ``workspace_id`` (the uc-registry tenant uuid — e.g.
+    ``Organization.workspace_id``). Returns the person_id string, or ``None``
+    when the resolver is dormant, the email is unknown, the match is ambiguous,
+    or anything fails. Never raises."""
+    if not is_configured():
+        return None
+    email = (email or "").strip().lower()
+    if not email or not workspace_id:
+        return None
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        token = await _contact_ops_token(client, workspace_id)
+        if not token:
+            return None
+        body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "find_person_by_identifier",
+                "arguments": {"identifiers": [{"namespace": "email", "value": email}]},
+            },
+        }
+        try:
+            r = await client.post(
+                _contact_ops_mcp_url(), json=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("resolver find_person transport error: %s", exc)
+            return None
+        if r.status_code != 200:
+            logger.warning("resolver find_person HTTP %s", r.status_code)
+            return None
+        try:
+            payload = r.json()
+        except ValueError:
+            return None
+
+    result = payload.get("result") or {}
+    if payload.get("error") or result.get("isError"):
+        return None
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        # fall back to content[0].text
+        import json as _json
+        text = None
+        for c in result.get("content", []) or []:
+            if isinstance(c, dict) and c.get("type") == "text":
+                text = c.get("text")
+                break
+        if not text:
+            return None
+        try:
+            structured = _json.loads(text)
+        except ValueError:
+            return None
+    matches = structured.get("matches") or []
+    if structured.get("ambiguous") or len(matches) != 1:
+        # ambiguous or no/multi match -> don't guess
+        return None
+    m = matches[0]
+    # CO IdentifierMatchOutput spreads PersonSummary, whose id field is person_id.
+    pid = m.get("person_id") or m.get("id")
+    return str(pid) if pid else None

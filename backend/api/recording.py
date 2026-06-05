@@ -1885,6 +1885,11 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 exc,
             )
 
+        # Stamp the recorder as a participant (resolves contact_id via the
+        # outbound Contact-Ops resolver) so the meeting links into the
+        # Customer-Ops federation reads. Best-effort; dormant by default.
+        await _autostamp_recorder_participant(session_pk)
+
         _set_status(
             "complete",
             completed_at=_now().isoformat(),
@@ -1903,6 +1908,94 @@ async def _run_session_reprocess(session_pk: int) -> None:
         )
     finally:
         db.close()
+
+
+async def _autostamp_recorder_participant(session_pk: int) -> None:
+    """Best-effort: stamp the recording user as a meeting participant with their
+    Contact-Ops contact_id, so the meeting links into the inbound Customer-Ops
+    federation reads (api.federation_meetings, keyed on participant contact_id).
+
+    Resolution is via the outbound resolver (services.contact_ops_resolver),
+    which is DORMANT by default — when off, or when the org has no workspace_id,
+    we still stamp name+email with contact_id=None (records attendance;
+    backfillable once resolution is live). Idempotent on the recorder's email
+    (re-stamps only to backfill a missing contact_id). Never raises — a stamp
+    failure must not affect finalize. Runs in its own DB session like
+    _set_status."""
+    try:
+        import uuid as _uuid
+
+        from database.database import SessionLocal
+        from auth.models import Organization, User
+        from services.contact_ops_resolver import resolve_email
+
+        db = SessionLocal()
+        try:
+            session = (
+                db.query(RecordingSession)
+                .filter(RecordingSession.id == session_pk)
+                .first()
+            )
+            if session is None or not session.user_id:
+                return
+            user = db.query(User).filter(User.id == session.user_id).first()
+            if not user or not user.email:
+                return
+            email = user.email.strip().lower()
+
+            org = (
+                db.query(Organization)
+                .filter(Organization.id == session.organization_id)
+                .first()
+            )
+            workspace_id = getattr(org, "workspace_id", None) if org else None
+            contact_id = await resolve_email(email, workspace_id) if workspace_id else None
+
+            participants = (
+                list(session.participants)
+                if isinstance(session.participants, list)
+                else []
+            )
+            existing = next(
+                (
+                    p
+                    for p in participants
+                    if isinstance(p, dict)
+                    and (p.get("email") or "").strip().lower() == email
+                ),
+                None,
+            )
+            if existing is not None:
+                # Already stamped — only backfill a missing contact_id.
+                if contact_id and not existing.get("contact_id"):
+                    existing["contact_id"] = contact_id
+                    session.participants = participants
+                    flag_modified(session, "participants")
+                    db.commit()
+                return
+
+            participants.append(
+                {
+                    "id": str(_uuid.uuid4()),
+                    "name": user.full_name or user.username or email,
+                    "email": email,
+                    "role": "recorder",
+                    "contact_id": contact_id,
+                }
+            )
+            session.participants = participants
+            flag_modified(session, "participants")
+            db.commit()
+            logger.info(
+                "autostamp recorder participant session=%s email=%s contact_id=%s",
+                session_pk,
+                email,
+                contact_id,
+            )
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        logger.exception("recorder autostamp swallowed error session=%s", session_pk)
 
 
 class FinalizeAudioVerification(BaseModel):
