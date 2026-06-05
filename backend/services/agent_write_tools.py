@@ -577,6 +577,14 @@ def apply_trigger_reprocess(
     if not session.audio_file or not Path(session.audio_file).exists():
         raise HTTPException(status_code=410, detail="Session audio file is not on disk; cannot reprocess.")
 
+    # Tier gate (WS6 transitive-gate audit): server reprocess is the
+    # paid-tier `canonical_reprocess` entitlement. Without this, a free
+    # user's agent could reach the GPU reprocess pipeline through the
+    # agent-write path, bypassing the gate every direct endpoint in
+    # api.recording enforces. Superusers resolve to enterprise.
+    from auth.tier import gate_feature_for_caller
+    gate_feature_for_caller(user, "canonical_reprocess")
+
     expected = proposal.get("before") or {}
     metadata = session.processing_metadata if isinstance(session.processing_metadata, dict) else {}
     current_status = metadata.get("reprocess_status")
@@ -593,19 +601,25 @@ def apply_trigger_reprocess(
     if request_context:
         session.extra_data = {**(session.extra_data or {}), "last_agent_action": request_context}
 
-    from api.recording import _run_session_reprocess
+    # Route through the bounded reprocess queue (Arq + per-org daily soft
+    # cap) so agent-initiated reprocesses respect the same fairness budget
+    # as the always-on path. enqueue_reprocess (async) is scheduled rather
+    # than awaited because this function is sync; it falls back to
+    # in-process when Arq is disabled/unavailable so a reprocess is never
+    # lost.
+    from workers.reprocess_workers import enqueue_reprocess
 
     if background_tasks is not None:
-        background_tasks.add_task(_run_session_reprocess, session.id)
-        scheduled = "background_tasks"
+        background_tasks.add_task(enqueue_reprocess, session.id)
+        scheduled = "reprocess_queue"
     else:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None:
-            loop.create_task(_run_session_reprocess(session.id))
-            scheduled = "event_loop"
+            loop.create_task(enqueue_reprocess(session.id))
+            scheduled = "reprocess_queue"
         else:
             raise HTTPException(status_code=500, detail="Unable to schedule reprocess")
 
