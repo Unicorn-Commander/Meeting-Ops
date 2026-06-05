@@ -71,7 +71,7 @@ function broadcastHydratedCacheClear(): void {
   }
 }
 
-export type Tier = 'free' | 'pro' | 'enterprise';
+export type Tier = 'free' | 'basic' | 'pro' | 'suite' | 'enterprise';
 
 export interface TierFeatures {
   server_live: boolean;
@@ -99,6 +99,12 @@ export interface TierFeatures {
   cross_meeting_search: boolean;
   uc_suite_entitlement: boolean;
   byok_models: boolean;
+  // Present in backend TIER_FEATURES (backend/auth/tier.py) — added here in the
+  // tier-A launch work so the frontend type matches the real backend shape.
+  live_diarization: boolean;
+  agent_write_basic: boolean;
+  agent_write_reprocess: boolean;
+  agent_write_email_draft: boolean;
 }
 
 /**
@@ -129,6 +135,11 @@ export const DEFAULT_TIER_FEATURES: TierFeatures = {
   cross_meeting_search: false,
   uc_suite_entitlement: false,
   byok_models: false,
+  // free-tier defaults mirrored from backend TIER_FEATURES.free
+  live_diarization: false,
+  agent_write_basic: true,
+  agent_write_reprocess: false,
+  agent_write_email_draft: false,
 };
 
 export interface User {
