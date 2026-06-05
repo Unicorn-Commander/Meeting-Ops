@@ -343,7 +343,7 @@ export const Pricing: React.FC = () => {
           <div className="max-w-3xl space-y-4">
             <div className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1 text-xs font-medium text-fuchsia-200">
               <Users className="h-3.5 w-3.5" />
-              Free, Basic, Pro, Suite, and Enterprise
+              Free, Pro, Suite, and Enterprise
             </div>
             <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
               Choose the tier that matches how you work.
@@ -424,7 +424,7 @@ export const Pricing: React.FC = () => {
 
           {/* 5-column tier grid at xl; stacks below. */}
           <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {tiers.map((tier) => {
+            {tiers.filter((tier) => tier.key !== 'basic').map((tier) => {
               const showAnnual = tier.hasToggle && cycle === 'annual' && tier.annual !== null;
               const displayPrice = showAnnual ? tier.annual! : tier.monthly;
               const displaySuffix = showAnnual ? tier.annualSuffix : tier.monthlySuffix;
