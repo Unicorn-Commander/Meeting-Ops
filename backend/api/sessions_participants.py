@@ -37,12 +37,16 @@ class ParticipantIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     email: Optional[EmailStr] = None
     role: Optional[str] = Field(default=None, max_length=100)
+    # Contact-Ops person id (federation join key). Stamped when known
+    # so the inbound Customer-Ops reads can find meetings by contact.
+    contact_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class ParticipantPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     email: Optional[EmailStr] = None
     role: Optional[str] = Field(default=None, max_length=100)
+    contact_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class ParticipantOut(BaseModel):
@@ -50,6 +54,7 @@ class ParticipantOut(BaseModel):
     name: str
     email: Optional[str] = None
     role: Optional[str] = None
+    contact_id: Optional[str] = None
 
 
 def _resolve_session(
@@ -120,6 +125,7 @@ def _to_out(p: dict) -> ParticipantOut:
         name=str(p.get("name") or ""),
         email=p.get("email") or None,
         role=p.get("role") or None,
+        contact_id=p.get("contact_id") or None,
     )
 
 
@@ -151,6 +157,7 @@ async def add_participant(
         "name": payload.name.strip(),
         "email": (str(payload.email) if payload.email else None),
         "role": (payload.role.strip() if payload.role else None) or None,
+        "contact_id": (payload.contact_id.strip() if payload.contact_id else None) or None,
     }
     current = _normalize(session.participants)
     current.append(new)
@@ -185,6 +192,8 @@ async def update_participant(
                 p["email"] = str(payload.email) if payload.email else None
             if "role" in payload.model_fields_set:
                 p["role"] = (payload.role.strip() if payload.role else None) or None
+            if "contact_id" in payload.model_fields_set:
+                p["contact_id"] = (payload.contact_id.strip() if payload.contact_id else None) or None
             updated = p
             break
 

@@ -76,6 +76,13 @@ class Organization(Base):
     # alembic 033 so we don't need a second migration.
     stripe_subscription_id = Column(String(64), unique=True, nullable=True, index=True)
 
+    # uc-registry workspace UUID this org maps to (SUITE-IDENTITY 0.1).
+    # Inbound Brigade federation tokens assert tenant via the
+    # `workspace_id` claim; api.federation_meetings binds it to org_id
+    # through THIS column (never a header). Nullable + unique: existing
+    # orgs stay NULL until explicitly mapped. Added in alembic 041.
+    workspace_id = Column(String(64), unique=True, nullable=True, index=True)
+
 
     # Relationships
     users = relationship("UserOrganization", back_populates="organization")

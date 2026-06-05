@@ -420,6 +420,15 @@ _load_router(app, "system_caps", "api.system_caps")
 # v3.18.3 background-jobs: generic poll endpoint for arq job status.
 _load_router(app, "jobs", "api.jobs")
 
+# === INBOUND FEDERATION (Customer-Ops cockpit signal) ===
+# /api/federation/* — contact-centric READ surface (meetings / summaries
+# / action items keyed on a Contact-Ops contact_id), authed by a
+# Brigade-minted RS256 token (aud=meeting-ops); tenant bound from the
+# workspace_id claim. Separate from the per-user PAT MCP at /mcp. Dormant
+# until BRIGADE_JWKS_URL is set + Brigade allow-lists meeting-ops as an
+# exchange audience. See api/federation_meetings.py.
+_load_router(app, "federation", "api.federation_meetings")
+
 # === PHASE B.1 ROUTERS (server-live streaming scaffolding) ===
 # /ws/sessions/{session_id}/live — auth via oauth2-proxy forward headers,
 # logs binary frames per the 19-byte header protocol in
