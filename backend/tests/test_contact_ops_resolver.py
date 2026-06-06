@@ -149,3 +149,31 @@ async def test_blank_email_returns_none(monkeypatch):
     _enable(monkeypatch)
     assert await r.resolve_email("", "ws-1") is None
     assert await r.resolve_email("a@b.com", "") is None
+
+
+@pytest.mark.asyncio
+async def test_search_people_returns_summaries(monkeypatch):
+    _wire(monkeypatch, _envelope({
+        "people": [
+            {"person_id": "p-1", "display_name": "Ada Lovelace", "email": "ada@example.com"},
+            {"id": "p-2", "name": "Grace Hopper", "emails": [{"value": "grace@example.com"}]},
+            {"id": "p-1", "display_name": "Duplicate"},
+        ]
+    }))
+    assert await r.search_people("ada", "ws-1") == [
+        {"person_id": "p-1", "display_name": "Ada Lovelace", "email": "ada@example.com"},
+        {"person_id": "p-2", "display_name": "Grace Hopper", "email": "grace@example.com"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_people_dormant_no_network(monkeypatch):
+    called = {"n": 0}
+
+    async def _boom(*a, **k):
+        called["n"] += 1
+        return {}
+
+    monkeypatch.setattr(r, "_call_contact_ops_tool", _boom)
+    assert await r.search_people("ada", "ws-1") == []
+    assert called["n"] == 0

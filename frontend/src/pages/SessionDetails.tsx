@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
-  Briefcase, Edit2, Check, X, Trash2, Network, ChevronDown,
+  Briefcase, Edit2, Check, X, Trash2, Network, ChevronDown, Link2,
 } from 'lucide-react';
 
 // Brigade Phase 2: lazy-load the 3D graph viewer so the Three.js
@@ -223,6 +223,13 @@ interface Participant {
   name: string;
   email?: string | null;
   role?: string | null;
+  contact_id?: string | null;
+}
+
+interface ContactOpsPerson {
+  person_id: string;
+  display_name: string;
+  email?: string | null;
 }
 
 interface ActionItem {
@@ -323,6 +330,10 @@ export const SessionDetails: React.FC = () => {
   const [editParticipantName, setEditParticipantName] = useState('');
   const [editParticipantEmail, setEditParticipantEmail] = useState('');
   const [editParticipantRole, setEditParticipantRole] = useState('');
+  const [contactSearchParticipantId, setContactSearchParticipantId] = useState<string | null>(null);
+  const [contactSearchQuery, setContactSearchQuery] = useState('');
+  const [contactSearchResults, setContactSearchResults] = useState<ContactOpsPerson[]>([]);
+  const [contactSearchLoading, setContactSearchLoading] = useState(false);
 
   // Per-session free-form tags. Source of truth is each POST/DELETE
   // response; we render the local state for snappy add/remove.
@@ -834,6 +845,47 @@ export const SessionDetails: React.FC = () => {
   const currentSessionOrgId = session?.organization_id ?? activeOrganization?.id ?? null;
   const movableOrganizations = organizations.filter((org) => org.is_active);
 
+
+  useEffect(() => {
+    const q = contactSearchQuery.trim();
+    if (!contactSearchParticipantId || q.length < 2) {
+      setContactSearchResults([]);
+      setContactSearchLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setContactSearchLoading(true);
+      try {
+        const res = await fetch(
+          `${config.apiUrl}/api/contact-ops/people/search?q=${encodeURIComponent(q)}&limit=8`,
+          { headers: participantHeaders(), signal: controller.signal },
+        );
+        if (!res.ok) {
+          if (res.status !== 400) {
+            setParticipantError(await readParticipantError(res));
+          }
+          setContactSearchResults([]);
+          return;
+        }
+        const data = await res.json();
+        setContactSearchResults(Array.isArray(data.items) ? data.items : []);
+      } catch (e) {
+        if (!(e instanceof DOMException && e.name === 'AbortError')) {
+          setParticipantError(e instanceof Error ? e.message : 'Contact search failed');
+        }
+      } finally {
+        setContactSearchLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [contactSearchParticipantId, contactSearchQuery, activeOrganization?.slug]);
+
   const confirmMoveOrganization = async () => {
     if (!session || !moveOrgTarget || movingOrg) return;
     setMovingOrg(true);
@@ -920,6 +972,43 @@ export const SessionDetails: React.FC = () => {
     setEditParticipantName('');
     setEditParticipantEmail('');
     setEditParticipantRole('');
+  };
+
+  const openContactSearch = (p: Participant) => {
+    setParticipantError(null);
+    setContactSearchParticipantId(p.id);
+    setContactSearchQuery(p.email || p.name || '');
+    setContactSearchResults([]);
+  };
+
+  const closeContactSearch = () => {
+    setContactSearchParticipantId(null);
+    setContactSearchQuery('');
+    setContactSearchResults([]);
+    setContactSearchLoading(false);
+  };
+
+  const stampParticipantContact = async (participantId: string, contactId: string | null) => {
+    setParticipantBusy(true);
+    setParticipantError(null);
+    try {
+      const res = await fetch(`${participantsBase()}/${participantId}`, {
+        method: 'PATCH',
+        headers: participantHeaders(),
+        body: JSON.stringify({ contact_id: contactId }),
+      });
+      if (!res.ok) {
+        setParticipantError(await readParticipantError(res));
+        return;
+      }
+      const updated: Participant = await res.json();
+      setParticipants((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      closeContactSearch();
+    } catch (e) {
+      setParticipantError(e instanceof Error ? e.message : 'Failed to tag Contact-Ops person');
+    } finally {
+      setParticipantBusy(false);
+    }
   };
 
   const saveEditParticipant = async () => {
@@ -3389,8 +3478,79 @@ export const SessionDetails: React.FC = () => {
                           {p.email && (
                             <p className="truncate text-xs text-gray-500">{p.email}</p>
                           )}
+                          {p.contact_id && (
+                            <p className="mt-1 inline-flex max-w-full items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                              <Check className="h-3 w-3 shrink-0" />
+                              <span className="truncate">Contact-Ops linked</span>
+                            </p>
+                          )}
+                          {contactSearchParticipantId === p.id && (
+                            <div className="mt-2 space-y-2">
+                              <div className="relative">
+                                <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-gray-400" />
+                                <input
+                                  type="text"
+                                  value={contactSearchQuery}
+                                  onChange={(e) => setContactSearchQuery(e.target.value)}
+                                  placeholder="Search Contact-Ops"
+                                  className="w-full rounded border border-gray-300 py-1 pl-7 pr-2 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                />
+                              </div>
+                              {contactSearchLoading && (
+                                <p className="text-xs text-gray-500">Searching...</p>
+                              )}
+                              {!contactSearchLoading && contactSearchQuery.trim().length >= 2 && contactSearchResults.length === 0 && (
+                                <p className="text-xs text-gray-500">No matches</p>
+                              )}
+                              {contactSearchResults.length > 0 && (
+                                <div className="max-h-44 overflow-y-auto rounded border border-gray-200 bg-white">
+                                  {contactSearchResults.map((person) => (
+                                    <button
+                                      key={person.person_id}
+                                      type="button"
+                                      onClick={() => stampParticipantContact(p.id, person.person_id)}
+                                      disabled={participantBusy}
+                                      className="block w-full px-2 py-2 text-left text-sm hover:bg-purple-50 disabled:opacity-50"
+                                    >
+                                      <span className="block truncate font-medium text-gray-900">{person.display_name}</span>
+                                      {person.email && (
+                                        <span className="block truncate text-xs text-gray-500">{person.email}</span>
+                                      )}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="flex gap-2">
+                                {p.contact_id && (
+                                  <button
+                                    type="button"
+                                    onClick={() => stampParticipantContact(p.id, null)}
+                                    disabled={participantBusy}
+                                    className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                                  >
+                                    Clear link
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={closeContactSearch}
+                                  disabled={participantBusy}
+                                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                                >
+                                  Done
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                         <div className="flex shrink-0 gap-1">
+                          <button
+                            onClick={() => openContactSearch(p)}
+                            className="rounded p-1 text-gray-400 hover:bg-emerald-50 hover:text-emerald-700"
+                            title="Tag Contact-Ops person"
+                          >
+                            <Link2 className="h-3.5 w-3.5" />
+                          </button>
                           <button
                             onClick={() => startEditParticipant(p)}
                             className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"

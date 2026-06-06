@@ -171,6 +171,122 @@ async def _contact_ops_token(client: httpx.AsyncClient, workspace_id: str) -> Op
     return token
 
 
+
+def _structured_from_mcp_payload(payload: dict) -> Optional[dict]:
+    result = payload.get("result") or {}
+    if payload.get("error") or result.get("isError"):
+        return None
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+
+    # MCP servers commonly mirror structured output as JSON text content.
+    import json as _json
+
+    for c in result.get("content", []) or []:
+        if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+            try:
+                parsed = _json.loads(c.get("text") or "")
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    return None
+
+
+def _person_summary(item: Any) -> Optional[dict]:
+    if not isinstance(item, dict):
+        return None
+    person_id = item.get("person_id") or item.get("id")
+    if not person_id:
+        return None
+    display_name = (
+        item.get("display_name")
+        or item.get("name")
+        or item.get("full_name")
+        or item.get("email")
+        or str(person_id)
+    )
+    email = item.get("email") or item.get("primary_email")
+    if not email:
+        emails = item.get("emails")
+        if isinstance(emails, list) and emails:
+            first = emails[0]
+            if isinstance(first, str):
+                email = first
+            elif isinstance(first, dict):
+                email = first.get("email") or first.get("value")
+    return {
+        "person_id": str(person_id),
+        "display_name": str(display_name) if display_name else str(person_id),
+        "email": str(email) if email else None,
+    }
+
+
+def _people_from_structured(structured: dict) -> list[dict]:
+    candidates = None
+    for key in ("people", "persons", "results", "items", "matches"):
+        value = structured.get(key)
+        if isinstance(value, list):
+            candidates = value
+            break
+    if candidates is None and isinstance(structured.get("person"), dict):
+        candidates = [structured["person"]]
+    if candidates is None:
+        candidates = []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in candidates:
+        person = _person_summary(item)
+        if not person or person["person_id"] in seen:
+            continue
+        seen.add(person["person_id"])
+        out.append(person)
+    return out
+
+
+async def _call_contact_ops_tool(
+    workspace_id: str,
+    tool_name: str,
+    arguments: dict,
+    *,
+    label: str,
+) -> Optional[dict]:
+    if not is_configured() or not workspace_id:
+        return None
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        token = await _contact_ops_token(client, workspace_id)
+        if not token:
+            return None
+        body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        try:
+            r = await client.post(
+                _contact_ops_mcp_url(),
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("resolver %s transport error: %s", label, exc)
+            return None
+        if r.status_code != 200:
+            logger.warning("resolver %s HTTP %s", label, r.status_code)
+            return None
+        try:
+            payload = r.json()
+        except ValueError:
+            return None
+    return _structured_from_mcp_payload(payload)
+
 # ── public API ─────────────────────────────────────────────────────────
 
 
@@ -186,56 +302,14 @@ async def resolve_email(email: str, workspace_id: str) -> Optional[str]:
     if not email or not workspace_id:
         return None
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        token = await _contact_ops_token(client, workspace_id)
-        if not token:
-            return None
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "find_person_by_identifier",
-                "arguments": {"identifiers": [{"namespace": "email", "value": email}]},
-            },
-        }
-        try:
-            r = await client.post(
-                _contact_ops_mcp_url(), json=body,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("resolver find_person transport error: %s", exc)
-            return None
-        if r.status_code != 200:
-            logger.warning("resolver find_person HTTP %s", r.status_code)
-            return None
-        try:
-            payload = r.json()
-        except ValueError:
-            return None
-
-    result = payload.get("result") or {}
-    if payload.get("error") or result.get("isError"):
+    structured = await _call_contact_ops_tool(
+        workspace_id,
+        "find_person_by_identifier",
+        {"identifiers": [{"namespace": "email", "value": email}]},
+        label="find_person",
+    )
+    if not structured:
         return None
-    structured = result.get("structuredContent")
-    if not isinstance(structured, dict):
-        # fall back to content[0].text
-        import json as _json
-        text = None
-        for c in result.get("content", []) or []:
-            if isinstance(c, dict) and c.get("type") == "text":
-                text = c.get("text")
-                break
-        if not text:
-            return None
-        try:
-            structured = _json.loads(text)
-        except ValueError:
-            return None
     matches = structured.get("matches") or []
     if structured.get("ambiguous") or len(matches) != 1:
         # ambiguous or no/multi match -> don't guess
@@ -244,3 +318,31 @@ async def resolve_email(email: str, workspace_id: str) -> Optional[str]:
     # CO IdentifierMatchOutput spreads PersonSummary, whose id field is person_id.
     pid = m.get("person_id") or m.get("id")
     return str(pid) if pid else None
+
+
+async def search_people(query: str, workspace_id: str, limit: int = 10) -> list[dict]:
+    """Search Contact-Ops people by name/email for manual participant tagging.
+
+    Returns a list of ``{person_id, display_name, email}``. Dormant config,
+    missing tenant, MCP errors, or unknown response shapes return an empty list.
+    Never raises.
+    """
+    if not is_configured():
+        return []
+    query = (query or "").strip()
+    if not query or len(query) < 2 or not workspace_id:
+        return []
+    try:
+        n = max(1, min(int(limit or 10), 25))
+    except (TypeError, ValueError):
+        n = 10
+
+    structured = await _call_contact_ops_tool(
+        workspace_id,
+        "search_people",
+        {"query": query, "limit": n},
+        label="search_people",
+    )
+    if not structured:
+        return []
+    return _people_from_structured(structured)[:n]
