@@ -733,6 +733,25 @@ async def mark_upload_failed(upload_id: str, error: str) -> None:
         db.close()
 
 
+def _stamp_speaker_contacts_fresh(session_pk: int) -> None:
+    """Run the confirmed speaker->contact participant stamp in its OWN fresh
+    DB session (re-querying the row) so it never clobbers a concurrently
+    committed status/participant write. Best-effort."""
+    from services.speaker_service import stamp_confirmed_speaker_contacts
+
+    db = SessionLocal()
+    try:
+        s = (
+            db.query(RecordingSession)
+            .filter(RecordingSession.id == session_pk)
+            .first()
+        )
+        if s is not None:
+            stamp_confirmed_speaker_contacts(s, db)
+    finally:
+        db.close()
+
+
 async def run_upload_pipeline(upload_id: str) -> None:
     db = SessionLocal()
     try:
@@ -866,6 +885,21 @@ async def run_upload_pipeline(upload_id: str) -> None:
         job.job_completed_at = datetime.now(timezone.utc)
         job.updated_at = datetime.now(timezone.utc)
         db.commit()
+
+        # Participant stamping (parity with the always-on/reprocess finalize
+        # path): the recorder, then any confirmed speaker->contact matches.
+        # Fresh sessions + re-query so the just-committed status isn't lost.
+        # Best-effort — a stamp failure never fails the upload.
+        try:
+            from api.recording import _autostamp_recorder_participant
+            await _autostamp_recorder_participant(session.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("upload recorder stamp failed session=%s: %s", session.id, exc)
+        try:
+            await asyncio.to_thread(_stamp_speaker_contacts_fresh, session.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("upload speaker stamp failed session=%s: %s", session.id, exc)
+
         await ws_manager.broadcast(upload_id, _status_payload(job))
     except asyncio.CancelledError:
         raise
@@ -925,7 +959,33 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
     # new meeting_date / meeting_time columns are the user-editable
     # "when the meeting actually happened" view.
     server_now = datetime.now(timezone.utc)
-    created_at = _created_at_from_filename_or_mtime(audio_path, server_now)
+
+    # Assemble the when/where/who provenance ledger and pick the best
+    # "recorded at" signal (audio container creation_time > filename date >
+    # file mtime > upload time). created_at/started_at follow that estimate;
+    # meeting_date/time prefer the filename parse (user intent) and fall back
+    # to the recorded signal.
+    from services.meeting_provenance import (
+        build_meeting_provenance,
+        parse_iso,
+        recorded_date_time,
+    )
+    provenance = build_meeting_provenance(
+        audio_path=audio_path,
+        original_filename=job.filename,
+        filename_date=parsed.meeting_date,
+        filename_time=parsed.meeting_time,
+        uploaded_at=server_now,
+        source_type="upload",
+    )
+    recorded = provenance["when"]["recorded_at"]
+    created_at = (parse_iso(recorded["value"]) if recorded else None) or server_now
+    meeting_date = parsed.meeting_date
+    meeting_time = parsed.meeting_time
+    if meeting_date is None:
+        rec_d, rec_t = recorded_date_time(recorded)
+        meeting_date = rec_d
+        meeting_time = meeting_time or rec_t
 
     session = RecordingSession(
         session_id=str(uuid.uuid4()),
@@ -935,8 +995,8 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         meeting_type="upload",
         created_at=created_at,
         started_at=created_at,
-        meeting_date=parsed.meeting_date,
-        meeting_time=parsed.meeting_time,
+        meeting_date=meeting_date,
+        meeting_time=meeting_time,
         status="processing",
         user_id=job.user_id,
         organization_id=job.organization_id,
@@ -951,6 +1011,7 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
                 "source": parsed.source,
                 "matched_title": parsed.title,
             },
+            "meeting_provenance": provenance,
         },
     )
     db.add(session)

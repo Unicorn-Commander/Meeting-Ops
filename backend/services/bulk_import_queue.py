@@ -467,14 +467,39 @@ class BulkImportPipelineQueue:
 
         db = SessionLocal()
         try:
+            from services.meeting_provenance import (
+                build_meeting_provenance,
+                parse_iso,
+                recorded_date_time,
+            )
+            _uploaded_at = datetime.now(timezone.utc)
+            _provenance = build_meeting_provenance(
+                audio_path=str(local_path),
+                original_filename=original_filename,
+                filename_date=parsed.meeting_date,
+                filename_time=parsed.meeting_time,
+                uploaded_at=_uploaded_at,
+                source_type="bulk_import",
+            )
+            _recorded = _provenance["when"]["recorded_at"]
+            _created_at = (parse_iso(_recorded["value"]) if _recorded else None) or _uploaded_at
+            _meeting_date = parsed.meeting_date
+            _meeting_time = parsed.meeting_time
+            if _meeting_date is None:
+                _rd, _rt = recorded_date_time(_recorded)
+                _meeting_date = _rd
+                _meeting_time = _meeting_time or _rt
+
             session = RecordingSession(
                 session_id=session_uuid,
                 name=title,
                 title=title,
                 description=f"Bulk imported from {original_filename}",
                 meeting_type="upload",
-                meeting_date=parsed.meeting_date,
-                meeting_time=parsed.meeting_time,
+                created_at=_created_at,
+                started_at=_created_at,
+                meeting_date=_meeting_date,
+                meeting_time=_meeting_time,
                 status="processing",
                 user_id=user_id,
                 organization_id=org_id,
@@ -490,6 +515,7 @@ class BulkImportPipelineQueue:
                         "source": parsed.source,
                         "matched_title": parsed.title,
                     },
+                    "meeting_provenance": _provenance,
                 },
             )
             db.add(session)
