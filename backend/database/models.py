@@ -536,6 +536,7 @@ class SpeakerProfile(Base):
     __table_args__ = (
         Index("ix_speaker_org", "organization_id"),
         Index("ix_speaker_org_name", "organization_id", "display_name", unique=True),
+        Index("ix_speaker_contact_id", "contact_id"),
         # Added in 015_speaker_profile_contacts; declared here so
         # autogenerate doesn't try to drop it.
         Index("ix_speaker_linked_user", "linked_user_id"),
@@ -557,6 +558,12 @@ class SpeakerProfile(Base):
     # is per-org; backend stores it verbatim, callers normalize. JSONB
     # on Postgres (per 015_speaker_profile_contacts) and JSON on SQLite.
     external_refs = Column(_JsonB(), nullable=True)
+    # Contact-Ops person id. Auto participant stamping only uses this when
+    # contact_link_confirmed=True; unconfirmed links are suggestions.
+    contact_id = Column(String(64), nullable=True)
+    contact_link_confirmed = Column(Boolean, nullable=False, default=False, server_default="false")
+    contact_link_confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    contact_link_confirmed_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
     centroid_embedding = Column(LargeBinary, nullable=True)
     embedding_dim = Column(Integer, nullable=True)

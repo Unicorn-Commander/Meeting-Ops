@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -75,6 +76,10 @@ class SpeakerResponse(BaseModel):
     company: Optional[str] = None
     linked_user_id: Optional[int] = None
     external_refs: Optional[dict] = None
+    contact_id: Optional[str] = None
+    contact_link_confirmed: bool = False
+    contact_link_confirmed_by_user_id: Optional[int] = None
+    contact_link_confirmed_at: Optional[str] = None
     notes: Optional[str] = None
     embedding_dim: Optional[int] = None
     embedding_model: Optional[str] = None
@@ -92,6 +97,8 @@ class SpeakerCreate(BaseModel):
     company: Optional[str] = None
     linked_user_id: Optional[int] = None
     external_refs: Optional[dict] = None
+    contact_id: Optional[str] = Field(default=None, max_length=64)
+    contact_link_confirmed: bool = False
     notes: Optional[str] = None
 
 
@@ -103,6 +110,8 @@ class SpeakerUpdate(BaseModel):
     company: Optional[str] = None
     linked_user_id: Optional[int] = None
     external_refs: Optional[dict] = None
+    contact_id: Optional[str] = Field(default=None, max_length=64)
+    contact_link_confirmed: Optional[bool] = None
     notes: Optional[str] = None
 
 
@@ -137,6 +146,11 @@ class SpeakerLinkResponse(BaseModel):
 
 class SpeakerLinkUpdate(BaseModel):
     speaker_id: Optional[int] = None  # None / 0 to clear
+    confirmed: bool = True
+
+
+class SpeakerContactLinkUpdate(BaseModel):
+    contact_id: Optional[str] = Field(default=None, max_length=64)
     confirmed: bool = True
 
 
@@ -196,6 +210,14 @@ def _to_response(speaker: SpeakerProfile) -> SpeakerResponse:
         company=speaker.company,
         linked_user_id=speaker.linked_user_id,
         external_refs=speaker.external_refs,
+        contact_id=speaker.contact_id,
+        contact_link_confirmed=bool(speaker.contact_link_confirmed),
+        contact_link_confirmed_by_user_id=speaker.contact_link_confirmed_by_user_id,
+        contact_link_confirmed_at=(
+            speaker.contact_link_confirmed_at.isoformat()
+            if speaker.contact_link_confirmed_at
+            else None
+        ),
         notes=speaker.notes,
         embedding_dim=speaker.embedding_dim,
         embedding_model=speaker.embedding_model,
@@ -515,6 +537,14 @@ async def create_speaker(
         company=payload.company,
         linked_user_id=payload.linked_user_id,
         external_refs=payload.external_refs,
+        contact_id=(payload.contact_id.strip() if payload.contact_id else None),
+        contact_link_confirmed=bool(payload.contact_id and payload.contact_link_confirmed),
+        contact_link_confirmed_by_user_id=(
+            current_user.id if payload.contact_id and payload.contact_link_confirmed else None
+        ),
+        contact_link_confirmed_at=(
+            datetime.now(timezone.utc) if payload.contact_id and payload.contact_link_confirmed else None
+        ),
         notes=payload.notes,
         created_by_user_id=current_user.id,
     )
@@ -578,6 +608,37 @@ async def update_speaker(
         val = getattr(payload, fld, None)
         if val is not None:
             setattr(speaker, fld, val or None if isinstance(val, str) else val)
+    if "contact_id" in payload.model_fields_set:
+        speaker.contact_id = (payload.contact_id.strip() if payload.contact_id else None)
+        if not speaker.contact_id:
+            speaker.contact_link_confirmed = False
+            speaker.contact_link_confirmed_by_user_id = None
+            speaker.contact_link_confirmed_at = None
+    if "contact_link_confirmed" in payload.model_fields_set:
+        speaker.contact_link_confirmed = bool(payload.contact_link_confirmed and speaker.contact_id)
+        speaker.contact_link_confirmed_by_user_id = current_user.id if speaker.contact_link_confirmed else None
+        speaker.contact_link_confirmed_at = datetime.now(timezone.utc) if speaker.contact_link_confirmed else None
+    db.commit()
+    db.refresh(speaker)
+    return _to_response(speaker)
+
+
+@router.patch("/api/speakers/{speaker_id}/contact-link", response_model=SpeakerResponse)
+async def update_speaker_contact_link(
+    speaker_id: int,
+    payload: SpeakerContactLinkUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Confirm or clear a SpeakerProfile -> Contact-Ops person link."""
+    gate_feature_for_caller(current_user, "speaker_library")
+    _require_admin(active_org, current_user)
+    speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
+    speaker.contact_id = (payload.contact_id.strip() if payload.contact_id else None)
+    speaker.contact_link_confirmed = bool(speaker.contact_id and payload.confirmed)
+    speaker.contact_link_confirmed_by_user_id = current_user.id if speaker.contact_link_confirmed else None
+    speaker.contact_link_confirmed_at = datetime.now(timezone.utc) if speaker.contact_link_confirmed else None
     db.commit()
     db.refresh(speaker)
     return _to_response(speaker)

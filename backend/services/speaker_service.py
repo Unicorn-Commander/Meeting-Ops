@@ -15,11 +15,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
 from rapidfuzz import fuzz as rapidfuzz_fuzz
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from database.models import (
     RecordingSession,
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_MODEL = os.getenv("SPEAKER_EMBEDDING_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM")
 DEFAULT_IDENTIFY_THRESHOLD = float(os.getenv("SPEAKER_IDENTIFY_THRESHOLD", "0.55"))
 STORE_SPEAKER_AUDIO = os.getenv("STORE_SPEAKER_AUDIO", "false").lower() in ("1", "true", "yes")
+SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD = float(os.getenv("SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD", "0.80"))
 
 
 # ---------- (de)serialization ----------
@@ -267,6 +271,106 @@ def _segments_from_session(session: RecordingSession) -> list[dict]:
     if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
         return session.transcript_diarized.get("segments", []) or []
     return []
+
+
+def stamp_confirmed_speaker_contacts(
+    session: RecordingSession,
+    db: Session,
+    *,
+    threshold: float = SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD,
+) -> dict:
+    """Best-effort participant stamping from confirmed speaker->contact links.
+
+    A speaker match becomes an asserted meeting participant only when all three
+    gates pass: the session link has a speaker_id, the link similarity is at or
+    above the high threshold, and the SpeakerProfile has a confirmed
+    Contact-Ops contact_id. Everything else is recorded as a suggestion in
+    session.processing_metadata["speaker_contact_suggestions"]. Never raises.
+    """
+    summary = {"stamped": 0, "suggested": 0, "threshold": threshold}
+    try:
+        links = (
+            db.query(SpeakerSessionLink, SpeakerProfile)
+            .join(SpeakerProfile, SpeakerProfile.id == SpeakerSessionLink.speaker_id)
+            .filter(
+                SpeakerSessionLink.session_id == session.id,
+                SpeakerSessionLink.organization_id == session.organization_id,
+            )
+            .all()
+        )
+        if not links:
+            return summary
+
+        participants = list(session.participants) if isinstance(session.participants, list) else []
+        existing_contact_ids = {
+            str(p.get("contact_id"))
+            for p in participants
+            if isinstance(p, dict) and p.get("contact_id")
+        }
+        suggestions: list[dict] = []
+        changed = False
+
+        for link, speaker in links:
+            contact_id = (speaker.contact_id or "").strip()
+            similarity = float(link.similarity or 0.0)
+            confirmed_contact = bool(speaker.contact_link_confirmed and contact_id)
+            high_confidence = similarity >= threshold
+
+            suggestion = {
+                "speaker_id": speaker.id,
+                "speaker_name": speaker.display_name,
+                "raw_label": link.raw_label,
+                "contact_id": contact_id or None,
+                "similarity": similarity if link.similarity is not None else None,
+                "reason": None,
+            }
+
+            if confirmed_contact and high_confidence:
+                if contact_id not in existing_contact_ids:
+                    participants.append({
+                        "id": str(uuid.uuid4()),
+                        "name": speaker.display_name,
+                        "email": speaker.email or None,
+                        "role": "speaker",
+                        "contact_id": contact_id,
+                    })
+                    existing_contact_ids.add(contact_id)
+                    summary["stamped"] += 1
+                    changed = True
+                continue
+
+            if not contact_id:
+                suggestion["reason"] = "no_contact_id"
+            elif not speaker.contact_link_confirmed:
+                suggestion["reason"] = "contact_link_unconfirmed"
+            elif not high_confidence:
+                suggestion["reason"] = "below_threshold"
+            else:
+                suggestion["reason"] = "not_stamped"
+            suggestions.append(suggestion)
+
+        metadata = dict(session.processing_metadata or {})
+        if suggestions:
+            metadata["speaker_contact_suggestions"] = suggestions
+            metadata["speaker_contact_suggestions_updated_at"] = datetime.now(timezone.utc).isoformat()
+            summary["suggested"] = len(suggestions)
+            session.processing_metadata = metadata
+            flag_modified(session, "processing_metadata")
+            changed = True
+        elif metadata.get("speaker_contact_suggestions"):
+            metadata.pop("speaker_contact_suggestions", None)
+            metadata.pop("speaker_contact_suggestions_updated_at", None)
+            session.processing_metadata = metadata
+            flag_modified(session, "processing_metadata")
+            changed = True
+
+        if changed:
+            session.participants = participants
+            flag_modified(session, "participants")
+            db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("speaker contact participant stamp swallowed error session=%s", getattr(session, "id", None))
+    return summary
 
 
 def identify_speakers(

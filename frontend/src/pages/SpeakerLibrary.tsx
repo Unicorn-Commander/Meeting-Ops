@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle, ChevronDown, ChevronRight, Link2, Check } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -17,6 +17,8 @@ interface SpeakerSummary {
   embedding_model?: string | null;
   sample_count: number;
   has_centroid: boolean;
+  contact_id?: string | null;
+  contact_link_confirmed?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -37,6 +39,12 @@ interface VoiceSample {
 interface SpeakerDetail extends SpeakerSummary {
   voice_samples: VoiceSample[];
   session_count: number;
+}
+
+interface ContactOpsPerson {
+  person_id: string;
+  display_name: string;
+  email?: string | null;
 }
 
 interface SpeakerTopMatch {
@@ -128,6 +136,10 @@ export const SpeakerLibrary: React.FC = () => {
   const [mergeTargetId, setMergeTargetId] = useState<number | null>(null);
   const [mergeConfirm, setMergeConfirm] = useState('');
   const [merging, setMerging] = useState(false);
+  const [contactQuery, setContactQuery] = useState('');
+  const [contactResults, setContactResults] = useState<ContactOpsPerson[]>([]);
+  const [contactSearching, setContactSearching] = useState(false);
+  const [contactLinking, setContactLinking] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const orgHeaders = (): Record<string, string> => {
@@ -241,6 +253,42 @@ export const SpeakerLibrary: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrganization?.slug, isAdmin]);
 
+
+  useEffect(() => {
+    const q = contactQuery.trim();
+    if (!detail || q.length < 2) {
+      setContactResults([]);
+      setContactSearching(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setContactSearching(true);
+      try {
+        const res = await fetch(
+          `${config.apiBaseUrl}/api/contact-ops/people/search?q=${encodeURIComponent(q)}&limit=8`,
+          { headers: orgHeaders(), signal: controller.signal },
+        );
+        if (!res.ok) {
+          setContactResults([]);
+          return;
+        }
+        const data = await res.json();
+        setContactResults(Array.isArray(data.items) ? data.items : []);
+      } catch (e) {
+        if (!(e instanceof DOMException && e.name === 'AbortError')) {
+          setError('Contact-Ops search failed.');
+        }
+      } finally {
+        setContactSearching(false);
+      }
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [contactQuery, detail?.id, activeOrganization?.slug]);
+
   const assignUnassignedLink = async (link: UnassignedSpeakerLink, speakerId: number) => {
     setAssigningLinkId(link.id);
     try {
@@ -352,6 +400,32 @@ export const SpeakerLibrary: React.FC = () => {
       setError('Network error creating speaker.');
     }
     setCreating(false);
+  };
+
+
+  const updateContactLink = async (contactId: string | null) => {
+    if (!detail) return;
+    setContactLinking(true);
+    try {
+      const res = await fetch(`${config.apiBaseUrl}/api/speakers/${detail.id}/contact-link`, {
+        method: 'PATCH',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: contactId, confirmed: Boolean(contactId) }),
+      });
+      if (!res.ok) {
+        setError(`Contact link update failed (HTTP ${res.status}).`);
+        return;
+      }
+      const updated: SpeakerSummary = await res.json();
+      setDetail(prev => prev ? { ...prev, ...updated } : prev);
+      setSpeakers(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s));
+      setContactQuery('');
+      setContactResults([]);
+    } catch {
+      setError('Network error updating contact link.');
+    } finally {
+      setContactLinking(false);
+    }
   };
 
   const enrollSample = async (file: File) => {
@@ -666,6 +740,64 @@ export const SpeakerLibrary: React.FC = () => {
                     Delete
                   </button>
                 </div>
+              </div>
+
+              <div className="mb-4 rounded border border-zinc-800 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs uppercase tracking-wide text-zinc-500">Contact-Ops link</div>
+                  {detail.contact_id && detail.contact_link_confirmed && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">
+                      <Check className="h-3 w-3" />
+                      Confirmed
+                    </span>
+                  )}
+                </div>
+                {detail.contact_id ? (
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 text-xs text-zinc-400">
+                      <span className="mr-2 text-zinc-500">person_id</span>
+                      <code className="break-all text-zinc-200">{detail.contact_id}</code>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => updateContactLink(null)}
+                      disabled={contactLinking}
+                      className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      Clear link
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-zinc-500" />
+                      <input
+                        type="text"
+                        value={contactQuery}
+                        onChange={e => setContactQuery(e.target.value)}
+                        placeholder="Search Contact-Ops by name"
+                        className="w-full rounded border border-zinc-700 bg-zinc-950 py-1.5 pl-7 pr-2 text-sm text-zinc-100 outline-none focus:border-fuchsia-500"
+                      />
+                    </div>
+                    {contactSearching && <div className="text-xs text-zinc-500">Searching…</div>}
+                    {contactResults.length > 0 && (
+                      <div className="max-h-44 overflow-y-auto rounded border border-zinc-800 bg-zinc-950">
+                        {contactResults.map(person => (
+                          <button
+                            key={person.person_id}
+                            type="button"
+                            onClick={() => updateContactLink(person.person_id)}
+                            disabled={contactLinking}
+                            className="block w-full px-2 py-2 text-left text-sm hover:bg-zinc-800 disabled:opacity-50"
+                          >
+                            <span className="block truncate font-medium text-zinc-100">{person.display_name}</span>
+                            {person.email && <span className="block truncate text-xs text-zinc-500">{person.email}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="border border-zinc-800 rounded p-3 mb-4">

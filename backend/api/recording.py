@@ -1787,9 +1787,13 @@ async def _run_session_reprocess(session_pk: int) -> None:
         # Stage 4 — Identify enrolled speakers. Best-effort — a transient
         # speaker-svc outage shouldn't fail the whole reprocess.
         try:
-            from services.speaker_service import identify_speakers
+            from services.speaker_service import (
+                identify_speakers,
+                stamp_confirmed_speaker_contacts,
+            )
 
             await asyncio.to_thread(identify_speakers, session, db)
+            await asyncio.to_thread(stamp_confirmed_speaker_contacts, session, db)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Reprocess identify_speakers failed for session=%s: %s",
