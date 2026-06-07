@@ -107,6 +107,53 @@ def _processing_threshold_minutes() -> int:
     return DEFAULT_PROCESSING_WATCHDOG_HOURS * 60
 
 
+# How long an *empty* always-on session must have existed before the watchdog
+# is allowed to HARD-DELETE it (vs the gentler flip-to-``failed``). This is the
+# 2026-06-07 fix for the local-then-upload data-loss landmine (lost session db
+# 501): under the v3.26.9 model the desktop recorder buffers the whole meeting
+# in browser IndexedDB and only POSTs it at Stop, so a *still-recording* (or
+# briefly-disconnected) session has NO server audio and NO server transcript —
+# it is indistinguishable from an abandoned empty zombie by
+# _alwayson_session_is_empty, even though the user's browser is holding the full
+# recording and can re-upload it via the orphan banner. Hard-deleting the row
+# there 404s that resume-upload and loses the meeting for good. So we only
+# DELETE empties old enough that a client-side resume is no longer plausible;
+# anything newer flips to ``failed`` (the row survives, so orphan resume still
+# resolves to a real session). 24h matches the recorder's own orphan-banner
+# "older than 24h" cutoff.
+DEFAULT_EMPTY_DELETE_MINUTES = 24 * 60
+
+
+def _empty_delete_threshold_minutes() -> int:
+    raw = os.getenv("SESSION_WATCHDOG_EMPTY_DELETE_MINUTES")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_EMPTY_DELETE_MINUTES
+
+
+def _empty_alwayson_safe_to_delete(sess: Any, now: datetime) -> bool:
+    """True iff an empty always-on zombie is old enough that hard-deleting it
+    won't strand a recording the user could still resume-upload from their
+    browser.
+
+    Age is measured from ``created_at`` (≈ when recording started), NOT
+    ``updated_at`` — under local-then-upload a live session stops touching the
+    row the instant it starts buffering locally, so ``updated_at`` says nothing
+    about how recoverable the recording is. Missing timestamp → conservative
+    ``False`` (never delete what we can't reason about; it flips to ``failed``).
+    """
+    created = getattr(sess, "created_at", None) or getattr(sess, "started_at", None)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_minutes = (now - created).total_seconds() / 60.0
+    return age_minutes >= _empty_delete_threshold_minutes()
+
+
 def _alwayson_session_is_empty(sess: Any) -> bool:
     """True iff ``sess`` is an always-on session that produced NOTHING worth
     keeping: no server-side audio AND no transcript text.
@@ -218,12 +265,17 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
     older than the configured threshold and resolve them.
 
     Two outcomes per row:
-      - Audio-less, transcript-less *always-on* zombies are HARD-DELETED
-        (rows + disk chunks + Qdrant), so the recorder stops accumulating
-        empty ``failed`` tombstones in the session list. See
-        :func:`_alwayson_session_is_empty` for the strict guard.
-      - Everything else is flipped to ``failed`` (audio + transcript + Garage
-        object preserved; only ``status`` + ``ended_at`` change).
+      - Audio-less, transcript-less *always-on* zombies that are also OLD
+        (created more than ``SESSION_WATCHDOG_EMPTY_DELETE_MINUTES`` ago, 24h
+        default) are HARD-DELETED (rows + disk chunks + Qdrant), so the recorder
+        stops accumulating empty ``failed`` tombstones in the session list. See
+        :func:`_alwayson_session_is_empty` + :func:`_empty_alwayson_safe_to_delete`
+        for the strict guard — the age gate is what keeps a *recent*
+        local-then-upload recording (empty server-side but recoverable from the
+        browser) from being deleted out from under the orphan banner.
+      - Everything else — including recent empty always-on rows — is flipped to
+        ``failed`` (audio + transcript + Garage object preserved; only
+        ``status`` + ``ended_at`` change), so the row survives for resume.
 
     Returns a summary dict. Never raises — exceptions are logged and the
     pass terminates cleanly. Idempotent."""
@@ -293,7 +345,15 @@ def mark_abandoned_recording_sessions(*, dry_run: bool = False) -> dict[str, Any
                 # _alwayson_session_is_empty). Real meetings, sessions with
                 # any audio/transcript, and upload/satellite rows fall through
                 # to the mark-failed path below, byte-for-byte unchanged.
-                if _alwayson_session_is_empty(sess):
+                #
+                # AND the row must be OLD enough that no client-side resume is
+                # plausible (_empty_alwayson_safe_to_delete). A recent empty is
+                # almost certainly a local-then-upload recording mid-flight or
+                # briefly offline — its audio lives in the browser and the
+                # orphan banner can still re-upload it, so deleting the server
+                # row would 404 that resume and lose the meeting (session 501).
+                # Recent empties fall through to flip-to-failed (row preserved).
+                if _alwayson_session_is_empty(sess) and _empty_alwayson_safe_to_delete(sess, now):
                     if dry_run:
                         summary["deleted"] += 1
                         continue
