@@ -23,6 +23,11 @@ from arq.connections import RedisSettings
 
 from database.database import SessionLocal
 from database.models import BulkImportFile, BulkImportJob
+# Register the rooms models in this worker's SQLAlchemy metadata at startup so
+# any RecordingSession query resolves its room_id -> conference_rooms FK. The
+# arq worker imports a narrower module set than the FastAPI app; without this,
+# reprocess queries raise NoReferencedTableError (conference_rooms missing).
+from database import models_rooms  # noqa: F401
 from services.bulk_import_queue import (
     _do_process_file,
     bulk_import_queue,
