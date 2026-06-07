@@ -36,6 +36,11 @@ export default function KnowledgeGraph() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Auto-load on mount: consult /me once, then (if no self-speaker) feature
+  // the first person — so the page opens on a real graph, not a blank canvas.
+  const [meResolved, setMeResolved] = useState(false);
+  const [autoSelected, setAutoSelected] = useState(false);
+
   const authFetch = useCallback(
     async (path: string) => {
       const token = localStorage.getItem('access_token');
@@ -95,6 +100,40 @@ export default function KnowledgeGraph() {
       cancelled = true;
     };
   }, [selected, hops, reloadKey, authFetch]);
+
+  // Default-load step 1: consult /me once. If the viewer has a speaker
+  // (linked_user_id / email / name match), open straight onto their graph.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const me: BrigadeGraphResponse = await authFetch(
+          '/api/knowledge-graph/person/me?hops=2',
+        );
+        if (!cancelled && me && me.speaker_id) {
+          setSelected({ id: me.speaker_id, display_name: me.speaker_name || 'You' });
+          setAutoSelected(true);
+        }
+      } catch {
+        /* fall through to the featured-person fallback */
+      } finally {
+        if (!cancelled) setMeResolved(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authFetch]);
+
+  // Default-load step 2: no self-speaker -> feature the first person once the
+  // people list has loaded, so the page is never blank when data exists.
+  useEffect(() => {
+    if (autoSelected || selected || !meResolved) return;
+    if (speakers.length > 0) {
+      setSelected(speakers[0]);
+      setAutoSelected(true);
+    }
+  }, [autoSelected, selected, meResolved, speakers]);
 
   const filtered = useMemo(() => {
     const sorted = [...speakers].sort((a, b) =>
@@ -188,9 +227,17 @@ export default function KnowledgeGraph() {
       )}
 
       {/* Body */}
-      {!selected && (
+      {!selected && !meResolved && (
+        <div className="flex items-center justify-center gap-2 rounded-lg border border-zinc-800 bg-black/20 px-6 py-16 text-sm text-zinc-400">
+          <RefreshCw className="h-4 w-4 animate-spin" /> Opening your knowledge graph…
+        </div>
+      )}
+
+      {!selected && meResolved && (
         <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 px-6 py-16 text-center text-sm text-zinc-400">
-          Pick a person above to see their meeting graph.
+          {speakers.length > 0
+            ? 'Pick a person above to see their meeting graph.'
+            : 'No people yet — record and reprocess a few meetings to build your graph.'}
         </div>
       )}
 
@@ -242,7 +289,13 @@ export default function KnowledgeGraph() {
             </p>
           )}
 
-          {showViewer && <BrigadeGraphViewer data={graph} height={520} />}
+          {showViewer && (
+            <BrigadeGraphViewer
+              data={graph}
+              height={520}
+              onSelectSpeaker={(id, name) => setSelected({ id, display_name: name })}
+            />
+          )}
 
           {graph.graph_url && (
             <div className="flex justify-end">

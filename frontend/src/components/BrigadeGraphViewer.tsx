@@ -94,11 +94,157 @@ function colorForLabel(label: string): string {
 }
 
 function sizeForNode(node: BrigadeNode): number {
-  // Meeting nodes (the focus) are visually larger so the user can
-  // orient themselves at a glance.
-  if (node.is_focus || node.label === 'Meeting') return 8;
+  // The focus person is the biggest so the user orients at a glance;
+  // meetings (the hubs) next, everything else small.
+  if (node.is_focus) return 12;
+  if (node.label === 'Meeting') return 7;
   return 4;
 }
+
+// ---------------------------------------------------------------------------
+// Avatar + per-type node detail. The graph nodes are hydrated server-side
+// (services/kg_hydrate.py) so `properties.kind` discriminates the shape and
+// carries human content (titles, text, dates, deep-link ids, avatar_url).
+// ---------------------------------------------------------------------------
+
+function initialsOf(name: string): string {
+  const parts = (name || '').split(/\s+/).filter(Boolean);
+  const ini = parts.map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  return ini || '?';
+}
+
+const Avatar: React.FC<{ name: string; url?: string | null; size?: number }> = ({
+  name,
+  url,
+  size = 36,
+}) => {
+  const [broken, setBroken] = useState(false);
+  if (url && !broken) {
+    return (
+      <img
+        src={url}
+        alt={name}
+        onError={() => setBroken(true)}
+        className="rounded-full object-cover ring-2 ring-white/70 shadow"
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  return (
+    <div
+      className="flex items-center justify-center rounded-full font-semibold text-white shadow ring-2 ring-white/70"
+      style={{
+        width: size,
+        height: size,
+        fontSize: size * 0.4,
+        background: 'linear-gradient(135deg,#a855f7,#6366f1)',
+      }}
+    >
+      {initialsOf(name)}
+    </div>
+  );
+};
+
+const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({
+  label,
+  children,
+}) => (
+  <div className="flex gap-2 text-xs">
+    <span className="w-20 shrink-0 text-slate-400">{label}</span>
+    <span className="break-words text-slate-700">{children}</span>
+  </div>
+);
+
+function fmtDate(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function titleCase(s: unknown): string {
+  return String(s ?? '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const NodeDetailBody: React.FC<{
+  node: BrigadeNode;
+  onSelectSpeaker?: (speakerId: number, name: string) => void;
+}> = ({ node, onSelectSpeaker }) => {
+  const p = (node.properties || {}) as Record<string, any>;
+  const kind = p.kind as string | undefined;
+
+  if (kind === 'speaker') {
+    const meta = [p.role, p.company].filter(Boolean).join(' · ');
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-3">
+          <Avatar name={node.name} url={p.avatar_url} size={44} />
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-slate-900">{node.name}</div>
+            {meta && <div className="truncate text-xs text-slate-500">{meta}</div>}
+          </div>
+        </div>
+        {p.email && <DetailRow label="Email">{p.email}</DetailRow>}
+        {!node.is_focus && onSelectSpeaker && typeof p.speaker_id === 'number' && (
+          <button
+            type="button"
+            onClick={() => onSelectSpeaker(p.speaker_id, node.name)}
+            className="mt-1 inline-flex items-center gap-1 rounded-md bg-fuchsia-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-fuchsia-700"
+          >
+            View {node.name.split(' ')[0]}’s graph →
+          </button>
+        )}
+        {node.is_focus && (
+          <p className="text-xs text-slate-400">The person at the center of this graph.</p>
+        )}
+      </div>
+    );
+  }
+
+  if (kind === 'meeting') {
+    const date = fmtDate(p.date);
+    return (
+      <div className="space-y-1.5">
+        <div className="font-semibold text-slate-900">{node.name}</div>
+        {date && <DetailRow label="When">{date}</DetailRow>}
+        {p.duration_min != null && <DetailRow label="Length">{p.duration_min} min</DetailRow>}
+        {p.status && <DetailRow label="Status">{titleCase(p.status)}</DetailRow>}
+        {p.session_id && (
+          <a
+            href={`/sessions/${p.session_id}`}
+            className="mt-1 inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700"
+          >
+            Open meeting <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  if (kind === 'action_item') {
+    return (
+      <div className="space-y-1.5">
+        <div className="font-medium text-slate-900">{p.text || node.name}</div>
+        {p.owner && <DetailRow label="Owner">{p.owner}</DetailRow>}
+        {p.status && <DetailRow label="Status">{titleCase(p.status)}</DetailRow>}
+        {fmtDate(p.due_date) && <DetailRow label="Due">{fmtDate(p.due_date)}</DetailRow>}
+      </div>
+    );
+  }
+
+  if (kind === 'decision' || kind === 'topic') {
+    return (
+      <div className="space-y-1.5">
+        <div className="font-medium text-slate-900">{p.text || node.name}</div>
+        {p.decided_by && <DetailRow label="Decided by">{p.decided_by}</DetailRow>}
+        {p.parent_meeting && <DetailRow label="Meeting">{p.parent_meeting}</DetailRow>}
+      </div>
+    );
+  }
+
+  return <div className="text-sm font-medium text-slate-800">{node.name}</div>;
+};
 
 // ---------------------------------------------------------------------------
 // Component
@@ -113,6 +259,9 @@ export interface BrigadeGraphViewerProps {
   data?: BrigadeGraphResponse;
   height?: number;
   showLabels?: boolean;
+  /** Re-focus the graph on a clicked person (Knowledge Graph page passes this
+   *  so you can walk the graph by clicking co-speakers). */
+  onSelectSpeaker?: (speakerId: number, name: string) => void;
 }
 
 const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
@@ -120,6 +269,7 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
   data: externalData,
   height = 480,
   showLabels = true,
+  onSelectSpeaker,
 }) => {
   const { getOrgQueryUrl } = useOrg();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -337,51 +487,30 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
       {/* Selected node detail panel — appears below the canvas when a
           node is clicked. Click background to dismiss. */}
       {selectedNode && (
-        <div className="bg-white border border-slate-200 rounded-lg p-4 text-sm">
-          <div className="flex items-start justify-between gap-3 mb-2">
-            <div className="flex items-center gap-2">
+        <div className="bg-white border border-slate-200 rounded-lg p-4 text-sm shadow-sm">
+          <div className="mb-2.5 flex items-center justify-between gap-3">
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium"
+              style={{
+                backgroundColor: colorForLabel(selectedNode.label) + '22',
+                color: colorForLabel(selectedNode.label),
+              }}
+            >
               <span
-                className="inline-block w-3 h-3 rounded-full"
+                className="inline-block h-2 w-2 rounded-full"
                 style={{ backgroundColor: colorForLabel(selectedNode.label) }}
               />
-              <span className="font-semibold text-slate-900">
-                {selectedNode.label}
-              </span>
-              <span className="text-slate-500">{selectedNode.name}</span>
-            </div>
+              {titleCase(selectedNode.label)}
+            </span>
             <button
               onClick={() => setSelectedNode(null)}
-              className="text-slate-400 hover:text-slate-600 text-xs"
+              className="text-xs text-slate-400 hover:text-slate-600"
               aria-label="Close detail"
             >
               Close
             </button>
           </div>
-          {selectedNode.properties &&
-          Object.keys(selectedNode.properties).length > 0 ? (
-            <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs text-slate-700">
-              {Object.entries(selectedNode.properties).map(([k, v]) => (
-                <React.Fragment key={k}>
-                  <dt className="font-mono text-slate-500">{k}</dt>
-                  <dd className="break-words text-slate-800">
-                    {v === null || v === undefined ? (
-                      <span className="text-slate-400 italic">null</span>
-                    ) : typeof v === 'object' ? (
-                      <code className="font-mono text-[11px]">
-                        {JSON.stringify(v)}
-                      </code>
-                    ) : (
-                      String(v)
-                    )}
-                  </dd>
-                </React.Fragment>
-              ))}
-            </dl>
-          ) : (
-            <p className="text-xs text-slate-500 italic">
-              No additional properties stored on this node.
-            </p>
-          )}
+          <NodeDetailBody node={selectedNode} onSelectSpeaker={onSelectSpeaker} />
         </div>
       )}
 
