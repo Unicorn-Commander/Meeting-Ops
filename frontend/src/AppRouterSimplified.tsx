@@ -36,6 +36,7 @@ import Terms from './pages/Terms';
 import Privacy from './pages/Privacy';
 import AUP from './pages/AUP';
 import LegalFooter from './components/LegalFooter';
+import { useAlwaysOn } from './contexts/AlwaysOnContext';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 
@@ -58,6 +59,15 @@ function readSidebarCollapsed(): boolean {
 function AppLayout({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const { organizations, activeOrganization, switchOrganization } = useOrg();
+  // Lock the workspace switcher while a recording is in flight. The recording's
+  // org is pinned at start, so switching mid-recording only causes confusion
+  // (and was how a stray session landed under the wrong workspace).
+  const { state: alwaysOnState } = useAlwaysOn();
+  const isRecording =
+    alwaysOnState === 'recording'
+    || alwaysOnState === 'paused'
+    || alwaysOnState === 'starting'
+    || alwaysOnState === 'stopping';
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Desktop-only collapse. Lazy-init from localStorage so the first
   // paint already reflects the persisted preference (no expand→collapse
@@ -110,7 +120,9 @@ function AppLayout({ children }: { children: React.ReactNode }) {
               id="org-switcher"
               value={activeOrganization?.slug ?? ''}
               onChange={(event) => switchOrganization(event.target.value)}
-              className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-zinc-500"
+              disabled={isRecording}
+              title={isRecording ? 'Stop the current recording to switch workspace' : undefined}
+              className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {organizations.map((organization) => (
                 <option key={organization.slug} value={organization.slug}>

@@ -1263,6 +1263,15 @@ async def list_summary_slices(
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    # Heartbeat. Since v3.26.9 an in-progress always-on recording buffers audio
+    # locally and uploads only at Stop, so NOTHING bumps updated_at during the
+    # meeting. The client polls this endpoint throughout recording, so treat
+    # each poll as a liveness signal and refresh updated_at — otherwise the
+    # session watchdog (status='recording' AND updated_at < threshold) reaps an
+    # ACTIVE recording mid-session and hard-deletes it.
+    if getattr(session, "status", None) == "recording":
+        session.updated_at = _now()
+        db.commit()
     slices = [_serialize_slice(s) for s in get_slices(session)]
     return {
         "session_id": session.session_id or str(session.id),
