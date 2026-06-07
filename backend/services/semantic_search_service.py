@@ -1,13 +1,13 @@
 """
 Semantic Search Service — Hybrid (Dense + Sparse BM25)
-Vector-based meeting search using Qdrant + fastembed.
+Vector-based meeting search using Qdrant.
 
-Indexes meeting transcripts and summaries as both dense (BAAI/bge-small-en-v1.5)
-and sparse (Qdrant/bm25) vector embeddings. Queries use Reciprocal Rank Fusion
-(RRF) to combine semantic similarity with keyword relevance.
-
-Uses fastembed (CPU) for embedding generation — fast enough for our scale
-(tens to hundreds of meetings, not millions of documents).
+Dense embeddings run on the shared Infinity server (BAAI/bge-m3, 1024-dim),
+consistent with the rest of the UC suite — NOT a local fastembed model. Sparse
+BM25 vectors stay local (fastembed, cheap). Queries use Reciprocal Rank Fusion
+(RRF) to combine semantic similarity with keyword relevance, and the RAG path
+(api/ai_chat.py) reranks the fused candidates with Infinity's reranker before
+building the LLM context.
 """
 
 import logging
@@ -33,10 +33,24 @@ def _resolve_qdrant():
 QDRANT_HOST, QDRANT_PORT = _resolve_qdrant()
 COLLECTION_NAME = "meeting_transcripts"
 
-# Embedding models
-DENSE_MODEL = "BAAI/bge-small-en-v1.5"   # 384-dim, fast on CPU
-DENSE_DIM = 384
-SPARSE_MODEL = "Qdrant/bm25"             # BM25 sparse via fastembed
+# Embedding models.
+# Dense embeddings run on the shared Infinity server (suite-consistent across
+# the UC apps) — NOT a local fastembed model. The vector dimension is PROBED
+# from Infinity at collection-create time so a model swap can't desync the
+# Qdrant collection; DENSE_DIM is only the fallback if the probe fails.
+DENSE_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")  # Infinity, 1024-dim
+DENSE_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))        # probe fallback only
+SPARSE_MODEL = "Qdrant/bm25"             # BM25 sparse stays local (fastembed, cheap)
+
+# Infinity embedding endpoint (OpenAI-compatible POST /embeddings). Prefer the
+# embedding-specific endpoint, fall back to the generic one, then the in-cluster
+# proxy default.
+INFINITY_EMBED_ENDPOINT = (
+    os.getenv("INFINITY_EMBEDDING_ENDPOINT")
+    or os.getenv("INFINITY_ENDPOINT")
+    or "http://unicorn-infinity-proxy:8086/v1"
+)
+INFINITY_API_KEY = os.getenv("INFINITY_API_KEY", "")
 
 # Chunk settings for long transcripts
 CHUNK_SIZE = 400  # words per chunk
@@ -64,6 +78,7 @@ class SemanticSearchService:
         self._client = None
         self._dense_embedder = None
         self._sparse_embedder = None
+        self._dense_dim = None  # probed from Infinity on first collection setup
         self._hybrid_enabled = False  # Set True after successful collection setup
         self._initialized = False
 
@@ -83,12 +98,36 @@ class SemanticSearchService:
         return self._client
 
     def _get_dense_embedder(self):
-        """Lazy-init dense embedding model (BAAI/bge-small-en-v1.5, 384-dim)."""
+        """Lazy-init the dense embedder — the shared Infinity server (suite-
+        consistent), not a local model. Returns an InfinityProvider exposing
+        ``embed_sync(texts) -> list[list[float]]``."""
         if self._dense_embedder is None:
-            from fastembed import TextEmbedding
-            self._dense_embedder = TextEmbedding(DENSE_MODEL)
-            logger.info(f"Loaded dense embedding model: {DENSE_MODEL}")
+            from services.providers.impl_embeddings import InfinityProvider
+            self._dense_embedder = InfinityProvider(
+                api_key=INFINITY_API_KEY,
+                endpoint=INFINITY_EMBED_ENDPOINT,
+                model=DENSE_MODEL,
+            )
+            logger.info(
+                "Dense embeddings via Infinity (endpoint=%s model=%s)",
+                INFINITY_EMBED_ENDPOINT, DENSE_MODEL,
+            )
         return self._dense_embedder
+
+    def _probe_dense_dim(self) -> int:
+        """Live dense-embedding dimension, probed once from Infinity so the
+        Qdrant collection can never desync from the configured model. Falls
+        back to DENSE_DIM if the probe fails."""
+        if self._dense_dim is None:
+            try:
+                vec = self._embed(["dimension probe"])
+                self._dense_dim = len(vec[0]) if vec and vec[0] else DENSE_DIM
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Dense-dim probe failed (%s); falling back to %s", exc, DENSE_DIM
+                )
+                self._dense_dim = DENSE_DIM
+        return self._dense_dim
 
     def _get_sparse_embedder(self):
         """Lazy-init sparse BM25 embedding model (Qdrant/bm25)."""
@@ -193,9 +232,15 @@ class SemanticSearchService:
         return title or body
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate dense embeddings for a list of texts."""
+        """Generate dense embeddings via the Infinity server."""
         embedder = self._get_dense_embedder()
-        return [e.tolist() for e in embedder.embed(texts)]
+        vecs = embedder.embed_sync(list(texts))
+        if not vecs or len(vecs) != len(texts):
+            raise RuntimeError(
+                f"Infinity dense embedding returned {len(vecs) if vecs else 0}/"
+                f"{len(texts)} vectors (endpoint {INFINITY_EMBED_ENDPOINT} unreachable?)"
+            )
+        return vecs
 
     def _sparse_embed(self, texts: List[str]) -> list:
         """Generate sparse BM25 embeddings for a list of texts.
@@ -226,13 +271,16 @@ class SemanticSearchService:
         collections = [c.name for c in client.get_collections().collections]
 
         needs_creation = False
+        want_dim = self._probe_dense_dim()
 
         if COLLECTION_NAME in collections:
-            # Check if the existing collection already has hybrid config
+            # Check the existing collection has hybrid config AT THE RIGHT
+            # DIMENSION. The old code only checked hybrid-vs-not and would skip
+            # a recreate on a dimension change (fastembed 384 -> Infinity
+            # bge-m3 1024), leaving Qdrant rejecting every upsert.
             info = client.get_collection(COLLECTION_NAME)
             vectors_config = info.config.params.vectors
 
-            # Named vectors will be a dict; unnamed will be a VectorParams
             has_named_dense = (
                 isinstance(vectors_config, dict) and "dense" in vectors_config
             )
@@ -240,18 +288,25 @@ class SemanticSearchService:
                 info.config.params.sparse_vectors
                 and "sparse" in info.config.params.sparse_vectors
             )
+            dense_size = (
+                getattr(vectors_config.get("dense"), "size", None)
+                if isinstance(vectors_config, dict)
+                else None
+            )
 
-            if has_named_dense and has_sparse:
-                # Already hybrid — nothing to do
+            if has_named_dense and has_sparse and dense_size == want_dim:
+                # Already hybrid at the right dimension — nothing to do
                 self._hybrid_enabled = True
                 self._initialized = True
-                logger.info("Qdrant collection already has hybrid config")
+                logger.info("Qdrant collection already hybrid at %s-dim", want_dim)
                 return
 
-            # Old collection (dense-only or wrong config) — delete and recreate
+            # Wrong config OR wrong dimension — delete + recreate. The caller
+            # MUST reindex afterward (old vectors are gone / incompatible).
             logger.info(
-                "Deleting old Qdrant collection to recreate with hybrid vectors "
-                f"(had named_dense={has_named_dense}, sparse={has_sparse})"
+                "Recreating Qdrant collection (named_dense=%s sparse=%s "
+                "dense_size=%s want=%s)",
+                has_named_dense, has_sparse, dense_size, want_dim,
             )
             client.delete_collection(COLLECTION_NAME)
             needs_creation = True
@@ -267,7 +322,7 @@ class SemanticSearchService:
                 collection_name=COLLECTION_NAME,
                 vectors_config={
                     "dense": VectorParams(
-                        size=DENSE_DIM,
+                        size=want_dim,
                         distance=Distance.COSINE,
                     ),
                 },
@@ -279,8 +334,8 @@ class SemanticSearchService:
             )
             self._hybrid_enabled = True
             logger.info(
-                f"Created Qdrant collection '{COLLECTION_NAME}' with hybrid "
-                f"vectors (dense {DENSE_DIM}-dim COSINE + sparse BM25)"
+                "Created Qdrant collection '%s' (dense %s-dim COSINE + sparse BM25)",
+                COLLECTION_NAME, want_dim,
             )
 
         self._initialized = True

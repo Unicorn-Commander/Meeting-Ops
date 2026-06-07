@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import json
 import logging
+import os
 
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession, ChatHistory
@@ -588,6 +589,45 @@ async def rag_query(
                 "rewritten_query": rewritten_query,
             }
         )
+
+    # 3b. Rerank the over-fetched candidates with Infinity's reranker so the
+    # most QUERY-RELEVANT chunks (not merely the most embedding-similar) lead
+    # the context. Best-effort + suite-consistent (same reranker the other UC
+    # apps use); if Infinity rerank is unreachable we keep the RRF order.
+    try:
+        from services.providers.impl_reranking import InfinityRerankingProvider
+
+        rr_endpoint = (
+            os.getenv("INFINITY_RERANKER_ENDPOINT")
+            or os.getenv("INFINITY_ENDPOINT")
+            or ""
+        )
+        if rr_endpoint and len(chunks) > 1:
+            reranker = InfinityRerankingProvider(
+                api_key=os.getenv("INFINITY_API_KEY", ""),
+                endpoint=rr_endpoint,
+                model=os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
+            )
+            results = await reranker.rerank(
+                query=search_query,
+                documents=[c.get("text", "") for c in chunks],
+                top_n=min(request.limit, len(chunks)),
+            )
+            ordered = []
+            for r in results or []:
+                idx = r.get("index")
+                if isinstance(idx, int) and 0 <= idx < len(chunks):
+                    c = dict(chunks[idx])
+                    c["rerank_score"] = r.get("relevance_score", r.get("score"))
+                    ordered.append(c)
+            if ordered:
+                logger.info(
+                    "RAG reranked %d candidates -> top %d via Infinity",
+                    len(chunks), len(ordered),
+                )
+                chunks = ordered
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"RAG rerank skipped (non-fatal): {e}")
 
     # 4. Assemble context within token budget (reduced from 12000 to 9000 to
     #    make room for ~1500 chars of chat history in the prompt)
