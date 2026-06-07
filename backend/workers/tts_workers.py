@@ -32,9 +32,12 @@ async def render_tts_summary_job(
     fmt: str,
 ) -> dict[str, Any]:
     """Render the single-voice summary TTS audio off the request path."""
+    import os
+
     from database.database import SessionLocal
     from database.models import RecordingSession
-    from api.tts import _summary_text, _output_path
+    from api.tts import _summary_text, _output_path, _build_spoken_script
+    from services.providers.impl_tts import KokoroProvider
     from services.providers.registry import ProviderRegistry
 
     db = SessionLocal()
@@ -43,14 +46,33 @@ async def render_tts_summary_job(
         if not session:
             return {"status": "failed", "error": "session_missing", "session_pk": session_pk}
 
-        text = _summary_text(session)
+        # Vocal summary: a Qwen-generated SPOKEN narration (distinct from the
+        # written summary), cached on the session, read aloud by Kokoro — voice
+        # AF Heart by default. Always Kokoro, independent of the org's podcast
+        # TTS provider.
+        fs = session.final_summary if isinstance(session.final_summary, dict) else {}
+        text = (fs.get("spoken_script") or "").strip()
         if not text:
-            return {"status": "failed", "error": "no_summary_text", "session_pk": session_pk}
+            written = _summary_text(session)
+            if not written:
+                return {"status": "failed", "error": "no_summary_text", "session_pk": session_pk}
+            registry = ProviderRegistry(db)
+            text = (await _build_spoken_script(registry, org_id, written) or written).strip()
+            if text and text != written:
+                new_fs = dict(fs)
+                new_fs["spoken_script"] = text
+                session.final_summary = new_fs
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    db.rollback()
 
         out_path = _output_path(org_slug, session_pk, "summary", fmt)
-        registry = ProviderRegistry(db)
-        provider = registry.get_tts(org_id)
-        provider_name = getattr(provider, "name", "unknown")
+        provider = KokoroProvider(
+            endpoint=os.getenv("KOKORO_ENDPOINT") or "http://192.168.10.14:8880"
+        )
+        provider_name = provider.name
+        voice = voice or "af_heart"
 
         try:
             audio_bytes = await provider.synthesize(text, voice=voice, format=fmt)

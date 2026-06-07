@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+## [3.28.2] - 2026-06-07
+
+### Added
+- **Vocal summary (Kokoro · AF Heart).** The session "Listen" panel is now a Vocal summary: Qwen 3.6 writes a SPOKEN-style narration — conversational prose shaped for the ear, distinct from the written summary — cached on the session, and Kokoro TTS reads it aloud in the **AF Heart** voice (defaults to `af_heart`, always renders via Kokoro independent of the org's podcast provider). Kokoro lives on midboy2 (`192.168.10.14:8880`); the `render_tts_summary_job` points there. (The customer node will need its own Kokoro reachability before this works there — midboy2 is LAN-local to the bigboy cluster.)
+
+### Changed
+- **Per-session "Open in Brigade" → "View in Knowledge Graph"** — the link on a meeting now opens the in-app Knowledge Graph (`/knowledge-graph`) instead of Brigade (internal infra that wasn't a customer destination).
+- **Podcast summary hidden** — the two-voice podcast-recap UI is gated off (code kept, just not rendered). Future: a separate charge or an export to Podcast-Ops.
+
 ## [3.28.1] - 2026-06-07
 
 ### Added

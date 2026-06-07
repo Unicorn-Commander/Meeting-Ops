@@ -435,6 +435,43 @@ async def _build_podcast_script(
     return parsed
 
 
+SPOKEN_SUMMARY_SYSTEM_PROMPT = (
+    "You are a warm, natural-sounding narrator. Rewrite the meeting summary below "
+    "as SPOKEN narration for a single voice to read aloud — flowing conversational "
+    "prose, NOT bullet points, headings, or markdown. Use short, clear sentences "
+    "with natural pacing. Open with a one-line orientation of what the meeting was "
+    "about, then walk through the key points, decisions, and action items as if "
+    "telling a colleague what happened. Keep it tight — about 120-220 words "
+    "(~45-90 seconds of speech). Output ONLY the narration text, no preamble."
+)
+
+
+async def _build_spoken_script(
+    registry: ProviderRegistry,
+    org_id: int,
+    summary_text: str,
+) -> str:
+    """Qwen-generated SPOKEN narration of the summary for the Kokoro vocal
+    summary — distinct from the written summary, shaped for the ear."""
+    llm = registry.get_llm(org_id, task="quality")
+    user_prompt = (
+        "Meeting summary to narrate aloud:\n\n"
+        + summary_text.strip()
+        + "\n\nWrite the spoken narration now."
+    )
+    try:
+        raw = await llm.chat(
+            SPOKEN_SUMMARY_SYSTEM_PROMPT,
+            user_prompt,
+            max_tokens=600,
+            temperature=0.6,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Spoken-summary script generation failed: %s", exc)
+        return ""
+    return (raw or "").strip()
+
+
 def _normalize_speaker_ids(
     script: list[dict],
     *,

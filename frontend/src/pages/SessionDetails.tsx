@@ -2531,20 +2531,18 @@ export const SessionDetails: React.FC = () => {
               <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
                 <div className="flex items-start gap-3">
                   <span className="font-semibold text-indigo-900">
-                    This meeting is in the Brigade knowledge graph.
+                    This meeting's people connect across your Knowledge Graph.
                   </span>
                   <span className="text-indigo-700">
-                    Speakers, action items, topics, and decisions are
-                    connected as a navigable graph.
+                    Explore how attendees link across meetings — co-speakers,
+                    topics, decisions, and action items.
                   </span>
                 </div>
                 <a
-                  href={session.brigade_graph_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  href="/knowledge-graph"
                   className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors whitespace-nowrap"
                 >
-                  View in Brigade graph
+                  View in Knowledge Graph
                 </a>
               </div>
             )}
@@ -2829,7 +2827,7 @@ export const SessionDetails: React.FC = () => {
               <div className="bg-white rounded-lg shadow-sm p-6 space-y-4">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <Volume2 className="w-5 h-5 text-purple-600" />
-                  Listen
+                  Vocal summary
                   {ttsProvider && (
                     <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full font-normal">
                       {ttsProvider.name}
@@ -2866,13 +2864,13 @@ export const SessionDetails: React.FC = () => {
                         ) : (
                           <Play className="w-4 h-4" />
                         )}
-                        {summaryAudioLoading ? 'Synthesizing...' : 'Listen to summary'}
+                        {summaryAudioLoading ? 'Narrating…' : 'Generate vocal summary'}
                       </button>
                     ) : (
                       <AudioPlayer
                         src={summaryAudioUrl}
                         downloadAs={`summary-${session.id || sessionId}.mp3`}
-                        caption="AI-narrated meeting summary."
+                        caption="AI vocal summary — a spoken narration (Kokoro · AF Heart), written for the ear and distinct from the notes above."
                         onRegenerate={() => synthesizeSummary(true)}
                         regenerating={summaryAudioLoading}
                       />
@@ -2882,7 +2880,10 @@ export const SessionDetails: React.FC = () => {
                     )}
                   </div>
 
-                  {ttsProvider?.supports_podcast && (
+                  {/* Podcast summary hidden 2026-06-07 (#33) — not wanted now;
+                      future: separate charge or export to Podcast-Ops. Code kept,
+                      just gated off so it renders nothing. */}
+                  {false && ttsProvider?.supports_podcast && (
                     <div className="pt-3 border-t border-gray-100">
                       {ttsVoices.length > 1 && (
                         <div className="mb-2 grid grid-cols-2 gap-2">
@@ -2931,8 +2932,8 @@ export const SessionDetails: React.FC = () => {
                       ) : (
                         <div className="space-y-3">
                           <AudioPlayer
-                            src={podcastAudioUrl}
-                            downloadAs={`podcast-${session.id || sessionId}.mp3`}
+                            src={podcastAudioUrl ?? ''}
+                            downloadAs={`podcast-${session?.id || sessionId}.mp3`}
                             caption="Two-host podcast recap (host + analyst)."
                             onRegenerate={() => synthesizePodcast(true)}
                             regenerating={podcastAudioLoading}
