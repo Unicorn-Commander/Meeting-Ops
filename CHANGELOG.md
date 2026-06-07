@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Reprocess jobs crashed instantly with `TypeError: ... unexpected keyword argument 'job_id'`** [hotfix on v3.26.15] — `enqueue_reprocess` (`workers/reprocess_workers.py`) passed `job_id=` to `pool.enqueue_job`, but Arq's reserved kwargs are underscore-prefixed (`_job_id`); the bare `job_id` was forwarded into `reprocess_session_job()` (which has no such param), so every reprocess job failed on pickup. Changed to `_job_id` (which also serves as the per-session idempotency key). Latent behind the DB-mismatch bug below — jobs never reached a worker to hit it until that was fixed.
 - **Always-on recordings never finished processing (reprocess queue DB mismatch)** [hotfix on v3.26.15] — the Arq reprocess worker (`meet-bulk-import-worker`) consumes from `ARQ_REDIS_URL` (Redis **db 4**), but the backend service had no `ARQ_REDIS_URL`, so `get_arq_pool()` (`workers/bulk_import_worker.py`) fell back to `REDIS_URL` (**db 6**) and enqueued every `finalize_session_job` to a DB no worker watches. Recordings uploaded + finalized fine but sat at `status=processing` until the session watchdog failed them ~6h later — no canonical transcript/summary/title ever produced. Added `ARQ_REDIS_URL=...redis/4` to the backend compose env so enqueue and consume share db 4. Backend env-only change; the on-startup reprocess-recovery re-enqueues any in-flight `processing` sessions onto the correct queue. Latent since the v3.26 (P-00065) Arq reprocess queue shipped — the worker got the env var, the backend didn't.
 
 ### Added

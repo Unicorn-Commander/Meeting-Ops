@@ -184,7 +184,10 @@ async def enqueue_reprocess(session_pk: int, *, background_tasks=None) -> Option
                     "(deprioritize, not block)",
                     org_id, new_total, _max_daily_audio_hours(), defer,
                 )
-        kwargs: dict[str, Any] = {"job_id": f"reprocess-{session_pk}"}
+        # Arq reserved kwargs are underscore-prefixed (_job_id, _defer_by). A
+        # bare "job_id" gets forwarded to reprocess_session_job() and raises
+        # TypeError; _job_id also doubles as the per-session idempotency key.
+        kwargs: dict[str, Any] = {"_job_id": f"reprocess-{session_pk}"}
         if defer:
             kwargs["_defer_by"] = defer
         job = await pool.enqueue_job(
