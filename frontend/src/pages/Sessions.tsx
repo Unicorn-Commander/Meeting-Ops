@@ -189,6 +189,45 @@ function effectiveSessionDate(session: Session, basis: DateBasis): string {
   return session.created_at;
 }
 
+/** Day-header label for date dividers: Today / Yesterday / weekday / full date. */
+function dayHeaderLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'Undated';
+  const a = new Date(); a.setHours(0, 0, 0, 0);
+  const b = new Date(d); b.setHours(0, 0, 0, 0);
+  const diff = Math.round((a.getTime() - b.getTime()) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff > 1 && diff < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** The group a session falls under for the active sort, or null when the sort
+ *  mode isn't grouped (name / duration stay a flat list). */
+function sessionGroupLabel(session: Session, sortBy: SortKey, basis: DateBasis): string | null {
+  if (sortBy === 'date') return dayHeaderLabel(effectiveSessionDate(session, basis));
+  if (sortBy === 'speakers') {
+    const bucket = SPEAKER_BUCKETS.find((bk) => bk.test(deriveSpeakerCount(session)));
+    return bucket ? bucket.label : 'Speakers';
+  }
+  if (sortBy === 'status') {
+    const s = session.status || 'unknown';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  return null;
+}
+
+/** Divider label to render BEFORE item i (when its group differs from the
+ *  previous item's), else null — drives the date/sort group headers. */
+function sessionDividerLabel(
+  list: Session[], i: number, sortBy: SortKey, basis: DateBasis,
+): string | null {
+  const label = sessionGroupLabel(list[i], sortBy, basis);
+  if (!label) return null;
+  const prev = i > 0 ? sessionGroupLabel(list[i - 1], sortBy, basis) : null;
+  return label !== prev ? label : null;
+}
+
 function deriveSpeakerCount(session: Session): number {
   if (typeof session.speaker_count === 'number' && session.speaker_count > 0) {
     return session.speaker_count;
@@ -2445,9 +2484,14 @@ export const Sessions: React.FC = () => {
                 Upload with options…
               </button>
             </div>
-            {filteredSessions.map(session => (
+            {filteredSessions.map((session, _i) => (
+              <React.Fragment key={session.id}>
+                {sessionDividerLabel(filteredSessions, _i, sortBy, dateBasis) && (
+                  <div className="col-span-full mt-3 mb-1 border-t border-gray-800 pt-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {sessionDividerLabel(filteredSessions, _i, sortBy, dateBasis)}
+                  </div>
+                )}
               <div
-                key={session.id}
                 className={`bg-gray-900 border rounded-lg hover:border-gray-700 transition-all p-6 ${
                   selectedSessionIds.includes(session.id)
                     ? 'border-purple-500/70 ring-1 ring-purple-500/40'
@@ -2636,6 +2680,7 @@ export const Sessions: React.FC = () => {
                   </div>
                 </div>
               </div>
+              </React.Fragment>
             ))}
           </div>
           ) : (

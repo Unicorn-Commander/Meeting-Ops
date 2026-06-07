@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.28.1] - 2026-06-07
+
+### Added
+- **Sessions card view: date / group dividers.** The grid view now renders a section header before each group as you scroll — by **day** when sorted by date (Today / Yesterday / weekday / full date), by **speaker-count bucket** when sorted by speakers, and by **status** when sorted by status (name/duration stay a flat list). Completes the Sessions list-grouping work (the summary snippet + refresh controls shipped in 3.28.0). The table view keeps its sortable Date column.
+
 ## [3.28.0] - 2026-06-07
 
 **The Knowledge Graph becomes a real, person-centric feature; cross-meeting search + RAG are made whole; and embeddings + reranking move onto the shared Infinity server (suite-consistent).** Built on v3.27.0 the same day.
