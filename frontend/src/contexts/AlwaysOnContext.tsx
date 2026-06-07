@@ -348,11 +348,27 @@ function transcriptSegmentId(sessionId: string, segment: any): string {
   ].join(':');
 }
 
+/**
+ * Build the X-MeetingOps-Org header for a given org slug. The recording
+ * lifecycle calls (start-always-on, /full-audio, /finalize, /finalize-audio)
+ * MUST all target the SAME org the session was created under, or the backend
+ * lookup 404s with "Session not found." We capture that slug at create time
+ * (sessionOrgSlugRef) rather than reading the live active org, so a
+ * mid-session org switch can't repoint the upload at the wrong org.
+ */
+function orgHeader(slug: string | null | undefined): Record<string, string> {
+  return slug ? { 'X-MeetingOps-Org': slug } : {};
+}
+
 export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const { activeOrganization } = useOrg();
   const { hasFeature } = useTierFeatures();
   const canUseServerProcessing = hasFeature('canonical_reprocess');
   const canUseServerProcessingRef = useRef(canUseServerProcessing);
+  // Slug of the org the *current* server session was created under. Set in
+  // createSession() and reused for /full-audio + /finalize at stop so all
+  // three calls resolve to the same org server-side (fixes full-audio 404).
+  const sessionOrgSlugRef = useRef<string | null>(null);
   const [state, setState] = useState<AlwaysOnState>('idle');
   const [vadActive, setVadActive] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -823,7 +839,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     const response = await fetch(`${config.apiUrl}/api/recordings/start-always-on`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...orgHeader(activeOrganization.slug) },
+      credentials: 'include',
       body: JSON.stringify({
         org_id: activeOrganization.id,
         source_label: formatSourceLabel(),
@@ -841,6 +858,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     const sessionId = String(session.id);
     setCurrentSessionId(sessionId);
     sessionRef.current = sessionId;
+    // Pin the org this session lives under for stop-time /full-audio +
+    // /finalize, regardless of any later active-org switch.
+    sessionOrgSlugRef.current = activeOrganization.slug ?? null;
     return sessionId;
   }, [activeOrganization]);
 
@@ -854,6 +874,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     }
     const response = await fetch(`${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`, {
       method: 'POST',
+      headers: orgHeader(sessionOrgSlugRef.current),
+      credentials: 'include',
     });
     if (!response.ok) {
       const detail = await response.text();
@@ -873,7 +895,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     try {
       await fetch(
         `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize-audio`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: orgHeader(sessionOrgSlugRef.current),
+          credentials: 'include',
+        },
       ).then(async (response) => {
         if (response.status === 403) {
           showPaidFeaturePrompt();
@@ -2007,7 +2033,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
             // reprocess pipeline (returns reprocessing_started=true).
             const result = await postFullAudio({
               apiUrl: config.apiUrl,
-              orgSlug: activeOrganization?.slug ?? null,
+              orgSlug: sessionOrgSlugRef.current,
               sessionId,
               blob: uploadBlob,
               mimeType: uploadMime,
@@ -2037,7 +2063,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           setStatusText('Finalizing');
           const finalizeResp = await fetch(
             `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
-            { method: 'POST' },
+            {
+              method: 'POST',
+              headers: orgHeader(sessionOrgSlugRef.current),
+              credentials: 'include',
+            },
           );
           if (!finalizeResp.ok) {
             if (finalizeResp.status === 403) {

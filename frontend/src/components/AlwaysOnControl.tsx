@@ -355,7 +355,7 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
               aria-checked={active}
               disabled={card.disabled}
               onClick={card.onClick}
-              className={`flex flex-col items-start gap-2 rounded-lg border px-3 py-3 text-left text-xs transition-colors ${
+              className={`flex flex-col items-start gap-1 rounded-lg border px-3 py-2.5 text-left text-xs transition-colors ${
                 active
                   ? 'border-fuchsia-500 bg-fuchsia-600/20 text-white'
                   : 'border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
@@ -363,7 +363,7 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
               title={
                 card.id !== 'inperson' && !tabSupported
                   ? 'Tab audio requires a Chromium-based desktop browser'
-                  : undefined
+                  : card.blurb
               }
             >
               <div className="flex items-center gap-2">
@@ -371,7 +371,6 @@ function AudioSourcePicker({ value, onChange, disabled }: AudioSourcePickerProps
                 <span className="font-semibold">{card.title}</span>
               </div>
               <div className="text-[11px] text-zinc-400">{card.sub}</div>
-              <div className="text-[11px] leading-4 text-zinc-500">{card.blurb}</div>
             </button>
           );
         })}
@@ -689,7 +688,7 @@ export default function AlwaysOnControl() {
           readOnly
           value={transcriptText}
           placeholder="No transcript yet."
-          className="h-[28rem] w-full resize-none rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+          className="h-[28rem] min-h-[16rem] w-full resize-y rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
         />
       </div>
       <div>
@@ -724,7 +723,7 @@ export default function AlwaysOnControl() {
         <div
           ref={summaryScroll.ref}
           onScroll={summaryScroll.handleScroll}
-          className="space-y-3 max-h-[28rem] overflow-y-auto pr-1"
+          className="h-[28rem] min-h-[16rem] resize-y space-y-3 overflow-y-auto overflow-x-hidden pr-1"
         >
           {alwaysOn.summary.currentDraft && (
             <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">

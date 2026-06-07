@@ -338,6 +338,17 @@ export class AlwaysOnVadEngine {
       // UI can attach a VU meter to the same stream without prompting
       // for permission a second time.
       getStream: async () => stream,
+      // Keep the user's selected stream alive across pause/resume. The
+      // library's default pauseStream stop()s every track (permanent) and
+      // its default resumeStream re-opens getUserMedia with hard-coded
+      // default-mic constraints — both wrong for our mic / tab / mic+tab
+      // sources and for the parallel full-audio MediaRecorder bound to this
+      // same stream. MicVAD.pause()/start() already disconnect/reconnect the
+      // internal node graph, which is all we need to gate frame processing.
+      pauseStream: async () => {
+        /* no-op: never tear down the shared capture stream on pause */
+      },
+      resumeStream: async (s: MediaStream) => s,
       onSpeechStart: () => {
         this.clearSilenceTimer();
         this.options.onSpeechStart?.();

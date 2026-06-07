@@ -586,7 +586,11 @@ export default function PipelineStatusPicker({
           options={sttOptions}
           value={effectiveSttValue}
           onChange={onStt}
-          sublabel={pipeline?.stt?.gpu ?? pipeline?.stt?.engine}
+          sublabel={
+            effectiveSttValue === 'browser-parakeet'
+              ? 'On-device (browser)'
+              : pipeline?.stt?.gpu ?? pipeline?.stt?.engine
+          }
           statusColor={pipeline?.stt?.ready ? 'bg-green-400' : 'bg-red-400'}
         />
 
@@ -607,7 +611,11 @@ export default function PipelineStatusPicker({
           options={llmOptions}
           value={effectiveLlmValue}
           onChange={onLlm}
-          sublabel={pipeline?.llm?.route}
+          sublabel={
+            llmOptions.find((o) => o.value === effectiveLlmValue)?.tier === 'browser'
+              ? 'On-device (browser)'
+              : pipeline?.llm?.route
+          }
           customForSession={isCustomLlm}
           statusColor={pipeline?.llm?.ready ? 'bg-yellow-400' : 'bg-red-400'}
         />
