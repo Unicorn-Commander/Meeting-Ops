@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Network, ExternalLink, Search, RefreshCw } from 'lucide-react';
+import { Network, Search, RefreshCw } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import BrigadeGraphViewer, {
@@ -40,6 +40,9 @@ export default function KnowledgeGraph() {
   // the first person — so the page opens on a real graph, not a blank canvas.
   const [meResolved, setMeResolved] = useState(false);
   const [autoSelected, setAutoSelected] = useState(false);
+
+  // Walk-the-graph history (person → person via node clicks) → powers Back.
+  const [history, setHistory] = useState<SpeakerRow[]>([]);
 
   const authFetch = useCallback(
     async (path: string) => {
@@ -189,6 +192,7 @@ export default function KnowledgeGraph() {
                   key={s.id}
                   type="button"
                   onClick={() => {
+                    setHistory([]);
                     setSelected(s);
                     setQuery('');
                   }}
@@ -224,6 +228,20 @@ export default function KnowledgeGraph() {
 
       {speakersError && (
         <p className="mb-3 text-sm text-amber-400">Couldn’t load people: {speakersError}</p>
+      )}
+
+      {history.length > 0 && (
+        <button
+          type="button"
+          onClick={() => {
+            const prev = history[history.length - 1];
+            setHistory((h) => h.slice(0, -1));
+            if (prev) setSelected(prev);
+          }}
+          className="mb-3 inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-fuchsia-500 hover:text-fuchsia-200"
+        >
+          ← Back to {history[history.length - 1].display_name}
+        </button>
       )}
 
       {/* Body */}
@@ -293,21 +311,11 @@ export default function KnowledgeGraph() {
             <BrigadeGraphViewer
               data={graph}
               height={520}
-              onSelectSpeaker={(id, name) => setSelected({ id, display_name: name })}
+              onSelectSpeaker={(id, name) => {
+                setHistory((h) => (selected ? [...h, selected] : h));
+                setSelected({ id, display_name: name });
+              }}
             />
-          )}
-
-          {graph.graph_url && (
-            <div className="flex justify-end">
-              <a
-                href={graph.graph_url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-fuchsia-300"
-              >
-                <ExternalLink className="h-3.5 w-3.5" /> Open full graph in Brigade
-              </a>
-            </div>
           )}
         </div>
       )}

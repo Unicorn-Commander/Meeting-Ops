@@ -1,9 +1,12 @@
 """
 Brigade agent source — federates Unicorn Brigade agents into Meeting-Ops.
 
-Forwards the user's bearer JWT (same uchub realm) so Brigade applies its own
-role-based filtering. Caches list responses per (org_id, user_email) for ~60s
-in Redis to avoid hammering Brigade on every page load.
+Auth: the Brigade ``/api/v1/agents`` read path is service-authed — it wants the
+same ``X-API-Key`` service key the writer/client use, NOT a user JWT (a user
+bearer 401s, which is the bug this fixes). Failures degrade to "no Brigade
+agents" rather than surfacing an error in the chat picker. Caches list
+responses per (org_id, user_email) for ~60s in Redis to avoid hammering
+Brigade on every page load.
 """
 from __future__ import annotations
 
@@ -28,6 +31,13 @@ HTTP_TIMEOUT = 5.0  # short — UI must stay snappy when Brigade is down
 
 def _brigade_base() -> str:
     return os.getenv("BRIGADE_URL", BRIGADE_URL_DEFAULT).rstrip("/")
+
+
+def _brigade_api_key() -> Optional[str]:
+    """Brigade service key — the same one brigade_client / brigade_writer use.
+    The agents read endpoint is service-authed, so we send X-API-Key (a user
+    JWT 401s)."""
+    return os.getenv("BRIGADE_API_KEY") or os.getenv("BRIGADE_ADMIN_KEY") or None
 
 
 def _bearer_from_request(request: Request) -> Optional[str]:
@@ -145,9 +155,9 @@ class BrigadeAgentSource(AgentSource):
         db: Session,
         org_id: int,
     ):
-        bearer = _bearer_from_request(request)
-        if not bearer:
-            logger.debug("No bearer token on request — skipping Brigade source")
+        api_key = _brigade_api_key()
+        if not api_key:
+            logger.debug("No Brigade API key configured — skipping Brigade source")
             return []
 
         cache_key = _user_cache_key(request, org_id)
@@ -156,12 +166,19 @@ class BrigadeAgentSource(AgentSource):
             return [_map_brigade_agent_to_descriptor(raw) for raw in cached]
 
         url = f"{_brigade_base()}/api/v1/agents"
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.get(url, headers={"Authorization": bearer})
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                resp = await client.get(url, headers={"X-API-Key": api_key})
+        except Exception as exc:  # noqa: BLE001 — network/timeout, never surface
+            logger.warning("Brigade agents fetch failed (suppressed): %s", exc)
+            return []
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"Brigade /api/v1/agents returned HTTP {resp.status_code}"
+            # Degrade to "no Brigade agents" instead of raising — a Brigade
+            # hiccup must NOT dump an error into the chat agent picker.
+            logger.warning(
+                "Brigade /api/v1/agents returned HTTP %s (suppressed)", resp.status_code
             )
+            return []
 
         body = resp.json()
         if isinstance(body, dict):
@@ -185,12 +202,16 @@ class BrigadeAgentSource(AgentSource):
         if not agent_id.startswith("brigade:"):
             return None
         real_id = agent_id.split(":", 1)[1]
-        bearer = _bearer_from_request(request)
-        if not bearer:
+        api_key = _brigade_api_key()
+        if not api_key:
             return None
         url = f"{_brigade_base()}/api/v1/agents/{real_id}"
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.get(url, headers={"Authorization": bearer})
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                resp = await client.get(url, headers={"X-API-Key": api_key})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Brigade get agent %s failed (suppressed): %s", real_id, exc)
+            return None
         if resp.status_code != 200:
             logger.warning(f"Brigade get agent {real_id} returned {resp.status_code}")
             return None

@@ -202,7 +202,9 @@ async def _person_payload(
     envelope = {
         "speaker_id": speaker.id,
         "speaker_name": speaker.display_name,
-        "graph_url": _person_graph_url(speaker_node, org_id),
+        # Brigade is internal infrastructure, not a customer destination — no
+        # "Open in Brigade" deep-link on the in-app graph (the page IS the view).
+        "graph_url": None,
         "focus": speaker_node,
         "node_cap": _NODE_CAP,
     }

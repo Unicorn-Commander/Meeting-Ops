@@ -514,8 +514,10 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
         </div>
       )}
 
-      {/* "Open in Brigade" full-screen affordance */}
-      {data.graph_url && (
+      {/* Footer: node/edge count (always) + optional "Open in Brigade"
+          (only when the backend supplies a graph_url — the Knowledge Graph
+          page deliberately omits it; Brigade is internal infra). */}
+      {data.nodes.length > 0 && (
         <div className="flex items-center justify-between gap-3 text-xs text-slate-600 px-1">
           <span>
             {data.nodes.length} node{data.nodes.length === 1 ? '' : 's'},{' '}
@@ -527,15 +529,17 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
               </>
             )}
           </span>
-          <a
-            href={data.graph_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
-          >
-            Open in Brigade
-            <ExternalLink className="w-3 h-3" />
-          </a>
+          {data.graph_url && (
+            <a
+              href={data.graph_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
+            >
+              Open in Brigade
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
         </div>
       )}
     </div>
