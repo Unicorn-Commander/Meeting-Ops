@@ -9,6 +9,7 @@ import LiveRecording from './pages/LiveRecording';
 import Dashboard from './pages/Dashboard';
 import RAGChat from './pages/RAGChat';
 import DigestsPage from './pages/Digests';
+import KnowledgeGraph from './pages/KnowledgeGraph';
 import { Sessions } from './pages/Sessions';
 import { SessionDetails } from './pages/SessionDetails';
 import { SpeakerLibrary } from './pages/SpeakerLibrary';
@@ -174,6 +175,15 @@ function SimplifiedNavigation({
   // that admin items move OUT of the main list and into their own
   // section, so Speakers / Rooms (the multi-tenant configuration
   // surfaces) get pushed to the admin section below.
+  // Knowledge Graph page kill-switch. Ships dark — hidden unless
+  // VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=true (default OFF). The backend gates the
+  // endpoint by tier, so typing the URL manually still resolves safely.
+  const knowledgeGraphEnabled =
+    String(
+      (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+        ?.VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED || '',
+    ).toLowerCase() === 'true';
+
   const navItems: NavItem[] = [
     { path: '/record', label: 'Record', icon: '🎙️', primary: true },
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
@@ -181,6 +191,9 @@ function SimplifiedNavigation({
     { path: '/import', label: 'Import / Export', icon: FolderUp },
     { path: '/local-sessions', label: 'Local Sessions', icon: Lock },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
+    ...(knowledgeGraphEnabled
+      ? [{ path: '/knowledge-graph', label: 'Knowledge Graph', icon: '🕸️' } as NavItem]
+      : []),
     { path: '/digests', label: 'Digests', icon: '📊' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
     { path: '/help', label: 'Help', icon: HelpCircle },
@@ -623,6 +636,12 @@ export function AppRouterSimplified() {
       <Route path="/digests" element={
         <ProtectedRoute>
           <DigestsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/knowledge-graph" element={
+        <ProtectedRoute>
+          <KnowledgeGraph />
         </ProtectedRoute>
       } />
 

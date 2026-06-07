@@ -29,6 +29,13 @@ ENV VITE_POSTHOG_KEY=$VITE_POSTHOG_KEY
 ARG VITE_POSTHOG_HOST=https://us.i.posthog.com
 ENV VITE_POSTHOG_HOST=$VITE_POSTHOG_HOST
 
+# Knowledge Graph page kill-switch (ship-dark). When "true" the
+# /knowledge-graph nav item + page render; default "false" hides them (the
+# backend endpoint is tier-gated regardless). Build with
+# VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=true to enable on a given deploy.
+ARG VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=false
+ENV VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=$VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED
+
 WORKDIR /app
 
 # Copy package files

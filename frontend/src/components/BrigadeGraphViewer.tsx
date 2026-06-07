@@ -45,7 +45,7 @@ import { useOrg } from '../contexts/OrgContext';
 // React.lazy code-split.
 // ---------------------------------------------------------------------------
 
-interface BrigadeNode {
+export interface BrigadeNode {
   id: string;
   label: string; // "Meeting" | "Speaker" | "ActionItem" | "Topic" | "Decision" | other
   name: string;
@@ -53,20 +53,25 @@ interface BrigadeNode {
   properties?: Record<string, unknown>;
 }
 
-interface BrigadeLink {
+export interface BrigadeLink {
   source: string;
   target: string;
   type: string; // "HAS_SPEAKER" | "HAS_ACTION_ITEM" | "HAS_TOPIC" | "HAS_DECISION" | "ASSIGNED_TO" | "DECIDED_BY" | other
   properties?: Record<string, unknown>;
 }
 
-interface BrigadeGraphResponse {
+export interface BrigadeGraphResponse {
   nodes: BrigadeNode[];
   links: BrigadeLink[];
   graph_url: string | null;
   focus: string | null;
-  reason: 'not_synced_yet' | 'live_failed' | null;
-  synced_at: string | null;
+  reason: 'not_synced_yet' | 'live_failed' | 'single_meeting' | null;
+  synced_at?: string | null;
+  // Knowledge Graph person-view extras (optional; unused by the session view).
+  truncated?: boolean;
+  node_cap?: number;
+  speaker_id?: number;
+  speaker_name?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,13 +105,19 @@ function sizeForNode(node: BrigadeNode): number {
 // ---------------------------------------------------------------------------
 
 export interface BrigadeGraphViewerProps {
-  sessionId: string;
+  /** Fetch the per-session graph by id. Ignored when `data` is provided. */
+  sessionId?: string;
+  /** Pre-fetched graph payload. When set, the viewer renders it directly and
+   *  skips its own fetch (used by the cross-meeting Knowledge Graph page,
+   *  which owns the fetch + its own empty-state copy). */
+  data?: BrigadeGraphResponse;
   height?: number;
   showLabels?: boolean;
 }
 
 const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
   sessionId,
+  data: externalData,
   height = 480,
   showLabels = true,
 }) => {
@@ -114,8 +125,8 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<unknown>(null);
 
-  const [data, setData] = useState<BrigadeGraphResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<BrigadeGraphResponse | null>(externalData ?? null);
+  const [loading, setLoading] = useState(!externalData);
   const [error, setError] = useState<string | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [selectedNode, setSelectedNode] = useState<BrigadeNode | null>(null);
@@ -156,8 +167,20 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
   }, [sessionId, getOrgQueryUrl]);
 
   useEffect(() => {
+    // Parent-supplied data renders directly (no fetch) — the Knowledge Graph
+    // page drives the viewer this way.
+    if (externalData) {
+      setData(externalData);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    if (!sessionId) {
+      setLoading(false);
+      return;
+    }
     fetchGraph();
-  }, [fetchGraph]);
+  }, [externalData, sessionId, fetchGraph]);
 
   // react-force-graph-3d wants nodes + links to be REFERENCES that
   // match (link.source === node.id). We pass the response shape

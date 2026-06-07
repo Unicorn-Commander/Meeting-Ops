@@ -297,6 +297,8 @@ _load_router(
     "api.recording",
     router_attr="brigade_graph_router",
 )
+# Knowledge Graph — cross-meeting person-centric subgraph (absolute paths).
+_load_router(app, "knowledge_graph", "api.knowledge_graph")
 _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
 # Per-meeting permissions (collaborators + magic-link share). Two
 # routers in one module: `router` carries the auth'd per-session
