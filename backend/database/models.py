@@ -564,6 +564,11 @@ class SpeakerProfile(Base):
     contact_link_confirmed = Column(Boolean, nullable=False, default=False, server_default="false")
     contact_link_confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     contact_link_confirmed_at = Column(DateTime, nullable=True)
+    # Meeting-Ops-local avatar override (043_speaker_photo_url). Highest
+    # priority in the avatar chain: MO override > Contact-Ops federated
+    # photo (via contact_id) > generated initials. Lets a user pin a face
+    # even for a speaker not linked to a Contact-Ops person.
+    photo_url = Column(String(1000), nullable=True)
     notes = Column(Text, nullable=True)
     centroid_embedding = Column(LargeBinary, nullable=True)
     embedding_dim = Column(Integer, nullable=True)
