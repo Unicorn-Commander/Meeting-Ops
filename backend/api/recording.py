@@ -2624,12 +2624,11 @@ async def get_brigade_graph(
     #    can render the empty-state with a retry button instead of a
     #    500. We do NOT cache the failure path so the next page load
     #    retries.
+    # Brigade is internal infrastructure, not a customer destination — the
+    # in-app Knowledge Graph (this inline 3D viewer + the /knowledge-graph page)
+    # IS the surface. Never emit an "Open in Brigade" deep-link; the viewer
+    # footer then shows just the node/edge count.
     graph_url = None
-    try:
-        graph_url = build_brigade_graph_url(session)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("brigade_graph build_url failed session=%s: %s", session.id, exc)
-        graph_url = None
 
     brigade_client = BrigadeClient()
     try:
