@@ -1853,6 +1853,63 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 exc,
             )
 
+        # Stage 5.9 — semantic index (Qdrant) for cross-meeting search + RAG.
+        # This is the step that was MISSING from the reprocess pipeline: only
+        # the legacy simple_recording_db finalize indexed, so every always-on
+        # finalize AND every upload produced a transcript/summary that never
+        # reached Qdrant — recent meetings silently vanished from search + RAG
+        # chat (sessions 496/499/502 all had 0 points). We index AFTER
+        # identify_speakers has rewritten the diarized labels with real names,
+        # and build the indexed transcript FROM the diarized segments so the
+        # per-chunk ``speakers`` payload (and therefore speaker-aware RAG) is
+        # populated. Best-effort + off-thread (sync HTTP to Infinity + Qdrant);
+        # a failure never blocks completion.
+        try:
+            from services.semantic_search_service import semantic_search
+
+            _segs = (
+                session.transcript_diarized.get("segments")
+                if isinstance(session.transcript_diarized, dict)
+                else None
+            )
+            if _segs:
+                _index_transcript = "\n".join(
+                    f"{(seg.get('speaker') or 'Speaker')}: {(seg.get('text') or '').strip()}"
+                    for seg in _segs
+                    if (seg.get("text") or "").strip()
+                )
+            else:
+                _index_transcript = session.transcript_simple or session.transcript or ""
+
+            _index_summary = session.summary or ""
+            if not _index_summary and isinstance(session.final_summary, dict):
+                _index_summary = (
+                    session.final_summary.get("executive")
+                    or session.final_summary.get("summary")
+                    or ""
+                )
+
+            await asyncio.to_thread(
+                semantic_search.index_session,
+                session_id=session.session_id or str(session.id),
+                title=session.title or session.name or "",
+                transcript=_index_transcript,
+                summary=_index_summary,
+                created_at=session.created_at.isoformat() if session.created_at else "",
+                organization_id=session.organization_id,
+            )
+            logger.info(
+                "Reprocess: semantic index updated for session=%s (%d diarized segs)",
+                session.id,
+                len(_segs) if _segs else 0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess semantic index failed (non-fatal) session=%s: %s",
+                session.id,
+                exc,
+            )
+
         # Stage 6 — Brigade graph write. Best-effort fire-and-forget per
         # docs/brigade-integration-design.md Phase 1: Meeting + Speakers
         # + ActionItems + Topics + Decisions land as :Meeting /
