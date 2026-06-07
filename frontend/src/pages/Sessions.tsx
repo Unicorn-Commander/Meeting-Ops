@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
   Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
   ArrowUp, ArrowDown, ArrowUpDown, Briefcase, AlertTriangle,
-  Lock as LockIcon, Paperclip,
+  Lock as LockIcon, Paperclip, RefreshCw,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
@@ -753,6 +753,10 @@ export const Sessions: React.FC = () => {
   // the list in place.
   const [loading, setLoading] = useState(!sessionsHydratedFromCache);
   const [refreshing, setRefreshing] = useState(false);
+  // Auto-refresh: poll the list while it's on (default on) so a new/just-
+  // processed meeting appears without a manual reload; the Refresh button
+  // forces it immediately.
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [showCreator, setShowCreator] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   // viewMode persists to localStorage; mobile shell ignores it (always card list).
@@ -1078,10 +1082,11 @@ export const Sessions: React.FC = () => {
     // the refetch swaps in the latest in place. Only show the spinner
     // when there's genuinely nothing on screen yet.
     fetchSessions({ showSpinner: !sessionsHydratedFromCache });
+    if (!autoRefresh) return;
     const interval = setInterval(() => fetchSessions({ showSpinner: false }), 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTags.join(','), activeOrganization?.slug]);
+  }, [selectedTags.join(','), activeOrganization?.slug, autoRefresh]);
 
   useEffect(() => {
     const onInvalidated = () => fetchSessions({ showSpinner: false });
@@ -2009,6 +2014,27 @@ export const Sessions: React.FC = () => {
               </button>
             </div>
 
+            {/* Refresh + auto-refresh */}
+            <div className="flex items-center bg-gray-800 rounded-lg">
+              <button
+                onClick={() => fetchSessions({ showSpinner: false })}
+                disabled={refreshing}
+                title="Refresh now"
+                aria-label="Refresh sessions"
+                className="p-2 rounded-l-lg text-gray-300 hover:text-white disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={() => setAutoRefresh((v) => !v)}
+                title={autoRefresh ? 'Auto-refresh on — click to pause' : 'Auto-refresh off — click to enable'}
+                aria-pressed={autoRefresh}
+                className={`px-3 py-2 text-xs rounded-r-lg border-l border-gray-700 transition-colors ${autoRefresh ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+              >
+                Auto
+              </button>
+            </div>
+
             {/* Filters */}
             <button
               onClick={() => setShowFilters(!showFilters)}
@@ -2475,6 +2501,14 @@ export const Sessions: React.FC = () => {
                       )}
                       {session.description && (
                         <p className="text-gray-400 text-sm mt-1 line-clamp-2">{session.description}</p>
+                      )}
+                      {session.summary_preview && (
+                        <p
+                          className="text-gray-500 text-xs mt-1.5 line-clamp-2 leading-snug"
+                          title={session.summary_preview}
+                        >
+                          {session.summary_preview}
+                        </p>
                       )}
                     </div>
                     <div className="flex flex-col items-end gap-1">
