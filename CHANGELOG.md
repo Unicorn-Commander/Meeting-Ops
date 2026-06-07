@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.28.3] - 2026-06-07
+
+### Changed
+- **Removed all user-facing "Brigade" references from the Knowledge Graph UI.** Brigade is internal infrastructure — the knowledge graph lives *in the app* (sidebar). The inline per-session 3D viewer's loading/error/empty copy now reads "knowledge graph" (was *"This meeting hasn't been synced to Brigade yet"* / *"Loading graph from Brigade…"* / *"Brigade is unreachable"*); the per-session `brigade-graph` endpoint no longer emits an "Open in Brigade" deep-link (so the inline viewer footer just shows the node/edge count); and the Pricing feature labels drop "Brigade" ("Knowledge graph (cross-meeting)" / "Knowledge graph + cross-app federation").
+
+### Notes
+- Parked plan: `docs/inference-gateway-and-uc-rollout-2026-06-07.md` — the `unicorncommander.ai` inference gateway (local-first via bigboy GPUs + automatic 3rd-party fallback) that unblocks the customer-node rollout (centerdeep currently can't reach its GPU services / Qdrant).
+
 ## [3.28.2] - 2026-06-07
 
 ### Added

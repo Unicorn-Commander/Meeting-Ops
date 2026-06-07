@@ -156,7 +156,7 @@ const tiers: TierCard[] = [
       },
       { included: true, label: 'Audio upload + 90-day compressed retention' },
       { included: true, label: 'Full speaker library + speaker recognition' },
-      { included: true, label: 'Brigade knowledge graph integration' },
+      { included: true, label: 'Knowledge graph (cross-meeting)' },
       {
         included: true,
         label: 'All cross-app handles in MCP results (Contact-Ops, Project-Ops, Crisis-Ops)',
@@ -184,7 +184,7 @@ const tiers: TierCard[] = [
       { included: true, label: 'Everything in Pro on Meeting-Ops' },
       { included: true, label: 'Project-Ops Pro included' },
       { included: true, label: 'Contact-Ops Pro included' },
-      { included: true, label: 'Brigade graph + federation (cross-app KG)' },
+      { included: true, label: 'Knowledge graph + cross-app federation' },
       { included: true, label: 'Future UC apps included as they ship' },
       { included: true, label: 'One subscription, one login (via Brigade federation when it lands)' },
     ],

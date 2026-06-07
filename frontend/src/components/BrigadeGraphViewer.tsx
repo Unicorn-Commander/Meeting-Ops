@@ -360,7 +360,7 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
       >
         <div className="flex items-center gap-3 text-slate-600 text-sm">
           <RefreshCw className="w-4 h-4 animate-spin" />
-          <span>Loading graph from Brigade...</span>
+          <span>Loading the knowledge graph…</span>
         </div>
       </div>
     );
@@ -373,7 +373,7 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
         className="bg-rose-50 border border-rose-200 rounded-lg p-4"
       >
         <p className="text-sm text-rose-900 mb-3">
-          Couldn't load Brigade graph: {error}
+          Couldn't load the knowledge graph: {error}
         </p>
         <button
           onClick={fetchGraph}
@@ -395,37 +395,23 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
       >
         {isNotSynced ? (
           <p>
-            This meeting hasn't been synced to Brigade yet. Sync happens
-            automatically when reprocess completes. (If Brigade isn't
-            configured in production, you'll see this state for all
-            meetings.)
+            This meeting isn't in the knowledge graph yet — it's added
+            automatically once the meeting finishes processing. Record (or
+            reprocess) a meeting and it'll appear here, and on the Knowledge
+            Graph page in the sidebar.
           </p>
         ) : (
           <div>
             <p className="mb-3">
-              Brigade is currently unreachable for the inline graph.
-              {data?.graph_url ? ' You can still open the full graph in Brigade.' : ''}
+              The knowledge graph is temporarily unavailable for this meeting.
             </p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={fetchGraph}
-                className="px-3 py-1.5 bg-slate-700 text-white text-xs font-medium rounded-md hover:bg-slate-800 transition-colors inline-flex items-center gap-2"
-              >
-                <RefreshCw className="w-3 h-3" />
-                Retry
-              </button>
-              {data?.graph_url && (
-                <a
-                  href={data.graph_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
-                >
-                  Open in Brigade
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              )}
-            </div>
+            <button
+              onClick={fetchGraph}
+              className="px-3 py-1.5 bg-slate-700 text-white text-xs font-medium rounded-md hover:bg-slate-800 transition-colors inline-flex items-center gap-2"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Retry
+            </button>
           </div>
         )}
       </div>
@@ -514,9 +500,7 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
         </div>
       )}
 
-      {/* Footer: node/edge count (always) + optional "Open in Brigade"
-          (only when the backend supplies a graph_url — the Knowledge Graph
-          page deliberately omits it; Brigade is internal infra). */}
+      {/* Footer: node/edge count. */}
       {data.nodes.length > 0 && (
         <div className="flex items-center justify-between gap-3 text-xs text-slate-600 px-1">
           <span>
@@ -525,21 +509,10 @@ const BrigadeGraphViewer: React.FC<BrigadeGraphViewerProps> = ({
             {data.synced_at && (
               <>
                 {' '}
-                synced {new Date(data.synced_at).toLocaleString()}
+                updated {new Date(data.synced_at).toLocaleString()}
               </>
             )}
           </span>
-          {data.graph_url && (
-            <a
-              href={data.graph_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-md hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
-            >
-              Open in Brigade
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          )}
         </div>
       )}
     </div>
