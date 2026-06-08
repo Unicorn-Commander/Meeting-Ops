@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.29.5] - 2026-06-08
+
+### Changed
+- **Speaker roster surfaced back in the session record.** The per-speaker assignment UI (`SpeakerTagger`: each `SPEAKER_xx` with a dropdown to pick an existing person / add to training / create new, pre-selected for identified speakers) was only reachable under the "Speakers" tab. It now also renders as a **collapsible "Speakers" card at the top of the record** on every other view, so you can name/assign speakers inline when you open a session (matching the older in-record placement). Mutually exclusive with the Speakers tab so `SpeakerTagger` never double-mounts. (The empty-roster symptom itself was the org-default bug fixed in v3.29.4.)
+
 ## [3.29.4] - 2026-06-08
 
 ### Fixed

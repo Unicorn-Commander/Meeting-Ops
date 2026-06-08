@@ -279,6 +279,8 @@ export const SessionDetails: React.FC = () => {
   const [activeSegment, setActiveSegment] = useState<number>(-1);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>('all');
+  // v3.29.5: speaker roster surfaced IN the record (collapsible), not only the Speakers tab.
+  const [speakersCardOpen, setSpeakersCardOpen] = useState(true);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploading, setUploading] = useState(false);
   // Re-process modal: re-runs the transcribe -> diarize -> summarize -> embed
@@ -2465,9 +2467,35 @@ export const SessionDetails: React.FC = () => {
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
 
-            {/* Speakers tab: Phase 3 speaker tagger — confirm/change diarized labels */}
+            {/* Speakers tab: full Phase-3 tagger (confirm/change diarized labels) */}
             {activeTab === 'speakers' && (
               <SpeakerTagger sessionId={String(session.id || sessionId)} />
+            )}
+
+            {/* Speaker roster surfaced IN the record (not only the Speakers tab):
+                a collapsible card on every other view so you can name SPEAKER_xx
+                inline — pick an existing person, add to training, or create new.
+                Mutually exclusive with the Speakers tab above so SpeakerTagger
+                never double-mounts. */}
+            {activeTab !== 'speakers' && speakers.length > 0 && (
+              <div className="bg-white rounded-lg shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setSpeakersCardOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-6 py-3 text-left hover:bg-gray-50 rounded-t-lg"
+                  aria-expanded={speakersCardOpen}
+                >
+                  <span className="text-sm font-semibold text-gray-800">
+                    Speakers ({speakers.length}) — assign or name
+                  </span>
+                  <span className="text-gray-400 text-xs">{speakersCardOpen ? '▾ Hide' : '▸ Show'}</span>
+                </button>
+                {speakersCardOpen && (
+                  <div className="px-2 pb-2">
+                    <SpeakerTagger sessionId={String(session.id || sessionId)} />
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Server-side reprocess status banner.
