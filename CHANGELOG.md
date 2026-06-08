@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.28.4] - 2026-06-07
+
+### Added
+- **Sessions: one-click "Select all (N) / None".** Added an always-visible select-all / clear-selection control next to the view-mode toggle that works in **both** the grid (default) and list views. Previously only the list view's table header had a "select all visible" checkbox, so in the card/grid view you had to tick each card by hand; the new control selects (or clears) every session in the current filtered list in one click. ("None" is disabled when nothing is selected.)
+
 ## [3.28.3] - 2026-06-07
 
 ### Changed

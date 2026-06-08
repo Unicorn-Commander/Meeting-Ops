@@ -2053,6 +2053,32 @@ export const Sessions: React.FC = () => {
               </button>
             </div>
 
+            {/* Select all / none — one click, works in BOTH grid and list
+                views (the list-view header checkbox only covers its own
+                column-filtered subset; this covers the whole filtered list). */}
+            {filteredSessions.length > 0 && (
+              <div
+                className="flex items-center bg-gray-800 rounded-lg text-xs"
+                title="Select or clear every session in this list"
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleSelectVisible(filteredSessions.map((s) => s.id), true)}
+                  className="px-3 py-2 rounded-l-lg text-gray-300 hover:text-white transition-colors"
+                >
+                  Select all ({filteredSessions.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={clearSessionSelection}
+                  disabled={selectedSessionIds.length === 0}
+                  className="px-3 py-2 rounded-r-lg border-l border-gray-700 text-gray-300 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  None
+                </button>
+              </div>
+            )}
+
             {/* Refresh + auto-refresh */}
             <div className="flex items-center bg-gray-800 rounded-lg">
               <button
