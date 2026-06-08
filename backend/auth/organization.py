@@ -235,12 +235,23 @@ def resolve_active_organization(
                 detail="Organization not found",
             )
     elif current_user.organizations:
-        # User has at least one org membership. Pick the first as the implicit
-        # active org when the frontend does not send an explicit slug. This
-        # prevents 403s for users whose memberships do not include the platform
-        # default (e.g. GFL/shafen-khan users). The frontend can override by
-        # passing the X-Organization or ?org= selector.
-        organization = current_user.organizations[0].organization
+        # No explicit org selector sent. Prefer the platform "home" org
+        # (DEFAULT_ORG_SLUG) when the user is a member of it — this avoids
+        # silently dropping a multi-org user into whichever membership happens
+        # to be first (which can be an empty/test org, e.g. a user whose first
+        # membership is "Test Co" would see no speakers/sessions even though
+        # their real data lives in the home org). Falls back to the first
+        # membership for users not in the home org (e.g. GFL/shafen-khan), so
+        # the no-403 behavior is preserved. The frontend can always override
+        # with the X-MeetingOps-Org header or ?org= selector.
+        organization = next(
+            (
+                m.organization
+                for m in current_user.organizations
+                if m.organization and m.organization.slug == DEFAULT_ORG_SLUG
+            ),
+            current_user.organizations[0].organization,
+        )
     else:
         # User has no memberships yet; auto-provision into the platform default.
         organization = ensure_default_organization(db)

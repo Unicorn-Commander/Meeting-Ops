@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.29.4] - 2026-06-08
+
+### Fixed
+- **Multi-org users were silently dropped into an arbitrary (often empty) workspace.** When a Meeting-Ops API request reached the backend without an explicit workspace selector (`X-MeetingOps-Org` header / `?org=`), `resolve_active_organization` fell back to `organizations[0]` — the user's *first* membership, which can be an empty/test org. For a user whose first membership is e.g. "Test Co", that meant no speakers/sessions/contacts showed even though their real data lives in their home org — and switching workspaces appeared to "do nothing" whenever the header didn't ride along. The no-selector fallback now **prefers the platform home org (`DEFAULT_ORG_SLUG`) when the user is a member of it**, falling back to the first membership only for users who aren't (preserving the no-403 behavior for non-home-org users like GFL/Shafen). Part of the workspace-selection hardening; the frontend still always overrides via the header/selector when present.
+
 ## [3.29.3] - 2026-06-08
 
 **Closes the last security item from the v3.29.0 audit: the live meeting WebSockets now authenticate at the handshake.** This was the deferred "self-host without oauth2-proxy" gap.
