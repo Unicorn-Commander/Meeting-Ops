@@ -46,6 +46,11 @@ export interface IntegrationUpdatePayload {
   shared_agent_id?: string;
   // Project-Ops-only
   default_project_number?: string;
+  /**
+   * When true, action items from completed meetings are auto-submitted to
+   * the Project-Ops triage inbox (propose-only). Default false (opt-in).
+   */
+  auto_push_action_items?: boolean;
 }
 
 export interface TestResult {
