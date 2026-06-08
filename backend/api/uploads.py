@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -1760,6 +1761,7 @@ async def _summarize_session(
     template: str = "standard",
     llm_model: Optional[str] = None,
     llm_thinking: Optional[bool] = None,
+    force: bool = False,
 ) -> None:
     transcript = session.transcript_simple or ""
     if not transcript.strip():
@@ -1834,6 +1836,29 @@ async def _summarize_session(
             f"Transcript:\n{transcript[:60000]}"
         )
 
+    # v3.29.1 idempotency guard: skip the LLM call when the EXACT summary
+    # input (system + body prompt — which fold in transcript_simple, the
+    # speaker labels, the template, and which route/prompt was chosen) is
+    # byte-identical to the input that produced the CURRENT stored summary.
+    # This catches the genuinely redundant case — a reprocess whose
+    # re-transcription + diarization came out identical to the last pass —
+    # WITHOUT ever skipping a summary the inputs actually changed (new
+    # transcript, new template, or newly-identified speaker names all shift
+    # the hash and re-run). `force=True` (an explicit "regenerate") always
+    # re-runs. The browser-live -> server-final progression is unaffected:
+    # those prompts differ (browser STT text vs Parakeet text), so both run.
+    summary_input_hash = hashlib.sha256(
+        f"{template}\x00{system_prompt}\x00{prompt}".encode("utf-8")
+    ).hexdigest()
+    if not force and session.summary:
+        existing_md = session.processing_metadata or {}
+        if existing_md.get("summary_input_hash") == summary_input_hash:
+            logger.info(
+                "Summary input unchanged for session=%s — skipping redundant LLM call",
+                session.id,
+            )
+            return
+
     # Qwen3.6 inference params per the model card + Meeting Minutes
     # tuning: temperature 0.6, top_p 0.9, top_k 30, presence_penalty 1.2,
     # repetition_penalty 1.0. These reduce both repetition loops (the
@@ -1890,6 +1915,15 @@ async def _summarize_session(
         # commit on it. Falls back to the old in-JSON path which the
         # frontend parser still understands.
         logger.warning("action_items promotion failed for session %s: %s", session.id, exc)
+
+    # Stamp the input hash so a later identical re-summarize (e.g. a no-op
+    # reprocess) short-circuits at the guard above. Only reached on a
+    # successful LLM summary — a failed/empty-transcript path returns earlier
+    # and never poisons the hash.
+    summary_md = dict(session.processing_metadata or {})
+    summary_md["summary_input_hash"] = summary_input_hash
+    session.processing_metadata = summary_md
+    flag_modified(session, "processing_metadata")
 
     db.commit()
     db.refresh(session)

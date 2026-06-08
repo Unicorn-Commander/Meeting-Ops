@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.29.1] - 2026-06-08
+
+**Two of the v3.29.0 deferred items, closed: redundant re-summarization is skipped, and reprocess de-dup is made robust.** Both backend-only; no API or UI change.
+
+### Changed
+- **Summary idempotency guard.** `_summarize_session` (run at finalize AND on every reprocess) now hashes the *exact* LLM input — system + body prompt, which fold in the transcript, speaker labels, template, and route — and **skips the LLM call when it matches the input that produced the current stored summary**. A reprocess whose re-transcription + diarization came out byte-identical no longer burns a redundant Qwen pass. It still re-runs whenever the transcript, speaker names, or template actually change (those shift the hash), and a new `force=True` always regenerates. The browser-live → server-final progression is unaffected (those inputs differ, so both run) — this only removes provably-identical repeats.
+- **Reprocess in-flight lock replaces the stable-`_job_id` dedup.** The old `_job_id="reprocess-{pk}"` prevented concurrent double-runs but also (a) let Arq's `keep_result` window silently swallow a *legitimate* later reprocess of the same session, and (b) could leave a stale job key that blocked crash-recovery's re-enqueue. `enqueue_reprocess` now takes an explicit per-session Redis lock (`NX` + TTL, default `REPROCESS_LOCK_TTL_SECONDS=7200`) and uses a **unique per-attempt job_id**: a duplicate enqueue while one is in flight is a clean no-op, the job releases its own lock (compare-and-delete by token) on finish, the lock self-frees via TTL if a worker dies, and `recover_reprocess_jobs` force-clears stale locks so recovery always proceeds. Added focused tests for both seams (`test_summary_idempotency.py`, `test_reprocess_lock.py`).
+
 ## [3.29.0] - 2026-06-08
 
 **Production-readiness pass: moat/security hardening, a silent data-integrity fix, and diarization-on-the-3090 made permanent.** Driven by a multi-agent audit of the whole app (30 confirmed, adversarially-verified findings).
