@@ -386,8 +386,10 @@ export const MeetingIntelligenceDashboard: React.FC<{
   useEffect(() => {
     if (!meetingData.sessionId || isRecording || realNotes) return;
 
-    // TODO: /api/meeting-notes/session/{id} endpoint does not exist yet.
-    // When implemented, this should fetch previously generated notes for the session.
+    // Load any existing server-generated analysis for this session. The
+    // session's `summary` (canonical session endpoint) IS the source of truth;
+    // a dedicated /api/meeting-notes endpoint may come later but isn't needed.
+    // Failures are non-fatal: we just fall through to the empty state.
     const fetchNotes = async () => {
       setNotesLoading(true);
       try {
@@ -909,14 +911,15 @@ export const MeetingIntelligenceDashboard: React.FC<{
                       <div className="text-center py-6 text-gray-500">
                         <Icon className="w-8 h-8 mx-auto mb-2 text-gray-600" />
                         <p className="text-xs">
-                          {isRecording 
+                          {isRecording
                             ? 'Insights will appear as the meeting progresses'
-                            : 'No analysis available for this session'
-                          }
+                            : notesLoading
+                              ? 'Loading session analysis…'
+                              : 'No analysis available for this session yet'}
                         </p>
-                        {!isRecording && meetingData.transcript && (
+                        {!isRecording && !notesLoading && meetingData.transcript && (
                           <p className="text-xs mt-1 text-gray-600">
-                            Click "Analyze Session" to generate insights
+                            The summary is generated automatically when processing completes.
                           </p>
                         )}
                       </div>

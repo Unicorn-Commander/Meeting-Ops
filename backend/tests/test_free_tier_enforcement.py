@@ -793,3 +793,50 @@ def test_v3_18_3_speakers_write_free_blocked(client):
     # Read — should NOT be 403 (gate is write-only on this endpoint).
     resp = client.get("/api/speakers", headers=headers)
     assert resp.status_code != 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# v3.29.2 — stop_recording + always-on/start defense-in-depth gates
+# ---------------------------------------------------------------------------
+
+
+def test_v3_29_2_stop_recording_free_blocked(client):
+    """POST /api/simple/recording-sessions/{id}/stop schedules the server
+    completion pass (transcribe+diarize+identify+index). The gate runs before
+    the session lookup, so a free user 403s regardless of session existence."""
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-stop-free", "tiergate_stop_free", "free"
+    )
+    headers = _login_headers(client, "tiergate_stop_free", "admin123", org_slug)
+    resp = client.post(
+        "/api/simple/recording-sessions/nonexistent-sid/stop", headers=headers
+    )
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text
+
+
+def test_v3_29_2_stop_recording_pro_passes_gate(client):
+    """A pro user clears the stop gate — proven by getting past it to the
+    session lookup (404 for a nonexistent session), not a 403."""
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-stop-pro", "tiergate_stop_pro", "pro"
+    )
+    headers = _login_headers(client, "tiergate_stop_pro", "admin123", org_slug)
+    resp = client.post(
+        "/api/simple/recording-sessions/nonexistent-sid/stop", headers=headers
+    )
+    assert resp.status_code != 403, resp.text
+    assert resp.status_code == 404, resp.text
+
+
+def test_v3_29_2_always_on_start_free_blocked(client):
+    """POST /api/simple/always-on/start is server-side continuous capture —
+    free users must 403 (the gate runs before the recorder is touched, so no
+    recorder is started in this test)."""
+    org_id, org_slug, user_id = _seed_user_and_org(
+        "tiergate-aostart-free", "tiergate_aostart_free", "free"
+    )
+    headers = _login_headers(client, "tiergate_aostart_free", "admin123", org_slug)
+    resp = client.post("/api/simple/always-on/start", headers=headers)
+    assert resp.status_code == 403, resp.text
+    assert "canonical_reprocess" in resp.text

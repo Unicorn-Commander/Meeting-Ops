@@ -1045,7 +1045,14 @@ async def stop_recording(
     db: Session = Depends(get_db)
 ):
     """Stop recording and trigger transcription"""
-    
+    # v3.29.2 defense-in-depth: /stop schedules the server completion pass
+    # (transcribe + diarize + identify + index). /start is already gated on
+    # canonical_reprocess, so a real Free/Basic user can't have a server
+    # recording to stop — this closes the direct-/stop-without-/start vector
+    # and makes the server-compute gate explicit. gate_feature_for_caller
+    # bypasses the internal room-recorder token, so Conference Room is unaffected.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
+
     # Get session from database - handle both session_id and integer id
     session = _get_session_for_org(db, active_org.organization.id, session_id)
     
@@ -1457,30 +1464,52 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             logger.info(f"   Has transcript: {bool(session.transcript)}")
             logger.info(f"   Has summary: {bool(session.summary)}")
 
-            # Step 5: Index into vector store for semantic search
-            try:
-                from services.semantic_search_service import semantic_search
-                semantic_search.index_session(
-                    session_id=session.session_id or str(session.id),
-                    title=session.title or session.name or "",
-                    transcript=session.transcript_simple or "",
-                    summary=session.summary or "",
-                    created_at=session.created_at.isoformat() if session.created_at else "",
-                    organization_id=session.organization_id,
-                )
-                logger.info(f"   Indexed in vector store for semantic search")
-            except Exception as e:
-                logger.warning(f"Vector indexing failed (non-fatal): {e}")
-
-            # Step 6a: Phase 3 — identify speakers against the org speaker
+            # Step 5: Phase 3 — identify speakers against the org speaker
             # library and rewrite transcript_diarized labels with display
-            # names BEFORE embedding, so cross-meeting RAG sees real names.
+            # names. This MUST run before indexing (Step 6) so the embedded
+            # transcript + cross-meeting RAG see real names, not SPEAKER_xx.
+            # (v3.29.2: previously index ran first, so the vector copy of every
+            # normal record->stop meeting carried raw labels until a reprocess
+            # healed it — the code contradicted its own "BEFORE embedding"
+            # comment. This is the same seam pinned for the reprocess path in
+            # test_reprocess_indexing; stop_recording is the primary flow.)
             try:
                 from services.speaker_service import identify_speakers
                 ident_summary = identify_speakers(session, db)
                 logger.info(f"   Speaker identification: {ident_summary}")
             except Exception as e:
                 logger.warning(f"Speaker identification failed (non-fatal): {e}")
+
+            # Step 6: Index into the vector store for semantic search. Build
+            # the indexed transcript FROM the (now speaker-named) diarized
+            # segments so RAG is speaker-aware, mirroring reprocess Stage-5.9;
+            # fall back to transcript_simple when no diarized segments exist.
+            try:
+                from services.semantic_search_service import semantic_search
+                _segs = (
+                    session.transcript_diarized.get("segments")
+                    if isinstance(session.transcript_diarized, dict)
+                    else None
+                )
+                if _segs:
+                    _index_transcript = "\n".join(
+                        f"{(seg.get('speaker') or 'Speaker')}: {(seg.get('text') or '').strip()}"
+                        for seg in _segs
+                        if (seg.get("text") or "").strip()
+                    )
+                else:
+                    _index_transcript = session.transcript_simple or ""
+                semantic_search.index_session(
+                    session_id=session.session_id or str(session.id),
+                    title=session.title or session.name or "",
+                    transcript=_index_transcript,
+                    summary=session.summary or "",
+                    created_at=session.created_at.isoformat() if session.created_at else "",
+                    organization_id=session.organization_id,
+                )
+                logger.info(f"   Indexed in vector store for semantic search (speaker-aware)")
+            except Exception as e:
+                logger.warning(f"Vector indexing failed (non-fatal): {e}")
 
         except Exception as e:
             logger.error(f"Failed to commit session updates: {e}")
@@ -2361,6 +2390,13 @@ async def start_always_on(
 ):
     """Enable always-on recording mode. The system will listen continuously
     and automatically create meeting sessions when speech is detected."""
+    # v3.29.2: always-on is server-side continuous capture + per-segment
+    # processing — gate it like /start (was ungated). Non-invasive front-gate:
+    # paid/internal pass straight through to the unchanged recorder; Free/Basic
+    # get 403. Inert on the cloud node (no USB mic) so this can't regress it;
+    # the org-scoping refactor of retroactive-session creation stays deferred
+    # to a desktop/USB-mic test pass.
+    gate_feature_for_caller(current_user, "canonical_reprocess")
     from services.always_on_recorder import always_on_recorder
 
     device_id = body.device_id if body else None

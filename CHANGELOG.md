@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+## [3.29.2] - 2026-06-08
+
+**Three more v3.29.0 deferred items closed: a real search-quality fix on the primary recording path, stop/always-on defense-in-depth gates, and a dashboard empty-state cleanup.**
+
+### Fixed
+- **Primary record→stop path embedded speaker labels, not names.** `simple_recording_db.process_recording` (the main record→stop completion pass) called `semantic_search.index_session` **before** `identify_speakers`, so the vector copy of every normal meeting carried raw `SPEAKER_xx` labels instead of real names — degrading cross-meeting search/RAG attribution until a reprocess healed it — even though the inline comment said "rewrite labels BEFORE embedding". Swapped the order (identify → index) and now build the indexed transcript **from the speaker-named diarized segments** (`"{speaker}: {text}"`), mirroring the reprocess Stage-5.9 shape. (The "legacy finalize ordering" deferred item turned out to be this primary path, not a dead one.)
+- **MeetingIntelligenceDashboard empty state pointed at a removed action.** When a session had no analysis yet, the panel told users to *Click "Analyze Session"* — but that control was removed and the generate functions are no-ops. Replaced with an honest, loading-aware empty state ("Loading session analysis…" / "No analysis available for this session yet" / "The summary is generated automatically when processing completes."). Also corrected the stale `/api/meeting-notes` TODO comment — the dashboard already reads the canonical session `summary` and degrades gracefully on fetch failure.
+
+### Security / moat
+- **Defense-in-depth tier gates on two server-compute entry points.** `POST /api/simple/recording-sessions/{id}/stop` (schedules the full transcribe+diarize+identify+index pass) and `POST /api/simple/always-on/start` (server-side continuous capture) were ungated. Both now gate `canonical_reprocess`. `/start` was already gated so `/stop` was naturally protected, but this makes the server-compute boundary explicit and closes the direct-`/stop`-without-`/start` vector. `gate_feature_for_caller` bypasses the internal room-recorder token, so Conference Room is unaffected; the gates are non-invasive front-checks (paid/internal pass straight through). `/always-on/stop` is intentionally left ungated — it's pure cleanup (no compute). The always-on retroactive-session **org-scoping** refactor stays deferred to a desktop/USB-mic test pass.
+
+### Tests
+- Source-order guard pinning identify-before-index in `process_recording` (the service-level behavior is already pinned for reprocess by `test_reprocess_indexing`); free-vs-pro gate tests for `/stop` and `/always-on/start` added to `test_free_tier_enforcement.py`.
+
 ## [3.29.1] - 2026-06-08
 
 **Two of the v3.29.0 deferred items, closed: redundant re-summarization is skipped, and reprocess de-dup is made robust.** Both backend-only; no API or UI change.
