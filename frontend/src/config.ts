@@ -201,3 +201,20 @@ export const config = {
 };
 
 export default config;
+
+/**
+ * v3.29.3: append the caller's JWT to a WebSocket URL as `?token=` (or `&token=`
+ * if the URL already has a query string, e.g. the `?org=` from getOrgQueryUrl).
+ * The browser WebSocket API can't set an Authorization header, so the meeting
+ * sockets (transcription / audio-levels / transcription-auto) authenticate via
+ * this query param — matching the backend `auth.ws_auth.enforce_ws_auth`
+ * handshake check. No-op when no token is stored (the socket then relies on the
+ * WS_REQUIRE_AUTH kill-switch / oauth2-proxy, i.e. the pre-v3.29.3 behaviour).
+ */
+export function appendWsToken(url: string): string {
+  const token =
+    (typeof localStorage !== 'undefined' && localStorage.getItem('access_token')) || '';
+  if (!token) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}

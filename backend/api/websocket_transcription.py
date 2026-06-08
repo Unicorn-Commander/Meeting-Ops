@@ -9,6 +9,7 @@ from typing import Dict, Set
 import logging
 
 from services.whisperx_npu_service import whisperx_service
+from auth.ws_auth import enforce_ws_auth
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,15 @@ manager = TranscriptionManager()
 @router.websocket("/ws/audio-levels")
 async def websocket_audio_levels(websocket: WebSocket):
     """WebSocket endpoint for real-time audio level monitoring"""
+    # v3.29.3: authenticate the handshake (?token=) before accepting. Sessionless
+    # socket (global audio:levels pubsub), so no org-scope — just require a valid
+    # user. WS_REQUIRE_AUTH=false falls back to the legacy open behaviour.
+    ok, _user = await enforce_ws_auth(websocket)
+    if not ok:
+        return
     # Add basic connection validation to reduce spam
     client_host = websocket.client.host if websocket.client else "unknown"
-    
+
     await websocket.accept()
     logger.debug(f"Audio levels WebSocket connected from {client_host}")  # Changed to debug level
     
@@ -133,6 +140,12 @@ async def websocket_audio_levels(websocket: WebSocket):
 @router.websocket("/ws/transcription/{session_id}")
 async def websocket_transcription(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for live transcription streaming"""
+    # v3.29.3: authenticate + org-scope the handshake before accepting. This
+    # socket can push audio for server STT and replays a session's transcription,
+    # so an unauth/cross-org client was a compute + cross-tenant-read hole.
+    ok, _user = await enforce_ws_auth(websocket, session_id=session_id)
+    if not ok:
+        return
     await manager.connect(websocket, session_id)
     
     try:

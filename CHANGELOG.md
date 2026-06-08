@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [3.29.3] - 2026-06-08
+
+**Closes the last security item from the v3.29.0 audit: the live meeting WebSockets now authenticate at the handshake.** This was the deferred "self-host without oauth2-proxy" gap.
+
+### Security / moat
+- **WebSocket handshake auth + org-scoping.** `/ws/transcription/{id}` (could push audio for server STT + replay a session's transcription), `/ws/transcription-auto/{id}` (the live-recording socket — live transcription + progressive summaries), and `/ws/audio-levels` accepted **any** connection at the app layer. On the cloud node oauth2-proxy fronts them, but on a self-hosted node with no proxy that was a cross-tenant read + ungated-compute hole. Added a `?token=` JWT check at the handshake (the browser WebSocket API can't set headers), reusing the proven `decode_token` + `_org_ids` pattern already used by `websocket_remote_audio` / `streaming`; the two session-bound sockets are **org-scoped** (a session belonging to another org → close 1008). New shared helper `auth/ws_auth.py`. A **`WS_REQUIRE_AUTH` kill-switch** (default on) allows instant rollback to the open behaviour without a redeploy. The frontend (`LiveRecording.tsx`) now appends the access token to its socket URLs via a `appendWsToken` helper. `/ws/sessions/{id}/live` (server-live) was already authenticated; the vestigial plain `/ws/transcription/{id}` (no frontend consumer) is secured anyway.
+
+### Tests
+- `test_ws_auth.py`: reject-without-token (all three sockets), accept-with-valid-token, cross-org session rejection, and the kill-switch path — driven through Starlette's TestClient.
+
 ## [3.29.2] - 2026-06-08
 
 **Three more v3.29.0 deferred items closed: a real search-quality fix on the primary recording path, stop/always-on defense-in-depth gates, and a dashboard empty-state cleanup.**

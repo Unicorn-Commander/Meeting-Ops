@@ -75,6 +75,14 @@ async def websocket_with_auto_summary(websocket: WebSocket, session_id: str):
     2. Automatic periodic summarization (backend-controlled)
     3. Settings-based enable/disable of summarization
     """
+    # v3.29.3: authenticate + org-scope the handshake before accepting. This is
+    # the live-recording socket (LiveRecording.tsx) — it streams a session's
+    # transcription + progressive summaries, so an unauth/cross-org connect was a
+    # cross-tenant read. WS_REQUIRE_AUTH=false falls back to legacy open behaviour.
+    from auth.ws_auth import enforce_ws_auth
+    ok, _user = await enforce_ws_auth(websocket, session_id=session_id)
+    if not ok:
+        return
     await websocket.accept()
     
     # Add to active connections
