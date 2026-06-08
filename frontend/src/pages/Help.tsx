@@ -492,7 +492,7 @@ function AdminTier() {
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
             <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
               <Network className="h-4 w-4 text-fuchsia-400" />
-              Brigade knowledge graph
+              Knowledge graph
             </div>
             <p className="mt-1 text-sm text-zinc-400">
               Writes meetings, speakers, and action items into the shared

@@ -268,7 +268,7 @@ def test_get_tier_features_superuser_gets_enterprise_dict():
 
 def _run(coro):
     """Run an async coroutine to completion for tests."""
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 def test_require_tier_passes_at_or_above_min():

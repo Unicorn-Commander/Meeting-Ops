@@ -199,13 +199,11 @@ def _enable_auto_push(monkeypatch):
     yield
 
 
-# A dedicated loop keeps this version-proof across the get_event_loop()
-# deprecation; the writer/client don't cache a loop so isolation is fine.
-_LOOP = asyncio.new_event_loop()
-
-
+# asyncio.run() is the supported, version-proof replacement for the
+# deprecated get_event_loop()/new_event_loop() dance; the writer/client
+# don't cache a loop so a fresh loop per call is fine.
 def _run(coro):
-    return _LOOP.run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _seed(

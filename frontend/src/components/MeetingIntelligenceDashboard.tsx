@@ -763,18 +763,6 @@ export const MeetingIntelligenceDashboard: React.FC<{
               </button>
             )}
 
-            {/* Manual Generate for non-recording sessions (endpoint not yet implemented) */}
-            {!isRecording && meetingData.transcript && (
-              <button
-                disabled
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs bg-gray-800 text-gray-500 cursor-not-allowed"
-                title="AI session analysis coming soon"
-              >
-                <Brain className="w-3 h-3" />
-                Analyze (Coming Soon)
-              </button>
-            )}
-
             {/* Clear Button - context aware */}
             {(viewMode === 'live' ? realNotes : finalReport) && (
               <button

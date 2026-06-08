@@ -2,15 +2,15 @@
 Part of the Unicorn Commander Suite
 
 ## Project Overview
-Hardware appliance for AI-powered meeting recording and transcription. NPU acceleration, real-time transcription, speaker diarization, and meeting insights. Designed for headless deployment on AMD Ryzen AI hardware for SMBs. Cloud build (v0.7.x) and on-prem appliance build ship from the same codebase via compose targets.
+AI-powered meeting recording and transcription: browser-first live capture, real-time transcription, speaker diarization, and meeting insights, with a server completion pass on the bigboy GPU cluster (Parakeet 1.1B STT, pyannote 3.1 diarization, Qwen 3.6 35B-A3B-Vision summaries). Cloud and on-prem/appliance builds ship from the same codebase via compose targets.
 
-**Status**: Backend ~95% | Frontend ~95% | Auth working | LLM integrated | Mobile responsive | Phase B server-live streaming with Sortformer speakers + EOU detection LIVE | Brigade graph writes LIVE
+**Status**: Backend live | Frontend live | Auth working | LLM integrated | Mobile responsive | browser-first capture with server completion pass | Knowledge Graph (person-centric) LIVE
 
-**Latest release**: v3.19.0 tagged 2026-05-29 — 5-agent swarm coordinated release closing the polished-launch acceptance criteria. Mobile Free-tier moat fix (was uploading audio to server silently — critical), Settings 4-tier IA rebuild, Conference room wizard fixes, Speaker library pagination, Dashboard first-run onboarding, SessionDetails desktop tabs, Pricing real copy + Subscribe button, Radix Dialog migration + WCAG-AA pass, per-org integration toggles (Brigade/PO/Contact-Ops/Accounting-Ops/Stable) with encrypted-at-rest creds, Stripe Subscriptions (inert until keys set), Founders 100 mechanic, UpgradeBanner. See CHANGELOG. Activation env list in CHANGELOG. On top of v3.18.2 tagged 2026-05-29 — generative-endpoint tier gating + async event-loop fix. Closes 4 remaining server-LLM-on-content paths from the Codex code audit table (`/api/ai-chat/sessions/{id}/messages`, `/api/ai-chat/rag/query`, `/api/simple/recording-sessions/{id}/insights[/regenerate]`, `/api/digests`) and wraps 6 `svc.chat_sync()` calls inside `ai_insights.py` in `asyncio.to_thread` so the event loop stops blocking for tens of seconds per LLM round-trip. On top of v3.18.1 tagged 2026-05-29 — moat restoration. Closes 6 S0 free-tier moat violations (`/api/uploads` transcribe, `/api/simple/recording-sessions/{id}/start`, `/api/rooms/{id}/recordings/start`, satellite `/upload-audio` + `/transcript`, `ws/remote-audio` cross-org leak), 4 unauth admin router surfaces (`simple_settings`/`ai_settings`/`agent_management`/`unified_agent` + retire `meeting_intelligence_real`), 3 admin-check 500s on `live_transcription`, and an `always_on_recorder` orphan-row insert. Adds `auth.tier.get_org_tier(org)` reading `Organization.plan`, threads org/user owner through `AlwaysOnRecorder`, and ships 26 missing env pass-throughs in compose. See CHANGELOG. On top of v3.18.0 (default-off live diarization + default-off silence-gap segmentation), v3.17.1 (session watchdog + graph-rag default ON), v3.17.0 (Project-Ops action-items bridge, dark), v3.16.0 (graph-augmented retrieval tuning + regression fix), v3.15.1 (Speaker Library layout fix), v3.15.0 (Speaker Library unassigned + merge), v3.14.x (agent platform Phase 2), v3.13.x (PATs + MCP write tools), v3.12.x (propose→confirm→mutate), v3.11.x (graph-rag), v3.10.x (graph backfill + augmented retrieval), v3.9.x (ops-center card + Help page + README), v3.7.x-v3.8.x (Garage object storage migration), v3.4.0 — Record page: removed the duplicate legacy "Live Transcription" panel (single transcript from the recorder now) and collapsed the advanced "Agent & Pipeline Status" picker behind a default-collapsed toggle. On top of v3.3.0 Record page cleanup — removed the redundant "Record from this browser" card (it bypassed the browser-first/free-tier path), AlwaysOnControl is the single recorder, and the meeting-type selector is collapsed to two options (Just me / Me + system audio). On top of v3.2.0 consumer self-serve signup backend (Option B) — email/password signup, per-user personal org, email verification, verify/resend endpoints; INERT until activated (ALLOW_REGISTRATION/SECRET_KEY/SMTP/oauth2-proxy routes + frontend pages, see docs/consumer-signup.md). On top of v3.1.0 free-tier wiring — free users (no `canonical_reprocess`) now auto-record on-device/local-only in the browser, server-call guards + 403 upgrade prompts, Local Sessions always in nav; inert for current enterprise users. On top of v3.0.0 free-tier enforcement — free tier is browser-only, server-processing endpoints (chunks/finalize/summarize/import) 403 free users via tier_features gates in auth/tier.py (canonical_reprocess, brigade_integration, cross_device_sync, bulk_import); internal callers bypass. On top of v2.3.0 (PWA service worker switched to prompt/parked so a deploy never swaps cached chunks mid-recording — update banner defers while recording and surfaces on stop), on top of v2.2.0 (opt-in Sortformer canonical-hybrid diarization for `/finalize-audio`, PARKED — default stays pyannote; Sortformer v1 one-shot diarize OOMs on real-length meetings, see CHANGELOG), on top of v2.1.0 (2026-05-26) utterance-grouped per-word streaming UI, on top of v2.0.0 (v2 endpoint wire-up with per-word `tokens_finalized` + EOU detection) + v1.5.0 (parakeet checkpoint swap to streaming-trained `parakeet_realtime_eou_120m-v1`) + v1.4.0 (`<ServerLiveTranscript>` wired into Record page) + v1.3.0 (cursor + VAD silence-gate) + v1.2.0 (Sortformer parallel dispatch + speaker badges) + v1.1.0 (catch-up of post-v1.0.0 commits). Operational runbook at `docs/runbook-streaming-v2.md`. Backend pytest: 338 passed / 0 failed / 3 skipped.
+**Latest release**: v3.28.4 (v3.29.0 in progress) — see `CHANGELOG.md` for the full history. Recent arc: the Knowledge Graph became a real, person-centric, hydrated feature (`/knowledge-graph`); cross-meeting search + RAG were made whole (the reprocess pipeline now indexes to Qdrant, and all completed meetings were backfilled); embeddings + reranking moved onto the shared Infinity server (suite-consistent); vocal summaries render via Kokoro (AF Heart); and the broken-since-June-5 Arq reprocess pipeline was repaired and hardened (watchdog no longer deletes active/recoverable recordings, worker↔backend env parity is test-guarded). The codebase is browser-first by design (below); the server runs only the per-meeting completion pass.
 
 ## Architecture is browser-first by design
 
-Live STT and live summarization run in the user's browser (Parakeet 0.6B INT8 + Qwen 3 0.6B / Gemma 4 E2B via onnxruntime-web + transformers.js, cached in IndexedDB). The server only runs at meeting completion (Parakeet 1.1B fp16 + pyannote 3.1 + wespeaker embeddings + Qwen 3.6 35B-A3B-Vision), in a single 30-90 second pass per finished meeting. Privacy mode skips the server pass entirely; nothing leaves the device.
+Live STT and live summarization run in the user's browser (in-browser Parakeet for live transcription + a small on-device summary LLM via onnxruntime-web / transformers.js / WebGPU, cached in IndexedDB). The server only runs at meeting completion — a single per-meeting pass that does the canonical Parakeet 1.1B transcription, pyannote 3.1 diarization (via the `meet-speaker-svc` service), and a Qwen 3.6 35B-A3B-Vision summary/title — then indexes the result for cross-meeting search. Privacy mode skips the server pass entirely; nothing leaves the device.
 
 This isn't an aesthetic choice — it's the moat. Our marginal cost per concurrent user-hour is $0 in compute (the user's CPU/GPU does it). Competitors pay AssemblyAI / Deepgram per audio-minute and OpenAI / Anthropic per token, per user, continuously. At scale we're 10-100x cheaper to run.
 
@@ -54,7 +54,7 @@ Queued behind product/design decisions:
 ## Quick Start
 
 ```bash
-# Start Docker services (PostgreSQL on 5434, llama.cpp GPT-OSS-20B on 11437)
+# Start Docker services (PostgreSQL, Redis, Qdrant; LLM is reached via LiteLLM)
 docker compose -f docker-compose-full-stack.yml up -d
 
 # Start backend (port 9050)
@@ -64,9 +64,9 @@ cd backend && ./start-backend.sh
 cd frontend && npm run dev -- --host 0.0.0.0
 
 # Run tests
-cd backend && python3 -m pytest tests/ -v    # 40 pass, 3 skip
-cd frontend && npm run build                  # 0 TS errors
-cd frontend && npx vitest run                 # 23 pass
+cd backend && python3 -m pytest tests/ -v
+cd frontend && npm run build
+cd frontend && npx vitest run
 ```
 
 **Login**: admin / admin123 (superuser)
@@ -77,16 +77,13 @@ cd frontend && npx vitest run                 # 23 pass
 
 ## Architecture
 
-### LLM: GPT-OSS 20B on llama.cpp Vulkan (default)
-- Default model: `gpt-oss-20b-mxfp4.gguf` in `./models/` (~28 tok/s, ~12GB VRAM)
-- Fallback model: `granite-3.3-2b-instruct-Q4_K_M.gguf` (~43 tok/s, ~1.5GB VRAM)
-- Model registry: `backend/config/model_registry.py` — centralized model configs
-- Active model setting: `ai.llm_model` in settings_manager (persisted to DB)
-- Token multiplier: GPT-OSS uses Harmony prompt format with hidden reasoning tokens (3x multiplier applied automatically)
-- API: OpenAI-compatible `/v1/chat/completions` at port 11437
-- GPU: AMD 780M iGPU via Vulkan (RADV)
-- Used for: summaries, titles, AI chat, insights, sentiment analysis
-- Switch models: `POST /api/settings/models/active` or Settings UI dropdown
+### LLM: Qwen 3.6 35B-A3B-Vision via llama.cpp, fronted by LiteLLM
+- Default model: Qwen 3.6 35B-A3B-Vision — a Mixture-of-Experts model (~3B active params) served via llama.cpp and exposed through LiteLLM at `unicorn-litellm:4000` (OpenAI-compatible)
+- Fast model: `gemma-4-e4b` (used for cheap/low-latency calls)
+- Vision-capable (handles OCR / image-bearing context)
+- API: OpenAI-compatible `/v1/chat/completions` against the LiteLLM gateway
+- Used for: summaries, titles, AI chat, insights, sentiment analysis, vocal-summary narration
+- Model registry: `backend/config/` — centralized model configs; active model persisted in settings
 
 ### Frontend (React 19 + TypeScript + Vite + TailwindCSS)
 Active router: `AppRouterSimplified.tsx` (mobile-responsive with hamburger menu)
@@ -106,9 +103,9 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 
 ### Backend (FastAPI + Python 3.13)
 
-**main.py** loads 22 routers with status tracking:
-- 3 required (auth, recording, sessions) - fail fast
-- 19 optional (agent, AI, analytics, satellite, etc.) - log warning on failure
+**main.py** loads the routers in `backend/api/` with status tracking:
+- A small set are required (auth, recording, sessions) - fail fast
+- The rest are optional (agent, AI, analytics, satellite, etc.) - log warning on failure
 - `/health` reports router status and real timestamps
 
 **Key API routers** (in `backend/api/`):
@@ -127,22 +124,24 @@ Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, Sess
 - `websocket_remote_audio.py` - Companion app remote audio WebSocket
 
 **Key services** (in `backend/services/`):
-- `unified_llm_service.py` - LLM via llama.cpp OpenAI API (reads model from model_registry, applies token multiplier)
-- `unified_agent_service.py` - Progressive summarization (reads model from model_registry)
+- `unified_llm_service.py` - LLM via the LiteLLM OpenAI-compatible gateway (Qwen 3.6 35B-A3B-Vision)
+- `unified_agent_service.py` - Progressive / completion-pass summarization
 - `working_audio_service.py` - USB mic audio capture
-- `real_whisper_service.py` - NPU-accelerated Whisper
-- `transcription_service.py` - Transcription orchestration
+- `transcription_service.py` - Transcription orchestration (server completion pass → Parakeet 1.1B)
+
+### Server-side AI services (server completion pass)
+- **STT**: Parakeet 1.1B for the server completion pass; in-browser Parakeet for the live transcript
+- **Diarization**: pyannote 3.1 via the `meet-speaker-svc` service (runs on bigboy's RTX 3090)
+- **LLM**: Qwen 3.6 35B-A3B-Vision (MoE, ~3B active) via llama.cpp behind LiteLLM at `unicorn-litellm:4000`; fast model `gemma-4-e4b`
+- **Embeddings + reranking**: shared Infinity server — `BAAI/bge-m3` (1024-dim dense) + `bge-reranker-v2-m3`; sparse BM25 stays local
+- **TTS**: Kokoro (`af_heart` voice) for vocal summaries
 
 ### Infrastructure
-- PostgreSQL on port 5434 (session/transcript storage)
-- Redis (real-time pub/sub)
-- llama.cpp Vulkan on port 11437 (GPT-OSS 20B default, Granite 3.3 2B fallback)
-- Qdrant on port 6335 (hybrid vector search — dense + BM25 sparse)
-
-### NPU (AMD Phoenix, 16 TOPS)
-- 220x speedup over CPU, 0.0045 RTF
-- 4,789 tokens/sec, INT8 via MLIR-AIE2
-- Whisper Large-v3 default model
+- PostgreSQL (session/transcript storage)
+- Redis (real-time pub/sub + Arq reprocess queue)
+- Qdrant — collection `meet_transcripts`, hybrid vector search (dense + BM25 sparse)
+- LiteLLM gateway (`unicorn-litellm:4000`) fronting the llama.cpp LLM
+- Shared Infinity server for embeddings + reranking
 
 ## API Endpoints
 
@@ -212,31 +211,31 @@ python3 mcp/meeting_ops_mcp.py
 ```
 UC-Meeting-Ops/
   backend/
-    main.py                    # FastAPI app, 22 routers
-    api/                       # 22 API routers (incl. satellite, remote audio)
-    services/                  # 22 service modules
-    auth/                      # JWT authentication
+    main.py                    # FastAPI app, loads the routers in api/
+    api/                       # API routers (incl. satellite, remote audio)
+    services/                  # service modules
+    auth/                      # JWT authentication + tier gating
     database/                  # SQLAlchemy models + connection
     models/                    # Unified agent + vocabulary models
     config/                    # AI backend config + model registry
-    tests/                     # 8 test files (39 tests)
+    workers/                   # Arq reprocess / bulk-import workers
+    tests/                     # backend pytest suite
     start-backend.sh           # Start script
   frontend/
     src/
       App.tsx                  # Root component (+ ToastContainer)
-      AppRouterSimplified.tsx  # Router (7 routes, mobile responsive)
-      pages/                   # 7 page components
-      components/              # 7 shared components (+ Toast.tsx)
-      contexts/                # 3 context providers
-      hooks/                   # 1 hook (useKeyboardShortcuts)
-      __tests__/               # 4 test files (23 tests)
+      AppRouterSimplified.tsx  # Router (mobile responsive)
+      pages/                   # page components
+      components/              # shared components
+      contexts/                # context providers
+      hooks/                   # hooks
+      __tests__/               # frontend vitest suite
       config.ts                # API URL configuration
   mcp/
-    meeting_ops_mcp.py         # MCP server for external AI agents (8 tools)
+    meeting_ops_mcp.py         # MCP server for external AI agents
+  services/
+    speaker-svc/               # meet-speaker-svc: pyannote 3.1 diarization + embeddings
   docs/                        # Design documents
-    companion-app-design.md    # Mac/PC companion app architecture
-    satellite-devices-design.md # ESP32/RPi satellite device specs
-  models/                      # GGUF model files for llama.cpp
   docker-compose-full-stack.yml
 ```
 

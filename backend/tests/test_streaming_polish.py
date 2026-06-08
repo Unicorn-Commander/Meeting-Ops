@@ -249,7 +249,7 @@ def test_slow_upstream_triggers_skip_next_n(monkeypatch):
     drains correctly (False, False, True if there's enough audio).
 
     Async style matches the existing test_brigade_writer.py pattern of
-    asyncio.get_event_loop().run_until_complete(...).
+    asyncio.run(...).
     """
     import asyncio as _asyncio
 
@@ -287,22 +287,17 @@ def test_slow_upstream_triggers_skip_next_n(monkeypatch):
             self.sent.append(payload)
 
     fake_ws = _FakeWS()
-    # Use a fresh event loop so we're independent of whatever state the
-    # surrounding suite left behind. asyncio.get_event_loop() is
-    # deprecated when there's no running loop on the thread; the brigade
-    # tests get away with it because of fixture sequencing, but the
-    # whole-suite run leaves us with a closed loop.
-    loop = _asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            streaming_mod._flush_to_stt(
-                state, fake_ws,  # type: ignore[arg-type]
-                is_final=False,
-                http_client=_SlowClient(),  # type: ignore[arg-type]
-            )
+    # asyncio.run() gives us a fresh loop independent of whatever state the
+    # surrounding suite left behind, and is the supported replacement for
+    # the deprecated get_event_loop()/new_event_loop() dance (the latter
+    # left the whole-suite run with a closed loop on Python 3.14).
+    _asyncio.run(
+        streaming_mod._flush_to_stt(
+            state, fake_ws,  # type: ignore[arg-type]
+            is_final=False,
+            http_client=_SlowClient(),  # type: ignore[arg-type]
         )
-    finally:
-        loop.close()
+    )
 
     assert state.skip_next_n == 2, state.skip_next_n
     # Confirm we sent a partial back (the slow path still succeeded).

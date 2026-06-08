@@ -1299,6 +1299,7 @@ async def create_summary_slice(
     Returns 422 when there isn't enough new transcript since the previous
     slice; 503 when the LLM provider fails.
     """
+    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: "Summarize now" runs the server LLM
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")

@@ -187,9 +187,10 @@ function SimplifiedNavigation({
   // that admin items move OUT of the main list and into their own
   // section, so Speakers / Rooms (the multi-tenant configuration
   // surfaces) get pushed to the admin section below.
-  // Knowledge Graph page kill-switch. Ships dark — hidden unless
-  // VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=true (default OFF). The backend gates the
-  // endpoint by tier, so typing the URL manually still resolves safely.
+  // Knowledge Graph page is now GA. VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=true is set
+  // in our deploy envs so the nav item ships on by default; the flag is retained
+  // only as a kill-switch (unset / non-"true" hides the nav item). The backend
+  // gates the endpoint by tier, so typing the URL manually still resolves safely.
   const knowledgeGraphEnabled =
     String(
       (import.meta as unknown as { env?: Record<string, string | undefined> }).env

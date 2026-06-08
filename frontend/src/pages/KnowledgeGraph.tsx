@@ -153,9 +153,10 @@ export default function KnowledgeGraph() {
     return matches.slice(0, 50);
   }, [speakers, query]);
 
+  const nodes = graph?.nodes ?? [];
   const showViewer =
     !!graph &&
-    graph.nodes.length > 0 &&
+    nodes.length > 0 &&
     graph.reason !== 'not_synced_yet' &&
     graph.reason !== 'live_failed';
 
@@ -302,7 +303,7 @@ export default function KnowledgeGraph() {
           )}
           {graph.truncated && (
             <p className="text-xs text-amber-400">
-              Showing the first {graph.node_cap ?? graph.nodes.length} nodes — narrow by
+              Showing the first {graph.node_cap ?? nodes.length} nodes — narrow by
               person or reduce hops.
             </p>
           )}

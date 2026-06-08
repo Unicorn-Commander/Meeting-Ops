@@ -1,18 +1,26 @@
 """
 Enhanced WebSocket endpoint with automatic summarization
 """
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 import json
 import asyncio
 from typing import Dict, Set, Optional, List
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy.orm import Session
+
 from services.whisperx_npu_service import whisperx_service
 from services.auto_summarization_service import auto_summarization_service
 from services.unified_agent_service import unified_agent_service
 from services.system_service import SystemService
 from services.websocket_registry import websocket_registry
+from auth.dependencies import get_current_user, get_current_organization
+from auth.models import User
+from auth.organization import ActiveOrganization
+from auth.tier import gate_feature_for_caller
+from database.database import get_db
+from database.models import RecordingSession
 
 logger = logging.getLogger(__name__)
 
@@ -289,47 +297,73 @@ async def broadcast_transcription_segment(session_id: str, segment: Dict):
 async def control_auto_summarization(
     session_id: str,
     action: str,
-    enabled: Optional[bool] = None
+    enabled: Optional[bool] = None,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
 ):
     """
     REST endpoint to control auto-summarization
-    
+
     Actions:
     - start: Start auto-summarization
     - stop: Stop auto-summarization
     - status: Get current status
     - force: Force generate a summary now
+
+    v3.29.0 security fix: this router was UNAUTHENTICATED — any authenticated
+    caller could run the server LLM on an arbitrary session_id ("force") and
+    read back the generated summary of ANY tenant's meeting (cross-org exfil +
+    ungated server compute). We now require auth, org-scope the session to the
+    active organization, and tier-gate the LLM-running "force" action.
     """
+    # Org-scope: the session must belong to the caller's active organization.
+    rec = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.session_id == session_id,
+            RecordingSession.organization_id == active_org.organization.id,
+        )
+        .first()
+    )
+    if not rec:
+        raise HTTPException(status_code=404, detail="Session not found in active organization.")
+
     try:
         if action == "start":
             await auto_summarization_service.start_auto_summarization(session_id)
             return {"status": "started", "session_id": session_id}
-            
+
         elif action == "stop":
             await auto_summarization_service.stop_auto_summarization(session_id)
             return {"status": "stopped", "session_id": session_id}
-            
+
         elif action == "status":
             status = auto_summarization_service.get_status(session_id)
             return {"status": "success", "data": status}
-            
+
         elif action == "force":
+            gate_feature_for_caller(current_user, "qwen36_summary")  # server LLM run
             summary = await auto_summarization_service.force_summary(session_id)
             if summary:
                 return {"status": "success", "summary": summary}
             else:
                 raise HTTPException(status_code=400, detail="Not enough content for summary")
-                
+
         else:
             raise HTTPException(status_code=400, detail=f"Invalid action: {action}")
-            
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error controlling auto-summarization: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/auto-summary/settings")
-async def get_auto_summary_settings():
+async def get_auto_summary_settings(
+    current_user: User = Depends(get_current_user),
+):
     """Get current auto-summarization settings"""
     settings = SystemService.load_settings()
     return {
@@ -348,9 +382,14 @@ async def update_auto_summary_settings(
     summaryTriggerMode: Optional[str] = None,
     summaryUpdateInterval: Optional[int] = None,
     summaryWordCountInterval: Optional[int] = None,
-    enableFinalSummary: Optional[bool] = None
+    enableFinalSummary: Optional[bool] = None,
+    current_user: User = Depends(get_current_user),
 ):
-    """Update auto-summarization settings"""
+    """Update auto-summarization settings (global; admin only)"""
+    # v3.29.0 security fix: these are instance-wide settings — require an
+    # authenticated superuser (the endpoint was fully unauthenticated).
+    if not getattr(current_user, "is_superuser", False):
+        raise HTTPException(status_code=403, detail="Admin privileges required to change global summarization settings.")
     try:
         settings = SystemService.load_settings()
         

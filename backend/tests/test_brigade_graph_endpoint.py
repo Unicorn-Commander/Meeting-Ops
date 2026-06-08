@@ -392,9 +392,15 @@ def test_synced_session_shapes_response(client, two_orgs, monkeypatch):
     # focus + reason fields surface correctly.
     assert body["focus"] == "meeting_ops_meeting_alpha"
     assert body["reason"] is None
-    # graph_url surfaces (deep-link to Brigade 3D viewer).
-    assert body["graph_url"] is not None
-    assert "focus=meeting_ops_meeting_alpha" in body["graph_url"]
+    # graph_url is intentionally None — recording.py hardcodes it so the
+    # frontend renders the in-app 3D graph from the nodes/links payload
+    # instead of deep-linking to Brigade's standalone viewer.
+    assert body["graph_url"] is None
+    # The graph payload the frontend renders from is still fully present.
+    assert "nodes" in body and body["nodes"]
+    assert "links" in body and body["links"]
+    assert "focus" in body
+    assert all("label" in n for n in body["nodes"])
 
 
 # ---------------------------------------------------------------------------

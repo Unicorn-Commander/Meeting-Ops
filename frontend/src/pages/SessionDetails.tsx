@@ -2555,10 +2555,10 @@ export const SessionDetails: React.FC = () => {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="font-semibold text-purple-900">
-                      Brigade knowledge graph
+                      Knowledge graph
                     </div>
                     <p className="mt-1 text-purple-700">
-                      Brigade graph is a Pro/Enterprise integration.
+                      The knowledge graph is a Pro/Enterprise integration.
                       Upgrade to sync meetings into your private
                       knowledge graph and see related people,
                       decisions, and action items across Unicorn
@@ -2795,7 +2795,7 @@ export const SessionDetails: React.FC = () => {
                     </h2>
                     <p className="text-sm text-gray-600 mt-1">
                       Shows how this meeting connects to other people,
-                      topics, and decisions in your Brigade knowledge
+                      topics, and decisions in your knowledge
                       graph.
                     </p>
                   </div>

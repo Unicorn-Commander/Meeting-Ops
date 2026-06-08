@@ -8,30 +8,28 @@ cd backend
 # Or manually:
 uvicorn main:app --host 0.0.0.0 --port 9050 --reload
 
-# Database (PostgreSQL via Docker on port 5434)
+# Database (PostgreSQL via Docker)
 docker compose -f docker-compose-full-stack.yml up -d
-# Connection: postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions
 
-# LLM (GPT-OSS 20B default via llama.cpp Vulkan on port 11437)
-# Started by docker-compose, OpenAI-compatible API
+# LLM is reached over HTTP via the LiteLLM gateway (OpenAI-compatible)
+# Qwen 3.6 35B-A3B-Vision behind llama.cpp, fronted by LiteLLM at unicorn-litellm:4000
 ```
 
 ## Architecture
 
 ### LLM Integration
-- Default model: GPT-OSS 20B (MXFP4 GGUF) on llama.cpp Vulkan (~28 tok/s)
-- Fallback model: Granite 3.3 2B (Q4_K_M GGUF) (~43 tok/s)
-- Model registry: `config/model_registry.py` — centralized configs, token multipliers
-- Active model setting: `ai.llm_model` in settings_manager (DB-persisted)
-- API: OpenAI-compatible `/v1/chat/completions` at `http://localhost:11437`
+- Default model: Qwen 3.6 35B-A3B-Vision — Mixture-of-Experts (~3B active params), served via llama.cpp
+- Gateway: LiteLLM at `unicorn-litellm:4000` (OpenAI-compatible `/v1/chat/completions`)
+- Fast model: `gemma-4-e4b` for cheap / low-latency calls
+- Vision-capable (OCR / image-bearing context)
+- Model registry: `config/` — centralized configs; active model persisted in settings
 - Service: `services/unified_llm_service.py` (singleton, `llm_service` global)
-- Token multiplier: applied inside `_call_llm()` — callers pass base tokens
-- Used by: ai_chat, ai_insights, unified_agent_service, meeting_notes_service
+- Used by: ai_chat, ai_insights, unified_agent_service, meeting_notes_service, vocal-summary narration
 
 ### main.py
-Loads 21 routers via `_load_router()` with status tracking:
-- **Required** (3): auth, recording (simple_recording_db), sessions - fail fast on error
-- **Optional** (18): all others (including satellite_api, websocket_satellite) - log warning, report in /health
+Loads the routers in `api/` via `_load_router()` with status tracking:
+- **Required**: auth, recording (simple_recording_db), sessions - fail fast on error
+- **Optional**: all others (including satellite_api, websocket_satellite) - log warning, report in /health
 
 `/health` returns `{"status": "healthy"|"degraded", "routers_loaded": N, "routers_failed": [...]}` with real timestamps.
 
@@ -63,12 +61,11 @@ Loads 21 routers via `_load_router()` with status tracking:
 ### Services (backend/services/)
 | Service | Purpose | Status |
 |---------|---------|--------|
-| unified_llm_service.py | Granite 3.3 2B via llama.cpp OpenAI API | Working |
-| unified_agent_service.py | Progressive summarization (single model) | Working |
+| unified_llm_service.py | Qwen 3.6 35B-A3B-Vision via the LiteLLM OpenAI-compatible gateway | Working |
+| unified_agent_service.py | Progressive / completion-pass summarization | Working |
 | working_audio_service.py | USB mic recording via FFmpeg | Working |
-| real_whisper_service.py | NPU-accelerated Whisper | Working |
-| transcription_service.py | Transcription orchestration | Working |
-| llm_service.py | LLM service (llama.cpp backend) | Working |
+| transcription_service.py | Transcription orchestration (server completion pass → Parakeet 1.1B) | Working |
+| llm_service.py | LLM service (LiteLLM gateway backend) | Working |
 | meeting_notes_service.py | Meeting notes generation | Working |
 | auto_summarization_service.py | Auto-summarization | Working |
 | live_transcription_service.py | Live transcription service | Working |
@@ -79,7 +76,7 @@ Loads 21 routers via `_load_router()` with status tracking:
 
 ### Database
 ```
-PostgreSQL (port 5434):
+PostgreSQL:
 - recording_sessions (id, session_id, name, title, status, created_at, started_at, ended_at, audio_file, transcript, transcript_simple, transcript_diarized, summary, final_summary, duration, ...)
 - transcriptions (id, session_id, text, speaker, start_time, end_time, confidence, created_at)
 - unified_agents (id, name, system_prompt, model_name, config)
@@ -87,30 +84,30 @@ PostgreSQL (port 5434):
 - vocabulary_sets (id, name, description, terms)
 ```
 
+### Server-side AI services (server completion pass)
+- **STT**: Parakeet 1.1B for the server completion pass; in-browser Parakeet for the live transcript
+- **Diarization**: pyannote 3.1 via `meet-speaker-svc` (runs on bigboy's RTX 3090)
+- **LLM**: Qwen 3.6 35B-A3B-Vision (MoE) via LiteLLM at `unicorn-litellm:4000`; fast model `gemma-4-e4b`
+- **Embeddings + reranking**: shared Infinity server — `BAAI/bge-m3` (1024-dim dense) + `bge-reranker-v2-m3`; sparse BM25 local
+- **Vector store**: Qdrant, collection `meet_transcripts`, hybrid dense+sparse
+- **TTS**: Kokoro (`af_heart`) for vocal summaries
+
 ### Config (backend/config/)
-- `model_registry.py` - Model configs (GPT-OSS 20B, Granite 3.3 2B), `get_active_model()`
-- `ai_backends.py` - llama.cpp backend config (reads from model_registry)
-- `dual_ai_backends.py` - Backward-compat wrapper (same single backend)
+- Centralized model configs + `get_active_model()` (Qwen 3.6 35B-A3B-Vision default, `gemma-4-e4b` fast)
+- AI backend config points at the LiteLLM OpenAI-compatible gateway
 
 ## Known Issues
 1. **MeetingIntelligenceDashboard** - Live notes and final report generation endpoints not yet implemented (buttons disabled in UI)
 
 ## Testing
 ```bash
-# Run all tests (39 pass, 3 skip)
+# Run the backend pytest suite
 python3 -m pytest tests/ -v
-
-# Test files:
-# test_auth.py (6 tests) - login, token, protected routes
-# test_health.py (3 tests) - health, status endpoints
-# test_recording.py (8 tests) - CRUD lifecycle
-# test_export.py (3 tests) - transcript download
-# test_analytics.py (4 tests) - summary, sessions, performance
-# test_search_analytics.py (15 tests) - search, analytics, AI insights
-# test_vocabulary.py (3 tests, skipped on SQLite) - vocab CRUD
 ```
+Tests in `tests/` cover auth, health/status, recording CRUD lifecycle, export, analytics,
+search + AI insights, vocabulary, the session watchdog, and worker↔backend compose env parity.
 
-## NPU Performance
-- Whisper Large-v3: 220x speedup, 0.0045 RTF
-- 1 hour audio processed in 16.2 seconds
-- 4,789 tokens/sec, INT8 via MLIR-AIE2
+## Throughput
+Measured STT + diarization + LLM throughput (the server completion pass) is captured in
+`docs/throughput-benchmark-2026-06-08.md`. A reusable load harness lives at
+`services/speaker-svc/scripts/throughput_bench.py`.

@@ -39,6 +39,33 @@ def _env_names(service: dict) -> set[str]:
     return names
 
 
+def _env_pairs(service: dict) -> dict[str, str]:
+    """Return the service's environment as a name -> value dict.
+
+    Mirrors _env_names but keeps the value so we can inspect URL targets.
+    Handles both compose env forms (``- KEY=VALUE`` list and ``KEY: VALUE``
+    mapping)."""
+    env = service.get("environment", [])
+    pairs: dict[str, str] = {}
+    if isinstance(env, list):
+        for item in env:
+            name, _, value = str(item).partition("=")
+            pairs[name.strip()] = value
+    elif isinstance(env, dict):
+        for k, v in env.items():
+            pairs[str(k)] = "" if v is None else str(v)
+    return pairs
+
+
+# Model-service URL vars whose host, when it names a co-located meet-* svc,
+# must correspond to a real service in the same compose file. URLs that point
+# at an external host (e.g. a Tailscale IP) are intentionally ignored.
+SERVICE_URL_VARS = ("SPEAKER_SVC_URL", "PARAKEET_SERVER_URL", "SORTFORMER_URL")
+# Capture the host out of http://<host>:<port>, restricted to meet-* hosts so
+# the ${VAR:-http://...} default form still resolves the right target.
+MEET_HOST_RE = re.compile(r"https?://(meet-[A-Za-z0-9_.-]+):\d+")
+
+
 def test_worker_has_backend_model_service_env():
     if not COMPOSE.exists():
         pytest.skip(f"compose not found at {COMPOSE}")
@@ -55,4 +82,47 @@ def test_worker_has_backend_model_service_env():
         "meet-bulk-import-worker is missing model-service env the backend "
         "declares; the reprocess pipeline will fail (Parakeet/LLM unreachable). "
         "Add these to the worker service env: " + ", ".join(missing)
+    )
+
+
+def test_meet_host_model_urls_have_a_matching_container():
+    """If a service points SPEAKER_SVC_URL / PARAKEET_SERVER_URL / SORTFORMER_URL
+    at ``http://meet-<svc>:<port>``, a service with that ``container_name`` must
+    exist in the same compose file.
+
+    This catches the drift where someone wires a model-service URL at a
+    co-located meet-* container that was never defined (or got renamed/removed)
+    — the reprocess + live pipelines would then fail name resolution at runtime.
+    External targets (e.g. a Tailscale-IP host) are intentionally ignored; only
+    in-compose meet-* hosts are asserted."""
+    if not COMPOSE.exists():
+        pytest.skip(f"compose not found at {COMPOSE}")
+    data = yaml.safe_load(COMPOSE.read_text())
+    services = data.get("services", {})
+
+    container_names = {
+        svc.get("container_name")
+        for svc in services.values()
+        if isinstance(svc, dict) and svc.get("container_name")
+    }
+
+    missing: list[str] = []
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        pairs = _env_pairs(svc)
+        for var in SERVICE_URL_VARS:
+            if var not in pairs:
+                continue
+            m = MEET_HOST_RE.search(pairs[var])
+            if not m:
+                continue
+            host = m.group(1)
+            if host not in container_names:
+                missing.append(f"{svc_name}.{var} -> {host}")
+
+    assert not missing, (
+        "compose service(s) reference a meet-* model-service host with no "
+        "matching container_name in the same file (name resolution will fail "
+        "at runtime): " + ", ".join(sorted(missing))
     )

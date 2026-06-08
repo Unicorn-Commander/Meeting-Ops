@@ -391,7 +391,7 @@ def test_writer_fires_after_reprocess(client, monkeypatch):
     db = SessionLocal()
     try:
         # Direct call mirrors how the reprocess hook fires.
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             bw_mod.write_meeting_to_brigade(session_id, db)
         )
         assert result.ok
@@ -441,7 +441,7 @@ def test_writes_meeting_speakers_actions_topics_decisions(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=stub)
         )
     finally:
@@ -507,10 +507,10 @@ def test_shared_tenancy_uses_canonical_graph(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(session_a, db, client=stub)
         )
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(session_b, db, client=stub)
         )
     finally:
@@ -544,10 +544,10 @@ def test_per_org_graph_tenancy_uses_org_id(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(session_a, db, client=stub)
         )
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(session_b, db, client=stub)
         )
     finally:
@@ -597,7 +597,7 @@ def test_writer_swallows_brigade_errors(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=failing)
         )
     finally:
@@ -628,7 +628,7 @@ def test_idempotent_rerun_safe(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        r1 = asyncio.get_event_loop().run_until_complete(
+        r1 = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=stub_one)
         )
         sess = (
@@ -638,7 +638,7 @@ def test_idempotent_rerun_safe(client, monkeypatch):
         )
         first_stamp = sess.brigade_synced_at
 
-        r2 = asyncio.get_event_loop().run_until_complete(
+        r2 = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=stub_two)
         )
         db.expire(sess)
@@ -693,7 +693,7 @@ def test_noop_when_no_api_key(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=probe)
         )
     finally:
@@ -738,7 +738,7 @@ def test_writes_meeting_only_no_speakers_no_actions(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             write_meeting_to_brigade(session_id, db, client=stub)
         )
     finally:
@@ -785,7 +785,7 @@ def test_completion_mode_live_stored_on_meeting_node(client, monkeypatch):
 
     db = SessionLocal()
     try:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(
                 session_id, db, client=stub, completion_mode="live"
             )
@@ -823,7 +823,7 @@ def test_completion_mode_reprocess_default(client, monkeypatch):
     db = SessionLocal()
     try:
         # Default — no completion_mode kwarg.
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             write_meeting_to_brigade(session_id, db, client=stub)
         )
     finally:
@@ -922,7 +922,7 @@ def test_finalize_handler_fires_brigade_live_write(client, monkeypatch):
 
     # Allow the background task a moment to complete.
     try:
-        asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.3))
+        asyncio.run(asyncio.sleep(0.3))
     except RuntimeError:
         pass
 

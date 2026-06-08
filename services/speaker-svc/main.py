@@ -16,6 +16,7 @@ in the multipart body (always supported).
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -461,7 +462,12 @@ async def diarize(
     else:
         raw = await audio.read()
     wav, _ = _read_audio(raw)
-    return _run_diarization_on_wav(
+    # Offload the blocking pyannote pass off the event loop so the single
+    # uvicorn worker can still service /health (and queue a second request)
+    # while a diarization runs — otherwise a long meeting stalls the loop and
+    # can trip a false-unhealthy healthcheck. (v3.29.0)
+    return await asyncio.to_thread(
+        _run_diarization_on_wav,
         wav,
         return_embeddings=return_embeddings,
         num_speakers=num_speakers,

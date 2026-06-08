@@ -10,7 +10,7 @@ interface AskBarMessage {
   sources?: Array<{ meeting_id?: string; title?: string; snippet?: string }>;
 }
 
-const COMING_SOON_MESSAGE = 'Coming soon — wire the MCP';
+const COMING_SOON_MESSAGE = 'Coming soon';
 
 export const AskBar: React.FC = () => {
   const { activeOrganization } = useOrg();

@@ -357,6 +357,11 @@ async def start_upload(
 
     target_session = None
     if request.action == "attach":
+        # v3.29.0 moat fix: an attach-upload runs the full server STT +
+        # diarization + summary pipeline (run_upload_pipeline) just like a
+        # transcribe-upload, so it must carry the same audio_upload gate
+        # (Free/Basic 403). Previously only the "transcribe" branch gated.
+        gate_feature_for_caller(current_user, "audio_upload")
         if not request.target_session_id:
             raise HTTPException(status_code=400, detail="target_session_id is required for attach uploads.")
         target_session = _find_session(db, request.target_session_id, active_org.organization.id)
@@ -621,6 +626,7 @@ async def reprocess_session(
     so callers can use whichever they already have in hand. Mirrors the
     lookup pattern used by ai_chat and other session-scoped endpoints.
     """
+    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.29.0 moat fix: reprocess runs the paid server pipeline
     rec = (
         db.query(RecordingSession)
         .filter(
@@ -876,6 +882,64 @@ async def run_upload_pipeline(upload_id: str) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pre-warm of ai_insights failed for session %s: %s", session.id, exc)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="summarizing")
+
+        # Semantic index (Qdrant) for cross-meeting search + RAG. MUST mirror
+        # recording.py reprocess "Stage 5.9": this interactive-upload pipeline
+        # previously produced a transcript + summary that NEVER reached Qdrant,
+        # so uploaded meetings were silently invisible to semantic search + RAG
+        # chat (same silent-failure class as the always-on finalize path that
+        # left sessions 496/499/502 at 0 points). Index AFTER identify_speakers
+        # so diarized labels carry real names, and build the indexed transcript
+        # FROM the diarized segments so the per-chunk ``speakers`` payload (and
+        # therefore speaker-aware RAG) is populated. Best-effort + off-thread;
+        # a failure never blocks the upload.
+        try:
+            await _set_job_state(db, job, stage="embedding", progress_pct=20)
+            from services.semantic_search_service import semantic_search
+
+            _segs = (
+                session.transcript_diarized.get("segments")
+                if isinstance(session.transcript_diarized, dict)
+                else None
+            )
+            if _segs:
+                _index_transcript = "\n".join(
+                    f"{(seg.get('speaker') or 'Speaker')}: {(seg.get('text') or '').strip()}"
+                    for seg in _segs
+                    if (seg.get("text") or "").strip()
+                )
+            else:
+                _index_transcript = session.transcript_simple or session.transcript or ""
+
+            _index_summary = session.summary or ""
+            if not _index_summary and isinstance(session.final_summary, dict):
+                _index_summary = (
+                    session.final_summary.get("executive")
+                    or session.final_summary.get("summary")
+                    or ""
+                )
+
+            await asyncio.to_thread(
+                semantic_search.index_session,
+                session_id=session.session_id or str(session.id),
+                title=session.title or session.name or "",
+                transcript=_index_transcript,
+                summary=_index_summary,
+                created_at=session.created_at.isoformat() if session.created_at else "",
+                organization_id=session.organization_id,
+            )
+            await _set_job_state(db, job, progress_pct=100, last_completed_stage="embedding")
+            logger.info(
+                "Upload: semantic index updated for session=%s (%d diarized segs)",
+                session.id,
+                len(_segs) if _segs else 0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Upload semantic index failed (non-fatal) session=%s: %s",
+                session.id,
+                exc,
+            )
 
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)

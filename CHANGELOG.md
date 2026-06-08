@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+## [3.29.0] - 2026-06-08
+
+**Production-readiness pass: moat/security hardening, a silent data-integrity fix, and diarization-on-the-3090 made permanent.** Driven by a multi-agent audit of the whole app (30 confirmed, adversarially-verified findings).
+
+### Security / moat
+- **`websocket_auto_summary` router was unauthenticated** — `POST /api/auto-summary/control/{id}?action=force` ran the server LLM on *any* session id and returned that meeting's summary (cross-tenant read + ungated compute), and `PUT/GET /api/auto-summary/settings` let anyone mutate instance-wide summarization settings. Now requires auth, **org-scopes the session**, **tier-gates** the LLM-running `force` action (`qwen36_summary`), and restricts the settings write to superusers. (It also no longer swallows 4xx into 500s.)
+- **Closed three ungated server-compute paths** that let Free/Basic tiers run paid GPU work: the **vocal-summary + podcast TTS** endpoints (`/tts/summary`, `/tts/podcast`, both `/start` jobs — now gate `qwen36_summary`), the **"Summarize now"** slice endpoint (`/sessions/{id}/summary-slices` — gates `qwen36_summary`), and the **upload reprocess + attach-upload** paths (`/uploads/sessions/{id}/reprocess` and `start_upload action="attach"` — now gate `canonical_reprocess` / `audio_upload`, matching the transcribe branch).
+
+### Fixed
+- **Interactive uploads were silently invisible to search + RAG.** The file-picker/drag-drop upload pipeline (`run_upload_pipeline`) produced a transcript + summary but **never indexed to Qdrant** — the same silent-failure class as the always-on path fixed in v3.28.0, but for the upload door. Added the indexing stage (mirrors reprocess "Stage 5.9": built from diarized segments after `identify_speakers`, best-effort/non-fatal) so uploaded meetings appear in semantic search + cross-meeting RAG.
+- **Stale red test** (`test_brigade_graph_endpoint`) asserted `graph_url is not None` after the deep-link was intentionally removed — corrected. Forward-ported four tests off the removed-on-3.14 `get_event_loop().run_until_complete()` to `asyncio.run()` (the suite no longer hangs on newer interpreters).
+- **`meet-speaker-svc` blocked its event loop** — the pyannote pass now runs via `asyncio.to_thread`, so the single worker stays responsive (health probe + queued request) during a long diarization.
+- Frontend hardening: `KnowledgeGraph` page no longer white-screens on a malformed graph payload; removed a dead "Analyze (Coming Soon)" control; the Dashboard "Ask" placeholder no longer shows a developer-facing string.
+
+### Changed
+- **Diarization on the RTX 3090 is now permanent IaC.** Restored the `meet-speaker-svc` service to the bigboy compose (GPU 0, `speaker_models` volume, `HUGGINGFACE_TOKEN`, `/health` healthcheck, `restart: unless-stopped`) and repointed the `SPEAKER_SVC_URL` default (backend + worker) to `http://meet-speaker-svc:8889` — it was running as a hand-started container with nothing in version control. A new compose-parity test asserts any `meet-*` model-service URL has a matching service. Documented the `HUGGINGFACE_TOKEN` diarization prerequisite in the env example.
+- **Knowledge Graph is GA** — the compose build default `VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED` flips to `true` (was ship-dark) to match the v3.28.0 release notes; the flag stays as a kill-switch.
+- Removed the last user-facing **"Brigade"** wording leaks (SessionDetails upgrade card + expanded graph section, Help integration card) — the product term is "knowledge graph".
+- Added regression coverage for the Stage-5.9 indexing seam and the `meet-speaker-svc` diarize provider; refreshed the stale `CLAUDE.md` / `backend/CLAUDE.md` stack docs (Qwen 3.6 / LiteLLM / Infinity / pyannote-on-3090) and added a measured throughput benchmark (`docs/throughput-benchmark-2026-06-08.md`).
+
 ## [3.28.4] - 2026-06-07
 
 ### Added
