@@ -81,6 +81,7 @@ class _FakeProjectOpsClient:
         self._project_number = project_number
         self.created: list[dict[str, Any]] = []
         self.status_updates: list[tuple[str, str]] = []
+        self.submitted: list[dict[str, Any]] = []
         self.aclose_called = False
 
     async def create_task(
@@ -116,6 +117,28 @@ class _FakeProjectOpsClient:
 
             raise ProjectOpsClientError("simulated PO status failure")
         return {}
+
+    async def submit_candidate_action_items(
+        self,
+        items,
+        *,
+        source_type: str = "MEETING_OPS",
+        timeout_seconds=None,
+    ) -> dict[str, Any]:
+        """Records the submitted batch; returns the PO triage ingest shape
+        ({created, skipped, proposals}). Raises when ``fail`` is set to
+        exercise the writer's eventual-consistency (don't-stamp) path."""
+        self.submitted.append({"items": items, "source_type": source_type})
+        if self._fail:
+            from services.projectops_client import ProjectOpsClientError
+
+            raise ProjectOpsClientError("simulated PO triage submit failure")
+        created = len(items)
+        return {
+            "created": created,
+            "skipped": 0,
+            "proposals": [{"id": f"prop-{i}"} for i in range(created)],
+        }
 
     async def aclose(self) -> None:
         self.aclose_called = True
@@ -672,3 +695,267 @@ def test_gated_off_when_auto_push_disabled(client, monkeypatch):
     # And nothing got stamped onto the action items.
     for it in _items_for_session(session_id):
         assert (it.raw_payload or {}).get("po_task_id") is None
+
+
+# ---------------------------------------------------------------------------
+# 10-17. Triage submit path (submit_action_items_to_triage)
+#
+# The finalize/reprocess pipeline now submits action items to the PO TRIAGE
+# inbox (propose-only) instead of creating tasks directly. These cover the
+# new writer's contract: submit + stamp, replay-skip, no-target-still-works
+# (the key win over the direct writer), the linked-project routing hint, the
+# shared auto-push gate, no-op when unconfigured, eventual-consistency on
+# failure (don't stamp), and not double-filing direct-bridged items.
+# ---------------------------------------------------------------------------
+
+
+def test_triage_submits_and_stamps(client):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    # No target project anywhere — triage needs none.
+    org_id, session_id = _seed(
+        items=[
+            {"text": "Investigate slow dashboard", "owner": "Shafen"},
+            {"text": "Write API docs for triage", "owner": "Alice"},
+            {"text": "Email the client the timeline", "owner": None},
+        ],
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    assert result.created == 3  # po_created echoed from the stub
+
+    # One batch submit carrying all 3 candidates.
+    assert len(stub.submitted) == 1
+    batch = stub.submitted[0]
+    assert batch["source_type"] == "MEETING_OPS"
+    cands = batch["items"]
+    assert len(cands) == 3
+    assert cands[0]["text"] == "Investigate slow dashboard"
+    assert cands[0]["owner"] == "Shafen"
+    assert cands[0]["sourceActionItemId"]  # a stable id is present
+    assert cands[0]["sourceRef"]["app"] == "meeting-ops"
+    assert "meetingTitle" in cands[0]["sourceRef"]
+    # No create_task calls happen on the triage path.
+    assert stub.created == []
+
+    # Every row stamped for triage — but NOT with a po_task_id (no task yet).
+    for it in _items_for_session(session_id):
+        rp = it.raw_payload or {}
+        assert rp.get("po_triage_submitted_at", "").endswith("Z")
+        assert rp.get("po_triage_source_type") == "MEETING_OPS"
+        assert rp.get("po_task_id") is None
+
+
+def test_triage_replay_skips_submitted(client):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    org_id, session_id = _seed()
+
+    first = _FakeProjectOpsClient()
+    db = SessionLocal()
+    try:
+        r1 = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=first
+            )
+        )
+    finally:
+        db.close()
+    assert r1.created == 3
+    assert len(first.submitted) == 1
+
+    # Second run: stamps are seen; nothing re-submitted.
+    second = _FakeProjectOpsClient()
+    db = SessionLocal()
+    try:
+        r2 = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=second
+            )
+        )
+    finally:
+        db.close()
+    assert r2.ok is True
+    assert r2.mode == "live"
+    assert r2.created == 0
+    assert r2.skipped == 3
+    assert second.submitted == []
+
+
+def test_triage_no_target_still_submits(client):
+    # The key improvement over the direct writer: no session link, no
+    # override, and no org default — triage STILL submits (it routes itself,
+    # where the direct writer would return mode="no-target").
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    org_id, session_id = _seed()  # bare org, zero project config
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    assert result.created == 3
+    assert len(stub.submitted) == 1
+
+
+def test_triage_passes_linked_project_hint(client):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    project_uuid = "abcdef12-3456-4789-8abc-def012345678"
+    org_id, session_id = _seed(
+        project_app="project-ops", project_id=project_uuid
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    cands = stub.submitted[0]["items"]
+    assert all(
+        c["sourceRef"]["linkedProjectRef"] == project_uuid for c in cands
+    )
+
+
+def test_triage_gated_off_when_auto_push_disabled(client, monkeypatch):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    _patch_auto_push(monkeypatch, enabled=False)
+
+    org_id, session_id = _seed()
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "gated-off"
+    assert result.created == 0
+    assert stub.submitted == []
+    for it in _items_for_session(session_id):
+        assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
+
+
+def test_triage_noop_when_unconfigured(client):
+    from services.projectops_client import ProjectOpsClient
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    org_id, session_id = _seed()
+    probe = ProjectOpsClient()
+    assert probe.is_live is False
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=probe
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "no-op"
+    for it in _items_for_session(session_id):
+        assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
+
+
+def test_triage_failure_leaves_rows_unstamped(client):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    org_id, session_id = _seed()
+    failing = _FakeProjectOpsClient(fail=True)
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=failing
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is False
+    assert result.mode == "error"
+    # Nothing stamped -> items get retried on the next finalize/backfill.
+    for it in _items_for_session(session_id):
+        assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
+
+
+def test_triage_skips_direct_bridged_items(client):
+    # An item already bridged via the direct path (po_task_id set) is left
+    # alone — never double-filed into the triage inbox.
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    org_id, session_id = _seed(
+        items=[
+            {
+                "text": "Already a PO task",
+                "owner": "Alice",
+                "raw_payload": {"po_task_id": "task-X"},
+            },
+            {"text": "Fresh item", "owner": "Bob"},
+        ],
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    # Only the fresh item submitted; the direct-bridged one skipped.
+    assert len(stub.submitted) == 1
+    cands = stub.submitted[0]["items"]
+    assert len(cands) == 1
+    assert cands[0]["text"] == "Fresh item"
+    assert result.skipped == 1  # the already-bridged item

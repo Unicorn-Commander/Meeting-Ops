@@ -77,6 +77,12 @@ DEFAULT_BASE_URL = "http://project-ops-backend:3201/api/v1"
 # 5s because we may also page the projects list to resolve a number.
 DEFAULT_TIMEOUT_SECONDS = 8.0
 
+# Triage ingest runs an embed + rerank + LLM reasoning pass PER item on
+# local hardware (seconds each), so a batch needs far more headroom than
+# the single-insert create_task path. Used by submit_candidate_action_items,
+# which also issues a SINGLE attempt (no expensive retry on timeout).
+TRIAGE_INGEST_TIMEOUT_SECONDS = 240.0
+
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_INITIAL_BACKOFF_SECONDS = 0.25
 DEFAULT_BACKOFF_MULTIPLIER = 2.0
@@ -429,6 +435,55 @@ class ProjectOpsClient:
         )
         return data if isinstance(data, dict) else {}
 
+    async def submit_candidate_action_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        source_type: str = "MEETING_OPS",
+        timeout_seconds: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Submit a batch of candidate action items to Project-Ops' TRIAGE
+        agent (``POST /triage/ingest``). Propose-only: the triage agent
+        routes + dedups each item and writes a TriageProposal for human
+        review — NO task is created until a human approves in Project-Ops.
+
+        Unlike ``create_task`` this needs NO target project: triage resolves
+        routing itself (or files the item in the "needs a project" inbox).
+        Idempotent on the PO side via ``(sourceType, sourceActionItemId)``,
+        so re-submitting the same items is safe (they return as ``skipped``).
+
+        ``items`` is a list of ``{text, owner?, sourceActionItemId?,
+        sourceRef?}``. Returns the ingest summary
+        ``{created, skipped, proposals}``.
+
+        Timeout/retry: a batch triggers one embed + rerank + LLM pass per
+        item on local GPUs, so this uses a generous per-call timeout
+        (``TRIAGE_INGEST_TIMEOUT_SECONDS``) and a SINGLE attempt — re-issuing
+        the whole expensive batch on a timeout would be wasteful, and the
+        writer's eventual-consistency posture (don't stamp on failure,
+        re-submit next finalize/backfill, PO dedups) already covers a
+        dropped response. Raises ``ProjectOpsClientError`` on terminal
+        failure; callers gate on ``is_live`` first.
+        """
+        if not self.is_live:
+            raise ProjectOpsClientError(
+                "submit_candidate_action_items called while not configured "
+                "(PROJECTOPS_API_KEY or KC credentials unset)"
+            )
+        if not items:
+            return {"created": 0, "skipped": 0, "proposals": []}
+        body: dict[str, Any] = {"items": items, "sourceType": source_type}
+        data = await self._request_with_retries(
+            "POST",
+            "/triage/ingest",
+            json=body,
+            timeout=timeout_seconds or TRIAGE_INGEST_TIMEOUT_SECONDS,
+            max_attempts=1,
+        )
+        if not isinstance(data, dict):
+            return {"created": 0, "skipped": 0, "proposals": []}
+        return data
+
     async def resolve_project_id(self, project_number: str) -> str:
         """Public passthrough to the number->UUID resolver (handy for
         scripts / diagnostics)."""
@@ -507,15 +562,24 @@ class ProjectOpsClient:
         *,
         json: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        max_attempts: Optional[int] = None,
     ) -> Any:
         """Issue an HTTP request with bounded retries. Retries on
         connect/timeout/5xx; 4xx is terminal (the payload won't get
         better). Returns parsed JSON on 2xx; raises ProjectOpsClientError
-        on terminal failure or after exhausting retries."""
+        on terminal failure or after exhausting retries.
+
+        ``timeout`` overrides the per-request read timeout for this call
+        (the triage-ingest path needs far more than the 8s default).
+        ``max_attempts`` overrides the retry count for this call — pass 1
+        for an expensive, idempotent op that must not be re-issued on a
+        timeout."""
         url = f"{self._base_url}{path}"
         backoff = self._initial_backoff
         last_detail: Optional[str] = None
-        for attempt in range(self._max_retries):
+        attempts = max_attempts if max_attempts is not None else self._max_retries
+        for attempt in range(attempts):
             try:
                 headers = await self._headers()
                 async with self._client_ctx() as client:
@@ -525,6 +589,7 @@ class ProjectOpsClient:
                         json=json,
                         params=params,
                         headers=headers,
+                        timeout=timeout if timeout is not None else self._timeout,
                     )
                 if resp.status_code < 400:
                     if not resp.content:
@@ -564,12 +629,12 @@ class ProjectOpsClient:
                     attempt,
                     exc,
                 )
-            if attempt < self._max_retries - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(backoff)
                 backoff *= self._backoff_multiplier
         logger.warning(
             "projectops_client request failed after %d attempts %s %s detail=%s",
-            self._max_retries,
+            attempts,
             method,
             path,
             last_detail,
@@ -597,4 +662,5 @@ __all__ = [
     "ProjectOpsClient",
     "ProjectOpsClientError",
     "DEFAULT_BASE_URL",
+    "TRIAGE_INGEST_TIMEOUT_SECONDS",
 ]

@@ -211,10 +211,12 @@ async def finalize_session_job(
                 session_pk, exc,
             )
 
-        # ---- Step 5: Project-Ops action-item bridge (best-effort) ----
+        # ---- Step 5: Project-Ops triage submit (best-effort) ----
+        # Action items go to the PO triage inbox (propose-only); a human
+        # approves in Project-Ops before anything becomes a task.
         try:
-            from services.projectops_writer import write_action_items_to_projectops
-            await write_action_items_to_projectops(
+            from services.projectops_writer import submit_action_items_to_triage
+            await submit_action_items_to_triage(
                 db=db, session_pk=session_pk, completion_mode="live"
             )
         except Exception as exc:  # noqa: BLE001

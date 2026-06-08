@@ -51,6 +51,17 @@ STAMP_TASK_ID = "po_task_id"
 STAMP_PROJECT_NUMBER = "po_project_number"
 STAMP_SYNCED_AT = "po_synced_at"
 
+# Triage-path stamp keys. Set when an action item has been submitted to the
+# Project-Ops triage inbox (propose-only) — distinct from STAMP_TASK_ID
+# because no task exists until a human approves in PO. The idempotency
+# marker for the triage submit path.
+STAMP_TRIAGE_SUBMITTED_AT = "po_triage_submitted_at"
+STAMP_TRIAGE_SOURCE_TYPE = "po_triage_source_type"
+
+# The sourceType Meeting-Ops stamps on candidates submitted to PO triage.
+# PO dedups on (sourceType, sourceActionItemId), so this must be stable.
+TRIAGE_SOURCE_TYPE = "MEETING_OPS"
+
 # Org-scoped setting key, stored inside Organization.settings (JSONB).
 ORG_DEFAULT_SETTING_KEY = "projectops_default_project_number"
 
@@ -238,6 +249,59 @@ def _stamp_item(item: Any, *, task_id: str, project_number: Optional[str]) -> No
         payload[STAMP_PROJECT_NUMBER] = project_number
     payload[STAMP_SYNCED_AT] = _utcnow_iso()
     item.raw_payload = payload
+
+
+def _stamp_triage(item: Any) -> None:
+    """Mark an action item as submitted to the Project-Ops triage inbox.
+    The idempotency marker for the triage path (mirrors ``_stamp_item`` but
+    carries no task id — no task exists until a human approves in PO).
+    Reassigns the dict so SQLAlchemy flags the JSONB column dirty."""
+    payload = dict(item.raw_payload or {})
+    payload[STAMP_TRIAGE_SUBMITTED_AT] = _utcnow_iso()
+    payload[STAMP_TRIAGE_SOURCE_TYPE] = TRIAGE_SOURCE_TYPE
+    item.raw_payload = payload
+
+
+def _explicit_project_ref(db: Session, session: Any) -> Optional[str]:
+    """The session's EXPLICIT Project-Ops link — the session->PO link
+    (``project_app == 'project-ops'`` + ``project_id``) or a per-meeting
+    override — if any. Unlike ``_resolve_target_project`` this does NOT fall
+    back to the org default: it's only a routing HINT for triage, and the
+    org default is too weak a signal to bias the agent's routing. Returns a
+    project number or UUID, or None."""
+    if (
+        getattr(session, "project_app", None) == PROJECT_APP_PROJECTOPS
+        and getattr(session, "project_id", None)
+    ):
+        return str(session.project_id).strip()
+    meta = session.processing_metadata or {}
+    if isinstance(meta, dict):
+        override = meta.get(SESSION_OVERRIDE_KEY)
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+    return None
+
+
+def _candidate_source_ref(
+    session: Any, item: Any, linked_ref: Optional[str]
+) -> dict[str, Any]:
+    """Provenance + routing hint for a triage candidate's ``sourceRef``.
+    Carries enough for the PO reviewer (and a future hint-aware router) to
+    see where the item came from and any explicitly intended project."""
+    ref: dict[str, Any] = {
+        "app": "meeting-ops",
+        "meetingTitle": _meeting_label(session),
+        "meetingDate": _meeting_date(session),
+        "sessionId": session.id,
+        "sessionUid": getattr(session, "session_id", None),
+        "actionItemId": item.id,
+    }
+    owner = (item.owner or "").strip()
+    if owner:
+        ref["owner"] = owner
+    if linked_ref:
+        ref["linkedProjectRef"] = linked_ref
+    return ref
 
 
 async def write_action_items_to_projectops(
@@ -447,6 +511,210 @@ async def write_action_items_to_projectops(
         )
 
 
+async def submit_action_items_to_triage(
+    *,
+    db: Session,
+    session_pk: int,
+    completion_mode: str = "reprocess",
+    client: Optional[Any] = None,
+) -> ProjectOpsWriteResult:
+    """Submit this session's un-submitted action items to Project-Ops'
+    TRIAGE agent (propose-only) instead of creating tasks directly.
+
+    This is the finalize/reprocess successor to
+    ``write_action_items_to_projectops``. Where the direct writer needed a
+    pre-resolved target project and created a task per item, triage needs
+    NO target: the PO-side agent routes each item to the best-fitting
+    project (or files it in the "needs a project" inbox), dedups against
+    existing work, and a human approves in Project-Ops before anything
+    becomes a task. That dissolves the "auto-push creates task noise"
+    problem the auto-push gate was built for — but we keep the SAME per-org
+    opt-in gate so an org still chooses whether finalize feeds its triage
+    inbox.
+
+    Contract mirrors the direct writer: NEVER raises into the recording
+    pipeline; honors the per-org integration enable + the v3.26.0 auto-push
+    opt-in; a clean no-op when PO is unconfigured. Idempotent via a
+    ``po_triage_submitted_at`` stamp on ``action_items.raw_payload`` AND
+    PO's own ``(sourceType, sourceActionItemId)`` uniqueness — a re-run
+    submits only the un-stamped items and PO skips any it has already seen.
+    Items already bridged via the direct path (``po_task_id`` set) are left
+    alone (not double-filed).
+
+    Note: triage-routed items are NOT linked back with a ``po_task_id`` (no
+    task exists until approval in PO), so the MO->PO marked-done status
+    propagation does not apply to them — PO owns the task lifecycle from
+    approval onward. The direct ``create_task`` path (and its status
+    propagation) remains available for explicit / backfill use.
+    """
+    from services.projectops_client import ProjectOpsClient, ProjectOpsClientError
+
+    try:
+        from database.models import ActionItem, RecordingSession
+
+        session = (
+            db.query(RecordingSession)
+            .filter(RecordingSession.id == session_pk)
+            .first()
+        )
+        if session is None:
+            logger.info(
+                "projectops_triage skipped: session_pk=%s not found", session_pk
+            )
+            return ProjectOpsWriteResult(
+                ok=False, mode="error", detail="session not found"
+            )
+
+        # Per-org integration toggle (same guarantee as the direct writer):
+        # an org that turned project_ops OFF never leaks to a shared PO.
+        from services.integrations.org_config import resolve_project_ops
+
+        po_cfg = resolve_project_ops(db, session.organization_id)
+        if not po_cfg.enabled and po_cfg.source == "disabled":
+            logger.info(
+                "projectops_triage org=%s explicitly disabled project_ops — "
+                "skipping session=%s",
+                session.organization_id,
+                session_pk,
+            )
+            return ProjectOpsWriteResult(ok=True, mode="no-op")
+
+        # Same v3.26.0 auto-push opt-in gate as the direct writer: feeding
+        # the triage inbox from finalize is opt-in per org (default OFF).
+        if not po_cfg.extra.get("auto_push_action_items", False):
+            logger.info(
+                "projectops_triage org=%s auto-push disabled (opt-in OFF, "
+                "source=%s) — skipping session=%s mode=%s",
+                session.organization_id,
+                po_cfg.source,
+                session_pk,
+                completion_mode,
+            )
+            return ProjectOpsWriteResult(ok=True, mode="gated-off")
+
+        owned_client = client is None
+        if client is None:
+            if po_cfg.source == "org_override":
+                active_client = ProjectOpsClient(
+                    base_url=po_cfg.api_base_url,
+                    api_key=po_cfg.api_key,
+                )
+            else:
+                active_client = ProjectOpsClient()
+        else:
+            active_client = client
+        try:
+            if not active_client.is_live:
+                logger.info(
+                    "projectops_triage: PO unconfigured (PROJECTOPS_API_KEY / "
+                    "KC creds unset), skipping session=%s",
+                    session_pk,
+                )
+                return ProjectOpsWriteResult(ok=True, mode="no-op")
+
+            action_items = (
+                db.query(ActionItem)
+                .filter(ActionItem.session_id == session.id)
+                .order_by(ActionItem.sort_order.asc(), ActionItem.id.asc())
+                .all()
+            )
+
+            # Submit only items not already submitted to triage AND not
+            # already bridged to a direct PO task — don't double-file work.
+            pending = [
+                it
+                for it in action_items
+                if not (it.raw_payload or {}).get(STAMP_TRIAGE_SUBMITTED_AT)
+                and not (it.raw_payload or {}).get(STAMP_TASK_ID)
+            ]
+            already = len(action_items) - len(pending)
+            if not pending:
+                logger.info(
+                    "projectops_triage session=%s nothing new to submit "
+                    "(already=%d)",
+                    session_pk,
+                    already,
+                )
+                return ProjectOpsWriteResult(
+                    ok=True, mode="live", created=0, skipped=already
+                )
+
+            # An explicit session<->PO link (or per-meeting override) rides
+            # along as a routing hint in each candidate's sourceRef. We omit
+            # the org default on purpose — triage should route freely.
+            linked_ref = _explicit_project_ref(db, session)
+            candidates = [
+                {
+                    "text": it.text,
+                    "owner": (it.owner or None),
+                    "sourceActionItemId": str(it.id),
+                    "sourceRef": _candidate_source_ref(session, it, linked_ref),
+                }
+                for it in pending
+            ]
+
+            try:
+                result = await active_client.submit_candidate_action_items(
+                    candidates, source_type=TRIAGE_SOURCE_TYPE
+                )
+            except ProjectOpsClientError as exc:
+                # Don't stamp: the un-submitted items get retried on the next
+                # finalize/backfill, and PO dedups anything that did land.
+                # Eventual consistency, no duplicate proposals.
+                logger.warning(
+                    "projectops_triage submit failed session=%s count=%d: %s",
+                    session_pk,
+                    len(pending),
+                    exc,
+                )
+                return ProjectOpsWriteResult(
+                    ok=False,
+                    mode="error",
+                    skipped=already,
+                    detail=str(exc)[:200],
+                )
+
+            for it in pending:
+                _stamp_triage(it)
+            db.commit()
+
+            po_created = (
+                int(result.get("created", 0)) if isinstance(result, dict) else 0
+            )
+            po_skipped = (
+                int(result.get("skipped", 0)) if isinstance(result, dict) else 0
+            )
+            logger.info(
+                "projectops_triage session=%s mode=%s submitted=%d "
+                "po_created=%d po_skipped=%d already=%d",
+                session_pk,
+                completion_mode,
+                len(pending),
+                po_created,
+                po_skipped,
+                already,
+            )
+            return ProjectOpsWriteResult(
+                ok=True,
+                mode="live",
+                created=po_created,
+                skipped=already + po_skipped,
+                detail=f"submitted={len(pending)} po_created={po_created}",
+            )
+        finally:
+            if owned_client:
+                await active_client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "projectops_triage swallowed error session_pk=%s: %s",
+            session_pk,
+            exc,
+        )
+        return ProjectOpsWriteResult(
+            ok=False, mode="error", detail=str(exc)[:200]
+        )
+
+
 def _ref_as_number(project_ref: str) -> Optional[str]:
     """If the resolved target was a human project number (not a UUID),
     use it as the stamped project number when the create response didn't
@@ -520,10 +788,12 @@ async def propagate_action_item_status(
 
 __all__ = [
     "write_action_items_to_projectops",
+    "submit_action_items_to_triage",
     "propagate_action_item_status",
     "get_org_default_project_number",
     "set_org_default_project_number",
     "ProjectOpsWriteResult",
     "ORG_DEFAULT_SETTING_KEY",
     "SESSION_OVERRIDE_KEY",
+    "TRIAGE_SOURCE_TYPE",
 ]
