@@ -62,7 +62,7 @@ const CARDS: CardDef[] = [
   {
     key: 'project_ops',
     title: 'Project-Ops',
-    description: 'Convert action items into tasks on a per-org project.',
+    description: 'Send meeting action items to the Project-Ops triage inbox for review.',
   },
   {
     key: 'contact_ops',
@@ -95,6 +95,7 @@ interface FormState {
   tenancy_mode: string;
   shared_agent_id: string;
   default_project_number: string;
+  auto_push_action_items: boolean;
   showKey: boolean;
 }
 
@@ -107,6 +108,7 @@ function defaultFormFromView(view: IntegrationView): FormState {
     tenancy_mode: (extra.tenancy_mode as string) || 'shared',
     shared_agent_id: (extra.shared_agent_id as string) || '',
     default_project_number: (extra.default_project_number as string) || '',
+    auto_push_action_items: Boolean(extra.auto_push_action_items),
     showKey: false,
   };
 }
@@ -189,6 +191,7 @@ export default function IntegrationsPanel() {
         payload.shared_agent_id = form.shared_agent_id;
       } else if (key === 'project_ops') {
         payload.default_project_number = form.default_project_number;
+        payload.auto_push_action_items = form.auto_push_action_items;
       }
       const next = await updateIntegration(key, payload);
       setViews((prev) => ({ ...prev, [key]: next }));
@@ -397,15 +400,39 @@ export default function IntegrationsPanel() {
                 )}
 
                 {card.key === 'project_ops' && (
-                  <Field
-                    label="Default project number"
-                    value={form.default_project_number}
-                    onChange={(v) =>
-                      updateForm(card.key, { default_project_number: v })
-                    }
-                    placeholder="P-00055"
-                    disabled={!isAdmin || busy}
-                  />
+                  <>
+                    <Field
+                      label="Default project number (optional)"
+                      value={form.default_project_number}
+                      onChange={(v) =>
+                        updateForm(card.key, { default_project_number: v })
+                      }
+                      placeholder="P-00055"
+                      disabled={!isAdmin || busy}
+                    />
+                    <div className="flex items-start justify-between gap-3 pt-1">
+                      <div className="pr-2">
+                        <label className="block text-xs font-medium text-zinc-300">
+                          Auto-send action items to triage
+                        </label>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          When on, action items from completed meetings are sent
+                          to the Project-Ops triage inbox for review. Propose-only
+                          — the triage agent routes each item and nothing becomes
+                          a task until someone approves it in Project-Ops. Off by
+                          default.
+                        </p>
+                      </div>
+                      <ToggleSwitch
+                        checked={form.auto_push_action_items}
+                        onChange={(v) =>
+                          updateForm(card.key, { auto_push_action_items: v })
+                        }
+                        disabled={!isAdmin || busy}
+                        ariaLabel="Auto-send action items to the Project-Ops triage inbox"
+                      />
+                    </div>
+                  </>
                 )}
               </div>
             )}
