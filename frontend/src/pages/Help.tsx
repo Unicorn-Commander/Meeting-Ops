@@ -252,6 +252,20 @@ function EveryoneTier() {
       </section>
 
       <section className="space-y-4">
+        <SectionHeader icon={Users} title="Naming the speakers" />
+        <p className="text-zinc-300">
+          Until a voice is recognized, the transcript labels it generically
+          ("Speaker 1"). When you open a meeting that still has unnamed speakers, a
+          highlighted <span className="text-zinc-100">"name the speakers"</span>{' '}
+          prompt sits right at the top of the record — pick who each voice is from
+          the dropdown (it pre-fills its best guess, so it's usually one tap each).
+          Naming a voice once teaches the system, so that person is recognized
+          automatically in later meetings, and your summaries and search start
+          using real names instead of "Speaker 1."
+        </p>
+      </section>
+
+      <section className="space-y-4">
         <SectionHeader icon={FolderTree} title="Finding meetings: Sessions & Folders" />
         <p className="text-zinc-300">
           The <span className="text-zinc-100">Sessions</span> page lists every
@@ -690,9 +704,11 @@ function OperatorTier() {
               3
             </span>
             <span>
-              <span className="text-zinc-100">Summarize</span> — a larger LM than
-              the browser ran, producing the polished summary, key points, and
-              action items.
+              <span className="text-zinc-100">Summarize</span> — Qwen 3.6
+              35B-A3B-Vision (a vision-capable Mixture-of-Experts model, far
+              larger than the browser ran), producing the polished summary, key
+              points, and action items. The same model backs cross-meeting AI
+              Chat.
             </span>
           </li>
           <li className="flex items-start gap-3">

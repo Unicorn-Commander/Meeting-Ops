@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.30.0] - 2026-06-08
+
+**Production-ready / pre-launch milestone.** Consolidates the v3.29.6 → v3.29.13 arc (session-card enrichment, the security + robustness pass, the Sessions perf fix + speaker-naming UX, and the pre-onboarding "make everything honest" sweep) into a tagged release, with a docs + Help refresh.
+
+### Changed
+- **Help page refreshed.** Named the server summary/chat model — **Qwen 3.6 35B-A3B-Vision** (MoE) — in the operator-tier pipeline description (was "a larger LM"), and added a **"Naming the speakers"** section to the end-user tier covering the new inline prompt (name unidentified voices right from the meeting record; one tap each; teaches the system for future meetings). The role-based structure (everyone / team admins / administrators) and the rest of the content were already accurate.
+- **`CLAUDE.md` updated** from the stale "v3.28.4 (v3.29.0 in progress)" to the v3.30.0 milestone, with an explicit **live-inference-stack** block (Parakeet / pyannote 3.1 / Qwen 3.6 / Infinity / Kokoro) so the canonical project doc no longer implies the corrected-away Whisper/Granite/gpt-oss labels.
+
 ## [3.29.13] - 2026-06-08
 
 **Two robustness fixes surfaced by the live pre-launch walkthrough.**
