@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.29.13] - 2026-06-08
+
+**Two robustness fixes surfaced by the live pre-launch walkthrough.**
+
+### Fixed
+- **No more white-screen on an already-open tab during a deploy.** When a new frontend build replaces the hashed JS chunks, a tab that's been open since before the deploy can fail to lazy-load a now-deleted chunk ("Failed to fetch dynamically imported module") and render blank. `main.tsx` now listens for Vite's `vite:preloadError` (and a matching `unhandledrejection`) and **reloads once** to pick up the fresh bundle, with a 10-second guard so it can't loop. A first-time visitor was never affected; this covers existing sessions.
+- **Sessions "No sessions found" no longer flashes during load.** When the list hydrates from an empty cache, `loading` is already `false` before the real data arrives, so the empty-state showed for ~1s on a populated account. Gated it behind a `hasFetchedOnce` flag — the skeleton shows until the first server fetch completes, then either the grid or a genuine empty-state. (A brand-new user with no meetings still sees the empty-state immediately.)
+
 ## [3.29.12] - 2026-06-08
 
 **Pre-onboarding sweep — every Settings panel + new-user surface made honest.** An 18-agent audit (70 findings, 63 verified) drove this; combined with a live browser walkthrough confirming the real experience. The goal: nothing stale or fake before a real user pokes around.

@@ -808,6 +808,11 @@ export const Sessions: React.FC = () => {
   // Subsequent polls + filter changes don't toggle this — they update
   // the list in place.
   const [loading, setLoading] = useState(!sessionsHydratedFromCache);
+  // True once the first server fetch has completed. Gates the "No sessions"
+  // empty-state so it can't flash during the initial load — when the list is
+  // hydrated from an empty cache, `loading` is already false but the real data
+  // hasn't arrived yet, which would otherwise show "No sessions found" for ~1s.
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   // Auto-refresh: poll the list while it's on (default on) so a new/just-
   // processed meeting appears without a manual reload; the Refresh button
@@ -1240,6 +1245,7 @@ export const Sessions: React.FC = () => {
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     } finally {
+      setHasFetchedOnce(true);
       if (showSpinner) {
         setLoading(false);
       } else {
@@ -2505,7 +2511,7 @@ export const Sessions: React.FC = () => {
         )}
 
         {/* Sessions */}
-        {loading ? (
+        {loading || (!hasFetchedOnce && filteredSessions.length === 0) ? (
           <SkeletonSessionGrid count={6} />
         ) : filteredSessions.length === 0 ? (
           <div className="text-center py-12">
