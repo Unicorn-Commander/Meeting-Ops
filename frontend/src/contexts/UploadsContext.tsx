@@ -14,6 +14,43 @@ import {
   type UploadStatus,
 } from '../utils/uploads';
 
+// Quota / plan-limit error codes the backend returns (HTTP 402) from
+// /api/uploads/start. These are the ones where the right user action is to
+// upgrade the plan, so we surface a friendly message + an "Upgrade" CTA
+// instead of dumping the raw JSON body.
+const UPGRADE_ERROR_CODES = new Set([
+  'monthly_hours_exceeded',
+  'file_too_large',
+]);
+
+interface UploadErrorInfo {
+  message: string;
+  /** true → show an Upgrade CTA (a plan limit was hit, not a transient issue). */
+  upgrade: boolean;
+}
+
+/** Turn an upload error response body into a clean, human message (+ whether
+ * to show an Upgrade CTA). The backend sends `{detail: {code, message, ...}}`
+ * for quota errors and a plain string or `{detail: "..."}` otherwise; we used
+ * to throw the raw JSON, which surfaced as an unreadable blob in a toast. */
+function parseUploadError(rawText: string, fallback: string): UploadErrorInfo {
+  let message = (rawText || '').trim() || fallback;
+  let code = '';
+  try {
+    const body = JSON.parse(rawText);
+    const detail = body?.detail;
+    if (detail && typeof detail === 'object') {
+      if (typeof detail.message === 'string') message = detail.message;
+      if (typeof detail.code === 'string') code = detail.code;
+    } else if (typeof detail === 'string' && detail.trim()) {
+      message = detail.trim();
+    }
+  } catch {
+    /* not JSON — keep the raw text as the message */
+  }
+  return { message, upgrade: UPGRADE_ERROR_CODES.has(code) };
+}
+
 export interface UploadItem {
   localId: string;
   uploadId?: string;
@@ -167,8 +204,10 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
         signal: abort.signal,
       });
       if (!startRes.ok) {
-        const detail = await startRes.text();
-        throw new Error(detail || 'Upload was rejected.');
+        const info = parseUploadError(await startRes.text(), 'Upload was rejected.');
+        const err: any = new Error(info.message);
+        err.upgrade = info.upgrade;
+        throw err;
       }
       const started = await startRes.json();
       updateUpload(localId, { uploadId: started.upload_id, jobId: started.upload_id, stage: 'uploading' });
@@ -189,8 +228,10 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
         signal: abort.signal,
       });
       if (!finalizeRes.ok) {
-        const detail = await finalizeRes.text();
-        throw new Error(detail || 'Finalize failed.');
+        const info = parseUploadError(await finalizeRes.text(), 'Finalize failed.');
+        const err: any = new Error(info.message);
+        err.upgrade = info.upgrade;
+        throw err;
       }
       const finalized = await finalizeRes.json();
       updateUpload(localId, { jobId: finalized.job_id, sessionId: finalized.session_id ?? null, stage: 'queued', progress: 0 });
@@ -198,13 +239,34 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
       if (error?.name === 'AbortError') {
         updateUpload(localId, { stage: 'cancelled', error: null, progress: 0 });
       } else {
-        updateUpload(localId, { stage: 'failed', error: error?.message || 'Upload failed.' });
-        toast.error(error?.message || 'Upload failed.');
+        const message = error?.message || 'Upload failed.';
+        updateUpload(localId, { stage: 'failed', error: message });
+        if (error?.upgrade) {
+          // Plan limit hit (e.g. monthly audio hours). Make the next step
+          // obvious: a persistent toast with the friendly message + an
+          // Upgrade button that routes to the pricing/plans page.
+          toast.error(
+            <div className="space-y-2">
+              <div className="font-medium">Plan limit reached</div>
+              <div className="text-sm">{message}</div>
+              <button
+                type="button"
+                onClick={() => { toast.dismiss(); navigate('/pricing'); }}
+                className="inline-flex items-center rounded-md bg-fuchsia-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-fuchsia-700"
+              >
+                View plans &amp; upgrade →
+              </button>
+            </div>,
+            { autoClose: false, closeOnClick: false },
+          );
+        } else {
+          toast.error(message);
+        }
       }
     } finally {
       aborts.current.delete(localId);
     }
-  }, [activeOrganization?.slug, connectStatusSocket, updateUpload]);
+  }, [activeOrganization?.slug, connectStatusSocket, updateUpload, navigate]);
 
   const startUploads = useCallback(async (files: File[], options?: StartUploadsOptions) => {
     const pending = [...files];
@@ -261,10 +323,8 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
         headers: buildUploadHeaders(activeOrganization?.slug),
       });
       if (!res.ok) {
-        const detail = await res.text();
-        updateUpload(item.localId, {
-          error: detail || `Retry failed (${res.status})`,
-        });
+        const info = parseUploadError(await res.text(), `Retry failed (${res.status})`);
+        updateUpload(item.localId, { error: info.message });
         return;
       }
       updateUpload(item.localId, { stage: 'queued', progress: 0, error: null });

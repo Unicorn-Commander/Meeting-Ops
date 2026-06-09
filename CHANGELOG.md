@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.30.2] - 2026-06-09
+
+### Fixed
+- **Upload quota / plan-limit errors no longer surface as raw JSON.** When an upload hit a plan limit (the HTTP 402 from `/api/uploads/start` — monthly audio hours, file size, or concurrent uploads), the frontend threw the raw response body (`{"detail":{"code":"monthly_hours_exceeded",...}}`) straight into a toast. It now parses the backend's human `detail.message` and shows a clean error. For the genuinely plan-capped cases (monthly hours, file size), it shows a **persistent "Plan limit reached" toast with a "View plans & upgrade →" button** that routes to the pricing page. Covers every upload entry point (Import/Export, drag-drop, the upload tray, and create-with-upload, which all funnel through `UploadsContext`).
+
+### Note
+- The monthly-audio-hours quota is enforced **per organization off `Organization.plan`** (`services/quotas.py`), which is separate from the per-user feature tier (`User.tier`). To comp an org, set its `plan` (e.g. `enterprise` → unlimited hours), not just the user's tier.
+
 ## [3.30.1] - 2026-06-09
 
 ### Fixed
