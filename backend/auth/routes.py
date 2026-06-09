@@ -477,6 +477,70 @@ async def list_current_user_orgs(
     ]
 
 
+@router.delete("/me")
+async def delete_my_account(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Self-serve account deletion (App Review 5.1.1(v)).
+
+    *** DRAFT — destructive + runs on a LIVE prod backend. Review + test on
+    staging before deploy, and deploy to BOTH nodes (dogfood + customer). ***
+
+    The iOS app calls this on the cloud Delete-Account path. The admin
+    `DELETE /users/{id}` refuses self-deletion, so this is the self-serve path.
+
+    Cleanup (verified against database/models.py):
+      - `recording_sessions.user_id` is a plain Integer (NO FK) -> find + delete
+        the caller's sessions explicitly.
+      - `transcriptions.session_id` is a plain Integer (NO FK) -> delete manually
+        by session id.
+      - `action_items` + `session_collaborators` FK -> recording_sessions.id with
+        ondelete=CASCADE, so they go automatically when the sessions are deleted.
+      - `db.delete(user)` cascades personal_access_tokens (all, delete-orphan)
+        + the UserOrganization memberships.
+
+    NOT YET DONE (decide in review before deploy):
+      - Qdrant vectors for the deleted sessions (collection `meet_transcripts`).
+      - The Keycloak user itself (no admin-delete helper exists yet; a user could
+        otherwise re-auth into a fresh empty account). Full-delete vs disable?
+      - Speaker profiles owned solely by this user (audit before mass-deleting
+        anything shared at the org level).
+    """
+    from database.models import RecordingSession, Transcription
+
+    uid = current_user.id
+    AuthService.log_action(
+        db, uid, "account_self_deleted",
+        details={"username": current_user.username},
+    )
+
+    session_ids = [
+        row[0]
+        for row in db.query(RecordingSession.id)
+        .filter(RecordingSession.user_id == uid)
+        .all()
+    ]
+    if session_ids:
+        # No FK cascade on transcriptions -> delete by session id first.
+        db.query(Transcription).filter(
+            Transcription.session_id.in_(session_ids)
+        ).delete(synchronize_session=False)
+        # Deleting the sessions cascades action_items + session_collaborators.
+        db.query(RecordingSession).filter(
+            RecordingSession.user_id == uid
+        ).delete(synchronize_session=False)
+        # TODO(review): delete Qdrant points for these session_ids.
+
+    # TODO(review): delete the Keycloak user via a new admin helper (or disable).
+    # TODO(review): delete speaker profiles owned solely by this user.
+
+    db.delete(current_user)  # cascades PATs + org memberships
+    db.commit()
+
+    return {"message": "Account deleted"}
+
+
 @organizations_router.put("/default", response_model=UserResponse)
 async def set_default_organization(
     payload: SetDefaultOrganizationRequest,
