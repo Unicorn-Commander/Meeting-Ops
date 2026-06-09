@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.32.1] - 2026-06-09
+
+**A Stripe TEST-mode switch so the upgrade flow can be exercised end-to-end without charging a real card.**
+
+### Added
+- **`STRIPE_TEST_MODE` — one flag flips the whole billing subsystem onto Stripe's test environment.** The dogfood node has *live* Stripe keys, so clicking through checkout there would charge a real card — which made the self-serve upgrade flow untestable. Setting `STRIPE_TEST_MODE=1` now transparently redirects every `STRIPE_<X>` config read in `services/stripe_client.py` to its `STRIPE_TEST_<X>` variant (api key, webhook secret, publishable key, and all per-tier price IDs). The live `STRIPE_*` vars stay configured but dormant, so flipping back to production is a one-liner and we never delete the live credentials to test.
+  - **Fail-safe:** in test mode the wrapper *refuses* any resolved secret key that isn't an `sk_test_` key (and `is_configured()` reports billing-unavailable to match), so a half-configured node — flag on but `STRIPE_TEST_API_KEY` unset — goes **inert** rather than silently falling back to the live key and charging a real card.
+  - **`POST /api/stripe/webhook`** now verifies against the mode-aware signing secret (`STRIPE_TEST_WEBHOOK_SECRET` in test mode), keeping test + live webhook deliveries fully separate.
+  - **Pricing page shows a loud amber "🧪 Stripe TEST MODE — checkouts here use test cards … and never charge a real card" banner** when the backend reports test mode (new `test_mode` field on `GET /api/billing/subscription`), so a QA checkout can't be mistaken for a live one.
+  - **`backend/scripts/stripe_test_provision.py`** provisions the test environment from a test secret key: idempotently creates the Basic/Pro/Suite monthly+annual prices (reused by Stripe `lookup_key`), creates the webhook endpoint, and prints the ready-to-paste `STRIPE_TEST_*` env block. Refuses to run with anything but an `sk_test_` key.
+- **Coverage:** `tests/test_stripe_test_mode.py` (flag parsing, the redirection, the live-mode-unchanged path, and the fail-safe). Also repaired the pre-existing `test_billing_api.py` checkout mocks, which hadn't been updated for the v3.32.0 `organization_id` checkout parameter (the suite was red); they now assert the active org is threaded through.
+
+### Note
+- Live billing behavior is unchanged when `STRIPE_TEST_MODE` is unset (the default): every read resolves to the same live vars as before. This release is a no-op for production until the flag is explicitly flipped with test keys in place.
+
 ## [3.32.0] - 2026-06-09
 
 **Self-serve upgrade actually lifts the quota, a per-user sticky default workspace, and one consolidated fetch interceptor.**

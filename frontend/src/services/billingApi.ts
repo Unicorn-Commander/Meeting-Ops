@@ -29,6 +29,10 @@ export interface SubscriptionState {
   price_id?: string | null;
   current_period_end?: string | null;
   cancel_at_period_end: boolean;
+  // True when the backend runs Stripe in TEST mode (STRIPE_TEST_MODE=1).
+  // The Pricing page renders a "no real charges" banner so a test
+  // checkout isn't mistaken for a live one.
+  test_mode?: boolean;
 }
 
 export class BillingUnavailableError extends Error {

@@ -14,6 +14,7 @@ import {
 import {
   startCheckout,
   startPortal,
+  fetchSubscription,
   BillingUnavailableError,
   type BillingCycle,
   type CheckoutPlan,
@@ -238,6 +239,9 @@ export const Pricing: React.FC = () => {
    * price and pass the chosen cycle through to /api/billing/checkout.
    */
   const [cycle, setCycle] = useState<BillingCycle>('monthly');
+  // True when the backend runs Stripe in TEST mode — drives the loud
+  // "no real charges" banner so a QA checkout isn't mistaken for live.
+  const [testMode, setTestMode] = useState(false);
   const loggedIn = isLoggedIn();
 
   useEffect(() => {
@@ -251,6 +255,23 @@ export const Pricing: React.FC = () => {
       /* malformed referrer — keep 'direct' */
     }
     track('pricing_viewed', { from_referrer: fromReferrer });
+  }, []);
+
+  useEffect(() => {
+    // Best-effort: surface Stripe test mode so a checkout here is clearly
+    // labeled as non-charging. Silent on any failure (unauth, 503, etc.) —
+    // the banner just stays hidden.
+    let cancelled = false;
+    fetchSubscription()
+      .then((s) => {
+        if (!cancelled) setTestMode(Boolean(s.test_mode));
+      })
+      .catch(() => {
+        /* billing unconfigured / not logged in — no banner */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSubscribe = async (plan: CheckoutPlan) => {
@@ -311,6 +332,12 @@ export const Pricing: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      {testMode && (
+        <div className="sticky top-0 z-50 border-b border-amber-400/40 bg-amber-500/15 px-4 py-2 text-center text-sm font-medium text-amber-100 backdrop-blur">
+          🧪 Stripe <span className="font-bold">TEST MODE</span> — checkouts here use test cards
+          (e.g. <span className="font-mono">4242 4242 4242 4242</span>) and never charge a real card.
+        </div>
+      )}
       <div className="mx-auto w-full max-w-7xl px-4 py-6 lg:px-8">
         <header className="flex items-center justify-between border-b border-white/10 pb-4">
           <Link to="/login" className="flex items-center gap-3">

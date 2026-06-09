@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 
 from auth.models import User
 from database.database import get_db
-from services.stripe_client import _stripe, price_id_to_tier
+from services.stripe_client import _stripe, price_id_to_tier, webhook_secret
 
 # Default cohort label for Meeting-Ops v1 Founding 100. Aaron's design
 # intent: future cohorts (e.g. crisis_ops_v1) get distinct labels rather
@@ -576,7 +576,9 @@ async def stripe_webhook(
     signature. 500 on processing failure (Stripe will retry)."""
 
     body = await request.body()
-    secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    # Mode-aware: resolves STRIPE_TEST_WEBHOOK_SECRET when STRIPE_TEST_MODE=1,
+    # else STRIPE_WEBHOOK_SECRET. Keeps test + live webhooks fully separate.
+    secret = webhook_secret()
     if not secret:
         # We treat a missing secret as a hard failure: silently accepting
         # unsigned events would let an attacker upgrade tiers by POSTing

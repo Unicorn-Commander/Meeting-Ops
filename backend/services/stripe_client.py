@@ -45,6 +45,67 @@ _stripe_module: Optional[Any] = None
 _api_key_set = False
 
 
+# ---------------------------------------------------------------------------
+# Test-mode switch — one flag flips the WHOLE billing subsystem to Stripe
+# test keys/prices/webhook secret without touching the live config.
+# ---------------------------------------------------------------------------
+
+
+def _test_mode() -> bool:
+    """True iff billing runs against Stripe TEST keys.
+
+    Set STRIPE_TEST_MODE=1 (or true/yes/on) and every STRIPE_<X> env read in
+    this module transparently prefers STRIPE_TEST_<X> (api key, webhook
+    secret, publishable key, all price IDs). The live STRIPE_* vars stay
+    configured but dormant, so flipping the flag back is a one-liner and we
+    never delete production credentials to test.
+
+    Safety: in test mode _stripe() additionally REFUSES any resolved secret
+    key that isn't an `sk_test_` key, so a half-configured node
+    (STRIPE_TEST_MODE=1 but STRIPE_TEST_API_KEY unset) goes INERT rather than
+    silently falling back to the live key and charging a real card.
+    """
+    return os.getenv("STRIPE_TEST_MODE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _env(name: str) -> str:
+    """Read a STRIPE_<X> config var for the active mode.
+
+    In test mode, prefers STRIPE_TEST_<X> (falling back to the plain var only
+    if the test variant is unset). In live mode, reads the plain var. Every
+    Stripe credential / price-id lookup in this module routes through here so
+    the test-mode flag is the single switch.
+    """
+    if _test_mode() and name.startswith("STRIPE_"):
+        test_val = os.getenv("STRIPE_TEST_" + name[len("STRIPE_"):], "").strip()
+        if test_val:
+            return test_val
+    return os.getenv(name, "").strip()
+
+
+def test_mode() -> bool:
+    """Public accessor for the test-mode flag (frontend badge / health)."""
+    return _test_mode()
+
+
+def webhook_secret() -> str:
+    """The Stripe webhook signing secret for the active mode (test/live).
+
+    Routes through the test-mode switch so the webhook verifies against
+    STRIPE_TEST_WEBHOOK_SECRET when STRIPE_TEST_MODE is on.
+    """
+    return _env("STRIPE_WEBHOOK_SECRET")
+
+
+def publishable_key() -> str:
+    """The publishable key for the active mode. Not needed for redirect
+    Checkout (the backend creates the session), but exposed for the
+    test-mode UI badge + any future Stripe.js usage."""
+    return _env("STRIPE_PUBLISHABLE_KEY")
+
+
 def _stripe():
     """Import the `stripe` lib lazily, set api_key on first use.
 
@@ -63,11 +124,21 @@ def _stripe():
             ) from exc
         _stripe_module = stripe
     if not _api_key_set:
-        api_key = os.getenv("STRIPE_API_KEY", "").strip()
+        api_key = _env("STRIPE_API_KEY")
         if not api_key:
             raise RuntimeError(
                 "STRIPE_API_KEY is unset. Billing endpoints are inert until "
-                "configured (use sk_test_... in dev)."
+                "configured (use sk_test_... in dev, or set STRIPE_TEST_MODE=1 "
+                "+ STRIPE_TEST_API_KEY=sk_test_...)."
+            )
+        if _test_mode() and not api_key.startswith("sk_test_"):
+            # Fail-SAFE: test mode must never fall back to a live key. If the
+            # test key is missing/misset we'd otherwise resolve the live
+            # STRIPE_API_KEY and "test" checkouts would charge real cards.
+            raise RuntimeError(
+                "STRIPE_TEST_MODE=1 but no sk_test_ key resolved. Set "
+                "STRIPE_TEST_API_KEY=sk_test_... — refusing to use a live key "
+                "in test mode."
             )
         if not api_key.startswith("sk_test_") and os.getenv("STRIPE_ALLOW_LIVE") != "1":
             # Belt-and-suspenders: refuse to use a live key unless an
@@ -83,9 +154,19 @@ def _stripe():
 
 
 def is_configured() -> bool:
-    """True iff STRIPE_API_KEY is set. Used by frontend feature gates / health
-    checks. Does not actually load the SDK."""
-    return bool(os.getenv("STRIPE_API_KEY", "").strip())
+    """True iff a USABLE Stripe secret key is set for the active mode. Used by
+    frontend feature gates / health checks. Does not actually load the SDK.
+
+    Mirrors the _stripe() fail-safe: in test mode, a key that isn't sk_test_
+    does NOT count as configured (a live-key fallback would be refused at load
+    anyway), so a half-configured node reports billing-unavailable to the
+    frontend instead of surfacing a flow that 503s at checkout."""
+    key = _env("STRIPE_API_KEY")
+    if not key:
+        return False
+    if _test_mode() and not key.startswith("sk_test_"):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -137,13 +218,13 @@ def price_id_to_tier(price_id: Optional[str]) -> str:
     """
     if not price_id:
         return "free"
-    basic = os.getenv("STRIPE_BASIC_PRICE_ID", "").strip()
-    basic_annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
-    pro = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
-    pro_annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
-    suite = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
-    suite_annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
-    ent = os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip()
+    basic = _env("STRIPE_BASIC_PRICE_ID")
+    basic_annual = _env("STRIPE_BASIC_ANNUAL_PRICE_ID")
+    pro = _env("STRIPE_PRO_PRICE_ID")
+    pro_annual = _env("STRIPE_PRO_ANNUAL_PRICE_ID")
+    suite = _env("STRIPE_SUITE_PRICE_ID")
+    suite_annual = _env("STRIPE_SUITE_ANNUAL_PRICE_ID")
+    ent = _env("STRIPE_ENTERPRISE_PRICE_ID")
     if basic and price_id == basic:
         return "basic"
     if basic_annual and price_id == basic_annual:
@@ -179,8 +260,8 @@ def price_id_is_basic(price_id: str) -> bool:
     or annual). Used by the webhook + Pricing UI flags."""
     if not price_id:
         return False
-    monthly = os.getenv("STRIPE_BASIC_PRICE_ID", "").strip()
-    annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
+    monthly = _env("STRIPE_BASIC_PRICE_ID")
+    annual = _env("STRIPE_BASIC_ANNUAL_PRICE_ID")
     return (bool(monthly) and price_id == monthly) or (
         bool(annual) and price_id == annual
     )
@@ -193,8 +274,8 @@ def price_id_is_pro(price_id: str) -> bool:
     subscriber still flags as Pro for any code that asks."""
     if not price_id:
         return False
-    monthly = os.getenv("STRIPE_PRO_PRICE_ID", "").strip()
-    annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+    monthly = _env("STRIPE_PRO_PRICE_ID")
+    annual = _env("STRIPE_PRO_ANNUAL_PRICE_ID")
     if monthly and price_id == monthly:
         return True
     if annual and price_id == annual:
@@ -211,8 +292,8 @@ def price_id_is_suite(price_id: str) -> bool:
     deploys. Today the flag is documentation-only on the sibling apps."""
     if not price_id:
         return False
-    monthly = os.getenv("STRIPE_SUITE_PRICE_ID", "").strip()
-    annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
+    monthly = _env("STRIPE_SUITE_PRICE_ID")
+    annual = _env("STRIPE_SUITE_ANNUAL_PRICE_ID")
     if monthly and price_id == monthly:
         return True
     if annual and price_id == annual:
@@ -244,50 +325,50 @@ def tier_to_price_id(tier: str, billing_cycle: str = "monthly") -> Optional[str]
 
     if tier == "basic":
         if cycle == "annual":
-            annual = os.getenv("STRIPE_BASIC_ANNUAL_PRICE_ID", "").strip()
+            annual = _env("STRIPE_BASIC_ANNUAL_PRICE_ID")
             if annual:
                 return annual
             logger.warning(
                 "billing_cycle='annual' requested for plan='basic' but "
                 "STRIPE_BASIC_ANNUAL_PRICE_ID is unset; falling back to monthly."
             )
-        return os.getenv("STRIPE_BASIC_PRICE_ID", "").strip() or None
+        return _env("STRIPE_BASIC_PRICE_ID") or None
 
     if tier == "pro":
         if cycle == "annual":
-            annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+            annual = _env("STRIPE_PRO_ANNUAL_PRICE_ID")
             if annual:
                 return annual
             logger.warning(
                 "billing_cycle='annual' requested for plan='pro' but "
                 "STRIPE_PRO_ANNUAL_PRICE_ID is unset; falling back to monthly."
             )
-        return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
+        return _env("STRIPE_PRO_PRICE_ID") or None
     if tier == "pro_annual":
         # Convenience alias: someone passing plan="pro_annual" directly
         # gets the annual price without needing to also pass billing_cycle.
-        annual = os.getenv("STRIPE_PRO_ANNUAL_PRICE_ID", "").strip()
+        annual = _env("STRIPE_PRO_ANNUAL_PRICE_ID")
         if annual:
             return annual
         logger.warning(
             "plan='pro_annual' requested but STRIPE_PRO_ANNUAL_PRICE_ID "
             "is unset; falling back to monthly pro price."
         )
-        return os.getenv("STRIPE_PRO_PRICE_ID", "").strip() or None
+        return _env("STRIPE_PRO_PRICE_ID") or None
 
     if tier == "suite":
         if cycle == "annual":
-            annual = os.getenv("STRIPE_SUITE_ANNUAL_PRICE_ID", "").strip()
+            annual = _env("STRIPE_SUITE_ANNUAL_PRICE_ID")
             if annual:
                 return annual
             logger.warning(
                 "billing_cycle='annual' requested for plan='suite' but "
                 "STRIPE_SUITE_ANNUAL_PRICE_ID is unset; falling back to monthly."
             )
-        return os.getenv("STRIPE_SUITE_PRICE_ID", "").strip() or None
+        return _env("STRIPE_SUITE_PRICE_ID") or None
 
     if tier == "enterprise":
-        return os.getenv("STRIPE_ENTERPRISE_PRICE_ID", "").strip() or None
+        return _env("STRIPE_ENTERPRISE_PRICE_ID") or None
     return None
 
 

@@ -95,6 +95,10 @@ class SubscriptionResponse(BaseModel):
     price_id: Optional[str] = None
     current_period_end: Optional[str] = None
     cancel_at_period_end: bool = False
+    # True when the instance is running Stripe in TEST mode (STRIPE_TEST_MODE=1).
+    # The Pricing page shows a "no real charges" badge so a test checkout
+    # isn't mistaken for a live one.
+    test_mode: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +265,7 @@ async def get_subscription(
         is_founding_member=bool(getattr(current_user, "is_founding_member", False)),
         founding_cohort=getattr(current_user, "founding_cohort", None),
         has_subscription=False,
+        test_mode=stripe_client.test_mode(),
     )
     if not stripe_client.is_configured() or not current_user.stripe_customer_id:
         return base_response
@@ -291,4 +296,5 @@ async def get_subscription(
         price_id=sub.get("price_id"),
         current_period_end=end_iso,
         cancel_at_period_end=bool(sub.get("cancel_at_period_end")),
+        test_mode=stripe_client.test_mode(),
     )

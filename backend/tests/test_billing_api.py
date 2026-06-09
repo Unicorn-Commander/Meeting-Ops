@@ -121,8 +121,9 @@ def test_subscription_returns_local_state_when_stripe_unconfigured(client, strip
 def test_checkout_returns_url(client, stripe_configured, monkeypatch):
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         captured["user_id"] = user.id
         return "https://checkout.stripe.com/test/cs_123"
 
@@ -137,6 +138,9 @@ def test_checkout_returns_url(client, stripe_configured, monkeypatch):
     assert r.status_code == 200
     assert r.json()["url"].startswith("https://checkout.stripe.com/")
     assert captured["price_id"] == "price_pro_test"
+    # v3.32.0: the active org rides through to the webhook so the per-org
+    # quota follows the payment. Assert it's threaded (not dropped).
+    assert captured["organization_id"] is not None
 
 
 def test_checkout_400_for_unknown_plan(client, stripe_configured):
@@ -167,8 +171,9 @@ def test_checkout_basic_monthly_uses_basic_price(client, stripe_configured, monk
     """Basic monthly checkout sends STRIPE_BASIC_PRICE_ID to Stripe."""
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         return "https://checkout.stripe.com/test/cs_basic"
 
     monkeypatch.setattr(
@@ -186,8 +191,9 @@ def test_checkout_basic_monthly_uses_basic_price(client, stripe_configured, monk
 def test_checkout_basic_annual_uses_basic_annual_price(client, stripe_configured, monkeypatch):
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         return "https://checkout.stripe.com/test/cs_basic_yr"
 
     monkeypatch.setattr(
@@ -209,8 +215,9 @@ def test_checkout_suite_monthly_uses_suite_price(client, stripe_configured, monk
     Meeting-Ops Pro benefit now, cross-app later."""
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         return "https://checkout.stripe.com/test/cs_suite"
 
     monkeypatch.setattr(
@@ -228,8 +235,9 @@ def test_checkout_suite_monthly_uses_suite_price(client, stripe_configured, monk
 def test_checkout_suite_annual_uses_suite_annual_price(client, stripe_configured, monkeypatch):
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         return "https://checkout.stripe.com/test/cs_suite_yr"
 
     monkeypatch.setattr(
@@ -247,8 +255,9 @@ def test_checkout_suite_annual_uses_suite_annual_price(client, stripe_configured
 def test_checkout_pro_annual_uses_pro_annual_price(client, stripe_configured, monkeypatch):
     captured = {}
 
-    def _fake_create(db, user, price_id, success_url, cancel_url):
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
         captured["price_id"] = price_id
+        captured["organization_id"] = organization_id
         return "https://checkout.stripe.com/test/cs_pro_yr"
 
     monkeypatch.setattr(
