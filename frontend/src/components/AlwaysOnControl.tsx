@@ -912,11 +912,13 @@ export default function AlwaysOnControl() {
             </div>
           )}
           {/* v3.22.5 — stuck-state escape hatch. Surfaces only when the
-              context's isStuck signal is set: state claims active +
-              >60s warm-up elapsed + (no engine OR no chunks ever OR
-              last chunk >60s stale). Tight check by design (Aaron's
-              "false positives are bad UX"); shouldn't flicker during
-              a healthy recording. */}
+              context's isStuck signal is set: state claims active + either
+              the in-browser engine is gone (after a 30s boot grace) OR no
+              audio has been captured for 15 min (measured from the last
+              speech chunk, or from start if none ever landed). Deliberately
+              lenient (v3.30.x — was 60s, which false-positived on ordinary
+              meeting silence); a destructive "reset" prompt must not flicker
+              during a healthy, quiet recording. */}
           {alwaysOn.isStuck && (
             <div
               role="alert"
@@ -928,9 +930,9 @@ export default function AlwaysOnControl() {
                   <div className="font-medium">Recording appears stuck</div>
                   <p className="mt-0.5 text-xs leading-5 text-amber-200/90">
                     The recorder is claiming to be active but no audio has
-                    been captured for over a minute. This usually means the
-                    browser tab was suspended (common on phones). Reset to
-                    free up Record for a fresh session.
+                    been captured for a while. This usually means the browser
+                    tab was suspended (common on phones). Reset to free up
+                    Record for a fresh session.
                   </p>
                   <button
                     type="button"

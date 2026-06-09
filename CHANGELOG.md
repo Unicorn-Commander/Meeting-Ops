@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.30.1] - 2026-06-09
+
+### Fixed
+- **"Recording appears stuck" no longer false-positives on ordinary meeting silence.** The always-on recorder flagged a recording as stuck after just **60 seconds** with no captured audio — but a "chunk" is a VAD-detected *speech* slice, so any normal quiet stretch (someone reading a doc, a thinking pause, waiting for people to join) produced no chunks and tripped the destructive "Reset recording state" prompt. Raised the threshold to **15 minutes** of no captured audio, measured from the last speech chunk (or from session start if one never landed, so a silent start is fine too). A genuinely suspended/dead tab leaves a much larger gap and is still caught. The engine-missing desync check is now separate, with a 30-second boot grace. Message reworded from "for over a minute" to "for a while."
+
 ## [3.30.0] - 2026-06-08
 
 **Production-ready / pre-launch milestone.** Consolidates the v3.29.6 → v3.29.13 arc (session-card enrichment, the security + robustness pass, the Sessions perf fix + speaker-naming UX, and the pre-onboarding "make everything honest" sweep) into a tagged release, with a docs + Help refresh.

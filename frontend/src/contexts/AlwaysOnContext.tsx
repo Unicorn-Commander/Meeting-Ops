@@ -2503,26 +2503,36 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       if (isStuck) setIsStuck(false);
       return;
     }
-    const STALE_AFTER_MS = 60_000;
-    const WARMUP_MS = 15_000;
+    // How long with NO captured audio before we call the recording stuck.
+    // 15 min is deliberately long: a "chunk" is a VAD-detected *speech* slice,
+    // so a normal quiet stretch in a real meeting (someone reading a doc, a
+    // thinking pause, waiting for people to join) produces no chunks and must
+    // NOT trip this. A genuinely suspended / dead tab leaves a much larger gap
+    // and is still caught. Aaron's standing rule here: false positives on a
+    // destructive "reset" prompt are the worst outcome — keep this lenient.
+    // (Was 60s, which false-positived on ordinary meeting silence.)
+    const STUCK_AFTER_MS = 15 * 60_000;
+    // The in-browser engine object should exist within this window of Start;
+    // a missing engine after it is a genuine desync, not a slow boot.
+    const ENGINE_WARMUP_MS = 30_000;
     const check = () => {
       const sessionStart = startedAtRef.current;
       const lastChunk = lastChunkAtRef.current;
-      const elapsedSinceStart = sessionStart ? Date.now() - sessionStart : 0;
-      // Warm-up: don't flip stuck within the first 15s of a session.
-      // The first chunk takes the engine boot + first speech detection
-      // window to land, which can be up to ~10s in pathological cases.
-      if (elapsedSinceStart < WARMUP_MS) {
-        if (isStuck) setIsStuck(false);
+      const now = Date.now();
+      const elapsedSinceStart = sessionStart ? now - sessionStart : 0;
+      // Engine desync: claims active but the in-browser engine is gone. This
+      // is a hard failure that won't self-heal — flag it, but give boot a
+      // grace window so a slow phone init doesn't false-positive.
+      if (!engineRef.current) {
+        const stuckNow = elapsedSinceStart >= ENGINE_WARMUP_MS;
+        if (stuckNow !== isStuck) setIsStuck(stuckNow);
         return;
       }
-      // After warm-up: stuck = no engine, OR no chunk has ever landed,
-      // OR last chunk is older than 60s.
-      const noEngine = !engineRef.current;
-      const noChunkEver = lastChunk === null;
-      const chunkTooOld =
-        lastChunk !== null && Date.now() - lastChunk > STALE_AFTER_MS;
-      const stuckNow = noEngine || noChunkEver || chunkTooOld;
+      // Otherwise: stuck only if no audio has been captured for a long time,
+      // measured from the last chunk — or from session start if one never
+      // landed (a silent start is fine until STUCK_AFTER_MS has passed).
+      const lastAudioAt = lastChunk ?? sessionStart ?? now;
+      const stuckNow = now - lastAudioAt > STUCK_AFTER_MS;
       if (stuckNow !== isStuck) setIsStuck(stuckNow);
     };
     check();
