@@ -133,15 +133,31 @@ def _resolve_tenancy(
     *,
     tenancy_mode_override: Optional[str] = None,
     shared_agent_id_override: Optional[str] = None,
+    strict: bool = False,
 ) -> _GraphTarget:
     """Compute the active tenancy target from per-org config + org_id.
 
     Per-org overrides (passed in from the brigade integration config on
     Organization.integrations.brigade) win over the env-var defaults.
-    Unknown modes fall back to ``shared`` with a WARN log so a typo
-    in deployment env never silently leaks across orgs (we'd rather
-    write to one graph the operator can audit than fail-open into
-    cross-graph soup).
+
+    On an UNKNOWN mode the behaviour depends on ``strict``:
+
+    - ``strict=True`` (the WRITE path) → **raise**. An invalid mode is
+      almost always an operator typo (e.g. ``per_org_graphs``); silently
+      falling back to ``shared`` would write *every* org's meetings into
+      one graph — the exact cross-org commingling the operator was trying
+      to avoid. We fail closed: the writer's top-level ``except`` turns
+      this into a logged, skipped write (no data, no commingling) until
+      the env is fixed.
+    - ``strict=False`` (READ / deep-link paths) → warn + fall back to
+      ``shared``. These paths are downstream-org-scoped anyway (KG node
+      hydration filters by ``organization_id``), so a wrong graph name
+      degrades to "your own data / empty", never a cross-org read — and a
+      hard 500 on a read would be a worse outcome than the safe fallback.
+
+    Note an *unset* env is not "unknown": ``os.getenv`` returns
+    ``DEFAULT_TENANCY_MODE`` (a valid mode), so the default posture is
+    unaffected — only an explicit, invalid value trips the strict path.
     """
     raw_mode = (
         (tenancy_mode_override or os.getenv("BRIGADE_TENANCY_MODE", DEFAULT_TENANCY_MODE))
@@ -149,8 +165,15 @@ def _resolve_tenancy(
         .lower()
     )
     if raw_mode not in VALID_TENANCY_MODES:
+        if strict:
+            raise ValueError(
+                f"invalid BRIGADE_TENANCY_MODE={raw_mode!r}; expected one of "
+                f"{sorted(VALID_TENANCY_MODES)}. Refusing the Brigade write "
+                f"(fail-closed) to avoid cross-org commingling — fix the env."
+            )
         logger.warning(
-            "brigade_writer unknown BRIGADE_TENANCY_MODE=%r; falling back to %s",
+            "brigade_writer unknown BRIGADE_TENANCY_MODE=%r; falling back to %s "
+            "(read path — downstream org-scoping keeps this safe)",
             raw_mode,
             DEFAULT_TENANCY_MODE,
         )
@@ -450,6 +473,9 @@ async def write_meeting_to_brigade(
             shared_agent_id_override=brigade_cfg.extra.get("shared_agent_id")
             if brigade_cfg.source == "org_override"
             else None,
+            # Fail closed on a typo'd mode — never silently commingle orgs
+            # into the shared graph (the top-level except logs + skips).
+            strict=True,
         )
         owned_client = client is None
         # If the org has its own creds/URL, instantiate the client with

@@ -20,6 +20,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { config, appendWsToken } from '../config';
+import { showToast } from '../components/Toast';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import MobileLiveRecording from '../components/MobileLiveRecording';
@@ -888,7 +889,7 @@ export default function LiveRecording() {
       ws.onclose = (event) => {
         if (isRecording) {
           console.warn('[Meeting-Ops] Transcription WebSocket lost during recording');
-          alert('Connection to the server was lost. Your recording may still be running on the server. Check the Sessions page.');
+          showToast.warning('Connection to the server was lost. Your recording may still be running on the server — check the Sessions page.');
         }
       };
       ws.onerror = () => {
@@ -904,7 +905,7 @@ export default function LiveRecording() {
       // this is set. Cleared in stopRecording / error / unmount.
       setRecordActive(true);
     } catch (error: any) {
-      alert(`Failed to start recording: ${error.message}`);
+      showToast.error(`Failed to start recording: ${error.message}`);
       setIsRecording(false);
       setRecordActive(false);
     } finally {
@@ -1452,7 +1453,9 @@ export default function LiveRecording() {
                     const text = typeof autoSummary === 'string'
                       ? autoSummary
                       : autoSummary.executive || JSON.stringify(autoSummary, null, 2);
-                    navigator.clipboard.writeText(text);
+                    navigator.clipboard.writeText(text)
+                      .then(() => showToast.success('Action items copied'))
+                      .catch(() => showToast.error('Could not copy — clipboard access was blocked'));
                   }
                 }}
               >

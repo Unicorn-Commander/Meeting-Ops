@@ -168,9 +168,14 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
     // resolve against current origin so the copied link is always usable.
     const raw = c.invite_url || `/shared/sessions?token=${c.token}`;
     const url = raw.startsWith('http') ? raw : `${window.location.origin}${raw}`;
-    navigator.clipboard.writeText(url);
-    setCopiedTokenId(c.id);
-    setTimeout(() => setCopiedTokenId(null), 2000);
+    // Only flip the "Copied" chip once the write resolves — a denied/insecure-context
+    // clipboard would otherwise flash "Copied" having copied nothing.
+    navigator.clipboard.writeText(url)
+      .then(() => {
+        setCopiedTokenId(c.id);
+        setTimeout(() => setCopiedTokenId(null), 2000);
+      })
+      .catch(() => { /* clipboard blocked — leave the chip unset */ });
   };
 
   if (!isOpen) return null;

@@ -1312,7 +1312,7 @@ export const SessionDetails: React.FC = () => {
     }
     
     if (!content) {
-      alert('No transcript available for download');
+      toast.info('No transcript available for download');
       return;
     }
     
@@ -1329,7 +1329,7 @@ export const SessionDetails: React.FC = () => {
 
   const downloadSummary = () => {
     if (!session?.summary && !session?.final_summary) {
-      alert('No summary available for download');
+      toast.info('No summary available for download');
       return;
     }
     
@@ -1449,7 +1449,7 @@ export const SessionDetails: React.FC = () => {
     if (!file || !session) return;
 
     if (!file.type.startsWith('audio/') && !file.type.startsWith('video/')) {
-      alert('Please select an audio or video file');
+      toast.warning('Please select an audio or video file');
       return;
     }
 
@@ -1471,7 +1471,7 @@ export const SessionDetails: React.FC = () => {
       await fetchSession();
     } catch (error: any) {
       console.error('Upload failed:', error);
-      alert(error?.message || 'Failed to upload audio file');
+      toast.error(error?.message || 'Failed to upload audio file');
     } finally {
       setUploading(false);
       event.target.value = '';
@@ -1575,11 +1575,11 @@ export const SessionDetails: React.FC = () => {
         setEditingMeetingDate(false);
       } else {
         const errText = await response.text();
-        alert(`Failed to update meeting date: ${errText}`);
+        toast.error(`Failed to update meeting date: ${errText}`);
       }
     } catch (err) {
       console.error('Meeting date save failed:', err);
-      alert('Failed to update meeting date');
+      toast.error('Failed to update meeting date');
     } finally {
       setSavingMeetingDate(false);
     }
@@ -1612,11 +1612,11 @@ export const SessionDetails: React.FC = () => {
         setEditingTitle(false);
       } else {
         const errText = await response.text();
-        alert(`Failed to rename session: ${errText}`);
+        toast.error(`Failed to rename session: ${errText}`);
       }
     } catch (err) {
       console.error('Title save failed:', err);
-      alert('Failed to rename session');
+      toast.error('Failed to rename session');
     } finally {
       setSavingTitle(false);
     }
@@ -1653,11 +1653,11 @@ export const SessionDetails: React.FC = () => {
         setEditingProjectLink(false);
       } else {
         const errText = await response.text();
-        alert(`Failed to update project link: ${errText}`);
+        toast.error(`Failed to update project link: ${errText}`);
       }
     } catch (err) {
       console.error('Project link save failed:', err);
-      alert('Failed to update project link');
+      toast.error('Failed to update project link');
     } finally {
       setSavingProjectLink(false);
     }
@@ -1684,11 +1684,11 @@ export const SessionDetails: React.FC = () => {
           generated_emails: emails
         });
       } else {
-        alert('Failed to generate emails');
+        toast.error('Failed to generate emails');
       }
     } catch (error) {
       console.error('Email generation failed:', error);
-      alert('Failed to generate emails');
+      toast.error('Failed to generate emails');
     } finally {
       setGeneratingEmail(false);
     }
@@ -2103,7 +2103,7 @@ export const SessionDetails: React.FC = () => {
                       try {
                         const blob = await exportLocalSession(session.id);
                         if (!blob) {
-                          alert('Local session could not be exported.');
+                          toast.error('Local session could not be exported.');
                           return;
                         }
                         const url = URL.createObjectURL(blob);
@@ -2117,7 +2117,7 @@ export const SessionDetails: React.FC = () => {
                         URL.revokeObjectURL(url);
                       } catch (err) {
                         console.error('Local export failed:', err);
-                        alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+                        toast.error('Export failed: ' + (err instanceof Error ? err.message : String(err)));
                       }
                     }}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 text-sm"
@@ -2360,7 +2360,7 @@ export const SessionDetails: React.FC = () => {
                           URL.revokeObjectURL(url);
                         } catch (err) {
                           console.error('PDF export error:', err);
-                          alert('PDF export failed. Please try again.');
+                          toast.error('PDF export failed. Please try again.');
                         }
                       }}
                       className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
@@ -2389,7 +2389,7 @@ export const SessionDetails: React.FC = () => {
                           URL.revokeObjectURL(url);
                         } catch (err) {
                           console.error('DOCX export error:', err);
-                          alert('DOCX export failed. Please try again.');
+                          toast.error('DOCX export failed. Please try again.');
                         }
                       }}
                       className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
@@ -2418,7 +2418,7 @@ export const SessionDetails: React.FC = () => {
                           URL.revokeObjectURL(url);
                         } catch (err) {
                           console.error('Markdown export error:', err);
-                          alert('Markdown export failed. Please try again.');
+                          toast.error('Markdown export failed. Please try again.');
                         }
                       }}
                       className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
@@ -4152,7 +4152,7 @@ export const SessionDetails: React.FC = () => {
           navigate('/sessions');
         } catch (err) {
           console.error('Local delete failed:', err);
-          alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
+          toast.error('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
         }
       }}
       onCancel={() => setDeleteLocalConfirmOpen(false)}

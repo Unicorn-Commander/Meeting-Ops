@@ -158,6 +158,17 @@ export default function DigestsPage() {
           </div>
         </div>
       )}
+
+      {!digest && !loading && !error && (
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-16 px-6 border border-dashed border-zinc-800 rounded-lg">
+          <FileText className="w-10 h-10 text-zinc-600 mb-3" />
+          <p className="text-sm text-zinc-300 font-medium">No digest yet</p>
+          <p className="text-xs text-zinc-500 mt-1 max-w-sm">
+            Pick a period above and click <span className="text-zinc-300">Generate</span> to build a
+            summary of your meetings for that range.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

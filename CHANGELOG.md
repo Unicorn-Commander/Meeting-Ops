@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.29.7] - 2026-06-08
+
+**Completeness-audit wave 2: a real tenancy-isolation hardening + a UX-consistency polish pass.** A multi-agent audit swept session-views / incomplete-features / integrations / workspace-tenancy / backend-completeness; this ships the high-value, low-risk confirmed findings. (The audit also *confirmed* two security designs are solid — knowledge-graph cross-org node hydration gating, and the v3.29.3 WebSocket handshake org-scoping — no change needed there.)
+
+### Security / moat
+- **Brigade tenancy now fails closed on a misconfigured mode (was: silent cross-org commingling).** `brigade_writer._resolve_tenancy` fell back to `shared` on an *unknown* `BRIGADE_TENANCY_MODE` with only a WARN log — so an operator typo (e.g. `per_org_graphs` for `per_org_graph`) silently wrote **every org's** meetings into one shared knowledge graph, the exact tenancy violation per-org mode exists to prevent. The **write path** now raises on an invalid mode (`strict=True`); the writer's top-level `except` turns that into a logged, skipped write (no data, no commingling) until the env is fixed. **Read/deep-link paths keep the safe fallback** (`strict=False`) — they're downstream org-scoped (KG node hydration filters by `organization_id`), so a wrong graph name degrades to "your own data / empty", and a hard 500 on a read would be worse. An *unset* env is unaffected (it resolves to the valid default).
+- **`/api/system-info` is now auth-gated.** It leaked host details (platform, Python version, CPU/memory, NPU driver) without authentication. On the cloud node oauth2-proxy already fronted it; this closes the gap on a self-hosted node with no proxy (same posture as the v3.29.3 WS-auth work). `/api/status` stays intentionally public for container health checks. (The endpoint isn't consumed by the frontend, so no UX impact.)
+
+### Changed
+- **All blocking `alert()` calls on the core pages are now themed toasts.** 29 native `window.alert()` popups across `SessionDetails`, `Sessions`, `SessionCreator`, and `LiveRecording` — including the mid-recording "connection lost" alert that froze the page at the worst moment — now use the app's existing `react-toastify` toast system (`showToast.{success,error,warning,info}` / `toast.*`): success/failure/validation mapped by intent. Consistent, non-blocking feedback instead of a browser-chrome modal.
+- **Grid-card "AI Summary" preview uses the full summary fallback chain.** The card only rendered the legacy `summary.analysis.executive`; it now matches `SessionDetails` (`final_summary.executive` → `summary.executive` → `summary.analysis.executive`), so new-style summaries show on the card instead of silently dropping out.
+
+### Fixed
+- **Clipboard actions no longer claim success on a failed copy.** Three "copy" paths called `navigator.clipboard.writeText(...)` without awaiting/catching, then unconditionally showed success — so a denied/insecure-context write still flashed "copied": the summary-email Copy button (`SessionDetails`), the live "Copy Action Items" button (`LiveRecording`, previously *no* feedback at all), and the share-link "Copied" chip (`SessionPermissionsModal`). All now confirm only on resolve and surface an error on reject.
+- **Digests page no longer renders blank before first generate.** Added an initial empty-state ("No digest yet — pick a period and click Generate…") for the `!digest && !loading && !error` branch that previously left the area below the controls empty.
+
 ## [3.29.6] - 2026-06-08
 
 **Session-card enrichment + a polish/completeness pass (first wave of the "get to 100%" audit).**

@@ -65,7 +65,8 @@ interface Session {
   tags?: string[];
   audio_file?: string;
   transcript?: string;
-  summary?: any;               // AI-generated summary
+  summary?: any;               // AI-generated summary (legacy nest: summary.analysis.*)
+  final_summary?: any;         // New-style canonical summary (final_summary.executive/actions)
   summary_preview?: string;    // Plain-text snippet for list views
   speaker_count?: number;      // Distinct speakers, server-computed
   speakers?: SessionSpeaker[]; // Named speakers (display name + local photo) for cards
@@ -1607,7 +1608,7 @@ export const Sessions: React.FC = () => {
       ]);
     } catch (error) {
       console.error('Failed to mutate folder tags:', error);
-      alert(error instanceof Error ? error.message : 'Failed to update folder tags');
+      showToast.error(error instanceof Error ? error.message : 'Failed to update folder tags');
     } finally {
       setFolderMutationBusy(false);
     }
@@ -1700,7 +1701,7 @@ export const Sessions: React.FC = () => {
         fetchSessions();
       } catch (error) {
         console.error('Failed to delete local session:', error);
-        alert('Failed to delete local session');
+        showToast.error('Failed to delete local session');
       }
       return;
     }
@@ -1718,7 +1719,7 @@ export const Sessions: React.FC = () => {
       }
     } catch (error) {
       console.error('Failed to delete session:', error);
-      alert('Failed to delete session');
+      showToast.error('Failed to delete session');
     }
   };
 
@@ -1773,7 +1774,7 @@ export const Sessions: React.FC = () => {
 
   const downloadSummary = (session: Session) => {
     if (!session.summary) {
-      alert('No summary available for download');
+      showToast.info('No summary available for download');
       return;
     }
     
@@ -2666,22 +2667,32 @@ export const Sessions: React.FC = () => {
                   </div>
 
                   {/* AI Summary Preview */}
-                  {session.summary?.analysis?.executive && (
-                    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
-                        <span className="text-xs text-purple-300 font-medium">AI Summary</span>
-                      </div>
-                      <p className="text-gray-300 text-sm line-clamp-2">
-                        {session.summary.analysis.executive}
-                      </p>
-                      {session.summary.analysis.actions && session.summary.analysis.actions.length > 0 && (
-                        <div className="mt-2 text-xs text-gray-400">
-                          {session.summary.analysis.actions.length} action item{session.summary.analysis.actions.length !== 1 ? 's' : ''}
+                  {(() => {
+                    // Match SessionDetails' fallback chain so new-style summaries
+                    // (final_summary.executive) render on the card too, not just the
+                    // legacy summary.analysis nest.
+                    const exec = session.final_summary?.executive
+                      || session.summary?.executive
+                      || session.summary?.analysis?.executive;
+                    const actions = session.final_summary?.actions
+                      || session.summary?.actions
+                      || session.summary?.analysis?.actions;
+                    if (!exec) return null;
+                    return (
+                      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
+                          <span className="text-xs text-purple-300 font-medium">AI Summary</span>
                         </div>
-                      )}
-                    </div>
-                  )}
+                        <p className="text-gray-300 text-sm line-clamp-2">{exec}</p>
+                        {actions && actions.length > 0 && (
+                          <div className="mt-2 text-xs text-gray-400">
+                            {actions.length} action item{actions.length !== 1 ? 's' : ''}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Tags */}
                   {session.tags && session.tags.length > 0 && (

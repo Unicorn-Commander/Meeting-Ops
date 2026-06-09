@@ -2,7 +2,7 @@
 Meeting-Ops Backend - Production main.py
 Clean router loading with status tracking and real timestamps.
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -14,6 +14,10 @@ from typing import List
 # Phase B.5: Prometheus /metrics ASGI app. Imported here so it's always
 # available, even if api.streaming fails to load (degraded mode).
 from prometheus_client import make_asgi_app
+
+# Auth dependency for the few endpoints defined directly on `app` here in
+# main.py (the routers in api/ import their own). Used to gate /api/system-info.
+from auth.dependencies import get_current_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -578,8 +582,14 @@ async def get_audio_devices():
 
 
 @app.get("/api/system-info")
-async def get_system_info():
-    """Get detailed system information"""
+async def get_system_info(current_user=Depends(get_current_user)):
+    """Get detailed system information.
+
+    Auth-gated: this leaks host details (platform, Python version, CPU/memory,
+    NPU driver) so it must not be public. On the cloud node oauth2-proxy already
+    fronts it; this closes the gap on a self-hosted node with no proxy. (Unlike
+    /api/status, which is intentionally public for container health checks.)
+    """
     import platform
     import psutil
 

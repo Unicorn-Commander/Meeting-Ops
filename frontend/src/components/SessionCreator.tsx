@@ -5,6 +5,7 @@ import {
   Mic, Calendar, Sparkles
 } from 'lucide-react';
 import { config } from '../config';
+import { showToast } from './Toast';
 import { ProjectLinkPicker, type ProjectLink } from './ProjectLinkPicker';
 import {
   TranscriptionOptionsPanel,
@@ -118,13 +119,13 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
       (file.type && (file.type.startsWith('audio/') || file.type.startsWith('video/'))) ||
       audioExt.test(file.name);
     if (!looksLikeMedia) {
-      alert('Please select an audio or video file.');
+      showToast.warning('Please select an audio or video file.');
       return;
     }
 
     // Soft client-side cap; server-side per-org quota is the source of truth.
     if (file.size > 500 * 1024 * 1024) {
-      alert('File is larger than 500MB. Per-org quota may apply server-side.');
+      showToast.warning('File is larger than 500MB. Per-org quota may apply server-side.');
       return;
     }
 
@@ -161,12 +162,12 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
 
   const createSession = async () => {
     if (!sessionName.trim()) {
-      alert('Please enter a session name');
+      showToast.warning('Please enter a session name');
       return;
     }
 
     if (sessionType === 'upload' && !audioFile) {
-      alert('Please select an audio file to upload');
+      showToast.warning('Please select an audio file to upload');
       return;
     }
 
@@ -253,7 +254,7 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
       onSessionCreated(session.id);
     } catch (error) {
       console.error('[SessionCreator] Failed to create session:', error);
-      alert('Failed to create session. Please try again.');
+      showToast.error('Failed to create session. Please try again.');
     } finally {
       setCreating(false);
     }
