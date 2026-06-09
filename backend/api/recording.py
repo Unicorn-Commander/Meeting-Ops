@@ -1009,9 +1009,17 @@ async def finalize_always_on_session(
         try:
             from services.projectops_writer import submit_action_items_to_triage
 
-            await submit_action_items_to_triage(
+            _po_result = await submit_action_items_to_triage(
                 db=db_po, session_pk=session_pk, completion_mode="live"
             )
+            if not _po_result.ok:
+                logger.warning(
+                    "[projectops] live triage push did NOT succeed "
+                    "session=%s mode=%s detail=%s",
+                    session_pk,
+                    _po_result.mode,
+                    _po_result.detail,
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[projectops] live write failed session=%s: %s",
@@ -1949,9 +1957,17 @@ async def _run_session_reprocess(session_pk: int) -> None:
         try:
             from services.projectops_writer import submit_action_items_to_triage
 
-            await submit_action_items_to_triage(
+            _po_result = await submit_action_items_to_triage(
                 db=db, session_pk=session.id, completion_mode="reprocess"
             )
+            if not _po_result.ok:
+                logger.warning(
+                    "Project-Ops reprocess triage push did NOT succeed "
+                    "session=%s mode=%s detail=%s",
+                    session.id,
+                    _po_result.mode,
+                    _po_result.detail,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Project-Ops write swallowed error session=%s: %s",

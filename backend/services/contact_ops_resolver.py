@@ -143,6 +143,21 @@ async def _subject_token(client: httpx.AsyncClient) -> Optional[str]:
     }, "client-credentials mint")
     if not j or not j.get("access_token"):
         return None
+    # Keycloak silently drops an OPTIONAL client scope it doesn't grant and
+    # still returns 200 + a token (RFC 6749 5.1: the response `scope` lists
+    # what was ACTUALLY granted). If contacts:read isn't on the meeting-ops
+    # client's optional scopes, the mint looks fine here but the downstream
+    # Brigade exchange / CO read fails opaquely. Surface it at the source.
+    requested = _resolver_scope()
+    granted = set((j.get("scope") or "").split())
+    if requested and requested not in granted:
+        logger.warning(
+            "resolver client-credentials mint missing requested scope %r "
+            "(granted=%s); the meeting-ops KC client likely does not grant it "
+            "as an optional client scope — downstream contact-ops calls will 401/403",
+            requested,
+            sorted(granted) or "<none>",
+        )
     _store("subject", j["access_token"], j.get("expires_in", 300))
     return j["access_token"]
 
@@ -191,6 +206,15 @@ def _structured_from_mcp_payload(payload: dict) -> Optional[dict]:
                 continue
             if isinstance(parsed, dict):
                 return parsed
+    # No structuredContent dict and no parseable dict in text content — the CO
+    # MCP result shape drifted from what we parse. Log the actual (truncated)
+    # shape so it's diagnosable; still return None so callers don't crash.
+    logger.warning(
+        "resolver MCP unrecognized result shape: result_keys=%s content_types=%s payload=%.300r",
+        sorted(result.keys()) if isinstance(result, dict) else type(result).__name__,
+        [c.get("type") for c in (result.get("content") or []) if isinstance(c, dict)],
+        payload,
+    )
     return None
 
 
@@ -284,6 +308,12 @@ async def _call_contact_ops_tool(
         try:
             payload = r.json()
         except ValueError:
+            logger.warning(
+                "resolver %s 200 with non-JSON body (content-type=%s): %.200r",
+                label,
+                r.headers.get("content-type", "?"),
+                r.text,
+            )
             return None
     return _structured_from_mcp_payload(payload)
 

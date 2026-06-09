@@ -472,16 +472,22 @@ export default function RAGChatPanel() {
                       ? new Date(c.created_at).toLocaleDateString()
                       : '';
                     return (
-                      <a
-                        key={j}
-                        href={sid ? `#/sessions/${sid}` : undefined}
-                        className="flex items-center gap-1 text-xs text-fuchsia-400 hover:text-fuchsia-300 transition-colors"
-                      >
-                        <ExternalLink className="w-3 h-3 flex-shrink-0" />
-                        <span className="truncate">
-                          {label}{dateStr && ` · ${dateStr}`}
-                        </span>
-                      </a>
+                      <div key={j} className="mb-1.5 last:mb-0">
+                        <a
+                          href={sid ? `#/sessions/${sid}` : undefined}
+                          className="flex items-center gap-1 text-xs text-fuchsia-400 hover:text-fuchsia-300 transition-colors"
+                        >
+                          <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate">
+                            {label}{dateStr && ` · ${dateStr}`}
+                          </span>
+                        </a>
+                        {c.snippet && (
+                          <p className="ml-4 text-[11px] text-zinc-500 line-clamp-2 leading-snug">
+                            {c.snippet}
+                          </p>
+                        )}
+                      </div>
                     );
                   })}
                 </div>

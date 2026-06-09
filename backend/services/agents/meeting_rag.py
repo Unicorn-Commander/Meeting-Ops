@@ -242,6 +242,10 @@ def _sources_from_history(
                 "title": c.get("title"),
                 "created_at": c.get("created_at"),
                 "score": c.get("score"),
+                # Carry the search snippet through so the UI can show context
+                # under each source. None for tool results without one (list /
+                # details); already truncated upstream, so no payload concern.
+                "snippet": c.get("snippet"),
             })
     return list(seen.values())[:10]
 

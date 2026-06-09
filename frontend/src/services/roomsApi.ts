@@ -1153,15 +1153,16 @@ export const roomsApi = {
   },
 
   /**
-   * Discard (hard-delete) a recording session. Wraps the existing
-   * `/api/recording-sessions/{id}` DELETE handler used by the personal
-   * /record page Discard button.
+   * Discard (hard-delete) a recording session. Uses the canonical
+   * ORG-SCOPED `/api/simple/recording-sessions/{id}` DELETE handler (scopes
+   * by active org via _get_session_for_org). The older `/api/recording-sessions/{id}`
+   * route is not org-scoped, so a stray cross-org id could be deleted — repointed.
    */
   async discardSession(
     sessionId: string,
     { orgSlug }: RoomsApiOptions,
   ): Promise<void> {
-    await request<void>(`/api/recording-sessions/${sessionId}`, {
+    await request<void>(`/api/simple/recording-sessions/${sessionId}`, {
       orgSlug,
       method: 'DELETE',
     });

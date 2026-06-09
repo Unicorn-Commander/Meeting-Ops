@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.29.9] - 2026-06-08
+
+**Completeness-audit wave 4: production-readiness backlog.** An 8-group investigation swarm authored + adversarially verified precise fix specs; this ships the vetted set (dead-UI removal, integration robustness, a real cross-org delete fix, auth hygiene). Two findings were intentionally held: one whose marker has no consumer yet (Brigade failure-stamp — failures are already ERROR-logged), and one unsafe "unmount" recommendation (the `meeting_management` router still uniquely serves a live, test-covered export endpoint).
+
+### Fixed
+- **Rooms "Discard recording" hit a NON-org-scoped delete handler.** `roomsApi.discardSession` called `DELETE /api/recording-sessions/{id}` (served by `meeting_management.py`, not org-scoped) instead of the canonical org-scoped `DELETE /api/simple/recording-sessions/{id}` (`_get_session_for_org`). Repointed — a stray cross-org id can no longer be deleted via this path.
+- **Agent create/import/instantiate stamped a random `created_by`.** Three superuser endpoints in `agent_management_api` used `uuid.uuid4()` placeholders (TODO) instead of the authenticated caller; now derive a deterministic UUID from `current_user.id`, so ownership is real and stable.
+- **RAG/AI-Chat sources now show a snippet.** The search snippet the backend already produced was dropped before reaching the UI; it's now carried through `meeting_rag` sources and rendered (2-line, muted) under each citation in RAGChat.
+
+### Changed
+- **Known Issue #1 cleanup (MeetingIntelligenceDashboard).** Removed the dead live-notes WebSocket connect (it pointed at `/api/meeting-intelligence/ws/live-notes/{id}`, which the backend never implemented, so it errored + spammed the console on every recording render) and the two orphaned no-op functions (`generateLiveNotes`/`generateFinalReport`, zero call sites). The canonical summary still loads via the existing fetch path; ~110 lines of dead code removed.
+- **Project-Ops push failures are now visible instead of silent.** The three callers of `submit_action_items_to_triage` (live finalize, reprocess, Arq worker) discarded the typed result; they now log a warning when a push doesn't succeed (the most likely prod failure — a per-process KC service-token mint — was previously invisible). A failed triage push also stamps a `po_push_failed_at` marker on the session (`processing_metadata`) so a backfill can find it, cleared on the next success. All best-effort — finalize never raises.
+- **Batch-export email is now an honest 501.** `POST /api/export/batch` with `emailTo` set silently accepted a job it would never email; it now returns 501 up front (and the worker path logs loudly if reached). No dead "email" affordance ships.
+- **Contact-Ops resolver failure modes are diagnosable.** It now logs (still returning safely) when: a client-credentials mint comes back missing the requested `contacts:read` scope (the KC client likely doesn't grant it → downstream 401/403); a 200 carries a non-JSON body; or the MCP result shape drifts from what's parsed.
+- **Project-Ops client robustness.** The project-resolution pagination loop gained a no-progress circuit breaker (a misbehaving PO backend returning full pages with no new ids can't burn the whole page budget inside finalize); and an env-gated (`PROJECTOPS_EXPECTED_SCOPE`, no-op when unset) one-time warning fires if the token lacks the expected write scope/role.
+- **`meeting_management` auth hygiene.** Replaced the `Depends(x) if x else None` conditional-dependency smell on 14 parameters with unconditional `Depends(...)` (the imports are unconditional, so there was no live bypass — but the pattern is now correct).
+
 ## [3.29.8] - 2026-06-08
 
 **Completeness-audit wave 3: the "clear polish" — no-decision UI consistency fixes (frontend only).**

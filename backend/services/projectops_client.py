@@ -157,6 +157,67 @@ def _decode_jwt_exp(token: str) -> Optional[float]:
         return None
 
 
+# Set PROJECTOPS_EXPECTED_SCOPE to the scope/role the Project-Ops write
+# endpoints require (PO's RolesGuard wants ADMIN|MANAGER|STAFF). When set,
+# the client logs a one-time WARNING if a minted/static token doesn't carry
+# it — an early, specific signal for a misconfigured KC client scope, which
+# otherwise only shows up as a 403 deep in _request_with_retries. Log-only;
+# never blocks the request. Unset == disabled (no-op).
+_EXPECTED_SCOPE = _env("PROJECTOPS_EXPECTED_SCOPE")
+_scope_warned = False
+
+
+def _token_scopes(token: str) -> set[str]:
+    """Best-effort set of scope/role strings carried by a JWT. NOT a
+    signature check — diagnostic only. Reads the OAuth ``scope`` claim
+    (space-delimited) plus Keycloak ``realm_access.roles`` and every
+    ``resource_access.*.roles`` array."""
+    out: set[str] = set()
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return out
+        padding = "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(parts[1] + padding).decode("utf-8"))
+        scope = data.get("scope")
+        if isinstance(scope, str):
+            out.update(s for s in scope.split() if s)
+        elif isinstance(scope, list):
+            out.update(str(s) for s in scope)
+        ra = data.get("realm_access")
+        if isinstance(ra, dict) and isinstance(ra.get("roles"), list):
+            out.update(str(r) for r in ra["roles"])
+        resa = data.get("resource_access")
+        if isinstance(resa, dict):
+            for client_block in resa.values():
+                if isinstance(client_block, dict) and isinstance(client_block.get("roles"), list):
+                    out.update(str(r) for r in client_block["roles"])
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def _warn_if_scope_missing(token: str) -> None:
+    """Log ONCE per process if the token lacks PROJECTOPS_EXPECTED_SCOPE.
+    No-op when the env var is unset. Never raises, never blocks."""
+    global _scope_warned
+    if not _EXPECTED_SCOPE or _scope_warned:
+        return
+    try:
+        scopes = _token_scopes(token)
+        if _EXPECTED_SCOPE not in scopes:
+            _scope_warned = True
+            logger.warning(
+                "projectops_client: PO token is MISSING expected scope/role "
+                "%r (token carries: %s). Project-Ops write calls will likely "
+                "403 — check the Keycloak client's assigned scopes/roles.",
+                _EXPECTED_SCOPE,
+                sorted(scopes) or "<none decodable>",
+            )
+    except Exception:  # noqa: BLE001
+        return
+
+
 class _TokenSource:
     """Resolves bearer tokens for Project-Ops. Two modes, decided at
     construction time so a long-running client doesn't flip behavior
@@ -511,6 +572,7 @@ class ProjectOpsClient:
         if ref in self._project_id_cache:
             return self._project_id_cache[ref]
 
+        _seen_project_ids: set[str] = set()
         for page in range(1, _RESOLVE_MAX_PAGES + 1):
             data = await self._request_with_retries(
                 "GET",
@@ -520,12 +582,28 @@ class ProjectOpsClient:
             rows = data.get("data") if isinstance(data, dict) else data
             if not isinstance(rows, list) or not rows:
                 break
+            _new_on_page = 0
             for row in rows:
                 if not isinstance(row, dict):
                     continue
                 if row.get("projectNumber") == ref and row.get("id"):
                     self._project_id_cache[ref] = row["id"]
                     return row["id"]
+                _rid = row.get("id")
+                if isinstance(_rid, str) and _rid not in _seen_project_ids:
+                    _seen_project_ids.add(_rid)
+                    _new_on_page += 1
+            # No-progress circuit breaker: a full page that contributed zero
+            # new project ids means the API is looping (or ignoring `page`);
+            # stop rather than walk the full page cap on a degraded backend.
+            if _new_on_page == 0:
+                logger.warning(
+                    "projectops_client _resolve_project_id no-progress at "
+                    "page=%d (0 new ids) resolving %r — stopping early",
+                    page,
+                    ref,
+                )
+                break
             # Stop once we've walked the last page the API reports.
             meta = data.get("meta") if isinstance(data, dict) else None
             if isinstance(meta, dict):
@@ -542,6 +620,7 @@ class ProjectOpsClient:
 
     async def _headers(self) -> dict[str, str]:
         token = await self._token_source.get()
+        _warn_if_scope_missing(token)
         return {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",

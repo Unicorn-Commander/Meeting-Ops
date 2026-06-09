@@ -216,9 +216,15 @@ async def finalize_session_job(
         # approves in Project-Ops before anything becomes a task.
         try:
             from services.projectops_writer import submit_action_items_to_triage
-            await submit_action_items_to_triage(
+            _po_result = await submit_action_items_to_triage(
                 db=db, session_pk=session_pk, completion_mode="live"
             )
+            if not _po_result.ok:
+                logger.warning(
+                    "finalize_session_job: projectops triage push did NOT "
+                    "succeed session=%s mode=%s detail=%s",
+                    session_pk, _po_result.mode, _po_result.detail,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "finalize_session_job: projectops write failed session=%s: %s",

@@ -172,9 +172,10 @@ async def create_agent(
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Superuser required")
 
-    # TODO: Get actual user ID from auth
-    user_id = uuid.uuid4()  # Placeholder
-    
+    # created_by is a UUID column; User.id is an int. Map deterministically
+    # (same user -> same UUID, reversible via .int) so ownership filters hold.
+    user_id = uuid.UUID(int=current_user.id)
+
     agent = agent_manager.create_agent(
         request.dict(),
         created_by=user_id,
@@ -251,10 +252,10 @@ async def import_agent(
             raise HTTPException(status_code=403, detail="Superuser required")
         content = await file.read()
         data = json.loads(content)
-        
-        # TODO: Get actual user ID from auth
-        user_id = uuid.uuid4()  # Placeholder
-        
+
+        # created_by is a UUID column; User.id is an int. Map deterministically.
+        user_id = uuid.UUID(int=current_user.id)
+
         agent = agent_manager.import_agent(data, user_id, db)
         
         return {
@@ -310,10 +311,10 @@ async def instantiate_template(
     # Create agent from template data
     agent_data = template.template_data.copy()
     agent_data["name"] = name
-    
-    # TODO: Get actual user ID from auth
-    user_id = uuid.uuid4()  # Placeholder
-    
+
+    # created_by is a UUID column; User.id is an int. Map deterministically.
+    user_id = uuid.UUID(int=current_user.id)
+
     agent = agent_manager.create_agent(agent_data, user_id, db)
     
     # Increment template downloads

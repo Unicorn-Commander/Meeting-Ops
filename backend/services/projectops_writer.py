@@ -262,6 +262,62 @@ def _stamp_triage(item: Any) -> None:
     item.raw_payload = payload
 
 
+# Session-level marker keys (written to RecordingSession.processing_metadata)
+# so a failed Project-Ops push is visible + retryable. Distinct from the
+# per-item raw_payload stamps: those gate idempotency; this records the
+# health of the LAST push attempt for the whole session.
+STAMP_SESSION_PUSH_FAILED_AT = "po_push_failed_at"
+STAMP_SESSION_PUSH_ERROR = "po_push_error"
+STAMP_SESSION_PUSH_MODE = "po_push_mode"
+
+
+def _stamp_session_push_failure(
+    db: Session, session: Any, *, mode: str, detail: Optional[str]
+) -> None:
+    """Record a Project-Ops push failure on the session so it's queryable +
+    retryable (a backfill can target sessions carrying po_push_failed_at).
+    Best-effort: a stamp failure must never mask the original error, so this
+    swallows + logs. Reassigns processing_metadata so SQLAlchemy flags the
+    JSON column dirty."""
+    try:
+        meta = dict(session.processing_metadata or {})
+        meta[STAMP_SESSION_PUSH_FAILED_AT] = _utcnow_iso()
+        meta[STAMP_SESSION_PUSH_ERROR] = (detail or "")[:200]
+        meta[STAMP_SESSION_PUSH_MODE] = mode
+        session.processing_metadata = meta
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning(
+            "projectops_writer could not stamp push failure on session=%s: %s",
+            getattr(session, "id", "?"),
+            exc,
+        )
+
+
+def _clear_session_push_failure(db: Session, session: Any) -> None:
+    """Clear a prior push-failure marker after a successful push so the
+    session self-heals and isn't re-picked by a failure-targeted backfill.
+    No-op when nothing was stamped. Best-effort."""
+    try:
+        meta = session.processing_metadata or {}
+        if not isinstance(meta, dict) or STAMP_SESSION_PUSH_FAILED_AT not in meta:
+            return
+        meta = dict(meta)
+        meta.pop(STAMP_SESSION_PUSH_FAILED_AT, None)
+        meta.pop(STAMP_SESSION_PUSH_ERROR, None)
+        meta.pop(STAMP_SESSION_PUSH_MODE, None)
+        session.processing_metadata = meta
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning(
+            "projectops_writer could not clear push-failure stamp session=%s: %s",
+            getattr(session, "id", "?"),
+            exc,
+        )
+
+
 def _explicit_project_ref(db: Session, session: Any) -> Optional[str]:
     """The session's EXPLICIT Project-Ops link — the session->PO link
     (``project_app == 'project-ops'`` + ``project_id``) or a per-meeting
@@ -658,14 +714,19 @@ async def submit_action_items_to_triage(
                     candidates, source_type=TRIAGE_SOURCE_TYPE
                 )
             except ProjectOpsClientError as exc:
-                # Don't stamp: the un-submitted items get retried on the next
-                # finalize/backfill, and PO dedups anything that did land.
-                # Eventual consistency, no duplicate proposals.
+                # Don't stamp the ITEMS: the un-submitted items get retried on
+                # the next finalize/backfill, and PO dedups anything that did
+                # land. Eventual consistency, no duplicate proposals. But DO
+                # stamp the SESSION so the failed push is visible + a targeted
+                # backfill can find it.
                 logger.warning(
                     "projectops_triage submit failed session=%s count=%d: %s",
                     session_pk,
                     len(pending),
                     exc,
+                )
+                _stamp_session_push_failure(
+                    db, session, mode=completion_mode, detail=str(exc)
                 )
                 return ProjectOpsWriteResult(
                     ok=False,
@@ -677,6 +738,7 @@ async def submit_action_items_to_triage(
             for it in pending:
                 _stamp_triage(it)
             db.commit()
+            _clear_session_push_failure(db, session)
 
             po_created = (
                 int(result.get("created", 0)) if isinstance(result, dict) else 0

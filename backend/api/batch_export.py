@@ -126,6 +126,15 @@ async def create_batch_export(
     # canonical content to export (browser-only tier); explicit gate
     # closes the surface in case server-side fallbacks ever land.
     gate_feature_for_caller(current_user, "canonical_reprocess")
+    # Emailing batch exports is not implemented. Reject an emailTo request up
+    # front with 501 rather than accept the job and silently never send it.
+    # (Per-meeting email uses the SessionDetails "Email" action.)
+    if request.options.emailTo:
+        raise HTTPException(
+            status_code=501,
+            detail="Emailing batch exports is not supported. Download the file, "
+                   "or use the per-meeting Email action.",
+        )
     try:
         for session_id in request.sessionIds:
             if not _get_session_for_export(db, active_org.organization.id, session_id):
@@ -356,10 +365,18 @@ async def process_export_job(
         job.progress = 100
         job.completedAt = datetime.now(timezone.utc)
         
-        # Send email if requested
+        # Email delivery is NOT implemented for the batch route. The file was
+        # generated but not emailed; per-meeting email uses the SessionDetails
+        # "Email" action. Log loudly so this unimplemented path is auditable
+        # rather than silently swallowed. (create_batch_export 501s an emailTo
+        # request up front, so this should not normally be reached.)
         if options.emailTo:
-            # TODO: Implement email sending
-            logger.info(f"Would send export to {options.emailTo}")
+            logger.warning(
+                "batch export job %s requested emailTo=%s but batch email delivery "
+                "is not implemented — file generated, NOT emailed",
+                job_id,
+                options.emailTo,
+            )
         
     except Exception as e:
         logger.error(f"Export job {job_id} failed: {e}")

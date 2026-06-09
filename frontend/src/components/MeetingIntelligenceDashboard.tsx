@@ -87,7 +87,6 @@ export const MeetingIntelligenceDashboard: React.FC<{
     return saved ? JSON.parse(saved) : null;
   });
   const [notesLoading, setNotesLoading] = useState(false);
-  const [reportLoading, setReportLoading] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -252,7 +251,6 @@ export const MeetingIntelligenceDashboard: React.FC<{
   }, [realNotes, meetingData.notes, meetingData.participants]);
 
   // Track previous transcript length to detect new content
-  const [lastTranscriptLength, setLastTranscriptLength] = useState(0);
 
   // Persist state changes to localStorage
   useEffect(() => {
@@ -292,95 +290,20 @@ export const MeetingIntelligenceDashboard: React.FC<{
     }
   }, [finalReport, meetingData.sessionId]);
 
-  // Connect to meeting notes WebSocket
+  // Known Issue #1 (resolved): the live-notes WebSocket endpoint
+  // (/api/meeting-intelligence/ws/live-notes/{id}) was never built on the
+  // backend, so the old connect-and-stream attempt only produced console
+  // errors on every recording render. Live notes are not generated client-side;
+  // the canonical summary loads via the fetchNotes effect below (GET
+  // recording-sessions/{id} -> session.summary). This effect just tears down any
+  // stale socket and reflects "not connected".
   useEffect(() => {
-    if (!meetingData.sessionId || !isRecording || !liveAiEnabled) {
-      // Cleanup WebSocket if not recording or AI disabled
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-        setWsConnected(false);
-      }
-      return;
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
     }
-
-    const connectWebSocket = () => {
-      const wsUrl = getOrgQueryUrl(`${config.wsEndpoints.base.replace('http', 'ws')}/api/meeting-intelligence/ws/live-notes/${meetingData.sessionId}`);
-      console.log('[MeetingIntelligence] Connecting to notes WebSocket:', wsUrl);
-      
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('[MeetingIntelligence] Notes WebSocket connected');
-        setWsConnected(true);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log('[MeetingIntelligence] WebSocket message received:', data);
-          if (data.type === 'notes_update') {
-            console.log('[MeetingIntelligence] Notes update received:', data.notes);
-            setRealNotes(data.notes);
-            // Force re-render by updating a counter
-            setLastTranscriptLength(prev => prev + 1);
-          }
-        } catch (error) {
-          console.error('[MeetingIntelligence] WebSocket message error:', error);
-        }
-      };
-
-      ws.onerror = (error) => {
-        console.error('[MeetingIntelligence] WebSocket error:', error);
-        setWsConnected(false);
-      };
-
-      ws.onclose = () => {
-        console.log('[MeetingIntelligence] Notes WebSocket closed');
-        setWsConnected(false);
-      };
-    };
-
-    connectWebSocket();
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
+    setWsConnected(false);
   }, [meetingData.sessionId, isRecording, liveAiEnabled]);
-
-  // Send transcript chunks to WebSocket when transcript updates
-  useEffect(() => {
-    if (!isRecording || !meetingData.transcript) return;
-    
-    // Only process if there's new content
-    if (meetingData.transcript.length > lastTranscriptLength) {
-      const newContent = meetingData.transcript.slice(lastTranscriptLength);
-      
-      // Update length tracker
-      setLastTranscriptLength(meetingData.transcript.length);
-      
-      // Try WebSocket first
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        try {
-          const message = {
-            type: "transcript_chunk",
-            text: newContent,
-            templates: activeLiveTemplates
-          };
-          wsRef.current.send(JSON.stringify(message));
-          console.log('[MeetingIntelligence] Sent transcript chunk via WebSocket:', newContent.length, 'chars');
-        } catch (error) {
-          console.error('[MeetingIntelligence] WebSocket send failed:', error);
-        }
-      }
-      
-      // Live notes generation via API is not yet implemented.
-      // Notes come through the WebSocket connection when recording.
-    }
-  }, [meetingData.transcript, isRecording, activeLiveTemplates, lastTranscriptLength, liveAiEnabled]);
 
   // Fetch existing notes if not recording
   useEffect(() => {
@@ -483,17 +406,6 @@ export const MeetingIntelligenceDashboard: React.FC<{
           : [...prev, templateId]
       );
     }
-  };
-
-  // NOTE: generateLiveNotes and generateFinalReport are disabled because the
-  // backend endpoints (/api/meeting-intelligence/live-notes and /final-report)
-  // do not exist yet. Live notes come via WebSocket when recording.
-  const generateLiveNotes = async () => {
-    // No-op: endpoint not implemented
-  };
-
-  const generateFinalReport = async () => {
-    // No-op: endpoint not implemented
   };
 
   // Clear functions

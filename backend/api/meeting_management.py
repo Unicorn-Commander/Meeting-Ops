@@ -88,8 +88,8 @@ async def create_session(
 
 @router.get("/recording-sessions")
 async def list_sessions(
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
     skip: int = 0,
     limit: int = 100
 ):
@@ -135,8 +135,8 @@ async def list_sessions(
 @router.get("/recording-sessions/{session_id}")
 async def get_session(
     session_id: str,
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Get detailed information about a recording session"""
     try:
@@ -207,8 +207,8 @@ async def get_session(
 @router.delete("/recording-sessions/{session_id}")
 async def delete_session(
     session_id: str,
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Delete a recording session"""
     try:
@@ -242,8 +242,8 @@ async def delete_session(
 async def update_session(
     session_id: str,
     update_data: SessionUpdate,
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Update session metadata"""
     try:
@@ -274,8 +274,8 @@ async def update_session(
 async def update_transcript(
     session_id: str,
     transcript_data: TranscriptUpdate,
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Update the transcript for a session"""
     try:
@@ -453,8 +453,8 @@ async def export_session(
 async def reprocess_session(
     session_id: str,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Reprocess a session with NPU"""
     try:
@@ -508,8 +508,8 @@ async def get_npu_status():
 @router.get("/analytics/meetings")
 async def get_meeting_analytics(
     range: str = Query(default="week", pattern="^(week|month|quarter|year|all)$"),
-    db: Session = Depends(get_db) if get_db else None,
-    current_user = Depends(get_current_user) if get_current_user else None
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     """Get meeting analytics for a time range"""
     try:
