@@ -172,8 +172,11 @@ export default function LiveRecording() {
   // Removed showLiveIntelligence - summaries now integrated into sections
   const [audioDevices, setAudioDevices] = useState<any[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
-  const [llmModelName, setLlmModelName] = useState<string>('Granite 3.3 2B');
-  const [sttModelName, setSttModelName] = useState<string>('Whisper large-v3-turbo');
+  // Initial labels shown until /api/system/pipeline resolves the live values.
+  // Keep them aligned with what actually runs (Parakeet STT + Qwen 3.6 LLM) so
+  // they don't flash a stale "Whisper / Granite".
+  const [llmModelName, setLlmModelName] = useState<string>('Qwen 3.6 35B-A3B-Vision');
+  const [sttModelName, setSttModelName] = useState<string>('Parakeet 1.1B');
 
   // Declutter: the summary-format toggles collapse behind a header
   // disclosure so the record control stays the focus. Defaults collapsed.

@@ -341,8 +341,8 @@ export default function AudioSettings(_props: SectionProps) {
               Appliance recording device (PipeWire)
             </h3>
             <p className="mt-1 text-xs text-zinc-500">
-              Used by the on-appliance Whisper pipeline. Browser recording
-              ignores this — pick the browser mic above.
+              Used by the on-appliance transcription pipeline (Parakeet). Browser
+              recording ignores this — pick the browser mic above.
             </p>
 
             <div className="mt-3">
@@ -436,24 +436,28 @@ export default function AudioSettings(_props: SectionProps) {
 
       <div>
         <label className="mb-2 block text-sm font-medium text-zinc-300">
-          Transcription Model
+          Transcription Engine
         </label>
-        <select
-          value={settings.transcriptionModel}
-          onChange={(e) =>
-            setSettings({ ...settings, transcriptionModel: e.target.value })
-          }
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
-        >
-          <option value="base">Whisper Base (Fastest, ~39MB)</option>
-          <option value="small">Whisper Small (~244MB)</option>
-          <option value="medium">Whisper Medium (~1.5GB)</option>
-          <option value="large">Whisper Large (~3GB)</option>
-          <option value="large-v2">Whisper Large-v2 (~3GB)</option>
-          <option value="large-v3">Whisper Large-v3 (Best, ~3GB) ⭐</option>
-        </select>
+        <div className="space-y-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 px-4 py-3 text-sm text-zinc-300">
+          <div className="flex items-start gap-2">
+            <span className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-emerald-400" />
+            <span>
+              <strong className="text-zinc-100">Live (in browser):</strong> Parakeet,
+              on-device via WebGPU — $0 compute, nothing leaves the device.
+            </span>
+          </div>
+          <div className="flex items-start gap-2">
+            <span className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-fuchsia-400" />
+            <span>
+              <strong className="text-zinc-100">Final pass (server):</strong> Parakeet 1.1B
+              transcription + pyannote 3.1 diarization (speaker separation), with a
+              Qwen 3.6 35B-A3B-Vision summary.
+            </span>
+          </div>
+        </div>
         <p className="mt-1 text-xs text-zinc-500">
-          Large-v3 with NPU acceleration: 220x faster than CPU
+          The transcription model isn’t user-selectable — Meeting-Ops uses Parakeet
+          end-to-end (not Whisper). Privacy mode skips the server pass entirely.
         </p>
       </div>
 

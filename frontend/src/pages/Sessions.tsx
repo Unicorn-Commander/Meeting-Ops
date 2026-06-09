@@ -2672,37 +2672,15 @@ export const Sessions: React.FC = () => {
                         </span>
                       </div>
                     )}
-                    {/* Named speakers with avatars (diarized voices matched to people).
-                        Avatars come from the MO-local SpeakerProfile photo — no live
-                        Contact-Ops call — so the list stays cheap. */}
+                    {/* Named speakers (diarized voices matched to people). Names
+                        only — the avatar circles were dropped (mostly initial-letter
+                        placeholders with no photo = visual noise + render cost). */}
                     {session.speakers && session.speakers.length > 0 && (
                       <div className="flex items-center gap-2">
                         <Mic className="w-4 h-4 flex-shrink-0" />
-                        <div className="flex -space-x-2 flex-shrink-0">
-                          {session.speakers.slice(0, 4).map((sp, i) =>
-                            sp.photo_url ? (
-                              <img
-                                key={i}
-                                src={sp.photo_url}
-                                alt={sp.name}
-                                title={sp.name}
-                                className="w-6 h-6 rounded-full border border-gray-700 object-cover bg-gray-800"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <span
-                                key={i}
-                                title={sp.name}
-                                className="w-6 h-6 rounded-full border border-gray-700 bg-purple-500/30 text-purple-200 text-[10px] font-semibold flex items-center justify-center"
-                              >
-                                {(sp.name || '?').trim().charAt(0).toUpperCase()}
-                              </span>
-                            )
-                          )}
-                        </div>
-                        <span className="truncate text-xs">
+                        <span className="truncate">
                           {session.speakers.slice(0, 3).map((s) => s.name).join(', ')}
-                          {session.speakers.length > 3 && ` +${session.speakers.length - 3}`}
+                          {session.speakers.length > 3 && ` +${session.speakers.length - 3} more`}
                         </span>
                       </div>
                     )}

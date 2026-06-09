@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+## [3.29.11] - 2026-06-08
+
+**Settings now reflect the real stack (Parakeet, not Whisper), and speaker avatars are gone.**
+
+### Changed
+- **Settings → Audio showed a stale Whisper model picker.** Replaced the "Transcription Model" dropdown (Whisper base…large-v3 + "NPU 220x") — none of which is used — with an accurate read-only **Transcription Engine** panel: live in-browser **Parakeet** (WebGPU, on-device, $0) + server **Parakeet 1.1B** with **pyannote 3.1** diarization and a Qwen 3.6 summary. Also fixed the appliance-device hint ("on-appliance Whisper pipeline" → "transcription pipeline (Parakeet)").
+- **Live-recording model labels no longer flash stale values.** The status pills defaulted to "Whisper large-v3-turbo" / "Granite 3.3 2B" before `/api/system/pipeline` resolved; the defaults are now "Parakeet 1.1B" / "Qwen 3.6 35B-A3B-Vision" (the live endpoint already reported the correct labels — this just fixes the initial render).
+- **Removed speaker avatars from the session cards.** The avatar circles (mostly initial-letter placeholders, since few speakers have photos) were visual noise and added render cost; the cards now show **speaker names only** (desktop + mobile). The diarized-speaker info stays; just the pictures are gone.
+
+### Notes
+- Confirmed the AI Chat agent already runs **Qwen 3.6 35B-A3B-Vision on midboy1's P40** (`100.121.80.175:8088`) for every org — no change needed. (A separate legacy model-registry drives the Settings → AI *switcher* display and still shows `gpt-oss-20b`; that surface is cosmetic/superseded by the env-driven provider and can be reconciled separately.)
+
 ## [3.29.10] - 2026-06-08
 
 **Sessions-list speed fix + speaker-naming made frictionless + a page-size control.**

@@ -380,33 +380,11 @@ const MobileSessionsList: React.FC<Props> = ({
                       </p>
                     )}
 
-                    {/* Named speakers with avatars (parity with the desktop card).
-                        Local SpeakerProfile photo, initial-letter fallback. */}
+                    {/* Named speakers (names only — avatar circles dropped). */}
                     {session.speakers && session.speakers.length > 0 && (
-                      <div className="flex items-center gap-1.5">
-                        <div className="flex -space-x-1.5 flex-shrink-0">
-                          {session.speakers.slice(0, 4).map((sp, i) =>
-                            sp.photo_url ? (
-                              <img
-                                key={i}
-                                src={sp.photo_url}
-                                alt={sp.name}
-                                title={sp.name}
-                                className="w-5 h-5 rounded-full border border-gray-700 object-cover bg-gray-800"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <span
-                                key={i}
-                                title={sp.name}
-                                className="w-5 h-5 rounded-full border border-gray-700 bg-purple-500/30 text-purple-200 text-[9px] font-semibold flex items-center justify-center"
-                              >
-                                {(sp.name || '?').trim().charAt(0).toUpperCase()}
-                              </span>
-                            )
-                          )}
-                        </div>
-                        <span className="text-xs text-gray-400 truncate">
+                      <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                        <Mic className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">
                           {session.speakers.slice(0, 2).map((s) => s.name).join(', ')}
                           {session.speakers.length > 2 && ` +${session.speakers.length - 2}`}
                         </span>
