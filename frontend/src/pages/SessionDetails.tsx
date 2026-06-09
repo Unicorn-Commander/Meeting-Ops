@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Play, Pause, Download, Share2, Flag,
-  Users, Clock, Calendar, FileText, Volume2,
+  Users, Clock, Calendar, FileText, Volume2, Mic,
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
@@ -1761,6 +1761,14 @@ export const SessionDetails: React.FC = () => {
   const speakers = session.transcription?.speakers
     || [...new Set(segments.map(s => s.speaker || 'Speaker'))];
 
+  // Speakers still showing a raw diarization label ("SPEAKER_00" / "Speaker 1")
+  // rather than a real name. Drives a prominent inline "name them" prompt so the
+  // user can assign speakers in the fewest clicks, right where they read the
+  // meeting — instead of hunting for the Speakers tab.
+  const unnamedSpeakerCount = speakers.filter((s) =>
+    /^speaker[\s_-]*\d+$/i.test(String(s ?? '').trim())
+  ).length;
+
   const transcriptText = session.transcript
     || session.transcript_simple
     || session.transcription?.text
@@ -2478,20 +2486,44 @@ export const SessionDetails: React.FC = () => {
                 Mutually exclusive with the Speakers tab above so SpeakerTagger
                 never double-mounts. */}
             {activeTab !== 'speakers' && speakers.length > 0 && (
-              <div className="bg-white rounded-lg shadow-sm">
+              <div
+                className={`rounded-lg shadow-sm ${
+                  unnamedSpeakerCount > 0
+                    ? 'bg-amber-50 border border-amber-300 ring-1 ring-amber-200'
+                    : 'bg-white'
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => setSpeakersCardOpen((v) => !v)}
-                  className="w-full flex items-center justify-between px-6 py-3 text-left hover:bg-gray-50 rounded-t-lg"
+                  className={`w-full flex items-center justify-between px-6 py-3 text-left rounded-t-lg ${
+                    unnamedSpeakerCount > 0 ? 'hover:bg-amber-100' : 'hover:bg-gray-50'
+                  }`}
                   aria-expanded={speakersCardOpen}
                 >
-                  <span className="text-sm font-semibold text-gray-800">
-                    Speakers ({speakers.length}) — assign or name
+                  {unnamedSpeakerCount > 0 ? (
+                    <span className="text-sm font-semibold text-amber-900 flex items-center gap-2">
+                      <Mic className="w-4 h-4 flex-shrink-0" />
+                      {unnamedSpeakerCount} of {speakers.length} speaker{speakers.length !== 1 ? 's' : ''} still need{unnamedSpeakerCount === 1 ? 's' : ''} a name — tap to assign
+                    </span>
+                  ) : (
+                    <span className="text-sm font-semibold text-gray-800">
+                      Speakers ({speakers.length}) — assign or name
+                    </span>
+                  )}
+                  <span className={`text-xs ${unnamedSpeakerCount > 0 ? 'text-amber-700' : 'text-gray-400'}`}>
+                    {speakersCardOpen ? '▾ Hide' : '▸ Show'}
                   </span>
-                  <span className="text-gray-400 text-xs">{speakersCardOpen ? '▾ Hide' : '▸ Show'}</span>
                 </button>
                 {speakersCardOpen && (
                   <div className="px-2 pb-2">
+                    {unnamedSpeakerCount > 0 && (
+                      <p className="px-4 pt-1 pb-2 text-xs text-amber-800">
+                        Naming speakers makes the summary, transcript, and search use real
+                        names instead of “Speaker 1.” Pick a person from the dropdown
+                        (we pre-fill our best guess) — usually one tap each.
+                      </p>
+                    )}
                     <SpeakerTagger sessionId={String(session.id || sessionId)} />
                   </div>
                 )}

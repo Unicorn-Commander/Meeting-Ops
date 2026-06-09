@@ -787,6 +787,15 @@ export const Sessions: React.FC = () => {
     [],
   );
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
+  // How many session cards to render at once. The list fetches up to ~100 from
+  // the server; rendering all of them (each with avatars) is heavy, so cap the
+  // DOM by default with a user-controlled page size ('all' renders everything).
+  const [pageSize, setPageSize] = useState<number | 'all'>(25);
+  // The capped slice actually rendered (grid / list / mobile all use this).
+  const displayedSessions = useMemo(
+    () => (pageSize === 'all' ? filteredSessions : filteredSessions.slice(0, pageSize)),
+    [filteredSessions, pageSize],
+  );
   // All tags used across the org's sessions, plus counts for the folder rail.
   const [orgTagSummaries, setOrgTagSummaries] = useState<OrgTagSummary[]>([]);
   const [orgTagStats, setOrgTagStats] = useState({ totalSessions: 0, untaggedSessions: 0 });
@@ -1903,7 +1912,7 @@ export const Sessions: React.FC = () => {
   return (
     <>
       <MobileSessionsList
-        sessions={filteredSessions as any}
+        sessions={displayedSessions as any}
         loading={loading}
         refreshing={refreshing || isSearching}
         searchQuery={searchQuery}
@@ -2071,10 +2080,10 @@ export const Sessions: React.FC = () => {
               >
                 <button
                   type="button"
-                  onClick={() => toggleSelectVisible(filteredSessions.map((s) => s.id), true)}
+                  onClick={() => toggleSelectVisible(displayedSessions.map((s) => s.id), true)}
                   className="px-3 py-2 rounded-l-lg text-gray-300 hover:text-white transition-colors"
                 >
-                  Select all ({filteredSessions.length})
+                  Select all ({displayedSessions.length})
                 </button>
                 <button
                   type="button"
@@ -2469,6 +2478,32 @@ export const Sessions: React.FC = () => {
           </div>
         )}
 
+        {/* Results count + page-size control (caps how many cards render at
+            once; 'All' renders everything the server returned). */}
+        {!loading && filteredSessions.length > 0 && (
+          <div className="mb-3 flex items-center justify-between text-xs text-gray-400">
+            <span>
+              Showing {displayedSessions.length} of {filteredSessions.length}
+            </span>
+            <label className="flex items-center gap-2">
+              <span className="hidden sm:inline">Per page</span>
+              <select
+                value={String(pageSize)}
+                onChange={(e) =>
+                  setPageSize(e.target.value === 'all' ? 'all' : Number(e.target.value))
+                }
+                className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-gray-200 focus:outline-none focus:border-fuchsia-500"
+                title="How many sessions to show at once"
+              >
+                <option value="12">12</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+          </div>
+        )}
+
         {/* Sessions */}
         {loading ? (
           <SkeletonSessionGrid count={6} />
@@ -2521,11 +2556,11 @@ export const Sessions: React.FC = () => {
                 Upload with options…
               </button>
             </div>
-            {filteredSessions.map((session, _i) => (
+            {displayedSessions.map((session, _i) => (
               <React.Fragment key={session.id}>
-                {sessionDividerLabel(filteredSessions, _i, sortBy, dateBasis) && (
+                {sessionDividerLabel(displayedSessions, _i, sortBy, dateBasis) && (
                   <div className="col-span-full mt-3 mb-1 border-t border-gray-800 pt-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    {sessionDividerLabel(filteredSessions, _i, sortBy, dateBasis)}
+                    {sessionDividerLabel(displayedSessions, _i, sortBy, dateBasis)}
                   </div>
                 )}
               <div
@@ -2770,7 +2805,7 @@ export const Sessions: React.FC = () => {
           </div>
           ) : (
           <SessionsTable
-              sessions={filteredSessions}
+              sessions={displayedSessions}
               sortBy={sortBy}
               sortOrder={sortOrder}
               onHeaderSort={handleHeaderSort}

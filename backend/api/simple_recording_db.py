@@ -253,36 +253,53 @@ def _tags_payload(session: DBRecordingSession) -> List[str]:
     return [t for t in raw if isinstance(t, str) and t]
 
 
-def _speakers_payload(db: Session, session: DBRecordingSession) -> List[dict]:
-    """Named speakers for the list cards: confirmed SpeakerSessionLink rows
-    joined to their org SpeakerProfile (display_name + MO-local photo_url).
-    Cheap (one query, no Contact-Ops call) and best-effort — never raises into
-    the list builder. Distinct by name, capped so a busy meeting can't bloat a
-    card."""
+def _speakers_by_session_batch(
+    db: Session, sessions: List[DBRecordingSession]
+) -> Dict[int, List[dict]]:
+    """Named speakers for a PAGE of sessions in ONE query — confirmed
+    SpeakerSessionLink rows joined to their org SpeakerProfile (display_name +
+    MO-local photo_url). Returns ``{session_id: [{name, photo_url, raw_label}]}``,
+    distinct-by-name and capped per session.
+
+    This replaces a per-session ``_speakers_payload`` lookup that was an N+1 on
+    the list endpoint (one speaker query × up to ``limit`` sessions = visibly
+    slow cards). Best-effort: never raises into the list builder."""
+    out: Dict[int, List[dict]] = {}
+    ids = [s.id for s in sessions if s.id is not None]
+    if not ids:
+        return out
     try:
         from database.models import SpeakerSessionLink, SpeakerProfile
         rows = (
             db.query(
+                SpeakerSessionLink.session_id,
                 SpeakerProfile.display_name,
                 SpeakerProfile.photo_url,
                 SpeakerSessionLink.raw_label,
             )
-            .join(SpeakerSessionLink, SpeakerSessionLink.speaker_id == SpeakerProfile.id)
-            .filter(SpeakerSessionLink.session_id == session.id)
+            .join(SpeakerProfile, SpeakerSessionLink.speaker_id == SpeakerProfile.id)
+            .filter(SpeakerSessionLink.session_id.in_(ids))
             .filter(SpeakerSessionLink.speaker_id.isnot(None))
-            .order_by(SpeakerSessionLink.raw_label.asc())
-            .limit(12)
+            .order_by(
+                SpeakerSessionLink.session_id.asc(),
+                SpeakerSessionLink.raw_label.asc(),
+            )
             .all()
         )
-        out: List[dict] = []
-        seen: set = set()
-        for name, photo, raw in rows:
-            if name and name not in seen:
-                seen.add(name)
-                out.append({"name": name, "photo_url": photo, "raw_label": raw})
+        seen: Dict[int, set] = {}
+        for sid, name, photo, raw in rows:
+            if not name:
+                continue
+            names = seen.setdefault(sid, set())
+            if name in names:
+                continue
+            names.add(name)
+            bucket = out.setdefault(sid, [])
+            if len(bucket) < 12:
+                bucket.append({"name": name, "photo_url": photo, "raw_label": raw})
         return out
     except Exception:
-        return []
+        return {}
 
 
 def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict]:
@@ -506,6 +523,10 @@ async def list_sessions(
             .all()
         }
 
+    # One query for the whole page's named speakers (avoids an N+1 — see
+    # _speakers_by_session_batch). Keyed by session.id.
+    speakers_by_session = _speakers_by_session_batch(db, sessions)
+
     result = []
     for session in sessions:
         # Parse transcription if it exists
@@ -530,7 +551,7 @@ async def list_sessions(
             tags=_tags_payload(session),
             summary_preview=_summary_preview(session),
             speaker_count=_speaker_count(session),
-            speakers=_speakers_payload(db, session),
+            speakers=speakers_by_session.get(session.id, []),
             project_app=session.project_app,
             project_id=session.project_id,
             project_slug=session.project_slug,

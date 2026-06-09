@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.29.10] - 2026-06-08
+
+**Sessions-list speed fix + speaker-naming made frictionless + a page-size control.**
+
+### Performance
+- **Fixed the slow Sessions list (a regression from v3.29.6).** The list endpoint resolved named speakers with a **per-session query** (`_speakers_payload`) inside the response loop — an N+1 that ran up to ~100 extra speaker lookups per page, which is what made the cards visibly slow. Replaced it with a single batched query for the whole page (`_speakers_by_session_batch`, one `IN (...)` join → `{session_id: [...]}`). N+1 → 2 queries; same card data.
+
+### Added
+- **Speaker naming is now a prominent, in-place prompt when speakers aren't identified.** On a meeting whose speakers are still raw diarization labels (`SPEAKER_00` / "Speaker 1"), the in-record Speakers card now turns into an **amber call-to-action** — "N of M speakers still need a name — tap to assign" — auto-expanded with the assignment dropdowns right there (each pre-filled with the diarization best-guess, usually one tap). Once everyone's named, it goes back to the quiet "Speakers (N)" card. The goal: name speakers in the fewest clicks, right where you read the meeting, instead of hunting for the Speakers tab.
+- **Per-page control on the Sessions list.** A "Showing X of Y · Per page [12 / 25 / 50 / All]" selector caps how many cards render at once (default 25). Rendering all ~100 avatar-bearing cards at once was part of the sluggishness; this keeps the DOM light while still letting you show everything on demand. Grid, list, and mobile views + select-all all respect the cap.
+
 ## [3.29.9] - 2026-06-08
 
 **Completeness-audit wave 4: production-readiness backlog.** An 8-group investigation swarm authored + adversarially verified precise fix specs; this ships the vetted set (dead-UI removal, integration robustness, a real cross-org delete fix, auth hygiene). Two findings were intentionally held: one whose marker has no consumer yet (Brigade failure-stamp — failures are already ERROR-logged), and one unsafe "unmount" recommendation (the `meeting_management` router still uniquely serves a live, test-covered export endpoint).
