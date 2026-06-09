@@ -456,7 +456,7 @@ export const MeetingIntelligenceDashboard: React.FC<{
     if (!templateData) {
       return (
         <div className="text-center py-4 text-gray-500">
-          <p className="text-xs">No data yet. Generate {viewMode === 'live' ? 'live notes' : 'report'} to see content.</p>
+          <p className="text-xs">No {viewMode === 'live' ? 'live notes' : 'report'} available yet. Templates will show content when analysis completes.</p>
         </div>
       );
     }

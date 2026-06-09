@@ -62,10 +62,9 @@ interface AgentEditorProps {
 }
 
 const PROVIDERS = [
-  { value: 'ollama', label: 'Ollama (Local)', icon: '🏠' },
+  { value: 'llamacpp', label: 'LlamaCPP', icon: '🦙' },
   { value: 'openai', label: 'OpenAI', icon: '🌐' },
-  { value: 'anthropic', label: 'Anthropic', icon: '🤖' },
-  { value: 'llamacpp', label: 'LlamaCPP', icon: '🦙' }
+  { value: 'anthropic', label: 'Anthropic', icon: '🤖' }
 ];
 
 const OUTPUT_FORMATS = [
@@ -92,7 +91,7 @@ const AGENT_TYPE_OPTIONS = [
 ];
 
 const MODEL_PRESETS = {
-  'granite-3.3-2b-instruct': { context: 8192, temp: 0.7, tokens: 1024, top_p: 0.9 }
+  'qwen-3.6-35b-a3b-vision': { context: 32768, temp: 0.7, tokens: 2048, top_p: 0.9 }
 };
 
 export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCancel }) => {
@@ -369,7 +368,7 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
                     className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-purple-500"
                   >
                     <option value="">Select Model</option>
-                    <option value="granite-3.3-2b-instruct">Granite 3.3 2B Instruct (~850 t/s)</option>
+                    <option value="qwen-3.6-35b-a3b-vision">Qwen 3.6 35B-A3B-Vision (MoE)</option>
                   </select>
                   {errors.model_name && <p className="text-red-400 text-xs mt-1">{errors.model_name}</p>}
                 </div>
@@ -475,8 +474,8 @@ export const AgentEditor: React.FC<AgentEditorProps> = ({ agent, onSave, onCance
                     Model Performance
                   </h4>
                   <div className="text-sm text-zinc-300">
-                    {editedAgent.model_name === 'granite-3.3-2b-instruct' && (
-                      <p>Granite 3.3 2B Instruct: ~850 tokens/sec with 8K context on llama.cpp Vulkan. Used for summaries, chat, insights, and sentiment analysis.</p>
+                    {editedAgent.model_name === 'qwen-3.6-35b-a3b-vision' && (
+                      <p>Qwen 3.6 35B-A3B-Vision: Mixture-of-Experts model (~3B active params) with 32K context, served via LiteLLM. Used for summaries, chat, insights, and sentiment analysis. Fast model: gemma-4-e4b for low-latency tasks.</p>
                     )}
                   </div>
                 </div>

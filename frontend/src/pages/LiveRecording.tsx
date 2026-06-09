@@ -174,7 +174,7 @@ export default function LiveRecording() {
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   // Initial labels shown until /api/system/pipeline resolves the live values.
   // Keep them aligned with what actually runs (Parakeet STT + Qwen 3.6 LLM) so
-  // they don't flash a stale "Whisper / Granite".
+  // they don't flash stale model names.
   const [llmModelName, setLlmModelName] = useState<string>('Qwen 3.6 35B-A3B-Vision');
   const [sttModelName, setSttModelName] = useState<string>('Parakeet 1.1B');
 
@@ -268,7 +268,7 @@ export default function LiveRecording() {
               setProgressiveData({
                 intervalUsed: data.summary_data.interval_used,
                 nextInterval: data.summary_data.next_interval,
-                modelSize: data.summary_data.model_size || 'Granite 3.3 2B'
+                modelSize: data.summary_data.model_size || 'Qwen 3.6 35B-A3B-Vision'
               });
             } else if (data.data) {
               // OLD format compatibility
@@ -280,7 +280,7 @@ export default function LiveRecording() {
               setProgressiveData({
                 intervalUsed: wordCount || 0,
                 nextInterval: nextInterval,
-                modelSize: 'Legacy Format'
+                modelSize: 'Qwen 3.6 35B-A3B-Vision'
               });
             } else {
               return;
@@ -836,7 +836,7 @@ export default function LiveRecording() {
               setProgressiveData({
                 intervalUsed: wordCount || 0,
                 nextInterval: nextInterval,
-                modelSize: 'Legacy Format'
+                modelSize: 'Qwen 3.6 35B-A3B-Vision'
               });
             } else {
               return;

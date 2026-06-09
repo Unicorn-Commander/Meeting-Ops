@@ -70,13 +70,16 @@ interface ModelPerformance {
 }
 
 
+const ACTIVE_MODEL_ID = 'qwen-3.6-35b-a3b-vision';
+const ACTIVE_MODEL_LABEL = 'Qwen 3.6 35B-A3B-Vision';
+
 const MODEL_PERFORMANCE: ModelPerformance[] = [
   {
-    model: 'granite-3.3-2b-instruct',
-    speed: '~850 t/s',
-    tokens_per_sec: 850,
-    context: '8K',
-    memory: '~1.5GB',
+    model: ACTIVE_MODEL_ID,
+    speed: 'via LiteLLM',
+    tokens_per_sec: 60,
+    context: '32K',
+    memory: 'MoE (~3B active)',
     best_for: 'Summaries, chat, insights, sentiment'
   }
 ];
@@ -139,7 +142,7 @@ export const AgentDashboard: React.FC = () => {
       is_default_live: true,
       is_default_final: false,
       provider_type: 'llamacpp',
-      model_name: 'granite-3.3-2b-instruct',
+      model_name: 'qwen-3.6-35b-a3b-vision',
       model_settings: {
         temperature: 0.3,
         max_tokens: 512,
@@ -168,7 +171,7 @@ export const AgentDashboard: React.FC = () => {
       is_default_live: false,
       is_default_final: true,
       provider_type: 'llamacpp',
-      model_name: 'granite-3.3-2b-instruct',
+      model_name: 'qwen-3.6-35b-a3b-vision',
       model_settings: {
         temperature: 0.7,
         max_tokens: 2048,
@@ -200,7 +203,7 @@ export const AgentDashboard: React.FC = () => {
       is_default_live: false,
       is_default_final: false,
       provider_type: 'llamacpp',
-      model_name: 'granite-3.3-2b-instruct',
+      model_name: 'qwen-3.6-35b-a3b-vision',
       model_settings: {
         temperature: 0.7,
         max_tokens: 1024,
@@ -365,7 +368,7 @@ export const AgentDashboard: React.FC = () => {
                 Agent Management
               </h1>
               <p className="text-zinc-400">
-                Multi-tier agent system powered by Granite 3.3 2B on llama.cpp Vulkan
+                Multi-tier agent system powered by Qwen 3.6 35B-A3B-Vision (MoE) via LiteLLM
               </p>
             </div>
             
@@ -413,16 +416,16 @@ export const AgentDashboard: React.FC = () => {
               <div 
                 key={model.model}
                 className={`bg-zinc-900/70 rounded-lg border p-4 ${
-                  model.model === 'granite-3.3-2b-instruct'
+                  model.model === ACTIVE_MODEL_ID
                     ? 'border-green-500/50 bg-green-900/10'
                     : 'border-zinc-800'
                 }`}
               >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium text-white capitalize">
-                    {model.model.replace('-', ' ').replace('3.3:8b', ' 3.3 8B')}
+                  <span className="font-medium text-white">
+                    {model.model === ACTIVE_MODEL_ID ? ACTIVE_MODEL_LABEL : model.model}
                   </span>
-                  {model.model === 'granite-3.3-2b-instruct' && (
+                  {model.model === ACTIVE_MODEL_ID && (
                     <span className="px-2 py-1 text-xs bg-green-500/20 text-green-400 rounded-full">
                       ACTIVE
                     </span>
@@ -642,7 +645,7 @@ export const AgentDashboard: React.FC = () => {
                         is_default_live: false,
                         is_default_final: false,
                         provider_type: 'llamacpp',
-                        model_name: template.model_name || 'granite-3.3-2b-instruct',
+                        model_name: template.model_name || 'qwen-3.6-35b-a3b-vision',
                         model_settings: template.model_settings || {
                           temperature: 0.7,
                           max_tokens: 1024,

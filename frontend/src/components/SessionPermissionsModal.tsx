@@ -272,7 +272,7 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
-                  If they already have a unicorncommander.ai account they'll see the meeting on next sign-in.
+                  If they already have an account on this instance they'll see the meeting on next sign-in.
                   Otherwise they get an email with a magic link.
                 </p>
               </div>
@@ -358,7 +358,7 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
 
         <div className="flex items-center justify-between border-t border-gray-800 px-5 py-3">
           <a
-            href="https://meetingops.magicunicorn.dev/settings/members"
+            href={`${window.location.origin}/settings/members`}
             target="_blank"
             rel="noreferrer"
             className="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"

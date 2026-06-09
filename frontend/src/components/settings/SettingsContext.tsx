@@ -29,8 +29,8 @@ import type { SettingsSectionMeta } from './SettingsLayout';
 //                            recording defaults panel).
 //   - "Workspace settings" → per-org integrations, calendar, sharing,
 //                            retention, speaker library.
-//   - "Admin & appliance"  → providers, network, wifi, NPU, legacy AI
-//                            panel. adminOnly: true → hidden entirely
+//   - "Admin & appliance"  → providers, network, wifi, performance, legacy
+//                            AI panel. adminOnly: true → hidden entirely
 //                            for non-admins.
 //
 // UX-A scope: only regroup the existing 9 panels + add placeholder
@@ -102,7 +102,7 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     id: 'integrations',
     title: 'Integrations',
     icon: Plug,
-    description: 'Project-Ops, Brigade, Contact-Ops, Stable',
+    description: 'Project-Ops, Contact-Ops, and other Unicorn Commander suite apps',
     category: 'workspace',
     adminOnly: true,
   },
@@ -144,7 +144,7 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     id: 'ai',
     title: 'AI & transcription (legacy)',
     icon: Cpu,
-    description: 'Legacy NPU model picker — superseded by AI providers',
+    description: 'Legacy LLM model picker — superseded by AI providers',
     category: 'admin-appliance',
   },
   {
@@ -163,9 +163,9 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
   },
   {
     id: 'performance',
-    title: 'Performance & NPU',
+    title: 'Performance',
     icon: Monitor,
-    description: 'Hardware acceleration and limits',
+    description: 'Device and processing information',
     category: 'admin-appliance',
   },
   {
@@ -223,7 +223,7 @@ export const DEFAULT_SETTINGS: SettingsState = {
   autoGenerateActions: true,
   speakerDiarization: true,
   maxSpeakers: 4,
-  llmModel: 'gpt-oss-20b',
+  llmModel: 'qwen-3.6-35b-a3b-vision',
   llmProvider: 'llamacpp',
 
   defaultExportFormat: 'txt',
@@ -257,11 +257,6 @@ export const DEFAULT_SETTINGS: SettingsState = {
   telemetryEnabled: false,
   logLevel: 'info',
   logRetention: 30,
-
-  npuEnabled: true,
-  npuPowerMode: 'balanced',
-  cpuThreads: 4,
-  memoryLimit: 8192,
 };
 
 export function loadStoredSettings(): SettingsState {

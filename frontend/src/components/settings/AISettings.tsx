@@ -3,133 +3,88 @@ import { config } from '../../config';
 import { useSettingsContext } from './SettingsContext';
 import type { SectionProps } from './SettingsContext';
 
-interface AvailableModel {
-  model_id: string;
-  display_name: string;
-  speed_estimate: string;
-  vram_estimate: string;
-  best_for: string;
-  is_active: boolean;
+interface PipelineBlock {
+  label?: string;
+  model?: string;
+  ready?: boolean;
+}
+interface PipelineInfo {
+  llm?: PipelineBlock;
+  stt?: PipelineBlock;
+  diarization?: PipelineBlock;
 }
 
 export default function AISettings(_props: SectionProps) {
   const { settings, setSettings } = useSettingsContext();
-  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
-  const [modelSwitching, setModelSwitching] = useState(false);
-
-  const fetchAvailableModels = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/settings/models/available`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAvailableModels(data.models || []);
-        const activeModel = data.models?.find((m: any) => m.is_active);
-        if (activeModel) {
-          setSettings((prev: any) => ({ ...prev, llmModel: activeModel.model_id }));
-        }
-      }
-    } catch (e) {
-      console.log('Could not fetch available models:', e);
-    }
-  };
-
-  const switchModel = async (modelId: string) => {
-    setModelSwitching(true);
-    try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${config.apiUrl}/api/settings/models/active`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ model_id: modelId }),
-      });
-      if (res.ok) {
-        setSettings((prev: any) => ({ ...prev, llmModel: modelId }));
-        await fetchAvailableModels();
-      }
-    } catch (e) {
-      console.error('Failed to switch model:', e);
-    } finally {
-      setModelSwitching(false);
-    }
-  };
+  // Read-only view of what's actually running. The models are managed by the
+  // deployment (env-driven LiteLLM provider) — they are NOT switchable from the
+  // app, so we show the live engine status instead of a fake model picker.
+  const [pipeline, setPipeline] = useState<PipelineInfo | null>(null);
 
   useEffect(() => {
-    fetchAvailableModels();
+    const token = localStorage.getItem('access_token');
+    fetch(`${config.apiUrl}/api/system/pipeline`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => data && setPipeline(data))
+      .catch(() => {});
   }, []);
+
+  const EngineRow = ({
+    label,
+    value,
+    ready,
+  }: {
+    label: string;
+    value?: string;
+    ready?: boolean;
+  }) => (
+    <div className="flex items-center justify-between gap-3 py-1.5">
+      <span className="text-xs text-zinc-500">{label}</span>
+      <span className="flex items-center gap-2 text-sm text-zinc-200">
+        {typeof ready === 'boolean' && (
+          <span
+            title={ready ? 'Ready' : 'Not reachable'}
+            className={`inline-block h-2 w-2 rounded-full ${ready ? 'bg-emerald-400' : 'bg-zinc-600'}`}
+          />
+        )}
+        {value || '—'}
+      </span>
+    </div>
+  );
 
   return (
     <div className="space-y-6">
       <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">
-          LLM Provider
+        <label className="mb-2 block text-sm font-medium text-zinc-300">
+          AI Engine
         </label>
-        <select
-          value={settings.llmProvider}
-          onChange={(e) => setSettings({ ...settings, llmProvider: e.target.value })}
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
-        >
-          <option value="llamacpp">llama.cpp Vulkan (Local)</option>
-          <option value="ollama">Ollama (Local)</option>
-          <option value="openai">OpenAI API</option>
-          <option value="anthropic">Anthropic Claude</option>
-          <option value="custom">Custom Endpoint</option>
-        </select>
+        <div className="divide-y divide-zinc-800 rounded-lg border border-zinc-700 bg-zinc-800/60 px-4 py-2">
+          <EngineRow
+            label="Summaries & chat"
+            value={pipeline?.llm?.label || 'Qwen 3.6 35B-A3B-Vision'}
+            ready={pipeline?.llm?.ready}
+          />
+          <EngineRow
+            label="Transcription"
+            value={pipeline?.stt?.label || 'Parakeet 1.1B'}
+            ready={pipeline?.stt?.ready}
+          />
+          <EngineRow
+            label="Diarization"
+            value={pipeline?.diarization?.label || 'Pyannote 3.1'}
+            ready={pipeline?.diarization?.ready}
+          />
+        </div>
+        <p className="mt-1 text-xs text-zinc-500">
+          Models run on Unicorn Commander’s local GPU stack and are managed by your
+          deployment — there’s nothing to configure here.
+        </p>
       </div>
 
-      {(settings.llmProvider === 'llamacpp' ||
-        settings.llmProvider === 'ollama' ||
-        settings.llmProvider === 'custom') && (
-        <div>
-          <label className="block text-sm font-medium text-zinc-300 mb-2">
-            LLM Model
-          </label>
-          <select
-            value={settings.llmModel}
-            onChange={(e) => switchModel(e.target.value)}
-            disabled={modelSwitching}
-            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 disabled:opacity-50"
-          >
-            {availableModels.length > 0 ? (
-              availableModels.map((model) => (
-                <option key={model.model_id} value={model.model_id}>
-                  {model.display_name} {model.is_active ? '(Active)' : ''}
-                </option>
-              ))
-            ) : (
-              <option value={settings.llmModel}>{settings.llmModel}</option>
-            )}
-          </select>
-          {(() => {
-            const activeModel = availableModels.find(
-              (m) => m.model_id === settings.llmModel
-            );
-            if (activeModel) {
-              return (
-                <div className="mt-2 space-y-1">
-                  <p className="text-xs text-zinc-500">
-                    Speed: {activeModel.speed_estimate} &middot; VRAM:{' '}
-                    {activeModel.vram_estimate}
-                  </p>
-                  <p className="text-xs text-zinc-400">{activeModel.best_for}</p>
-                </div>
-              );
-            }
-            return null;
-          })()}
-          {modelSwitching && (
-            <p className="text-xs text-yellow-400 mt-1">Switching model...</p>
-          )}
-        </div>
-      )}
-
       <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">
+        <label className="mb-2 block text-sm font-medium text-zinc-300">
           Default Summary Format
         </label>
         <select
@@ -137,7 +92,7 @@ export default function AISettings(_props: SectionProps) {
           onChange={(e) =>
             setSettings({ ...settings, summaryFormat: e.target.value })
           }
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200"
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-zinc-200"
         >
           <option value="executive">Executive Summary</option>
           <option value="minutes">Meeting Minutes</option>
@@ -156,7 +111,7 @@ export default function AISettings(_props: SectionProps) {
             onChange={(e) =>
               setSettings({ ...settings, enableAI: e.target.checked })
             }
-            className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
           />
           <span className="text-sm text-zinc-300">Enable AI processing</span>
         </label>
@@ -168,7 +123,7 @@ export default function AISettings(_props: SectionProps) {
             onChange={(e) =>
               setSettings({ ...settings, autoGenerateActions: e.target.checked })
             }
-            className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
           />
           <span className="text-sm text-zinc-300">Auto-generate action items</span>
         </label>
@@ -180,21 +135,21 @@ export default function AISettings(_props: SectionProps) {
             onChange={(e) =>
               setSettings({ ...settings, speakerDiarization: e.target.checked })
             }
-            className="w-4 h-4 bg-zinc-800 border-zinc-600 rounded"
+            className="h-4 w-4 rounded border-zinc-600 bg-zinc-800"
           />
           <span className="text-sm text-zinc-300">Speaker diarization</span>
         </label>
 
         {settings.speakerDiarization && (
           <div className="ml-7">
-            <label className="block text-xs text-zinc-400 mb-1">Max Speakers</label>
+            <label className="mb-1 block text-xs text-zinc-400">Max Speakers</label>
             <input
               type="number"
               value={settings.maxSpeakers}
               onChange={(e) =>
                 setSettings({ ...settings, maxSpeakers: parseInt(e.target.value) })
               }
-              className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
+              className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-200"
               min="2"
               max="10"
             />

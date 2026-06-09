@@ -310,7 +310,7 @@ export default function AudioSettings(_props: SectionProps) {
       </div>
 
       {/* Backend (PipeWire) device list — only relevant on the appliance
-          build, where local Whisper consumes the hw:X,Y device directly. */}
+          build, where local Parakeet 1.1B consumes the hw:X,Y device directly. */}
       {hostCaps.local_audio && (
         <>
           {audioDeviceError && audioDevices.length === 0 && (
@@ -457,7 +457,8 @@ export default function AudioSettings(_props: SectionProps) {
         </div>
         <p className="mt-1 text-xs text-zinc-500">
           The transcription model isn’t user-selectable — Meeting-Ops uses Parakeet
-          end-to-end (not Whisper). Privacy mode skips the server pass entirely.
+          for all transcription (in-browser live + a server completion pass).
+          Privacy mode skips the server pass entirely.
         </p>
       </div>
 

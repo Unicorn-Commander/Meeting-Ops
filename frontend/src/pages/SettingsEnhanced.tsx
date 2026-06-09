@@ -113,8 +113,6 @@ export default function SettingsEnhanced() {
             llmProvider: backendSettings.aiProvider || prev.llmProvider,
             hostname: backendSettings.hostname || prev.hostname,
             ipMode: backendSettings.ipMode || prev.ipMode,
-            npuEnabled: backendSettings.npuEnabled !== false,
-            npuPowerMode: backendSettings.npuPowerMode || prev.npuPowerMode,
           };
           localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(mapped));
           return mapped;
@@ -198,8 +196,6 @@ export default function SettingsEnhanced() {
       wifiEnabled: settings.wifiEnabled,
       wifiSSID: settings.wifiSSID,
       wifiPassword: settings.wifiPassword,
-      npuEnabled: settings.npuEnabled,
-      npuPowerMode: settings.npuPowerMode,
       defaultExportFormat: settings.defaultExportFormat,
       includeTimestamps: settings.includeTimestamps,
       includeSpeakerLabels: settings.includeSpeakerLabels,

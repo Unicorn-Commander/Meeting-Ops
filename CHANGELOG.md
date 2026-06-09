@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.29.12] - 2026-06-08
+
+**Pre-onboarding sweep — every Settings panel + new-user surface made honest.** An 18-agent audit (70 findings, 63 verified) drove this; combined with a live browser walkthrough confirming the real experience. The goal: nothing stale or fake before a real user pokes around.
+
+### Removed
+- **The fake "NPU Acceleration" panel in Settings → Performance.** It claimed "AMD Phoenix NPU detected — 220× faster transcription" with fabricated metrics ("0.0045 RTF, 4,789 tok/s") and had a toggle + power-mode + CPU-threads + memory-limit controls that were **wired to nothing**, plus an appliance-only "Reference Hardware" (Ryzen/Hawk Point) block. All removed; replaced with an honest "nothing to configure here — Parakeet 1.1B / pyannote 3.1 / Qwen 3.6 run on the server" note. (Dropped the dead `npuEnabled`/`npuPowerMode`/`cpuThreads`/`memoryLimit` persistence too.)
+
+### Changed
+- **Settings → AI is now an honest read-only "AI Engine" panel.** Replaced the misleading model switcher (LLM Provider dropdown with dead Ollama/OpenAI/Custom options + a model list showing the legacy `gpt-oss-20b`/`granite` that don't actually run) with a live status view sourced from `/api/system/pipeline`: Summaries & chat = **Qwen 3.6 35B-A3B-Vision**, Transcription = **Parakeet**, Diarization = **pyannote 3.1**, each with a ready indicator. The real controls (summary format, AI toggles, max speakers) stay.
+- **Stale model names corrected everywhere they were user-visible.** `Granite 3.3 2B` / `gpt-oss-20b` → **Qwen 3.6 35B-A3B-Vision** (LiveRecording progressive-summary fallbacks, the Agent Dashboard/Editor copy + presets + model-performance card, the default `llmModel`); lingering `Whisper` copy → **Parakeet** (AudioSettings); internal **"Brigade"** → "Project-Ops, Contact-Ops, and other Unicorn Commander suite apps" in the Integrations description.
+- **Login: the SSO button now says "Sign in with Unicorn Commander"** (was "Sign in with SSO / enterprise") — matches the actual identity provider a new user clicks.
+- **Share-meeting invite is instance-relative.** The members link was hardcoded to `meetingops.magicunicorn.dev`; now uses `window.location.origin`, and "a unicorncommander.ai account" → "an account on this instance" (so it's correct on any deployment).
+- **MeetingIntelligenceDashboard** empty-state no longer says "Generate … to see content" (there is no Generate button) — now passive: "Templates will show content when analysis completes."
+
+### Verified live (browser walkthrough as a new user)
+- SSO **auto-signs-in with no password prompt** ("Sign in with Unicorn Commander"); AI Chat answers in ~8s on the Qwen 3.6 agent; the Sessions list loads and the pipeline-status panel reports the real models; no console errors on load. (Left as a minor follow-up: the Sessions "empty" state flashes ~1s during load for users who already have sessions — correct + instant for a brand-new user.)
+
 ## [3.29.11] - 2026-06-08
 
 **Settings now reflect the real stack (Parakeet, not Whisper), and speaker avatars are gone.**

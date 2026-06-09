@@ -302,7 +302,7 @@ export const Login: React.FC = () => {
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-zinc-100 transition hover:border-fuchsia-400/40 hover:bg-white/10"
               >
                 <ShieldCheck className="h-4 w-4 text-fuchsia-300" />
-                Sign in with SSO / enterprise
+                Sign in with Unicorn Commander
               </button>
               <div className="flex items-center justify-between text-sm text-zinc-400">
                 <span>Need a consumer account?</span>
