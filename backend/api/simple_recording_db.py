@@ -439,11 +439,41 @@ async def list_sessions(
         False,
         description="Return sessions from every organization the caller belongs to.",
     ),
+    all_tenants: bool = Query(
+        False,
+        description=(
+            "PLATFORM-ADMIN god-view: return sessions across EVERY organization "
+            "in the system, not just the caller's. Honored ONLY for superusers "
+            "(silently ignored otherwise). Explicit, opt-in cross-tenant access "
+            "for support/ops — the default views are member-scoped for privacy."
+        ),
+    ),
 ) -> List[SessionResponse]:
     """List all recording sessions from database"""
 
     org_names_by_id: dict[int, str] = {}
-    if include_all_my_orgs and not getattr(current_user, "is_superuser", False):
+    is_super = bool(getattr(current_user, "is_superuser", False))
+    if all_tenants and is_super:
+        # Explicit, opt-in PLATFORM-ADMIN god-view: every org's sessions. This is
+        # a deliberate cross-tenant action (the UI surfaces it only to superusers
+        # behind a clearly-labelled toggle), NOT a silent default — so we log it
+        # for an audit trail of who looked across tenants and when.
+        logger.warning(
+            "PLATFORM-ADMIN all-tenants session view used by user_id=%s (%s)",
+            getattr(current_user, "id", "?"),
+            getattr(current_user, "email", "?"),
+        )
+        query = db.query(DBRecordingSession)
+    elif include_all_my_orgs:
+        # Scope to the orgs the caller is a MEMBER of — for EVERYONE, including
+        # superusers. A superuser is an operations role (admin panels, user
+        # management, system config), NOT a licence to browse customers' private
+        # meeting content in the normal session list. Cross-org content access
+        # must come from real org membership, a shared workspace, or the explicit
+        # opt-in all-tenants god-view above — never the platform-admin flag by
+        # default. (Previously a superuser's "all orgs" view returned every
+        # session in the system, so the platform owner saw every tenant's private
+        # meetings on the default view — removed.)
         org_ids = [
             row.organization_id
             for row in db.query(UserOrganization.organization_id)
@@ -456,8 +486,6 @@ async def list_sessions(
             query = db.query(DBRecordingSession).filter(
                 DBRecordingSession.organization_id.in_(org_ids)
             )
-    elif include_all_my_orgs and getattr(current_user, "is_superuser", False):
-        query = db.query(DBRecordingSession)
     else:
         query = _scoped_session_query(db, active_org.organization.id)
     if tags:

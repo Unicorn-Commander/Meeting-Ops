@@ -21,6 +21,7 @@ import {
 } from '../components/TranscriptionOptionsPanel';
 import { useUploads } from '../contexts/UploadsContext';
 import { useOrg } from '../contexts/OrgContext';
+import { useAuth } from '../contexts/AuthContext';
 import { TagChip } from '../components/TagChip';
 import MobileSessionsList from '../components/MobileSessionsList';
 import { UpgradeBanner } from '../components/UpgradeBanner';
@@ -851,6 +852,11 @@ export const Sessions: React.FC = () => {
   // (server-stored). Default: all.
   const [sourceFilter, setSourceFilter] = useState<'all' | 'local' | 'synced'>('all');
   const [orgFilter, setOrgFilter] = useState<number | 'all'>('all');
+  // Platform-admin god-view: when ON (superusers only), the list fetch crosses
+  // every tenant instead of just the caller's orgs. Explicit + opt-in.
+  const { user } = useAuth();
+  const isSuperuser = !!user?.is_superuser;
+  const [allTenants, setAllTenants] = useState(false);
   // Sort state hydrates from URL ?sort=&order= so refresh keeps the
   // user's column choice. Falls back to date-desc if missing/invalid.
   const initialSort: SortKey = (() => {
@@ -1147,7 +1153,7 @@ export const Sessions: React.FC = () => {
     const interval = setInterval(() => fetchSessions({ showSpinner: false }), 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTags.join(','), activeOrganization?.slug, autoRefresh]);
+  }, [selectedTags.join(','), activeOrganization?.slug, autoRefresh, allTenants]);
 
   useEffect(() => {
     const onInvalidated = () => fetchSessions({ showSpinner: false });
@@ -1183,6 +1189,11 @@ export const Sessions: React.FC = () => {
 
       const params = new URLSearchParams();
       params.set('include_all_my_orgs', 'true');
+      // Platform-admin opt-in: cross every tenant. Backend ignores it for
+      // non-superusers, but only send it when actually toggled on.
+      if (allTenants && isSuperuser) {
+        params.set('all_tenants', 'true');
+      }
       // The backend list defaults to limit=100 (no Query()-enforced max). With
       // power users carrying hundreds of meetings, the default silently
       // chopped the tail off the list with no UI affordance to load more.
@@ -2335,6 +2346,46 @@ export const Sessions: React.FC = () => {
                 {org.name}
               </button>
             ))}
+          </div>
+        )}
+
+        {/* Platform-admin god-view (superusers only). Off by default — the
+            normal list is scoped to the admin's own workspaces, same as any
+            user. Toggling it on fetches sessions across EVERY tenant and is
+            loudly indicated, because it means viewing customers' private
+            meetings. The backend ignores the flag for non-superusers. */}
+        {isSuperuser && (
+          <div
+            className={`mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 ${
+              allTenants
+                ? 'border-amber-500/60 bg-amber-500/10'
+                : 'border-gray-800 bg-gray-900'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-xs">
+              {allTenants ? (
+                <AlertTriangle className="h-4 w-4 text-amber-400" />
+              ) : (
+                <LockIcon className="h-4 w-4 text-gray-500" />
+              )}
+              <span className="font-medium text-gray-300">Platform admin</span>
+              <span className="text-gray-500">
+                {allTenants
+                  ? '— viewing ALL tenants’ meetings across the platform'
+                  : '— viewing only your own workspaces'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setOrgFilter('all'); setAllTenants((v) => !v); }}
+              className={`rounded-md border px-3 py-1 text-xs font-medium transition-colors ${
+                allTenants
+                  ? 'border-amber-500 bg-amber-600/20 text-amber-100 hover:bg-amber-600/30'
+                  : 'border-gray-700 bg-zinc-800 text-gray-300 hover:bg-gray-700'
+              }`}
+            >
+              {allTenants ? 'Exit all-tenants view' : 'View all tenants'}
+            </button>
           </div>
         )}
 

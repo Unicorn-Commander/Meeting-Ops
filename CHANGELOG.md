@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+## [3.31.0] - 2026-06-09
+
+**Tenancy hardening + an explicit platform-admin god-view, plus long-meeting diarization fixes.**
+
+### Security / tenancy
+- **The platform-superuser session list is now privacy-scoped by default.** Previously a superuser's "all my orgs" view returned *every session in the entire system*, so the platform owner saw every tenant's private meetings on the normal Sessions page. It now scopes to the orgs the caller is actually a **member of** — for everyone, superuser or not. (Regular users were already correctly isolated; this only changes the superuser default.) Cross-tenant content access now requires real org membership, a shared workspace, or the explicit opt-in below.
+- **New: explicit, opt-in platform-admin "all tenants" god-view.** Superusers get a clearly-labelled **"View all tenants"** toggle on the Sessions page (hidden from everyone else). Off by default; when on, the list crosses every org and the UI shows a loud amber "Platform admin — viewing ALL tenants' meetings" banner. Each use is logged for an audit trail. The backend honors the `all_tenants` flag only for superusers. This replaces the silent, always-on god-view with a deliberate, visible, audited one.
+
+### Fixed
+- **Diarization failed on any meeting over 30 minutes.** The speaker service had a hard 30-min (`MAX_AUDIO_SECONDS=1800`) cap — a leftover from when diarization ran on a 12 GB 3060 — so a real 90-min meeting was rejected with "audio too long → diarization returned no segments," landing a summary with no speaker attribution. It now runs on the 24 GB RTX 3090 (measured: a 92-min meeting diarized in 91 s using only 2.6 GB), so the cap is raised to **8 hours**. (A true full-day single recording is better served by always-on auto-split into meetings.)
+- **Reprocess couldn't find the audio for upload-origin sessions.** `_run_session_reprocess` always tried to reassemble always-on per-chunk WAVs, so reprocessing any *uploaded* meeting died with `FileNotFoundError` on the missing `always_on/.../full_audio`. Uploaded sessions have a single audio file (`uploads/.../extracted.wav`) at `session.audio_file`; reprocess now uses it directly when there are no chunks to reassemble. This unblocks the full pipeline (diarization + embedding/Qdrant + knowledge-graph) for uploaded meetings.
+
 ## [3.30.2] - 2026-06-09
 
 ### Fixed
