@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [3.32.2] - 2026-06-09
+
+**Fix: actually pass `STRIPE_TEST_*` into the containers (v3.32.1 wired the code but not the compose env).**
+
+### Fixed
+- **`STRIPE_TEST_MODE` never reached the backend/worker, so v3.32.1's test-mode switch couldn't engage.** The bigboy compose injects Stripe config via an explicit `environment:` list (`- STRIPE_X=${STRIPE_X:-}`), not the whole env file — so dropping `STRIPE_TEST_*` into `.env.bigboy` had no effect; `stripe_client` still resolved the live key and `test_mode()` stayed `False`. Added the full `STRIPE_TEST_*` passthrough (mode flag, test api key, publishable, webhook secret, and all six Basic/Pro/Suite price IDs) to **both** the `backend` and `meet-bulk-import-worker` service env blocks. With the test keys provisioned and `STRIPE_TEST_MODE=1` set, billing now correctly runs against Stripe test (verified: `test_mode=True`, active key `sk_test_`, test prices + webhook secret resolved). Caught during the live test-mode bring-up on dogfood.
+
 ## [3.32.1] - 2026-06-09
 
 **A Stripe TEST-mode switch so the upgrade flow can be exercised end-to-end without charging a real card.**
