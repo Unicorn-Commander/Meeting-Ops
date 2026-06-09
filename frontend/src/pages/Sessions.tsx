@@ -41,6 +41,12 @@ interface Participant {
   role?: string | null;
 }
 
+interface SessionSpeaker {
+  name: string;
+  photo_url?: string | null;   // MO-local SpeakerProfile photo (no live Contact-Ops call)
+  raw_label?: string | null;   // e.g. SPEAKER_00
+}
+
 interface Session {
   id: string;
   name: string;
@@ -62,6 +68,7 @@ interface Session {
   summary?: any;               // AI-generated summary
   summary_preview?: string;    // Plain-text snippet for list views
   speaker_count?: number;      // Distinct speakers, server-computed
+  speakers?: SessionSpeaker[]; // Named speakers (display name + local photo) for cards
   project_app?: string | null;     // 'project-ops' | 'crisis-ops' | null
   project_id?: number | null;
   project_slug?: string | null;
@@ -2574,7 +2581,7 @@ export const Sessions: React.FC = () => {
                       )}
                       {session.summary_preview && (
                         <p
-                          className="text-gray-500 text-xs mt-1.5 line-clamp-2 leading-snug"
+                          className="text-gray-500 text-xs mt-1.5 line-clamp-3 leading-snug"
                           title={session.summary_preview}
                         >
                           {session.summary_preview}
@@ -2619,6 +2626,40 @@ export const Sessions: React.FC = () => {
                         <span className="truncate">
                           {session.participants.slice(0, 3).map((p) => p.name).join(', ')}
                           {session.participants.length > 3 && ` +${session.participants.length - 3} more`}
+                        </span>
+                      </div>
+                    )}
+                    {/* Named speakers with avatars (diarized voices matched to people).
+                        Avatars come from the MO-local SpeakerProfile photo — no live
+                        Contact-Ops call — so the list stays cheap. */}
+                    {session.speakers && session.speakers.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <Mic className="w-4 h-4 flex-shrink-0" />
+                        <div className="flex -space-x-2 flex-shrink-0">
+                          {session.speakers.slice(0, 4).map((sp, i) =>
+                            sp.photo_url ? (
+                              <img
+                                key={i}
+                                src={sp.photo_url}
+                                alt={sp.name}
+                                title={sp.name}
+                                className="w-6 h-6 rounded-full border border-gray-700 object-cover bg-gray-800"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <span
+                                key={i}
+                                title={sp.name}
+                                className="w-6 h-6 rounded-full border border-gray-700 bg-purple-500/30 text-purple-200 text-[10px] font-semibold flex items-center justify-center"
+                              >
+                                {(sp.name || '?').trim().charAt(0).toUpperCase()}
+                              </span>
+                            )
+                          )}
+                        </div>
+                        <span className="truncate text-xs">
+                          {session.speakers.slice(0, 3).map((s) => s.name).join(', ')}
+                          {session.speakers.length > 3 && ` +${session.speakers.length - 3}`}
                         </span>
                       </div>
                     )}

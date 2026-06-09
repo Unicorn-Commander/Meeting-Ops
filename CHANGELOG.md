@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.29.6] - 2026-06-08
+
+**Session-card enrichment + a polish/completeness pass (first wave of the "get to 100%" audit).**
+
+### Added
+- **Session cards now show who was in the meeting, with faces.** The Sessions grid cards surfaced participants + a summary snippet, but not the *diarized, named speakers*. Cards now render a **speaker row with avatars** — each named speaker's photo (small overlapping circles, initial-letter fallback) plus their names — sourced from the new `speakers` field on the session-list payload. The summary preview was bumped from 2 to 3 lines so there's "a little more of the summary" at a glance. Avatars come from the **MO-local `SpeakerProfile.photo_url`** (the same photo the Knowledge Graph uses), so the list stays cheap — no live Contact-Ops call per card.
+  - Backend: new `SpeakerSummary` model + `_speakers_payload(db, session)` helper (one query per session: confirmed `SpeakerSessionLink` → org `SpeakerProfile`, distinct by name, capped at 12, best-effort/never raises) wired into the `GET /recording-sessions` list response as `speakers: [{name, photo_url, raw_label}]`.
+
+### Fixed
+- **RAG / AI-Chat citations were rendering "Meeting undefined chunk undefined: undefined" with dead links.** The `RAGChat` `Citation` type expected `{meeting_id, chunk_idx, snippet}`, but the agent backend (`meeting_rag._sources_from_history`) actually streams `{session_id, title, created_at}` — so every source label was `undefined` and every "Sources" link pointed at `#/sessions/undefined`. Citations now show the **meeting title + date** and link to the real session; falls back to "Meeting {id}" only if a title is missing. (Found by the completeness audit.)
+- **"Copy email" reported success even when the copy failed.** The summary-email Copy button called `navigator.clipboard.writeText(...)` with no `await`/`.catch` and then unconditionally `alert('Email copied to clipboard!')` — so a denied/insecure-context write still told the user it worked. It now awaits the write and shows a themed `toast.success` only on resolve, `toast.error` on failure.
+
+### Removed
+- **Dead frontend code.** Deleted `MoveSessionOrgModal.tsx` (211 lines, never imported — superseded by the inline org-move dropdown in `SessionDetails` since v3.24) and removed the unreachable `/admin/agents-old` route + the legacy `AgentConfiguration` page (851 lines, ~33 KB, eagerly bundled, no nav link — superseded by `AgentDashboard`). Both verified to have zero remaining references; trims the main bundle.
+
 ## [3.29.5] - 2026-06-08
 
 ### Changed

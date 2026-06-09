@@ -10,9 +10,15 @@ import type {
 } from '../types/agent-actions.types';
 
 interface Citation {
-  meeting_id: string;
-  chunk_idx: number;
-  snippet: string;
+  // Shape the backend actually streams (meeting_rag _sources_from_history):
+  // deduped meeting briefs keyed by session_id, with a human title + date.
+  session_id?: string;
+  title?: string;
+  created_at?: string;
+  score?: number;
+  // Legacy/fallback fields tolerated if an older agent path ever sends them.
+  meeting_id?: string;
+  snippet?: string;
 }
 
 interface Message {
@@ -459,16 +465,25 @@ export default function RAGChatPanel() {
               {msg.citations && msg.citations.length > 0 && (
                 <div className="mt-2 pt-2 border-t border-zinc-700">
                   <p className="text-xs text-zinc-400 mb-1">Sources:</p>
-                  {msg.citations.map((c, j) => (
-                    <a
-                      key={j}
-                      href={`#/sessions/${c.meeting_id}`}
-                      className="flex items-center gap-1 text-xs text-fuchsia-400 hover:text-fuchsia-300 transition-colors"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      Meeting {c.meeting_id} chunk {c.chunk_idx}: {c.snippet?.slice(0, 60)}...
-                    </a>
-                  ))}
+                  {msg.citations.map((c, j) => {
+                    const sid = c.session_id || c.meeting_id;
+                    const label = c.title || (sid ? `Meeting ${sid}` : 'Source');
+                    const dateStr = c.created_at
+                      ? new Date(c.created_at).toLocaleDateString()
+                      : '';
+                    return (
+                      <a
+                        key={j}
+                        href={sid ? `#/sessions/${sid}` : undefined}
+                        className="flex items-center gap-1 text-xs text-fuchsia-400 hover:text-fuchsia-300 transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                        <span className="truncate">
+                          {label}{dateStr && ` · ${dateStr}`}
+                        </span>
+                      </a>
+                    );
+                  })}
                 </div>
               )}
               {msg.metadata?.pending_confirmation && msg.role === 'assistant' && (

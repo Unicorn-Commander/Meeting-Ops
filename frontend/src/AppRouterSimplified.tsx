@@ -14,7 +14,6 @@ import { Sessions } from './pages/Sessions';
 import { SessionDetails } from './pages/SessionDetails';
 import { SpeakerLibrary } from './pages/SpeakerLibrary';
 import SettingsEnhanced from './pages/SettingsEnhanced';
-import { AgentConfiguration } from './pages/admin/AgentConfiguration';
 import { SharedSessionRedirect } from './components/SharedSessionRedirect';
 import { AgentDashboard } from './pages/admin/AgentDashboard';
 import Rooms from './pages/Rooms';
@@ -625,12 +624,6 @@ export function AppRouterSimplified() {
       <Route path="/admin/agents" element={
         <AdminRoute>
           <AgentDashboard />
-        </AdminRoute>
-      } />
-
-      <Route path="/admin/agents-old" element={
-        <AdminRoute>
-          <AgentConfiguration />
         </AdminRoute>
       } />
 

@@ -111,6 +111,15 @@ class ParticipantSummary(BaseModel):
     role: Optional[str] = None
 
 
+class SpeakerSummary(BaseModel):
+    # Named speaker on a session, for the list cards: the confirmed
+    # SpeakerSessionLink -> SpeakerProfile, with the MO-local photo_url
+    # (no live Contact-Ops call) so cards can show speaker avatars cheaply.
+    name: str
+    photo_url: Optional[str] = None
+    raw_label: Optional[str] = None
+
+
 class SessionResponse(BaseModel):
     id: str
     name: str
@@ -125,6 +134,7 @@ class SessionResponse(BaseModel):
     tags: List[str] = []
     summary_preview: Optional[str] = None
     speaker_count: int = 0
+    speakers: List[SpeakerSummary] = []
     project_app: Optional[str] = None
     project_id: Optional[int] = None
     project_slug: Optional[str] = None
@@ -241,6 +251,38 @@ def _tags_payload(session: DBRecordingSession) -> List[str]:
     if not isinstance(raw, list):
         return []
     return [t for t in raw if isinstance(t, str) and t]
+
+
+def _speakers_payload(db: Session, session: DBRecordingSession) -> List[dict]:
+    """Named speakers for the list cards: confirmed SpeakerSessionLink rows
+    joined to their org SpeakerProfile (display_name + MO-local photo_url).
+    Cheap (one query, no Contact-Ops call) and best-effort — never raises into
+    the list builder. Distinct by name, capped so a busy meeting can't bloat a
+    card."""
+    try:
+        from database.models import SpeakerSessionLink, SpeakerProfile
+        rows = (
+            db.query(
+                SpeakerProfile.display_name,
+                SpeakerProfile.photo_url,
+                SpeakerSessionLink.raw_label,
+            )
+            .join(SpeakerSessionLink, SpeakerSessionLink.speaker_id == SpeakerProfile.id)
+            .filter(SpeakerSessionLink.session_id == session.id)
+            .filter(SpeakerSessionLink.speaker_id.isnot(None))
+            .order_by(SpeakerSessionLink.raw_label.asc())
+            .limit(12)
+            .all()
+        )
+        out: List[dict] = []
+        seen: set = set()
+        for name, photo, raw in rows:
+            if name and name not in seen:
+                seen.add(name)
+                out.append({"name": name, "photo_url": photo, "raw_label": raw})
+        return out
+    except Exception:
+        return []
 
 
 def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict]:
@@ -488,6 +530,7 @@ async def list_sessions(
             tags=_tags_payload(session),
             summary_preview=_summary_preview(session),
             speaker_count=_speaker_count(session),
+            speakers=_speakers_payload(db, session),
             project_app=session.project_app,
             project_id=session.project_id,
             project_slug=session.project_slug,

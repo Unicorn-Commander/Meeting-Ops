@@ -3088,10 +3088,14 @@ export const SessionDetails: React.FC = () => {
                         </div>
                         <button
                           onClick={() => {
-                            // Copy email to clipboard
+                            // Copy email to clipboard. Only claim success once the
+                            // write actually resolves — an unhandled writeText (denied
+                            // permission / insecure context) used to alert "copied!"
+                            // even when nothing was copied.
                             const emailText = `To: ${email.to || 'stakeholders@company.com'}\n${email.cc ? `CC: ${email.cc}\n` : ''}Subject: ${email.subject}\n\n${email.body}`;
-                            navigator.clipboard.writeText(emailText);
-                            alert('Email copied to clipboard!');
+                            navigator.clipboard.writeText(emailText)
+                              .then(() => toast.success('Email copied to clipboard'))
+                              .catch(() => toast.error('Could not copy — your browser blocked clipboard access'));
                           }}
                           className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
                         >
