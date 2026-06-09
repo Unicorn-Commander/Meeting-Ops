@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [3.32.3] - 2026-06-09
+
+**Fix: Stripe webhook deliveries were silently auth-walled — paid upgrades would never take effect.**
+
+### Fixed
+- **`POST /api/stripe/webhook` was being 302-redirected to the Keycloak login by oauth2-proxy**, so Stripe's webhook deliveries could never reach the handler. The end-to-end consequence: a customer could complete checkout, but the `customer.subscription.created` event would bounce off the login wall → `User.tier` and `Organization.plan` would never update → **they'd pay and not get upgraded** (and the per-org quota would stay capped). Added `^/api/stripe/webhook$` to `OAUTH2_PROXY_SKIP_AUTH_ROUTES` so the endpoint skips the interactive-login layer. This is safe because the handler does **mandatory Stripe signature verification itself** — an unsigned or forged POST is rejected with 400 (verified: good signature → 200, bad → 400). Found while bringing up Stripe test mode (a locally-signed event through the public URL returned 302→login instead of 200). Applies to both test and live keys.
+
 ## [3.32.2] - 2026-06-09
 
 **Fix: actually pass `STRIPE_TEST_*` into the containers (v3.32.1 wired the code but not the compose env).**
