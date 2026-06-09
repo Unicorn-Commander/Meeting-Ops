@@ -6,6 +6,7 @@ import {
   clearStoredOrgSlug,
   DEFAULT_ORG_SLUG,
   getStoredOrgSlug,
+  setDefaultOrganization,
   setStoredOrgSlug,
   type OrganizationMembership,
 } from '../utils/organization';
@@ -23,11 +24,26 @@ const OrgContext = createContext<OrgContextType | undefined>(undefined);
 
 function resolveActiveOrganization(
   organizations: OrganizationMembership[],
+  serverDefaultOrgId?: number | null,
 ): OrganizationMembership | null {
   if (organizations.length === 0) {
     return null;
   }
 
+  // 1. Server-side "home"/default workspace — the cross-device truth set via
+  //    PUT /api/organizations/default. Preferred ahead of the localStorage
+  //    sticky so a user's chosen workspace follows them onto a new device,
+  //    matching the backend's resolve_active_organization preference. Only
+  //    honored when they're actually a member.
+  if (serverDefaultOrgId != null) {
+    const serverMatch = organizations.find((org) => org.id === serverDefaultOrgId);
+    if (serverMatch) {
+      return serverMatch;
+    }
+  }
+
+  // 2. localStorage sticky — fast-path/offline fallback (the user's most
+  //    recent explicit choice on THIS device).
   const storedSlug = getStoredOrgSlug();
   if (storedSlug) {
     const storedMatch = organizations.find((org) => org.slug === storedSlug);
@@ -40,6 +56,7 @@ function resolveActiveOrganization(
     return organizations[0];
   }
 
+  // 3. Platform "home" org, else the first membership.
   const defaultOrg = organizations.find((org) => org.slug === DEFAULT_ORG_SLUG);
   return defaultOrg ?? organizations[0];
 }
@@ -50,6 +67,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
     () => user?.organizations ?? [],
     [user],
   );
+  const serverDefaultOrgId = user?.default_organization_id ?? null;
   const [activeOrganization, setActiveOrganization] = useState<OrganizationMembership | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -66,7 +84,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const nextOrg = resolveActiveOrganization(organizations);
+    const nextOrg = resolveActiveOrganization(organizations, serverDefaultOrgId);
     setActiveOrganization(nextOrg);
     if (nextOrg) {
       setStoredOrgSlug(nextOrg.slug);
@@ -74,7 +92,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
       clearStoredOrgSlug();
     }
     setIsLoading(false);
-  }, [authLoading, isAuthenticated, organizations]);
+  }, [authLoading, isAuthenticated, organizations, serverDefaultOrgId]);
 
   const switchOrganization = (slug: string) => {
     const nextOrg = organizations.find((organization) => organization.slug === slug);
@@ -84,6 +102,10 @@ export function OrgProvider({ children }: { children: ReactNode }) {
 
     setActiveOrganization(nextOrg);
     setStoredOrgSlug(nextOrg.slug);
+    // Persist the choice server-side so it follows the user across devices +
+    // nodes (best-effort, non-blocking — the localStorage sticky above is the
+    // offline source of truth if this fails).
+    void setDefaultOrganization(nextOrg.id);
   };
 
   const value = useMemo<OrgContextType>(() => ({

@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [3.32.0] - 2026-06-09
+
+**Self-serve upgrade actually lifts the quota, a per-user sticky default workspace, and one consolidated fetch interceptor.**
+
+### Fixed
+- **Paying for a plan now lifts the org's quota (self-serve upgrade works end-to-end).** A successful Stripe checkout moved `User.tier` (feature gates) but never `Organization.plan` — which is what the monthly-audio-hours quota reads — so a paying customer still hit the free 10-hour cap (the exact wall that blocked Shafen, just reached via payment instead of manual comp). The active org is now threaded through checkout → the Stripe subscription metadata (`meeting_ops_organization_id`) → the webhook, which sets `Organization.plan` (and clears any stale per-org hour cap) on `subscription.created/updated` and reverts it to free on `deleted`. Tier→plan mapping: enterprise→unlimited, any paid tier (basic/pro/suite)→Pro quota, cancel→free. (Stripe was already fully configured — live keys, webhook secret, price IDs — so this closes the last gap; checkout is now genuinely self-serve.)
+
+### Added
+- **Per-user sticky / default workspace.** New `User.default_organization_id` (migration `044`). When a request arrives with no explicit workspace selector, `resolve_active_organization` now prefers the user's saved default org (if they're still a member), then the platform home org, then their first membership — replacing the dogfood-specific `DEFAULT_ORG_SLUG` hack with a per-user choice that works on any node and follows you across devices. Switching workspaces in the UI persists the choice via the new `PUT /api/organizations/default`; the frontend prefers the server default ahead of the local sticky.
+
+### Changed
+- **Consolidated the two `window.fetch` interceptors into one.** The active-org header injection (was in `AuthContext`) and the JWT-401 refresh + stale-session handling (`installFetchInterceptor`) were two separate, order-fragile `window.fetch` monkeypatches — if they wrapped in the wrong order the org header could silently fail to ship. They're now a single, idempotent interceptor that attaches the org + auth headers AND handles 401 refresh/retry; `AuthContext` registers its refresh callback with it instead of wrapping fetch a second time. Removes a long-standing source of "the org header didn't make it" flakiness.
+
 ## [3.31.0] - 2026-06-09
 
 **Tenancy hardening + an explicit platform-admin god-view, plus long-meeting diarization fixes.**

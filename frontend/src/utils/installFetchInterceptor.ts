@@ -1,14 +1,30 @@
 /**
- * Global fetch interceptor — installs at module load time.
+ * Global fetch interceptor — the single, consolidated window.fetch wrapper.
  *
- * Wraps window.fetch so every request to /api/* gets stale-session
- * detection without per-page migration. Detects:
- *   - 302 redirects to oauth2-proxy / Keycloak (stale session cookie)
- *   - HTML responses when JSON was expected (oauth2-proxy 401 page)
+ * Installs ONCE at module load time (imported from main.tsx). It does BOTH
+ * jobs that used to live in two separate, order-fragile monkeypatches:
  *
- * On detection: shows the ReconnectingOverlay and redirects through
- * /oauth2/start so the SPA gets a fresh KC session and lands back
- * on the same hash route.
+ *   1. Active-org + auth header injection (was an effect in AuthContext).
+ *      Same-origin /api/* requests get the `X-MeetingOps-Org` header (from
+ *      the stored active-org slug) and an `Authorization: Bearer` header
+ *      (from the stored access token) when not already present. The org
+ *      rules come from utils/organization.ts (isMeetingOpsApiRequest +
+ *      buildOrgHeaders) so the decoration boundary is identical to before.
+ *
+ *   2. Stale-session / 401 handling. Detects:
+ *        - 302 redirects to oauth2-proxy / Keycloak (stale session cookie)
+ *        - opaque redirects (redirect:'manual') / network CORS failures
+ *        - HTML responses when JSON was expected (oauth2-proxy 401 page)
+ *        - JSON 401s on a JWT-authed API call → token refresh + retry
+ *      On the first three: shows the ReconnectingOverlay and redirects
+ *      through /oauth2/start (deferred while a recording is live). The JWT
+ *      refresh+retry is delegated to a handler AuthContext registers via
+ *      setAuthRefreshHandler() (AuthContext owns the token state).
+ *
+ * Consolidating into one wrapper removes the ordering hazard: previously
+ * AuthContext's effect re-wrapped window.fetch on every token change and
+ * restored the pre-wrap fetch on cleanup, which could blow away the org
+ * header injection depending on mount order.
  *
  * Active-recording guard
  * -----------------------
@@ -24,6 +40,12 @@
  */
 import { setReconnectingState } from '../components/ReconnectingOverlay';
 import { redirectToLogin } from './loginRedirect';
+import { config } from '../config';
+import {
+  buildOrgHeaders,
+  getStoredOrgSlug,
+  isMeetingOpsApiRequest,
+} from './organization';
 
 const _originalFetch = window.fetch.bind(window);
 
@@ -46,6 +68,20 @@ export function setRecordingActive(key: string, active: boolean): void {
     redirectDeferred = false;
     setTimeout(() => { redirectToLogin(); }, 50);
   }
+}
+
+/**
+ * JWT 401 refresh handler. AuthContext owns the access/refresh-token state,
+ * so it registers a callback here that performs the refresh and resolves
+ * `true` when a fresh access token is in localStorage. The interceptor uses
+ * it to refresh-and-retry a JWT-authed API call that came back 401. Null
+ * until AuthContext mounts (SSO-only / pre-mount calls just fall through).
+ */
+type AuthRefreshHandler = () => Promise<boolean>;
+let authRefreshHandler: AuthRefreshHandler | null = null;
+
+export function setAuthRefreshHandler(handler: AuthRefreshHandler | null): void {
+  authRefreshHandler = handler;
 }
 
 function isApiUrl(urlStr: string): boolean {
@@ -87,9 +123,29 @@ const interceptedFetch: typeof fetch = async (input, init) => {
     return _originalFetch(input as RequestInfo, init);
   }
 
+  // ── Header injection (active-org + auth) ───────────────────────────────
+  // Decorate same-origin /api requests with the active-org header + the
+  // stored bearer token. isMeetingOpsApiRequest is the exact boundary the
+  // old AuthContext interceptor used; buildOrgHeaders only sets the header
+  // when an org slug exists and the caller didn't already set it.
+  const orgSlug = getStoredOrgSlug();
+  const storedToken =
+    (typeof localStorage !== 'undefined' && localStorage.getItem('access_token')) || null;
+  let shouldDecorate = false;
+  try {
+    shouldDecorate = isMeetingOpsApiRequest(urlStr, config.apiBaseUrl);
+  } catch {
+    shouldDecorate = false;
+  }
+
+  const headers = shouldDecorate
+    ? buildOrgHeaders(init?.headers, orgSlug)
+    : new Headers(init?.headers || {});
+  if (shouldDecorate && storedToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${storedToken}`);
+  }
   // Force JSON Accept header so oauth2-proxy is more likely to return
   // a 401/JSON instead of an HTML login page if it can't find a session.
-  const headers = new Headers(init?.headers || {});
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
 
   // redirect: 'manual' so we can detect the 302 to Keycloak ourselves;
@@ -130,10 +186,36 @@ const interceptedFetch: typeof fetch = async (input, init) => {
     });
   }
 
+  // JSON 401 on a JWT-authed API call → try a token refresh + retry once.
+  // Skip /auth/* so a failed login/refresh doesn't recurse. The handler is
+  // owned by AuthContext (it holds the refresh token); when it isn't
+  // registered yet we just return the 401 untouched.
+  if (
+    response.status === 401 &&
+    authRefreshHandler &&
+    !/\/auth\//.test(urlStr)
+  ) {
+    const refreshed = await authRefreshHandler();
+    const refreshedToken =
+      (typeof localStorage !== 'undefined' && localStorage.getItem('access_token')) || null;
+    if (refreshed && refreshedToken && shouldDecorate) {
+      const retryHeaders = buildOrgHeaders(init?.headers, orgSlug);
+      retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
+      if (!retryHeaders.has('Accept')) retryHeaders.set('Accept', 'application/json');
+      const retryInit: RequestInit = {
+        ...init,
+        headers: retryHeaders,
+        redirect: init?.redirect || 'manual',
+      };
+      return _originalFetch(input as RequestInfo, retryInit);
+    }
+  }
+
   return response;
 };
 
-// Install once at module load. Idempotent — won't double-wrap on HMR.
+// Install once at module load. Idempotent — won't double-wrap on HMR or if
+// some other module imports this twice.
 if (!(window as unknown as { __meetOpsFetchInterceptor?: boolean }).__meetOpsFetchInterceptor) {
   window.fetch = interceptedFetch;
   (window as unknown as { __meetOpsFetchInterceptor?: boolean }).__meetOpsFetchInterceptor = true;

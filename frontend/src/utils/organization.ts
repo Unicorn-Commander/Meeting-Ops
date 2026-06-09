@@ -68,3 +68,24 @@ export function appendOrgQuery(url: string, orgSlug?: string | null): string {
 
   return `${resolved.pathname}${resolved.search}${resolved.hash}`;
 }
+
+/**
+ * Persist the user's "home"/default workspace server-side
+ * (PUT /api/organizations/default). Best-effort + non-blocking: callers
+ * (OrgContext.switchOrganization) should not await or surface failures —
+ * the localStorage sticky still works offline / if this 4xx/5xxes. The
+ * consolidated fetch interceptor attaches the Authorization + org header,
+ * so this stays a plain same-origin call.
+ */
+export function setDefaultOrganization(organizationId: number): Promise<void> {
+  return fetch('/api/organizations/default', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ organization_id: organizationId }),
+  })
+    .then(() => undefined)
+    .catch(() => {
+      // Swallow — the localStorage sticky is the offline source of truth and
+      // the next /api/auth/me will reconcile the server default.
+    });
+}

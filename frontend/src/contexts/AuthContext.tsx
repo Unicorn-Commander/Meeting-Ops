@@ -1,14 +1,10 @@
 import React, { createContext, useState, useContext, useEffect, type ReactNode } from 'react';
 import { config } from '../config';
-import { setReconnectingState } from '../components/ReconnectingOverlay';
-import { redirectToLogin } from '../utils/loginRedirect';
 import {
-  buildOrgHeaders,
   clearStoredOrgSlug,
-  getStoredOrgSlug,
-  isMeetingOpsApiRequest,
   type OrganizationMembership,
 } from '../utils/organization';
+import { setAuthRefreshHandler } from '../utils/installFetchInterceptor';
 import { clearAllHydratedCaches, HYDRATED_CACHE_CLEAR_EVENT } from '../utils/cachedState';
 import { identify, resetIdentity, track } from '../utils/posthog';
 
@@ -154,6 +150,11 @@ export interface User {
   created_at: string;
   organizations?: OrganizationMembership[];
   active_organization?: OrganizationMembership | null;
+  // Server-side "home"/default workspace (Organization.id). When set AND the
+  // user is still a member, OrgContext prefers it ahead of the localStorage
+  // sticky + DEFAULT_ORG_SLUG fallbacks so the chosen workspace follows the
+  // user across devices + nodes. Set via PUT /api/organizations/default.
+  default_organization_id?: number | null;
   tier?: Tier;
   tier_features?: TierFeatures;
 }
@@ -484,72 +485,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     window.location.href = `/oauth2/sign_out?rd=${rd}`;
   };
 
-  // Set up axios-like interceptor for fetch
+  // Register the JWT 401 refresh+retry handler with the single consolidated
+  // fetch interceptor (utils/installFetchInterceptor, installed once at
+  // module load from main.tsx). That interceptor owns the active-org +
+  // Authorization header injection (reading the token from localStorage,
+  // which we keep in sync) and the stale-session redirect handling; the only
+  // thing it can't do without us is refresh the JWT, because AuthContext
+  // holds the refresh token. We hand it `refreshAccessToken` and re-register
+  // on token changes so the closure always sees the current tokens.
+  //
+  // refreshAccessToken() self-guards (returns false when there's no refresh
+  // token), so it's safe to register unconditionally.
   useEffect(() => {
-    const originalFetch = window.fetch;
-    
-    window.fetch = async (url: RequestInfo | URL, init?: RequestInit) => {
-      const rawUrl = typeof url === 'string' ? url : url.toString();
-      const orgSlug = getStoredOrgSlug();
-      const shouldDecorate = isMeetingOpsApiRequest(url, config.apiBaseUrl);
-
-      if (shouldDecorate) {
-        const headers = buildOrgHeaders(init?.headers, orgSlug);
-        if (token && !headers.has('Authorization')) {
-          headers.set('Authorization', `Bearer ${token}`);
-        }
-        init = {
-          ...init,
-          headers,
-        };
-      }
-
-      const response = await originalFetch(url, init);
-
-      // Detect stale oauth2-proxy session: 302 redirect or HTML response
-      // when we expected JSON. This happens when the oauth2-proxy cookie
-      // expires but the SPA tab is still open.
-      const isApiCall = rawUrl.startsWith('/api/') || rawUrl.includes('/api/');
-      const headersInit = init?.headers;
-      const headersObj = headersInit instanceof Headers ? headersInit : new Headers(headersInit);
-      const wantsJson = headersObj.get('accept')?.includes('application/json') ||
-        (isApiCall && !headersObj.has('Accept'));
-      if (isApiCall && wantsJson && response.status === 302) {
-        const loc = response.headers.get('location') || '';
-        if (/\/oauth2\/(start|sign_out)|\/realms\/uchub/i.test(loc)) {
-          setReconnectingState(true);
-          redirectToLogin();
-          return new Response(null, { status: 302 });
-        }
-      }
-      if (isApiCall && wantsJson && response.headers.get('content-type')?.startsWith('text/html')) {
-        setReconnectingState(true);
-        redirectToLogin();
-        return new Response(null, { status: 401 });
-      }
-
-      // Handle 401 responses
-      if (response.status === 401 && refreshToken && !rawUrl.includes('/auth/')) {
-        const refreshSuccess = await refreshAccessToken();
-        // Retry the original request if refresh was successful
-        const refreshedToken = localStorage.getItem('access_token');
-        if (refreshSuccess && refreshedToken && shouldDecorate) {
-          const retryHeaders = buildOrgHeaders(init?.headers, orgSlug);
-          retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
-          init = {
-            ...init,
-            headers: retryHeaders,
-          };
-          return originalFetch(url, init);
-        }
-      }
-
-      return response;
-    };
-
-    return () => {
-      window.fetch = originalFetch;
-    };
+    setAuthRefreshHandler(() => refreshAccessToken());
+    return () => setAuthRefreshHandler(null);
   }, [token, refreshToken]);
 
   const tier: Tier = user?.tier ?? 'free';

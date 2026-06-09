@@ -134,6 +134,21 @@ class User(Base):
     # in alembic 037.
     founding_cohort = Column(String(64), nullable=True)
 
+    # Per-user "home" workspace (Organization). When set AND the user is
+    # still a member of it, this is the top preference resolve_active_org()
+    # falls back to when no X-MeetingOps-Org header / ?org= selector is
+    # supplied — so a user's chosen workspace persists server-side across
+    # devices + on any node. Replaces the dogfood-specific DEFAULT_ORG_SLUG
+    # preference hack (which only helped the magic-unicorn node). Set via
+    # PUT /api/organizations/default. NULL = no preference (fall through to
+    # the existing fallback chain). FK is ON DELETE SET NULL so deleting an
+    # org clears it rather than orphaning the user. Added in alembic 044.
+    default_organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

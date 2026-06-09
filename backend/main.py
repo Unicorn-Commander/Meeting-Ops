@@ -288,6 +288,10 @@ app.mount("/metrics", make_asgi_app())
 
 # === REQUIRED ROUTERS (fail fast if missing) ===
 _load_router(app, "auth", "auth.routes", required=True)
+# Org/membership endpoints under /api/organizations (e.g. PUT /default to set
+# the caller's home workspace). Second router object in auth.routes so the
+# code lives with the membership helpers; loaded here via router_attr.
+_load_router(app, "organizations", "auth.routes", router_attr="organizations_router")
 # session_tags must precede recording so /recording-sessions/tags wins
 # routing over /recording-sessions/{session_id} (the wildcard would swallow it).
 _load_router(app, "session_tags", "api.sessions_tags")

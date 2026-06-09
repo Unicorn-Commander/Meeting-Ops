@@ -235,23 +235,43 @@ def resolve_active_organization(
                 detail="Organization not found",
             )
     elif current_user.organizations:
-        # No explicit org selector sent. Prefer the platform "home" org
-        # (DEFAULT_ORG_SLUG) when the user is a member of it — this avoids
-        # silently dropping a multi-org user into whichever membership happens
-        # to be first (which can be an empty/test org, e.g. a user whose first
-        # membership is "Test Co" would see no speakers/sessions even though
-        # their real data lives in the home org). Falls back to the first
-        # membership for users not in the home org (e.g. GFL/shafen-khan), so
-        # the no-403 behavior is preserved. The frontend can always override
-        # with the X-MeetingOps-Org header or ?org= selector.
-        organization = next(
-            (
-                m.organization
-                for m in current_user.organizations
-                if m.organization and m.organization.slug == DEFAULT_ORG_SLUG
-            ),
-            current_user.organizations[0].organization,
-        )
+        # No explicit org selector sent. Resolve the active org through a
+        # preference chain (each step only applies if the user is actually a
+        # member, so the no-403 behavior is always preserved):
+        #
+        #   1. The user's server-side "home" workspace
+        #      (User.default_organization_id) — persists their chosen
+        #      workspace across devices + on any node. This replaces the
+        #      dogfood-specific DEFAULT_ORG_SLUG hack as the TOP preference.
+        #   2. The platform "home" org (DEFAULT_ORG_SLUG) when they're a
+        #      member — kept as a fallback so existing dogfood users with no
+        #      default set yet still land on magic-unicorn instead of an
+        #      empty/test org that happens to be first.
+        #   3. The first membership — for users in neither of the above
+        #      (e.g. GFL/shafen-khan), preserving the no-403 behavior.
+        #
+        # The frontend can always override with the X-MeetingOps-Org header
+        # or ?org= selector (handled in the `requested_slug` branch above).
+        default_org_id = getattr(current_user, "default_organization_id", None)
+        organization = None
+        if default_org_id is not None:
+            organization = next(
+                (
+                    m.organization
+                    for m in current_user.organizations
+                    if m.organization and m.organization.id == default_org_id
+                ),
+                None,
+            )
+        if organization is None:
+            organization = next(
+                (
+                    m.organization
+                    for m in current_user.organizations
+                    if m.organization and m.organization.slug == DEFAULT_ORG_SLUG
+                ),
+                current_user.organizations[0].organization,
+            )
     else:
         # User has no memberships yet; auto-provision into the platform default.
         organization = ensure_default_organization(db)

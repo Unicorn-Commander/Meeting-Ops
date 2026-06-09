@@ -142,6 +142,63 @@ def _extract_price_id(sub: dict) -> Optional[str]:
         return None
 
 
+def _org_plan_for_tier(tier: str) -> str:
+    """Map a subscription tier → the ``Organization.plan`` value the quota
+    system (services/quotas.py) understands. Quotas key off ``org.plan``
+    (free / pro / enterprise), so any PAID tier must map to a non-free plan or
+    a paying customer would still hit the free monthly-hours cap. Enterprise →
+    unlimited; everything paid (basic / pro / pro_annual / suite) → the Pro
+    quota; otherwise free."""
+    t = (tier or "free").lower()
+    if t == "enterprise":
+        return "enterprise"
+    if t in ("", "free"):
+        return "free"
+    return "pro"
+
+
+def _apply_org_plan_from_sub(db: Session, sub: dict, tier: str) -> None:
+    """Set the BUYING org's plan from a subscription so the per-org quota
+    follows the payment. The org id rides in the subscription metadata set at
+    checkout (``meeting_ops_organization_id``). This is the fix for the gap
+    where a successful payment moved ``User.tier`` (feature gates) but NOT
+    ``Organization.plan`` (the monthly-hours quota), so a paying user still hit
+    the free cap. Best-effort: a missing/unknown org is logged, not fatal — the
+    caller's user.tier change still stands."""
+    meta = sub.get("metadata") or {}
+    org_raw = meta.get("meeting_ops_organization_id")
+    if not org_raw:
+        logger.warning(
+            "subscription %s has no meeting_ops_organization_id metadata; "
+            "org plan/quota NOT updated (user.tier moved, but the per-org hours "
+            "quota still reflects the old plan)",
+            sub.get("id"),
+        )
+        return
+    try:
+        org_id = int(org_raw)
+    except (TypeError, ValueError):
+        logger.warning("subscription %s bad org metadata %r", sub.get("id"), org_raw)
+        return
+    from auth.models import Organization
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if org is None:
+        logger.warning("subscription %s org_id=%s not found", sub.get("id"), org_id)
+        return
+    new_plan = _org_plan_for_tier(tier)
+    if (org.plan or "free") != new_plan:
+        logger.info(
+            "subscription %s: org_id=%s plan %s→%s (quota follows the payment)",
+            sub.get("id"), org_id, org.plan, new_plan,
+        )
+        org.plan = new_plan
+        # Clear any stale per-org hour override so the tier default applies
+        # (enterprise → unlimited, pro → 100h).
+        org.max_monthly_hours = None
+        db.add(org)
+        db.commit()
+
+
 def _handle_subscription_created(db: Session, sub: dict) -> None:
     customer_id = sub.get("customer")
     user = _find_user_by_customer(db, customer_id) or _find_user_by_metadata(db, sub)
@@ -173,6 +230,8 @@ def _handle_subscription_created(db: Session, sub: dict) -> None:
     user.tier = new_tier
     db.add(user)
     db.commit()
+    # Lift the buying org's quota plan to match the payment.
+    _apply_org_plan_from_sub(db, sub, new_tier)
     # Founding 100: annual-upfront Pro subscribers get the cohort flag at
     # checkout-completion time. Other intervals (monthly) never qualify
     # by design — Aaron's spec. v3.23.0: Suite annual is also annual-upfront
@@ -222,6 +281,10 @@ def _handle_subscription_updated(db: Session, sub: dict) -> None:
         user.tier = new_tier
         db.add(user)
         db.commit()
+    # Always reconcile the org plan to the current tier (the org can be out of
+    # sync even when user.tier already matches — e.g. a prior webhook that only
+    # moved the user).
+    _apply_org_plan_from_sub(db, sub, new_tier)
 
 
 def _handle_subscription_deleted(db: Session, sub: dict) -> None:
@@ -241,6 +304,8 @@ def _handle_subscription_deleted(db: Session, sub: dict) -> None:
         user.tier = "free"
         db.add(user)
         db.commit()
+    # Drop the org back to the free quota plan when the subscription ends.
+    _apply_org_plan_from_sub(db, sub, "free")
 
 
 def _handle_customer_created(db: Session, customer: dict) -> None:

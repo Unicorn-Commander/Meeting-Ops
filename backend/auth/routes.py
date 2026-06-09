@@ -27,6 +27,13 @@ from auth.utils import (
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
+# Org/membership endpoints that read more naturally under /api/organizations
+# than under the /api/auth prefix (the user's "home"/default workspace).
+# Registered in main.py via _load_router(..., router_attr="organizations_router")
+# so we don't proliferate a separate module — they live with the membership
+# serialization helpers (_serialize_memberships) here.
+organizations_router = APIRouter(prefix="/api/organizations", tags=["organizations"])
+
 # Pydantic models for requests/responses
 class UserCreate(BaseModel):
     email: EmailStr
@@ -103,6 +110,10 @@ class OrganizationMembershipResponse(BaseModel):
     slug: str
     role: str
     is_active: bool
+
+
+class SetDefaultOrganizationRequest(BaseModel):
+    organization_id: int
 
 
 def _serialize_memberships(user: User) -> list[dict]:
@@ -464,6 +475,58 @@ async def list_current_user_orgs(
         OrganizationMembershipResponse(**membership)
         for membership in _serialize_memberships(current_user)
     ]
+
+
+@organizations_router.put("/default", response_model=UserResponse)
+async def set_default_organization(
+    payload: SetDefaultOrganizationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set the caller's "home"/default workspace (Organization).
+
+    The default org is the top preference that
+    `auth.organization.resolve_active_organization` falls back to when a
+    request carries no `X-MeetingOps-Org` header / `?org=` selector — so a
+    user's chosen workspace persists server-side across devices + on any
+    node. The caller MUST be a member of the target org (or a superuser);
+    we never let a user pin a workspace they can't access.
+    """
+    organization = (
+        db.query(Organization)
+        .filter(Organization.id == payload.organization_id)
+        .first()
+    )
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    membership = (
+        db.query(UserOrganization)
+        .filter(
+            UserOrganization.user_id == current_user.id,
+            UserOrganization.organization_id == organization.id,
+        )
+        .first()
+    )
+    if not membership and not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this organization",
+        )
+
+    current_user.default_organization_id = organization.id
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    return _build_user_response(
+        current_user,
+        active_org=organization,
+        active_role=(membership.role if membership else None),
+    )
 
 @router.post("/logout")
 async def logout(

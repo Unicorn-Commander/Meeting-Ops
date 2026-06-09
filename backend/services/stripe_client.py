@@ -329,6 +329,7 @@ def create_checkout_session(
     price_id: str,
     success_url: str,
     cancel_url: str,
+    organization_id: Optional[int] = None,
 ) -> str:
     """Create a Stripe Checkout Session for a Subscription. Returns the
     hosted Checkout URL the frontend redirects to.
@@ -359,6 +360,14 @@ def create_checkout_session(
         subscription_data={
             "metadata": {
                 "meeting_ops_user_id": str(user.id),
+                # The org being upgraded. The webhook reads this back to set
+                # Organization.plan so the per-org quota (monthly hours) actually
+                # lifts on payment — user.tier alone doesn't move the quota.
+                **(
+                    {"meeting_ops_organization_id": str(organization_id)}
+                    if organization_id is not None
+                    else {}
+                ),
                 "source": "pricing_page",
             },
         },

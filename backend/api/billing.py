@@ -38,7 +38,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_organization
+from auth.organization import ActiveOrganization
 from auth.models import User
 from database.database import get_db
 from services import stripe_client
@@ -131,9 +132,12 @@ def _ensure_configured() -> None:
 async def create_checkout(
     payload: CheckoutRequest,
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> CheckoutResponse:
-    """Create a Stripe Checkout session for the current user."""
+    """Create a Stripe Checkout session for the current user, upgrading their
+    ACTIVE organization (the workspace they're buying for). The org id rides in
+    the subscription metadata so the webhook can lift that org's quota plan."""
     _ensure_configured()
     cycle = (payload.billing_cycle or "monthly").lower()
     if cycle not in ("monthly", "annual"):
@@ -188,6 +192,7 @@ async def create_checkout(
             price_id=price_id,
             success_url=success_url,
             cancel_url=cancel_url,
+            organization_id=active_org.organization.id,
         )
     except RuntimeError as exc:
         logger.error("checkout: %s", exc)
