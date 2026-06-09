@@ -1671,16 +1671,32 @@ async def _run_session_reprocess(session_pk: int) -> None:
 
         canonical_id = session.session_id or str(session.id)
         chunks_dir = _audio_chunks_dir(org.slug, canonical_id)
-        # Park the reassembled WAV next to the chunk dir so cleanup is local
-        # to the per-session directory.
-        target_wav = _session_dir(org.slug, canonical_id) / "session.wav"
-
-        duration_sec, source_codec = await _reassemble_full_audio(chunks_dir, target_wav)
-        # Point session.audio_file at the reassembled WAV so identify_speakers
-        # has an absolute audio path to fall back on if it ever needs to
-        # re-extract embeddings (we already plumb per-segment embeddings,
-        # but the helper still checks audio_file.exists()).
-        session.audio_file = str(target_wav)
+        # Resolve the canonical audio. Always-on / recorded sessions reassemble
+        # their per-chunk WAVs; UPLOAD-origin sessions have NO chunks — their
+        # audio is already a single file on disk (e.g. uploads/.../extracted.wav)
+        # pointed at by ``session.audio_file``. This path used to unconditionally
+        # reassemble always-on chunks, so reprocessing any uploaded meeting died
+        # with FileNotFoundError on the missing always_on/.../full_audio. Prefer
+        # the existing single file when there are no chunks to reassemble.
+        existing_audio = Path(session.audio_file) if session.audio_file else None
+        if not chunks_dir.exists() and existing_audio is not None and existing_audio.exists():
+            target_wav = existing_audio
+            duration_sec = float(session.duration or 0.0)
+            source_codec = None
+            logger.info(
+                "reprocess session=%s: no always-on chunks; using existing audio_file %s",
+                session.id, target_wav,
+            )
+        else:
+            # Park the reassembled WAV next to the chunk dir so cleanup is local
+            # to the per-session directory.
+            target_wav = _session_dir(org.slug, canonical_id) / "session.wav"
+            duration_sec, source_codec = await _reassemble_full_audio(chunks_dir, target_wav)
+            # Point session.audio_file at the reassembled WAV so identify_speakers
+            # has an absolute audio path to fall back on if it ever needs to
+            # re-extract embeddings (we already plumb per-segment embeddings,
+            # but the helper still checks audio_file.exists()).
+            session.audio_file = str(target_wav)
         # Register the reassembled audio in audio_files so the existing
         # /download/audio endpoint can serve it.
         try:
