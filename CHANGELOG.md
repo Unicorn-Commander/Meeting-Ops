@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.29.8] - 2026-06-08
+
+**Completeness-audit wave 3: the "clear polish" — no-decision UI consistency fixes (frontend only).**
+
+### Added
+- **Mobile session cards now show named-speaker avatars too** (parity with the v3.29.6 desktop cards). `MobileSessionsList` renders the same overlapping avatar stack (local `SpeakerProfile.photo_url`, initial-letter fallback) + names from the session `speakers` payload, after the summary snippet.
+
+### Changed
+- **RAG source labels are now consistent across all three surfaces.** A source with no title rendered three different ways — `Untitled` (Sessions ask panel), `Meeting {id}` / `Source` (RAGChat), `Meeting {id-slice}` / index (dashboard AskBar). All now fall back to **"Untitled meeting"** (titles + real links unchanged).
+- **Local (privacy-mode) session cards no longer look empty.** A device-only session with no summary now shows "Live transcript only — no summary on this device" instead of a blank body.
+
+### Fixed
+- **RAG relevance score now has an accessible label.** The bare `(NN%)` on Sessions ask-panel sources gained a `title`/`aria-label` ("NN% relevance match") so it's not an unexplained number.
+- **RAG follow-up box no longer disappears mid-ask.** It was hidden until `ragMessages.length > 0`, so during the *first* answer (when the list is briefly empty) it vanished; it now also renders while loading (disabled), so the input stays put.
+
 ## [3.29.7] - 2026-06-08
 
 **Completeness-audit wave 2: a real tenancy-isolation hardening + a UX-consistency polish pass.** A multi-agent audit swept session-views / incomplete-features / integrations / workspace-tenancy / backend-completeness; this ships the high-value, low-risk confirmed findings. (The audit also *confirmed* two security designs are solid — knowledge-graph cross-org node hydration gating, and the v3.29.3 WebSocket handshake org-scoping — no change needed there.)

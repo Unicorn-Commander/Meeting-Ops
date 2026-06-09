@@ -2419,11 +2419,12 @@ export const Sessions: React.FC = () => {
                               <button
                                 key={sidx}
                                 onClick={() => navigate(`/sessions/${src.session_id}`)}
+                                title={`${Math.round(src.score * 100)}% relevance match`}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg border border-gray-700 transition-colors"
                               >
                                 <FileText className="w-3 h-3 text-fuchsia-400" />
-                                {src.title || 'Untitled'}
-                                <span className="text-gray-500">({Math.round(src.score * 100)}%)</span>
+                                {src.title || 'Untitled meeting'}
+                                <span className="text-gray-500" aria-label="relevance match">({Math.round(src.score * 100)}%)</span>
                               </button>
                             ))}
                           </div>
@@ -2442,8 +2443,10 @@ export const Sessions: React.FC = () => {
               <div ref={ragEndRef} />
             </div>
 
-            {/* Follow-up input */}
-            {ragMessages.length > 0 && (
+            {/* Follow-up input — also shown while the first answer is in flight
+                (ragMessages is briefly empty during that window) so the box never
+                vanishes mid-ask; it's disabled during loading. */}
+            {(ragMessages.length > 0 || ragLoading) && (
               <div className="flex gap-2 border-t border-gray-800 pt-3">
                 <input
                   type="text"
@@ -2580,14 +2583,18 @@ export const Sessions: React.FC = () => {
                       {session.description && (
                         <p className="text-gray-400 text-sm mt-1 line-clamp-2">{session.description}</p>
                       )}
-                      {session.summary_preview && (
+                      {session.summary_preview ? (
                         <p
                           className="text-gray-500 text-xs mt-1.5 line-clamp-3 leading-snug"
                           title={session.summary_preview}
                         >
                           {session.summary_preview}
                         </p>
-                      )}
+                      ) : session.is_local ? (
+                        <p className="text-gray-600 text-xs mt-1.5 italic">
+                          Live transcript only — no summary on this device
+                        </p>
+                      ) : null}
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       {!session.is_local && session.organization_name && (

@@ -467,7 +467,7 @@ export default function RAGChatPanel() {
                   <p className="text-xs text-zinc-400 mb-1">Sources:</p>
                   {msg.citations.map((c, j) => {
                     const sid = c.session_id || c.meeting_id;
-                    const label = c.title || (sid ? `Meeting ${sid}` : 'Source');
+                    const label = c.title || 'Untitled meeting';
                     const dateStr = c.created_at
                       ? new Date(c.created_at).toLocaleDateString()
                       : '';

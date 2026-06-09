@@ -179,7 +179,7 @@ export const AskBar: React.FC = () => {
                           href={src.meeting_id ? `#/sessions/${src.meeting_id}` : '#'}
                           className="inline-flex items-center gap-1 truncate rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-300 transition hover:border-fuchsia-500/40 hover:text-fuchsia-200"
                         >
-                          {src.title || `Meeting ${src.meeting_id?.slice(0, 8) || idx + 1}`}
+                          {src.title || 'Untitled meeting'}
                         </a>
                       ))}
                     </div>
