@@ -77,6 +77,35 @@ async def finalize_session_job(
                 "current_job_id": current_job_id,
             }
 
+        # ---- Step 0: identify enrolled speakers + normalize labels ----
+        # This step was MISSING from the live finalize path (it only existed
+        # in the reprocess pipeline), so an always-on meeting was summarized
+        # with raw pyannote labels even when the voices were enrolled — the
+        # exact "SPEAKER_02 said…" summaries Aaron hit. Identify first, then
+        # normalize leftovers to "Speaker N" + resync the transcript rows the
+        # UI reads. Best-effort: a speaker-svc outage must not fail finalize.
+        try:
+            import asyncio as _asyncio
+            from services.speaker_service import (
+                identify_speakers,
+                stamp_confirmed_speaker_contacts,
+            )
+            await _asyncio.to_thread(identify_speakers, session, db)
+            await _asyncio.to_thread(stamp_confirmed_speaker_contacts, session, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "finalize_session_job: identify_speakers failed session=%s: %s",
+                session_pk, exc,
+            )
+        try:
+            from services.speaker_labels import normalize_session_speaker_labels
+            normalize_session_speaker_labels(session, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "finalize_session_job: label normalization failed session=%s: %s",
+                session_pk, exc,
+            )
+
         # ---- Step 1: server summary ----
         summary_error: str | None = None
         try:

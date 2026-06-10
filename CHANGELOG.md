@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.33.0] - 2026-06-10
+
+**Humane speaker labels everywhere: summaries read attribution instead of guessing it, raw `SPEAKER_00` codes are gone, and the transcript view shows per-line speakers instead of "unknown".** Found via Aaron's phone call with Shafen — the summary said "the homeowners (SPEAKER_00)" and the transcript showed every line as unknown.
+
+### Fixed
+- **The summarizer now reads a speaker-attributed transcript instead of guessing who said what.** `_summarize_session` fed the LLM a *flat* `transcript_simple` (no per-line attribution — a stale comment claimed names were folded in, but nothing ever rewrote it) plus a list of labels and an instruction to "attribute statements to them." The model had to guess, and it parroted raw pyannote codes. It now builds the prompt body from the diarized segments as **"Name: utterance" lines** (consecutive same-speaker segments merged) — attribution is read, not inferred — with the prompt forbidding machine codes and identity-guessing for unidentified voices.
+- **The live always-on finalize never identified speakers at all.** `finalize_session_job` went straight to the summary; only the *reprocess* pipeline ran `identify_speakers`. So a live meeting was summarized with raw diarizer labels even when the voices were enrolled. The finalize job now runs **identify → contact-stamp → label-normalize → summarize**, matching the reprocess order.
+- **Transcript view showed "unknown" for every line.** The `transcriptions` rows the UI renders were inserted *before* diarization overlaid speaker labels, and nothing ever synced them afterwards. The new normalization step re-syncs those rows from the final diarized segments, so the transcript shows the same names/labels as the summary.
+
+### Added
+- **`services/speaker_labels.py`** — label normalization: identified voices keep their real name; unmatched diarizer codes become stable **"Speaker 1" / "Speaker 2"** (first-appearance order, idempotent, never collides with existing numbers); the original code is preserved in `raw_label` so the inline naming/enrollment flow (which keys on `raw_label`) is unaffected. Runs in both finalize and reprocess (new Stage 4.5). Covered by `tests/test_speaker_labels.py`.
+
+### Note
+- Voice **identification** itself still requires enrollment: naming a speaker once (inline prompt on the session) enrolls their voiceprint for future auto-naming. Phone-bandwidth audio matches less reliably until a phone sample is enrolled — naming one phone call fixes the next one.
+
 ## [3.32.3] - 2026-06-09
 
 **Fix: Stripe webhook deliveries were silently auth-walled — paid upgrades would never take effect.**

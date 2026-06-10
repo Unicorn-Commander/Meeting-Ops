@@ -1763,7 +1763,24 @@ async def _summarize_session(
     llm_thinking: Optional[bool] = None,
     force: bool = False,
 ) -> None:
-    transcript = session.transcript_simple or ""
+    # Prefer a speaker-ATTRIBUTED transcript built from the diarized
+    # segments ("Aaron Stransky: …" / "Speaker 1: …" lines). The old path
+    # fed the flat transcript_simple (no per-line attribution at all) plus a
+    # "here are the speaker labels, attribute statements to them" instruction
+    # — so the model had to GUESS who said what, and raw pyannote codes
+    # (SPEAKER_00) leaked straight into summaries. Raw codes are normalized
+    # to "Speaker N" here even if the session predates label normalization.
+    from services.speaker_labels import build_attributed_transcript
+
+    transcript = ""
+    speakers_seen: list[str] = []
+    diarized = session.transcript_diarized
+    if isinstance(diarized, dict) and diarized.get("segments"):
+        transcript, speakers_seen = build_attributed_transcript(
+            diarized.get("segments") or []
+        )
+    if not transcript.strip():
+        transcript = session.transcript_simple or ""
     if not transcript.strip():
         session.summary = json.dumps({"executive": "No transcript text was available.", "bullets": [], "actions": [], "decisions": []})
         db.commit()
@@ -1793,26 +1810,34 @@ async def _summarize_session(
             f"You are a meeting analyst. {style} Produce concise, useful meeting summaries."
         )
 
-    # Speaker context: list the distinct speaker labels so the model
-    # can attribute statements correctly. When pyannote produced
-    # SPEAKER_00 / SPEAKER_01 / ..., these become the names to use; once
-    # SpeakerTagger maps them to real names, those replace the raw labels
-    # in transcript_simple already.
-    speakers_seen: list[str] = []
-    diarized = session.transcript_diarized
-    if isinstance(diarized, dict):
-        for seg in diarized.get("segments", []):
-            spk = seg.get("speaker") or seg.get("raw_label")
-            if spk and spk not in speakers_seen:
-                speakers_seen.append(spk)
+    # Speaker context: the transcript lines above are already prefixed with
+    # the speaker ("Name: …"), so attribution is read, not guessed. Identified
+    # speakers show real names; unidentified ones show "Speaker N". The model
+    # must never emit raw diarizer codes or invent identities.
     if speakers_seen:
-        speaker_context = (
-            "Speakers present in this meeting: "
-            + ", ".join(speakers_seen)
-            + ". Attribute statements to them by name."
+        named = [s for s in speakers_seen if not re.match(r"^Speaker \d+$", s)]
+        generic = [s for s in speakers_seen if re.match(r"^Speaker \d+$", s)]
+        parts = [
+            "Each transcript line is prefixed with its speaker. Speakers: "
+            + ", ".join(speakers_seen) + "."
+        ]
+        if generic:
+            parts.append(
+                " " + ", ".join(generic)
+                + (" is an unidentified participant" if len(generic) == 1
+                   else " are unidentified participants")
+                + " — refer to them exactly by that label; do NOT guess their identity."
+            )
+        if named:
+            parts.append(
+                " Attribute statements only as written in the transcript."
+            )
+        parts.append(
+            " Never output machine codes like SPEAKER_00 — use only the labels above."
         )
+        speaker_context = "".join(parts)
     else:
-        speaker_context = "Speaker labels are not available; describe statements neutrally."
+        speaker_context = "Speaker labels are not available; describe statements neutrally and never invent speaker names."
 
     # Qwen3.6 has 256K context; we cap at 60K characters (~15K tokens) so
     # there is plenty of headroom for the response + system prompt while

@@ -1837,6 +1837,21 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 exc,
             )
 
+        # Stage 4.5 — normalize residual raw diarizer labels (SPEAKER_00 ->
+        # "Speaker N") + resync the transcriptions rows the UI renders so the
+        # transcript shows per-line speakers instead of "unknown". Must run
+        # AFTER identify (real names win) and BEFORE summarize/index.
+        try:
+            from services.speaker_labels import normalize_session_speaker_labels
+
+            await asyncio.to_thread(normalize_session_speaker_labels, session, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reprocess label normalization failed for session=%s: %s",
+                session.id,
+                exc,
+            )
+
         # Stage 5 — Final summary. Overwrites session.summary +
         # session.final_summary with the server-quality version that
         # supersedes the browser-rolled live summary slices.
