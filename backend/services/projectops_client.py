@@ -502,6 +502,7 @@ class ProjectOpsClient:
         *,
         source_type: str = "MEETING_OPS",
         timeout_seconds: Optional[float] = None,
+        bearer_override: Optional[str] = None,
     ) -> dict[str, Any]:
         """Submit a batch of candidate action items to Project-Ops' TRIAGE
         agent (``POST /triage/ingest``). Propose-only: the triage agent
@@ -525,6 +526,12 @@ class ProjectOpsClient:
         re-submit next finalize/backfill, PO dedups) already covers a
         dropped response. Raises ``ProjectOpsClientError`` on terminal
         failure; callers gate on ``is_live`` first.
+
+        ``bearer_override`` (optional) forces a specific bearer for this push
+        — used to send a Brigade-exchanged, workspace-bound federation token
+        (``aud=project-ops``) so PO routes the proposals to the correct
+        tenant. When None, the default token source is used (legacy / default
+        tenant routing).
         """
         if not self.is_live:
             raise ProjectOpsClientError(
@@ -540,6 +547,7 @@ class ProjectOpsClient:
             json=body,
             timeout=timeout_seconds or TRIAGE_INGEST_TIMEOUT_SECONDS,
             max_attempts=1,
+            bearer_override=bearer_override,
         )
         if not isinstance(data, dict):
             return {"created": 0, "skipped": 0, "proposals": []}
@@ -618,8 +626,12 @@ class ProjectOpsClient:
             f"(searched up to {_RESOLVE_MAX_PAGES} pages)"
         )
 
-    async def _headers(self) -> dict[str, str]:
-        token = await self._token_source.get()
+    async def _headers(self, bearer_override: Optional[str] = None) -> dict[str, str]:
+        """Build request headers. When ``bearer_override`` is supplied (e.g. a
+        Brigade-exchanged, workspace-bound federation token for the triage
+        push), it is used as the bearer INSTEAD of the default token source;
+        otherwise the configured ``_token_source`` mints/caches as usual."""
+        token = bearer_override if bearer_override else await self._token_source.get()
         _warn_if_scope_missing(token)
         return {
             "Authorization": f"Bearer {token}",
@@ -643,6 +655,7 @@ class ProjectOpsClient:
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
         max_attempts: Optional[int] = None,
+        bearer_override: Optional[str] = None,
     ) -> Any:
         """Issue an HTTP request with bounded retries. Retries on
         connect/timeout/5xx; 4xx is terminal (the payload won't get
@@ -653,14 +666,16 @@ class ProjectOpsClient:
         (the triage-ingest path needs far more than the 8s default).
         ``max_attempts`` overrides the retry count for this call — pass 1
         for an expensive, idempotent op that must not be re-issued on a
-        timeout."""
+        timeout.
+        ``bearer_override`` forces a specific bearer (e.g. a Brigade-exchanged
+        federation token) instead of the default token source for this call."""
         url = f"{self._base_url}{path}"
         backoff = self._initial_backoff
         last_detail: Optional[str] = None
         attempts = max_attempts if max_attempts is not None else self._max_retries
         for attempt in range(attempts):
             try:
-                headers = await self._headers()
+                headers = await self._headers(bearer_override)
                 async with self._client_ctx() as client:
                     resp = await client.request(
                         method,

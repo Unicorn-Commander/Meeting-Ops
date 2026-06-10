@@ -34,6 +34,17 @@ Covers the contract for ``services.projectops_writer``:
                                        returns mode="gated-off", created=0,
                                        and makes zero client calls even when
                                        a target + live client are present.
+  10-17. submit_action_items_to_triage — the triage submit path (submit +
+                                       stamp, replay-skip, no-target-still-
+                                       works, linked-project hint, shared
+                                       auto-push gate, no-op, eventual-
+                                       consistency on failure, no double-file).
+  18-20. triage federation token     — the workspace-bound, aud=project-ops
+                                       push: uses the Brigade-exchanged token
+                                       as bearer_override when the org's
+                                       workspace_id resolves, else falls back
+                                       to the default token (no override) and
+                                       warns (no workspace_id / exchange miss).
 
 The PO HTTP client is replaced by an injected stub (``_FakeProjectOpsClient``)
 passed via ``write_action_items_to_projectops(client=...)`` — the same
@@ -124,11 +135,20 @@ class _FakeProjectOpsClient:
         *,
         source_type: str = "MEETING_OPS",
         timeout_seconds=None,
+        bearer_override=None,
     ) -> dict[str, Any]:
-        """Records the submitted batch; returns the PO triage ingest shape
-        ({created, skipped, proposals}). Raises when ``fail`` is set to
-        exercise the writer's eventual-consistency (don't-stamp) path."""
-        self.submitted.append({"items": items, "source_type": source_type})
+        """Records the submitted batch (incl. any per-call bearer_override so
+        tests can assert the federation token is threaded through); returns the
+        PO triage ingest shape ({created, skipped, proposals}). Raises when
+        ``fail`` is set to exercise the writer's eventual-consistency
+        (don't-stamp) path."""
+        self.submitted.append(
+            {
+                "items": items,
+                "source_type": source_type,
+                "bearer_override": bearer_override,
+            }
+        )
         if self._fail:
             from services.projectops_client import ProjectOpsClientError
 
@@ -236,11 +256,14 @@ def _seed(
     project_id: Optional[str] = None,
     processing_metadata: Optional[dict] = None,
     items: Optional[list[dict]] = None,
+    workspace_id: Optional[str] = None,
 ):
     """Create one org + one completed session + N action items.
 
     ``items`` is a list of dicts (text/owner/status/due_date/raw_payload);
-    defaults to 3 simple todo items. Returns (org_id, session_id)."""
+    defaults to 3 simple todo items. ``workspace_id`` sets the org's
+    uc-registry tenant uuid (used by the federation-token push path).
+    Returns (org_id, session_id)."""
     from auth.models import Organization, User
     from database.database import SessionLocal
     from database.models import ActionItem, RecordingSession
@@ -253,6 +276,7 @@ def _seed(
             slug=f"pob-{suffix}",
             is_active=True,
             settings=org_settings or {},
+            workspace_id=workspace_id,
         )
         db.add(org)
         db.commit()
@@ -959,3 +983,146 @@ def test_triage_skips_direct_bridged_items(client):
     assert len(cands) == 1
     assert cands[0]["text"] == "Fresh item"
     assert result.skipped == 1  # the already-bridged item
+
+
+# ---------------------------------------------------------------------------
+# 18-20. Triage federation token (workspace-bound, aud=project-ops)
+#
+# The triage push must carry a Brigade-vouched, workspace-bound token so PO
+# routes the proposals to the correct tenant. These cover: (a) when the org
+# has a workspace_id and the federation token mints, it's threaded to the
+# client as bearer_override; (b) when the org has NO workspace_id, the push
+# falls back to the default token (no override) and warns; (c) when the org
+# has a workspace_id but the exchange yields nothing (Brigade not configured
+# for project-ops), the push falls back to the default token and warns — the
+# finalize still succeeds (graceful degradation).
+#
+# The writer imports ``projectops_federation_token`` lazily from
+# ``services.projectops_token`` inside the function body, so we patch it at
+# the source module (patching the name on ``services.projectops_writer``
+# would not be seen) — same seam pattern as ``_patch_auto_push``.
+# ---------------------------------------------------------------------------
+
+
+def _patch_federation_token(monkeypatch, *, returns):
+    """Replace ``projectops_federation_token`` (recording every workspace_id
+    it was asked for). ``returns`` is the token string to hand back, or None."""
+    from services import projectops_token as fed
+
+    asked: list[str] = []
+
+    async def _fake(workspace_id: str):
+        asked.append(workspace_id)
+        return returns
+
+    monkeypatch.setattr(fed, "projectops_federation_token", _fake)
+    return asked
+
+
+def test_triage_uses_federation_bearer_when_workspace_resolves(client, monkeypatch):
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    asked = _patch_federation_token(monkeypatch, returns="fed-bearer-tok")
+
+    org_id, session_id = _seed(workspace_id="ws-tenant-1")
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    # The federation token was minted for the org's workspace_id...
+    assert asked == ["ws-tenant-1"]
+    # ...and threaded to the client as the per-call bearer override.
+    assert len(stub.submitted) == 1
+    assert stub.submitted[0]["bearer_override"] == "fed-bearer-tok"
+    # Items still get stamped (happy path).
+    for it in _items_for_session(session_id):
+        assert (it.raw_payload or {}).get("po_triage_submitted_at", "").endswith("Z")
+
+
+def test_triage_falls_back_when_no_workspace_id(client, monkeypatch, caplog):
+    import logging
+
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    # Federation token would mint if asked — but it must NOT be asked when the
+    # org has no workspace_id.
+    asked = _patch_federation_token(monkeypatch, returns="should-not-be-used")
+
+    org_id, session_id = _seed(workspace_id=None)  # no tenant on the org
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = _run(
+                submit_action_items_to_triage(
+                    db=db, session_pk=session_id, client=stub
+                )
+            )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    # No workspace_id -> never mint a federation token.
+    assert asked == []
+    # The push falls back to the default token (no override).
+    assert len(stub.submitted) == 1
+    assert stub.submitted[0]["bearer_override"] is None
+    # And it warned that the default tenant routing will be used.
+    assert any(
+        "no workspace_id" in rec.getMessage()
+        and "default tenant routing" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_triage_falls_back_when_federation_token_unavailable(client, monkeypatch, caplog):
+    import logging
+
+    from services.projectops_writer import submit_action_items_to_triage
+    from database.database import SessionLocal
+
+    # Org HAS a workspace_id, but the exchange yields nothing (Brigade not yet
+    # granting actor=meeting-ops -> aud=project-ops, or KC secret unset).
+    asked = _patch_federation_token(monkeypatch, returns=None)
+
+    org_id, session_id = _seed(workspace_id="ws-tenant-2")
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = _run(
+                submit_action_items_to_triage(
+                    db=db, session_pk=session_id, client=stub
+                )
+            )
+    finally:
+        db.close()
+
+    # Graceful degradation: the finalize push STILL succeeds.
+    assert result.ok is True
+    assert result.mode == "live"
+    assert asked == ["ws-tenant-2"]
+    # Fell back to the default token (no override).
+    assert len(stub.submitted) == 1
+    assert stub.submitted[0]["bearer_override"] is None
+    # Warned that the default tenant routing will be used.
+    assert any(
+        "federation token unavailable" in rec.getMessage()
+        and "default tenant routing" in rec.getMessage()
+        for rec in caplog.records
+    )

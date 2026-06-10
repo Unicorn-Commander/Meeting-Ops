@@ -621,6 +621,22 @@ async def submit_action_items_to_triage(
                 ok=False, mode="error", detail="session not found"
             )
 
+        # Resolve the meeting org's workspace_id (the uc-registry tenant uuid)
+        # so the triage push can carry it via a Brigade-vouched federation
+        # token and PO routes the proposals to the correct tenant. Mirrors the
+        # recorder-autostamp path in api.recording (load Organization by
+        # session.organization_id, read org.workspace_id). When the org has no
+        # workspace_id (e.g. a dogfood org not yet registered), this stays None
+        # and the push degrades to the default token / default tenant routing.
+        from auth.models import Organization
+
+        org = (
+            db.query(Organization)
+            .filter(Organization.id == session.organization_id)
+            .first()
+        )
+        workspace_id = getattr(org, "workspace_id", None) if org else None
+
         # Per-org integration toggle (same guarantee as the direct writer):
         # an org that turned project_ops OFF never leaks to a shared PO.
         from services.integrations.org_config import resolve_project_ops
@@ -709,9 +725,41 @@ async def submit_action_items_to_triage(
                 for it in pending
             ]
 
+            # Obtain a Brigade-exchanged, workspace-bound federation token
+            # (aud=project-ops) so PO routes these proposals to the correct
+            # tenant. Graceful degradation: when the org has no workspace_id,
+            # or the exchange yields nothing (Brigade not yet granting
+            # actor=meeting-ops -> aud=project-ops, or KC secret unset), we
+            # fall back to the default service token (default tenant routing)
+            # and log a warning rather than failing the finalize push.
+            bearer_override: Optional[str] = None
+            if workspace_id:
+                from services.projectops_token import projectops_federation_token
+
+                bearer_override = await projectops_federation_token(workspace_id)
+                if bearer_override is None:
+                    logger.warning(
+                        "projectops_triage session=%s org=%s ws=%s: federation "
+                        "token unavailable — push will use the default tenant "
+                        "routing (Brigade not configured for project-ops, or KC "
+                        "secret unset)",
+                        session_pk,
+                        session.organization_id,
+                        workspace_id,
+                    )
+            else:
+                logger.warning(
+                    "projectops_triage session=%s org=%s: no workspace_id on "
+                    "org — push will use the default tenant routing",
+                    session_pk,
+                    session.organization_id,
+                )
+
             try:
                 result = await active_client.submit_candidate_action_items(
-                    candidates, source_type=TRIAGE_SOURCE_TYPE
+                    candidates,
+                    source_type=TRIAGE_SOURCE_TYPE,
+                    bearer_override=bearer_override,
                 )
             except ProjectOpsClientError as exc:
                 # Don't stamp the ITEMS: the un-submitted items get retried on
