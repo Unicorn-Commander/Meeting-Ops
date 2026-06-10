@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.33.2] - 2026-06-10
+
+### Fixed
+- **The v3.33.1 rename-triggered summary refresh silently never ran.** `finalize_session_job` has a drift-guard that skips any job whose id doesn't match the session's stamped `processing_job_id` — and completed sessions still carry the *stale* id from their original finalize. The rename hook enqueued the job without re-stamping, so every refresh was skipped as "drift" (caught live on the Shafen call, session 510). The hook now stamps the new job id before returning, same as the finalize endpoint does.
+
 ## [3.33.1] - 2026-06-10
 
 ### Added
