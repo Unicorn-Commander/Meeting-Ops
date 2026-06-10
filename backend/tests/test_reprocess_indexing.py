@@ -252,7 +252,11 @@ def test_reprocess_indexes_to_semantic_search(client, tmp_path, monkeypatch):
     # transcript was the exact failure mode (search/RAG silently empty).
     assert captured["transcript"] and captured["transcript"].strip()
     assert "Atlas migration" in captured["transcript"]
-    # Diarized speaker labels are prefixed onto each line.
-    assert "SPEAKER_00" in captured["transcript"]
+    # Diarized speaker labels are prefixed onto each line — and since
+    # v3.33.0 normalization (Stage 4.5) runs BEFORE indexing, raw diarizer
+    # codes must NOT reach the index: unmatched voices index as the humane
+    # "Speaker N" labels the UI + summary show (label parity, audit #3).
+    assert "Speaker 1:" in captured["transcript"]
+    assert "SPEAKER_00" not in captured["transcript"]
     # Summary from the (stubbed) summarizer also flows through to the index.
     assert "cutover" in (captured["summary"] or "")
