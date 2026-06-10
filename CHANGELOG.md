@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [3.35.1] - 2026-06-10
+
+### Added
+- **"Recorded by" provenance on sessions.** Workspaces are shared — multiple members' recordings sit side by side, and two people can record the *same* call (exactly what happened with Aaron + Shafen's branding call: each got their own copy in their own workspace). Session cards (grid + list) now show a `rec: <name>` badge and the session header shows whose account captured/uploaded the recording. Backend: `recorded_by` on the list payload (batched, no N+1) and detail payload.
+
+
 ## [3.35.0] - 2026-06-10
 
 **Every naming teaches the voiceprint, every pipeline speaks with attribution, and the ranked audit backlog is cleared.** (Core fixes + a 4-agent swarm.)

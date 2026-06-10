@@ -144,6 +144,26 @@ class SessionResponse(BaseModel):
     # 24h time. Backfilled from started_at / created_at by alembic 027.
     meeting_date: Optional[str] = None
     meeting_time: Optional[str] = None
+    # Provenance (v3.35.x): whose account captured/uploaded this session.
+    # Workspaces are shared — multiple members' recordings live side by
+    # side (two people can even record the SAME call), so cards/details
+    # show whose copy this is.
+    recorded_by: Optional[str] = None
+
+
+def _recorded_by_name(db: Session, user_id: Optional[int]) -> Optional[str]:
+    """Display name of the account that captured/uploaded a session.
+
+    Single-row lookup — used on the DETAIL payload only; the list path
+    batches via recorder_names_by_user_id to avoid an N+1."""
+    if user_id is None:
+        return None
+    from auth.models import User as _User
+
+    u = db.query(_User).filter(_User.id == user_id).first()
+    if u is None:
+        return None
+    return u.full_name or u.username or u.email or f"User {u.id}"
 
 
 def _brigade_graph_url_for_session(session: DBRecordingSession) -> Optional[str]:
@@ -555,6 +575,19 @@ async def list_sessions(
     # _speakers_by_session_batch). Keyed by session.id.
     speakers_by_session = _speakers_by_session_batch(db, sessions)
 
+    # Provenance: one batch query for the recorders' display names (same
+    # no-N+1 pattern as org_names_by_id above).
+    recorder_names_by_user_id: dict[int, str] = {}
+    session_user_ids = sorted({
+        int(s.user_id) for s in sessions if s.user_id is not None
+    })
+    if session_user_ids:
+        from auth.models import User as _User
+        recorder_names_by_user_id = {
+            int(u.id): (u.full_name or u.username or u.email or f"User {u.id}")
+            for u in db.query(_User).filter(_User.id.in_(session_user_ids)).all()
+        }
+
     result = []
     for session in sessions:
         # Parse transcription if it exists
@@ -587,6 +620,11 @@ async def list_sessions(
             organization_name=org_names_by_id.get(session.organization_id),
             meeting_date=session.meeting_date.isoformat() if session.meeting_date else None,
             meeting_time=session.meeting_time.isoformat() if session.meeting_time else None,
+            recorded_by=(
+                recorder_names_by_user_id.get(int(session.user_id))
+                if session.user_id is not None
+                else None
+            ),
         ))
 
     return result
@@ -873,6 +911,9 @@ async def get_session(
             "generated_emails": session.generated_emails or [],
             # Legacy fields
             "user_id": session.user_id,
+            # Provenance: whose account captured/uploaded this session
+            # (workspaces are shared; two members can record the same call).
+            "recorded_by": _recorded_by_name(db, session.user_id),
             "meeting_type": session.meeting_type,
             "updated_at": session.updated_at.isoformat() if session.updated_at else None,
             # Project linking (Phase 2)

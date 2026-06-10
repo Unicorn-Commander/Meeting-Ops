@@ -203,6 +203,8 @@ interface Session {
   project_slug?: string | null;
   organization_id?: number | null;
   organization_name?: string | null;
+  /** Provenance: whose account captured/uploaded this session. */
+  recorded_by?: string | null;
   participants?: Participant[];
   tags?: string[];
   /** True for local-only (privacy-mode) sessions loaded from IndexedDB. */
@@ -2015,6 +2017,15 @@ export const SessionDetails: React.FC = () => {
                     <Users className="w-4 h-4" />
                     {speakers.length} speaker{speakers.length !== 1 ? 's' : ''}
                   </span>
+                  {session.recorded_by && (
+                    <span
+                      className="flex items-center gap-1 text-gray-500"
+                      title={`Recorded on ${session.recorded_by}'s account`}
+                    >
+                      <Mic className="w-4 h-4" />
+                      {session.recorded_by}
+                    </span>
+                  )}
                   {session.transcription?.npu_accelerated && (
                     <span className="flex items-center gap-1 text-green-600">
                       <Zap className="w-4 h-4" />

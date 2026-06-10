@@ -75,6 +75,9 @@ interface Session {
   project_slug?: string | null;
   organization_id?: number | null;
   organization_name?: string | null;
+  // Provenance: whose account captured/uploaded this session (workspaces
+  // are shared; two members can record the same call).
+  recorded_by?: string | null;
   has_transcript: boolean;
   has_audio: boolean;
   session_type?: 'live' | 'upload';
@@ -542,6 +545,14 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                             className="inline-flex items-center rounded-full border border-gray-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300"
                           >
                             {session.organization_name}
+                          </span>
+                        )}
+                        {session.recorded_by && (
+                          <span
+                            title={`Recorded on ${session.recorded_by}'s account`}
+                            className="inline-flex items-center rounded-full border border-gray-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-400"
+                          >
+                            rec: {session.recorded_by}
                           </span>
                         )}
                         <button
@@ -2658,6 +2669,14 @@ export const Sessions: React.FC = () => {
                           className="rounded-full border border-gray-700 bg-zinc-800 px-2 py-1 text-xs text-gray-300"
                         >
                           {session.organization_name}
+                        </span>
+                      )}
+                      {session.recorded_by && (
+                        <span
+                          title={`Recorded on ${session.recorded_by}'s account`}
+                          className="rounded-full border border-gray-700 bg-zinc-800 px-2 py-1 text-xs text-gray-400"
+                        >
+                          rec: {session.recorded_by}
                         </span>
                       )}
                       <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
