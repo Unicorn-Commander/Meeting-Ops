@@ -237,7 +237,7 @@ describe('RAGChat', () => {
   it('renders citations as clickable session links after streaming completes', async () => {
     installFetch([
       'data: {"token": "Per the meeting"}\n\n',
-      'data: {"done": true, "sources": [{"meeting_id": "abc-123", "chunk_idx": 4, "snippet": "key decision recorded here"}]}\n\n',
+      'data: {"done": true, "sources": [{"session_id": "abc-123", "title": "Roadmap sync", "snippet": "key decision recorded here"}, {"meeting_id": "legacy-7"}]}\n\n',
     ]);
     await renderRAGChat();
 
@@ -245,9 +245,15 @@ describe('RAGChat', () => {
     fireEvent.change(input, { target: { value: 'Cite something.' } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
-    const link = await screen.findByRole('link', { name: /Meeting abc-123 chunk 4/ });
+    // Modern source shape: session_id + human title.
+    const link = await screen.findByRole('link', { name: /Roadmap sync/ });
     expect(link).toBeInTheDocument();
     expect(link).toHaveAttribute('href', '#/sessions/abc-123');
+    expect(screen.getByText(/key decision recorded here/)).toBeInTheDocument();
+
+    // Legacy fallback: meeting_id with no title renders as "Untitled meeting".
+    const legacyLink = screen.getByRole('link', { name: /Untitled meeting/ });
+    expect(legacyLink).toHaveAttribute('href', '#/sessions/legacy-7');
   });
 
   it('renders a confirmation card and applies the action inline', async () => {

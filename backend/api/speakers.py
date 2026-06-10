@@ -992,6 +992,45 @@ async def update_speaker_link(
     link.confirmed_by_user_id = current_user.id if payload.confirmed else None
     db.flush()
 
+    # v3.35.0 refinement: a confirmed assign HARVESTS a voice sample from this
+    # session (pooled from the diarizer's fine turns for this cluster), so
+    # every naming improves the running centroid — including new acoustic
+    # conditions (phone-band vs desk). Previously only the enroll path added
+    # samples; plain assigns taught the system nothing. Best-effort.
+    if payload.speaker_id and payload.confirmed:
+        try:
+            from services.speaker_service import add_voice_sample, pooled_embedding
+
+            diarized_doc = (
+                session.transcript_diarized
+                if isinstance(session.transcript_diarized, dict)
+                else {}
+            )
+            turns = [
+                t for t in (diarized_doc.get("speaker_turns") or [])
+                if (t.get("speaker") or "").strip() == link.raw_label
+            ]
+            emb = pooled_embedding(turns) or pooled_embedding(
+                _segments_for_label(session, link.raw_label)
+            )
+            if emb and (speaker.embedding_dim in (None, len(emb))):
+                add_voice_sample(
+                    db, speaker, emb,
+                    source="assign_confirm",
+                    embedding_model=speaker.embedding_model
+                    or "pyannote/wespeaker-voxceleb-resnet34-LM",
+                    source_session_id=session.id,
+                )
+                logger.info(
+                    "assign_confirm: harvested voice sample speaker=%s session=%s "
+                    "(samples now %s)", speaker.id, session.id, speaker.sample_count,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "assign_confirm sample harvest failed (non-fatal) session=%s: %s",
+                session.id, exc,
+            )
+
     # Rewrite the diarized transcript so the SessionDetails page picks up
     # the new label without an extra API roundtrip.
     diarized = session.transcript_diarized or {}

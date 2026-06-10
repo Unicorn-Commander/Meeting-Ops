@@ -28,7 +28,7 @@ describe('Login', () => {
     );
 
     expect(screen.getByText(/email verified, please sign in/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /sign in with sso \/ enterprise/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in with unicorn commander/i })).toBeInTheDocument();
   });
 
   it('shows the resend flow when verify=invalid is present', () => {

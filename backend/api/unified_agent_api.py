@@ -2,6 +2,7 @@
 Unified Agent API
 Simple endpoints for single meeting agent management
 """
+import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
@@ -143,104 +144,61 @@ async def get_available_models(current_user: User = Depends(get_current_user)):
 
 @router.get("/providers")
 async def get_available_providers(current_user: User = Depends(get_current_user)):
-    """Get available AI providers"""
-    return {
-        "providers": [
-            {
-                "type": "ollama",
-                "name": "Ollama (Local)",
-                "description": "Local model inference with granite3.3:8b",
-                "recommended": True,
-                "available": True  # TODO: Check actual availability
-            },
-            {
-                "type": "openai", 
-                "name": "OpenAI",
-                "description": "GPT models via OpenAI API",
-                "recommended": False,
-                "available": False  # TODO: Check API key
-            },
-            {
-                "type": "anthropic",
-                "name": "Anthropic",
-                "description": "Claude models via Anthropic API", 
-                "recommended": False,
-                "available": False  # TODO: Check API key
-            }
-        ],
-        "default": "ollama"
+    """Report the LLM route this deployment is actually configured to use.
+
+    Derived from the same env resolution ProviderRegistry.get_llm performs
+    (MEETING_OPS_LLM_* host-level direct route, else the LiteLLM gateway +
+    LLM_MODEL_{FAST,QUALITY,CHAT}), mirroring api/system_caps.py — no
+    hardcoded catalog and no availability claims this endpoint hasn't
+    verified. Per-org Provider Settings (Settings -> AI Providers) still
+    override this resolution at call time.
+    """
+    # Host-level direct route, with the legacy summarizer-specific envs as
+    # fallback (same precedence as ProviderRegistry.get_llm layer 3).
+    direct_url = (
+        os.getenv("MEETING_OPS_LLM_URL", "").strip()
+        or os.getenv("MEETING_OPS_SUMMARIZER_URL", "").strip()
+    )
+    direct_model = (
+        os.getenv("MEETING_OPS_LLM_MODEL", "").strip()
+        or os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
+    )
+    use_direct = bool(direct_url and direct_model)
+
+    # Per-task models on the gateway route — same env keys + code default
+    # as ProviderRegistry (Qwen 3.6 35B-A3B is the consolidated default).
+    task_models = {
+        task: os.getenv(env_key, "Qwen3.6-35B-A3B-Vision")
+        for task, env_key in (
+            ("fast", "LLM_MODEL_FAST"),
+            ("quality", "LLM_MODEL_QUALITY"),
+            ("chat", "LLM_MODEL_CHAT"),
+        )
     }
 
-@router.post("/test")
-async def test_agent(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Test the current agent configuration with sample text"""
-    agent = UnifiedMeetingAgent.get_default_agent(db)
-    
-    if not agent:
-        raise HTTPException(status_code=404, detail="No agent configured")
-    
-    # Test with sample transcript
-    sample_transcript = """
-    John: Welcome everyone to our Q4 planning meeting. We need to discuss the budget for next quarter.
-    Sarah: I've prepared the financial projections. We're looking at a 15% increase in marketing spend.
-    Mike: That sounds reasonable. What about the product development timeline?
-    Sarah: We should have the new feature ready by December 15th. John, can you handle the client communication?
-    John: Absolutely. I'll reach out to the key accounts this week.
-    """
-    
-    try:
-        import requests
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": agent.model_name,
-                "prompt": f"""{agent.system_prompt}
+    providers = []
+    if use_direct:
+        providers.append({
+            "type": "direct",
+            "name": "Direct LLM route",
+            "endpoint": direct_url,
+            "models": {task: direct_model for task in task_models},
+            "active": True,
+        })
+    providers.append({
+        "type": "litellm",
+        "name": "LiteLLM gateway",
+        "endpoint": os.getenv("OPENAI_API_BASE", "http://unicorn-litellm:4000/v1"),
+        "models": task_models,
+        "active": not use_direct,
+    })
 
-TEST TRANSCRIPT:
-{sample_transcript}
-
-RESPOND WITH JSON:
-{{
-    "executive": "Brief summary",
-    "bullets": ["Key point 1", "Key point 2"],
-    "actions": [{{"action": "Task", "owner": "Person", "priority": "medium"}}],
-    "decisions": ["Decision made"],
-    "title": "Meeting title"
-}}""",
-                "stream": False,
-                "format": "json",
-                "options": agent.model_config
-            },
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json().get("response", "")
-            try:
-                import json
-                parsed_result = json.loads(result)
-                return {
-                    "success": True,
-                    "test_result": parsed_result,
-                    "model_used": agent.model_name,
-                    "response_time": "< 30s"
-                }
-            except json.JSONDecodeError:
-                return {
-                    "success": False,
-                    "error": "Model returned invalid JSON",
-                    "raw_response": result
-                }
-        else:
-            return {
-                "success": False,
-                "error": f"Model request failed: {response.status_code}",
-                "model": agent.model_name
-            }
-            
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "model": agent.model_name
-        }
+    return {
+        "providers": providers,
+        "default": providers[0]["type"],
+        "note": (
+            "Resolved from live deployment config; per-org Provider Settings "
+            "override at call time. Live reachability is reported by "
+            "GET /api/system/pipeline."
+        ),
+    }

@@ -57,6 +57,11 @@ const STEP_TITLES: Record<WizardStep, string> = {
   5: 'Review & create',
 };
 
+// Feature flag: network_stream has no transport on the backend yet, so the
+// tile stays hidden instead of shipping a permanently disabled "Coming soon"
+// option. Flip to true when the chunk-based capture transport ships.
+const SHOW_NETWORK_STREAM_SOURCE: boolean = false;
+
 export default function RoomSetupWizard() {
   const navigate = useNavigate();
   const { activeOrganization } = useOrg();
@@ -345,14 +350,16 @@ function Step2({
           recommended
           onClick={() => pick('server_usb_mic')}
         />
-        <SourceOption
-          icon={<Network className="h-5 w-5" />}
-          title="Network audio stream"
-          description="Chunk-based capture from a remote PC or audio interface in the room."
-          selected={false}
-          badge="Coming soon"
-          disabled
-        />
+        {SHOW_NETWORK_STREAM_SOURCE && (
+          <SourceOption
+            icon={<Network className="h-5 w-5" />}
+            title="Network audio stream"
+            description="Chunk-based capture from a remote PC or audio interface in the room."
+            selected={false}
+            badge="Coming soon"
+            disabled
+          />
+        )}
         <SourceOption
           icon={<Cpu className="h-5 w-5" />}
           title="Satellite device (RPi / ESP32)"

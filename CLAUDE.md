@@ -101,7 +101,7 @@ Active router: `AppRouterSimplified.tsx` (mobile-responsive with hamburger menu)
 | /admin/agents-old | AgentConfiguration.tsx | Legacy agent config |
 
 Contexts: AuthContext, ThemeContext, RecordingContext
-Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, SessionCreator, Toast, MeetingIntelligenceDashboard
+Shared components: Login, ErrorMessage, LoadingSpinner, RecordingIndicator, SessionCreator, Toast
 
 ### Backend (FastAPI + Python 3.13)
 
@@ -205,9 +205,6 @@ python3 mcp/meeting_ops_mcp.py
 # Claude Desktop config (~/.claude/claude_desktop_config.json)
 # { "mcpServers": { "meeting-ops": { "command": "python3", "args": ["/path/to/mcp/meeting_ops_mcp.py"] } } }
 ```
-
-## Known Issues
-1. MeetingIntelligenceDashboard live notes/final report generation endpoints not yet implemented (buttons disabled)
 
 ## File Structure
 ```

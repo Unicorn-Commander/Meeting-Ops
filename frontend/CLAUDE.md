@@ -34,7 +34,6 @@ Mobile-responsive sidebar nav with hamburger menu on small screens.
 - `RecordingIndicator.tsx` - Global recording status (navigates to /record)
 - `SessionCreator.tsx` - Session creation dialog
 - `Toast.tsx` - Toast notification utility (wraps react-toastify)
-- `MeetingIntelligenceDashboard.tsx` - AI insights display
 
 ### Contexts
 - `AuthContext.tsx` - JWT auth state + login/logout
@@ -130,7 +129,7 @@ frontend/src/
       AgentDashboard.tsx
       AgentConfiguration.tsx
       AgentEditor.tsx
-  components/                # 7 shared components
+  components/                # 6 shared components
   contexts/                  # 3 context providers
   hooks/                     # 1 hook
   __tests__/                 # 4 test files

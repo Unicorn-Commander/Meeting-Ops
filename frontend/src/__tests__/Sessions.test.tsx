@@ -7,10 +7,6 @@ vi.mock('../components/SessionCreator', () => ({
   SessionCreator: () => <div>Session Creator</div>,
 }));
 
-vi.mock('../components/MeetingIntelligenceDashboard', () => ({
-  MeetingIntelligenceDashboard: () => <div>Meeting Intelligence</div>,
-}));
-
 vi.mock('../contexts/UploadsContext', () => ({
   useUploads: () => ({
     uploads: [],

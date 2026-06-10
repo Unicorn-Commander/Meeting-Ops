@@ -56,3 +56,49 @@ def test_process_recording_indexes_from_diarized_segments():
     assert "speaker" in window.lower(), (
         "index transcript should prefix each line with the segment speaker"
     )
+
+
+def test_process_recording_summarizes_after_identify_and_normalize():
+    """v3.34.0 (audit finding #4): the record->stop summary must be generated
+    AFTER identify_speakers + normalize_session_speaker_labels, via the shared
+    attributed-prompt path (api.uploads._summarize_session builds
+    "Name: utterance" lines from the diarized segments) — NOT the legacy
+    flat-text unified_agent_service.analyze_meeting call, which ran before
+    identification and made the model guess who said what."""
+    import api.simple_recording_db as srdb
+
+    src = inspect.getsource(srdb.process_recording)
+
+    identify_pos = src.find("identify_speakers(")
+    normalize_pos = src.find("normalize_session_speaker_labels(")
+    summarize_pos = src.find("_summarize_session(")
+    index_pos = src.find("index_session(")
+
+    assert identify_pos != -1, "identify_speakers() call not found in process_recording"
+    assert normalize_pos != -1, (
+        "normalize_session_speaker_labels() call not found in process_recording"
+    )
+    assert summarize_pos != -1, "_summarize_session() call not found in process_recording"
+    assert index_pos != -1, "index_session() call not found in process_recording"
+
+    assert identify_pos < summarize_pos, (
+        "identify_speakers() must run BEFORE the summary so matched voices "
+        "carry real names into the prompt"
+    )
+    assert normalize_pos < summarize_pos, (
+        "normalize_session_speaker_labels() must run BEFORE the summary so "
+        "unmatched voices read 'Speaker N', never raw SPEAKER_xx"
+    )
+    assert summarize_pos < index_pos, (
+        "index_session() stays last so Qdrant embeds the final labels + summary"
+    )
+
+    # The legacy flat-transcript summarizer (and its stale legacy
+    # model-name log string) must not come back.
+    assert "analyze_meeting" not in src, (
+        "process_recording must not summarize via the legacy flat-text "
+        "unified_agent_service.analyze_meeting path"
+    )
+    assert "granite" not in src.lower(), (
+        "stale legacy model-name strings must stay purged from process_recording"
+    )

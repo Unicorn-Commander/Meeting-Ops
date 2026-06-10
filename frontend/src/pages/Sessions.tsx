@@ -8,7 +8,6 @@ import {
   Lock as LockIcon, Paperclip, RefreshCw,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
-import { MeetingIntelligenceDashboard } from '../components/MeetingIntelligenceDashboard';
 import { SkeletonSessionGrid } from '../components/Skeleton';
 import { cacheKey, useHydratedState } from '../utils/cachedState';
 import { config } from '../config';
@@ -820,7 +819,6 @@ export const Sessions: React.FC = () => {
   // forces it immediately.
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [showCreator, setShowCreator] = useState(false);
-  const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   // viewMode persists to localStorage; mobile shell ignores it (always card list).
   const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
     try {
@@ -1890,41 +1888,6 @@ export const Sessions: React.FC = () => {
     : selectedFolder === UNGROUPED_FOLDER
       ? orgTagStats.untaggedSessions
       : (tagCountMap[selectedFolder] || 0);
-
-  if (selectedSession) {
-    const meetingData = {
-      transcript: selectedSession.transcript || '',
-      notes: null,
-      sessionId: selectedSession.id,
-      duration: selectedSession.duration || 0,
-      participants: (selectedSession.participants || []).map((p) => p.name),
-      topics: []
-    };
-
-    return (
-      <div className="min-h-screen bg-gray-950 text-white">
-        <div className="p-6">
-          <button
-            onClick={() => setSelectedSession(null)}
-            className="mb-6 flex items-center gap-2 text-purple-400 hover:text-purple-300"
-          >
-            ← Back to Sessions
-          </button>
-          
-          <div className="mb-6">
-            <h1 className="text-2xl font-bold text-white">{selectedSession.name}</h1>
-            <p className="text-gray-400">{selectedSession.description}</p>
-          </div>
-
-          <MeetingIntelligenceDashboard
-            meetingData={meetingData}
-            isRecording={selectedSession.status === 'recording' || selectedSession.status === 'active'}
-            className="w-full"
-          />
-        </div>
-      </div>
-    );
-  }
 
   return (
     <>

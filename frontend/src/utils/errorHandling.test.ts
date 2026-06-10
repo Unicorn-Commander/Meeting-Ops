@@ -1,4 +1,15 @@
-import { getErrorMessage } from './errorHandling';
+import { vi } from 'vitest';
+import { getErrorMessage, showErrorAlert } from './errorHandling';
+import { showToast } from '../components/Toast';
+
+vi.mock('../components/Toast', () => ({
+  showToast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+  },
+}));
 
 describe('getErrorMessage', () => {
   it('should handle Error instances', () => {
@@ -47,5 +58,28 @@ describe('getErrorMessage', () => {
 
   it('should use custom default message', () => {
     expect(getErrorMessage(null, 'Custom default')).toBe('Custom default');
+  });
+});
+
+describe('showErrorAlert', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should show an error toast with the default prefix', () => {
+    showErrorAlert(new Error('Something broke'));
+    expect(showToast.error).toHaveBeenCalledWith('Error: Something broke');
+  });
+
+  it('should show an error toast with a custom prefix', () => {
+    showErrorAlert('disk full', 'Export failed');
+    expect(showToast.error).toHaveBeenCalledWith('Export failed: disk full');
+  });
+
+  it('should not call window.alert', () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    showErrorAlert(new Error('Something broke'));
+    expect(alertSpy).not.toHaveBeenCalled();
+    alertSpy.mockRestore();
   });
 });

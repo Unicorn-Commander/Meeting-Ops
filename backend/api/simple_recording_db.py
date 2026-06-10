@@ -1412,59 +1412,46 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
         except Exception as e:
             logger.warning(f"Vocabulary replacement step failed (non-fatal): {e}")
 
-        # Step 2: Generate AI summary with timeout protection
+        # Step 2a: Identify enrolled speakers + normalize labels BEFORE the
+        # summary. v3.34.0 (audit findings #2/#4): identification used to run
+        # AFTER summarization (old Step 5, post-commit), so the record->stop
+        # summary was generated from a FLAT unattributed transcript and had
+        # to guess who said what, while unmatched voices kept raw SPEAKER_xx
+        # codes in the transcript UI. Identify first, then normalize the
+        # leftovers to "Speaker N" + resync the Transcription rows the UI
+        # reads — the same order as finalize (workers/finalize_workers.py
+        # Step 0) and reprocess. Best-effort: a speaker-svc outage must not
+        # fail processing.
+        try:
+            from services.speaker_service import identify_speakers
+            ident_summary = identify_speakers(session, db)
+            logger.info(f"Speaker identification: {ident_summary}")
+        except Exception as e:
+            logger.warning(f"Speaker identification failed (non-fatal): {e}")
+        try:
+            from services.speaker_labels import normalize_session_speaker_labels
+            normalize_session_speaker_labels(session, db)
+        except Exception as e:
+            logger.warning(f"Speaker label normalization failed (non-fatal): {e}")
+
+        # Step 2b: Generate AI summary with timeout protection
         try:
             if transcription_result and "segments" in transcription_result:
                 full_text = " ".join([s.get("text", "") for s in transcription_result["segments"]])
-                
+
                 if full_text.strip():
-                    logger.info(f"Starting AI analysis for session {session_id}")
-                    
-                    # Use the new dual-model approach: Granite for final comprehensive analysis
-                    logger.info(f"Starting final comprehensive analysis with Granite 3.3 8B")
-                    summary_result = await asyncio.wait_for(
-                        unified_agent_service.analyze_meeting(
-                            session_id=str(session.id),
-                            transcript=full_text
-                        ),
-                        timeout=180  # 3 minute timeout
-                    )
-                    
-                    if summary_result and summary_result.get("success"):
-                        analysis = summary_result.get("analysis", {})
-                        
-                        # Save comprehensive final summary
-                        final_summary = {
-                            "executive": analysis.get("executive", ""),
-                            "bullets": analysis.get("bullets", []),
-                            "actions": analysis.get("actions", []),
-                            "decisions": analysis.get("decisions", []),
-                            "title": analysis.get("title", ""),
-                            "minutes": analysis.get("minutes", ""),  # Meeting minutes
-                            "tasks": analysis.get("tasks", []),  # Task list
-                            "generated_at": datetime.now(timezone.utc).isoformat()
-                        }
-                        session.final_summary = final_summary
-                        
-                        # Legacy summary field for backward compatibility
-                        session.summary = json.dumps(analysis)
-                        
-                        # Also save as ai_insights for legacy frontend support
-                        session.ai_insights = analysis
-                        
-                        # Auto-generate title if available
-                        if isinstance(analysis, dict) and "title" in analysis:
-                            new_title = analysis["title"]
-                            if new_title and isinstance(new_title, str) and new_title != session.name:
-                                session.title = new_title[:200]  # Limit title length
-                                logger.info(f"Auto-generated title: {new_title}")
-                    else:
-                        logger.warning("AI analysis failed, using fallback summary")
-                        session.summary = json.dumps({
-                            "executive": f"Meeting recorded with {len(full_text.split())} words transcribed.",
-                            "bullets": ["Meeting content captured successfully", "AI analysis unavailable"],
-                            "title": f"Meeting {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-                        })
+                    # v3.34.0 (audit finding #4): summarize via the shared
+                    # attributed-prompt path used by finalize/reprocess/upload.
+                    # _summarize_session builds "Name: utterance" lines from
+                    # the (now identified + normalized) diarized segments so
+                    # the model reads attribution instead of guessing it,
+                    # writes summary/final_summary, auto-titles (respecting
+                    # title_user_set), persists action items, and shares the
+                    # summary-input idempotency hash. Replaces the legacy
+                    # flat-text summarizer call and its stale model-name log.
+                    logger.info(f"Starting AI summary for session {session_id} (attributed prompt)")
+                    from api.uploads import _summarize_session
+                    await _summarize_session(db, session, template="standard")
                 else:
                     logger.warning("No transcript text available for AI analysis")
                     session.summary = json.dumps({
@@ -1525,16 +1512,30 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             if isinstance(transcription_result, dict)
             else False
         )
+        # ai_model: stamp the live summarizer route instead of the stale
+        # hardcoded legacy model label — the env-configured direct model
+        # (MEETING_OPS_LLM_MODEL, the Qwen route _summarize_session prefers)
+        # or the org's ProviderRegistry default when no direct route is set.
+        ai_model = (
+            os.getenv("MEETING_OPS_LLM_MODEL", "").strip()
+            or os.getenv("MEETING_OPS_SUMMARIZER_MODEL", "").strip()
+            or "provider-registry-default"
+        )
         metadata.update({
             "word_count": word_count,
             "speaker_count": speaker_count,
             "npu_accelerated": npu_accelerated,
             "processing_time_ms": int(processing_duration * 1000) if processing_duration > 0 else 0,
             "transcription_model": transcription_model,
-            "ai_model": "granite3.3:8b",
+            "ai_model": ai_model,
             "processing_completed_at": datetime.now(timezone.utc).isoformat()
         })
         session.processing_metadata = metadata
+        # _summarize_session commits + refreshes the session above, so this
+        # in-place JSON mutation must be re-flagged or the Step 4 commit
+        # silently drops word_count / processing_completed_at.
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "processing_metadata")
         
         # Step 4: ALWAYS mark as completed (never leave in processing)
         session.status = "completed"
@@ -1556,26 +1557,14 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             logger.info(f"   Has transcript: {bool(session.transcript)}")
             logger.info(f"   Has summary: {bool(session.summary)}")
 
-            # Step 5: Phase 3 — identify speakers against the org speaker
-            # library and rewrite transcript_diarized labels with display
-            # names. This MUST run before indexing (Step 6) so the embedded
-            # transcript + cross-meeting RAG see real names, not SPEAKER_xx.
-            # (v3.29.2: previously index ran first, so the vector copy of every
-            # normal record->stop meeting carried raw labels until a reprocess
-            # healed it — the code contradicted its own "BEFORE embedding"
-            # comment. This is the same seam pinned for the reprocess path in
-            # test_reprocess_indexing; stop_recording is the primary flow.)
-            try:
-                from services.speaker_service import identify_speakers
-                ident_summary = identify_speakers(session, db)
-                logger.info(f"   Speaker identification: {ident_summary}")
-            except Exception as e:
-                logger.warning(f"Speaker identification failed (non-fatal): {e}")
-
-            # Step 6: Index into the vector store for semantic search. Build
-            # the indexed transcript FROM the (now speaker-named) diarized
-            # segments so RAG is speaker-aware, mirroring reprocess Stage-5.9;
-            # fall back to transcript_simple when no diarized segments exist.
+            # Step 5: Index into the vector store for semantic search. Runs
+            # AFTER Step 2a's identify_speakers + label normalization (the
+            # v3.29.2 identify-before-index invariant, pinned by
+            # test_stop_recording_index_order), so the indexed transcript is
+            # built FROM speaker-named/normalized transcript_diarized
+            # segments and RAG is speaker-aware, mirroring reprocess
+            # Stage-5.9; fall back to transcript_simple when no diarized
+            # segments exist.
             try:
                 from services.semantic_search_service import semantic_search
                 _segs = (

@@ -587,7 +587,7 @@ export const SessionDetails: React.FC = () => {
     if (sessionId) {
       fetchSession();
     } else {
-      console.error('❌ No sessionId found in URL params');
+      console.error('No sessionId found in URL params');
       setError('No session ID provided in URL');
       setLoading(false);
     }
@@ -816,11 +816,11 @@ export const SessionDetails: React.FC = () => {
         setActionItems(Array.isArray(data.action_items) ? data.action_items : []);
       } else {
         const errorText = await response.text();
-        console.error('❌ Failed to fetch session:', response.status, errorText);
+        console.error('Failed to fetch session:', response.status, errorText);
         setError(`Failed to fetch session: ${response.status} ${errorText}`);
       }
     } catch (error) {
-      console.error('❌ Error fetching session:', error);
+      console.error('Error fetching session:', error);
       setError(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);

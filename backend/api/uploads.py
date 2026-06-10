@@ -1654,14 +1654,14 @@ For each major topic discussed, create a numbered section:
 ## Action Items
 Create a markdown table with these columns:
 | Owner | Action | Priority | Deadline |
-For each action item mentioned or implied. If owner/deadline not stated, write "Not specified."
+For each action item explicitly stated in the transcript. If owner/deadline not stated, write "Not specified."
 
 ## Key Decisions
 List each decision made during the meeting:
 - **[Decision]** - Made by [who], rationale: [why, if discussed]
 
 ## Key Quotes
-Select 3-5 notable quotes that capture important positions, commitments, or insights:
+Select up to 5 notable quotes that capture important positions, commitments, or insights:
 > "[Exact words from transcript]" - [Speaker Name]
 > Context: [One sentence explaining why this quote matters]
 
@@ -1670,6 +1670,8 @@ Select 3-5 notable quotes that capture important positions, commitments, or insi
 
 ## Open Questions
 - [Any unresolved items that need follow-up]
+
+IMPORTANT: If a section has no genuine content in the transcript, write "None identified." under that heading — never invent, pad, or infer items to fill a section. Quote only words that actually appear in the transcript.
 
 ---
 TRANSCRIPT:
@@ -1688,6 +1690,46 @@ After the markdown sections above, emit a single fenced JSON block with the same
   "next_steps": ["..."],
   "minutes": "the full markdown output above as a single string",
   "title": "short descriptive title for this meeting"}}
+```
+"""
+
+# Lighter prompt for short recordings and single-speaker memos (v3.35.0,
+# audit #6). The full 7-section format forces fabricated-looking output on a
+# 60-second voice memo — quotes nobody needs, "implied" actions, multi-party
+# framing ("areas of agreement") that reads absurd for one voice. Same fenced
+# JSON contract so _parse_summarizer_json is unchanged; empty keys stay [].
+MEETING_OPS_MEMO_PROMPT = """Summarize the following short recording (a brief meeting or a single-speaker memo).
+
+{speaker_context}
+
+Output exactly these sections:
+
+## Summary
+2-4 sentences capturing what this recording is about and any outcome.
+
+## Key Points
+- The substantive points made, in order. Keep it tight.
+
+## Action Items
+Only actions EXPLICITLY stated. If none, write "None identified." — never invent or infer items.
+
+---
+TRANSCRIPT:
+{transcript}
+
+---
+After the markdown above, emit a single fenced JSON block (required for downstream tooling):
+
+```json
+{{"executive": "...",
+  "bullets": ["point", ...],
+  "actions": [{{"action": "...", "owner": "...", "priority": "medium", "deadline": "Not specified"}}],
+  "decisions": [],
+  "questions": [],
+  "quotes": [],
+  "next_steps": [],
+  "minutes": "the full markdown output above as a single string",
+  "title": "short descriptive title"}}
 ```
 """
 
@@ -1846,27 +1888,45 @@ async def _summarize_session(
     else:
         speaker_context = "Speaker labels are not available; describe statements neutrally and never invent speaker names."
 
-    # Qwen3.6 has 256K context; we cap at 60K characters (~15K tokens) so
-    # there is plenty of headroom for the response + system prompt while
-    # still capturing meetings up to ~3 hours of dense talk. The Meeting
-    # Minutes Mac app uses 120K tokens of context for Qwen3.6; we are
-    # well below that.
-    body_template = MEETING_OPS_SUMMARIZER_STYLE_PROMPT
-    if direct is not None:
-        # The full Meeting Minutes prompt only ships when we're routed to
-        # the dedicated Qwen endpoint. The org-default LLM path keeps the
-        # lighter template guidance so it works with any model.
-        prompt = body_template.format(
-            speaker_context=speaker_context,
-            transcript=transcript[:60000],
+    # v3.35.0 (audit #6): short recordings / single-speaker memos get the
+    # lighter memo prompt — the 7-section format forces padded, fabricated-
+    # looking minutes on a 60-second voice memo. Same fenced-JSON contract.
+    word_count = len(transcript.split())
+    is_memo = word_count < 300 or len(speakers_seen) <= 1
+
+    # Transcript caps (audit #7). Direct route = the dedicated Qwen 3.6
+    # endpoint (256K ctx) → 200K chars (~50K tokens) covers ~5h of dense
+    # talk. Registry route stays 60K (model unknown — could be anything an
+    # org configured). Either way, truncation is DISCLOSED to the model and
+    # stamped into processing_metadata — never silently dropped (the old
+    # comment claimed 60K ≈ "~3 hours"; it's really ~75-90 min).
+    cap = 200_000 if direct is not None else 60_000
+    truncated = len(transcript) > cap
+    transcript_body = transcript[:cap]
+    if truncated:
+        pct = int(100 * cap / max(len(transcript), 1))
+        transcript_body += (
+            f"\n\n[NOTE: transcript truncated — the text above covers roughly the "
+            f"first {pct}% of the meeting. State in the Executive Summary that "
+            f"this summary covers only that portion.]"
         )
-    else:
-        prompt = (
-            f"{style}\n\n{speaker_context}\n\n"
-            "Return strict JSON with keys executive, bullets, actions, decisions, title. "
-            "actions should be an array of objects with action, owner, priority when known.\n\n"
-            f"Transcript:\n{transcript[:60000]}"
-        )
+
+    # v3.35.0 (audit #8): the full structured prompt ships on BOTH routes —
+    # it's model-agnostic markdown+JSON. Previously the registry route used a
+    # stripped ask (executive/bullets/actions/decisions only), so quotes /
+    # next_steps / questions / minutes were permanently empty on any deploy
+    # without the direct env, and the UI sections silently varied.
+    body_template = (
+        MEETING_OPS_MEMO_PROMPT if is_memo else MEETING_OPS_SUMMARIZER_STYLE_PROMPT
+    )
+    prompt = body_template.format(
+        speaker_context=speaker_context,
+        transcript=transcript_body,
+    )
+    if direct is None:
+        # Keep the org-template guidance on the registry route (the only
+        # intended per-route difference now).
+        prompt = f"{style}\n\n{prompt}"
 
     # v3.29.1 idempotency guard: skip the LLM call when the EXACT summary
     # input (system + body prompt — which fold in transcript_simple, the
@@ -1954,6 +2014,10 @@ async def _summarize_session(
     # and never poisons the hash.
     summary_md = dict(session.processing_metadata or {})
     summary_md["summary_input_hash"] = summary_input_hash
+    # Truncation disclosure (v3.35.0, audit #7): record when the summary saw
+    # only part of the transcript so the UI/exports can surface it.
+    summary_md["summary_truncated"] = bool(truncated)
+    summary_md["summary_prompt_variant"] = "memo" if is_memo else "full"
     session.processing_metadata = summary_md
     flag_modified(session, "processing_metadata")
 

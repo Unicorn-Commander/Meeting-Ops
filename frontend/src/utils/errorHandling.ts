@@ -2,6 +2,8 @@
  * Utility functions for proper error handling
  */
 
+import { showToast } from '../components/Toast';
+
 /**
  * Safely converts an error to a displayable string message
  * @param error - The error object, which could be an Error instance, string, or any other type
@@ -48,11 +50,11 @@ export function getErrorMessage(error: unknown, defaultMessage: string = 'An unk
 }
 
 /**
- * Shows an error alert with proper error message handling
+ * Shows an error toast with proper error message handling
  * @param error - The error to display
  * @param prefix - Optional prefix for the error message
  */
 export function showErrorAlert(error: unknown, prefix: string = 'Error'): void {
   const message = getErrorMessage(error);
-  alert(`${prefix}: ${message}`);
+  showToast.error(`${prefix}: ${message}`);
 }

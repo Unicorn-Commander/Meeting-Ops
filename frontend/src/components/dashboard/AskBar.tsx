@@ -10,7 +10,7 @@ interface AskBarMessage {
   sources?: Array<{ meeting_id?: string; title?: string; snippet?: string }>;
 }
 
-const COMING_SOON_MESSAGE = 'Coming soon';
+const ASK_UNAVAILABLE_MESSAGE = "Ask isn't enabled on this workspace yet.";
 
 export const AskBar: React.FC = () => {
   const { activeOrganization } = useOrg();
@@ -18,7 +18,7 @@ export const AskBar: React.FC = () => {
   const [streaming, setStreaming] = useState('');
   const [pending, setPending] = useState(false);
   const [exchange, setExchange] = useState<AskBarMessage | null>(null);
-  const [comingSoon, setComingSoon] = useState(false);
+  const [askUnavailable, setAskUnavailable] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const submit = useCallback(async () => {
@@ -28,7 +28,7 @@ export const AskBar: React.FC = () => {
     setPending(true);
     setStreaming('');
     setExchange(null);
-    setComingSoon(false);
+    setAskUnavailable(false);
 
     const controller = new AbortController();
     abortRef.current?.abort();
@@ -53,8 +53,8 @@ export const AskBar: React.FC = () => {
       });
 
       if (res.status === 404) {
-        setComingSoon(true);
-        toast.info(COMING_SOON_MESSAGE);
+        setAskUnavailable(true);
+        toast.info(ASK_UNAVAILABLE_MESSAGE);
         setPending(false);
         return;
       }
@@ -119,10 +119,10 @@ export const AskBar: React.FC = () => {
   const close = () => {
     setExchange(null);
     setStreaming('');
-    setComingSoon(false);
+    setAskUnavailable(false);
   };
 
-  const hasOutput = Boolean(exchange) || Boolean(streaming) || comingSoon;
+  const hasOutput = Boolean(exchange) || Boolean(streaming) || askUnavailable;
 
   return (
     <div className="relative">
@@ -152,12 +152,8 @@ export const AskBar: React.FC = () => {
         <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-900/70 p-4 text-sm text-zinc-200 shadow-xl shadow-black/30">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              {comingSoon ? (
-                <div className="text-zinc-300">
-                  <span className="font-semibold text-fuchsia-300">Coming soon.</span>{' '}
-                  The meeting Ask endpoint isn't wired yet on this deployment. Wire the MCP and it'll
-                  light up here.
-                </div>
+              {askUnavailable ? (
+                <div className="text-zinc-300">{ASK_UNAVAILABLE_MESSAGE}</div>
               ) : (
                 <>
                   {exchange?.question && (

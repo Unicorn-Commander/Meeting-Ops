@@ -1,5 +1,32 @@
 ## [Unreleased]
 
+## [3.35.0] - 2026-06-10
+
+**Every naming teaches the voiceprint, every pipeline speaks with attribution, and the ranked audit backlog is cleared.** (Core fixes + a 4-agent swarm.)
+
+### Added
+- **Confirmed speaker assigns now harvest a voice sample.** Previously only the enroll path fed the voiceprint; a plain "assign to existing speaker" taught the system nothing. Every confirmed assign now pools a sample from that meeting's turn bank into the speaker's running centroid — so naming someone on a phone call teaches phone-them, and recognition genuinely improves with every naming in every acoustic condition.
+- **Short recordings / single-speaker memos get a memo-style summary** (summary + key points + explicit actions) instead of padded 7-section minutes with fabricated-looking quotes and "implied" action items. Full-format prompts gained an explicit anti-fabrication rule ("None identified." for empty sections; quote only words in the transcript) and "or implied" was removed from action-item instructions.
+- **Long meetings are no longer silently cut off.** The direct Qwen route's transcript cap rose 60K→200K chars (~5h of dense talk; the old cap really covered ~80 min, not the "~3 hours" the comment claimed). When truncation does happen, it's disclosed to the model, reflected in the executive summary, and stamped in `processing_metadata` (`summary_truncated`).
+- Tests: `test_summarizer_prompt_routing.py` (4), `test_semantic_search_chunking.py`, `test_unified_agent_providers.py`, `notifications.test.ts`.
+
+### Fixed
+- **The record→stop pipeline now identifies + normalizes speakers BEFORE summarizing**, and summarizes via the attributed-prompt path — it was the last pipeline still feeding the LLM flat unattributed text through the legacy `analyze_meeting` (with a stale "Granite 3.3 8B" log line to boot).
+- **The registry LLM route gets the full structured summary prompt** — previously it used a stripped executive/bullets-only ask, so quotes/next-steps/questions/minutes were permanently empty on any deploy without the direct env var, and UI sections silently varied between deployments.
+- **Speaker-aware chunking handles real names** — the turn-split regex missed "Mary-Jane:", "O'Brien:", "Dr. Smith:", "José:"; now a permissive per-line split. Removed the misaligned dead zip in the overlap path.
+- **`/api/agents/providers` no longer reports hardcoded fake availability** (Ollama "available: True # TODO", stale granite3.3 labels) — it derives from the live model config; the canned-transcript `/test` endpoint is gone.
+
+### Removed
+- **`meeting_intelligence_real.py`** — unmounted dead router calling raw Ollama (never loaded by main.py).
+- **`MeetingIntelligenceDashboard`** — fully unreachable dead component (its only mount sat behind a condition that could never be true) + its dead branch in Sessions.tsx, mock, and stale CLAUDE.md "Known Issues" entry.
+
+### Changed (frontend polish)
+- AskBar 404 fallback: dev jargon ("Wire the MCP and it'll light up") → "Ask isn't enabled on this workspace yet."
+- `notifications.ts` / `errorHandling.ts` wrappers rewired from `window.alert` to toasts (kills the next alert() regression at the source).
+- Room-setup wizard's permanently-disabled "Network audio stream — Coming soon" tile hidden behind a feature flag.
+- Stripped ❌-emoji debug prefixes from SessionDetails console.error calls.
+
+
 ## [3.34.0] - 2026-06-10
 
 **Voiceprints that actually match, tenancy-correct enrollment, honest endpoints, real export-email, and label/attribution parity across chat + RAG.** (Core fixes + a 3-agent polish swarm.)

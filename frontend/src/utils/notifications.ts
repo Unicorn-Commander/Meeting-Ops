@@ -1,13 +1,11 @@
+import { showToast } from '../components/Toast';
 import { getErrorMessage } from './errorHandling';
 
 /**
- * Display a notification to the user
- * This is a wrapper around alert() that can be replaced with a better notification system later
+ * Display a notification to the user via the shared toast system (react-toastify).
  */
 export function showNotification(message: string, type: 'success' | 'error' | 'info' = 'info'): void {
-  // For now, just use alert with proper formatting
-  const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
-  alert(`${prefix} ${message}`);
+  showToast[type](message);
 }
 
 /**

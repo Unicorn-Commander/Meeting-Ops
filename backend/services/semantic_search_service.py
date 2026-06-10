@@ -56,15 +56,26 @@ INFINITY_API_KEY = os.getenv("INFINITY_API_KEY", "")
 CHUNK_SIZE = 400  # words per chunk
 CHUNK_OVERLAP = 50  # overlapping words between chunks
 
-# Speaker label patterns for speaker-aware chunking
-SPEAKER_PATTERN = re.compile(
-    r'^(?:'
-    r'(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?):\s'  # "Speaker 1: ..." or "John: ..."
-    r'|'
-    r'\[(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]\s'  # "[Speaker 1] ..." or "[John] ..."
-    r')',
-    re.MULTILINE
-)
+# Speaker label pattern for speaker-aware chunking. Index transcripts are
+# built internally as "Name: text" lines, so accept ANY short prefix before
+# ": " — real display names include hyphens, apostrophes, periods, digits
+# and non-ASCII letters ("Mary-Jane:", "O'Brien:", "Dr. Smith:", "José:",
+# "Speaker 1:", "SPEAKER_00:"). The 60-char cap keeps a colon deep inside a
+# prose line from being misread as a speaker label.
+SPEAKER_PATTERN = re.compile(r'^(.{1,60}?):\s', re.MULTILINE)
+
+
+def _match_speaker_label(line: str) -> Optional[str]:
+    """Speaker name if the line starts a "Name: text" turn, else None.
+
+    Tolerates the legacy bracketed form ("[Speaker 1]: ...") by stripping
+    surrounding brackets from the captured name.
+    """
+    m = SPEAKER_PATTERN.match(line)
+    if not m:
+        return None
+    name = m.group(1).strip().strip("[]").strip()
+    return name or None
 
 
 class SemanticSearchService:
@@ -386,27 +397,8 @@ class SemanticSearchService:
         current_lines = []
 
         for line in lines:
-            # Check for speaker label at start of line
-            m = re.match(
-                r'^(?:(\[?(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]?):\s*(.*))',
-                line
-            )
-            if not m:
-                # Also try bracket format: [Speaker 1] text
-                m = re.match(
-                    r'^\[(Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]\s*(.*)',
-                    line
-                )
-                if m:
-                    # Reformat to have bracket speaker
-                    speaker = m.group(1)
-                    rest = m.group(2)
-                else:
-                    speaker = None
-                    rest = None
-            else:
-                speaker = m.group(1).strip("[]")
-                rest = m.group(2)
+            # Check for speaker label at start of line ("Name: text")
+            speaker = _match_speaker_label(line)
 
             if speaker:
                 # Save previous turn
@@ -447,11 +439,7 @@ class SemanticSearchService:
                 # Overlap: keep the last few turns that fit within CHUNK_OVERLAP words
                 overlap_turns = []
                 overlap_words = 0
-                overlap_speakers = set()
-                for ot_speaker, ot_text in reversed(list(zip(
-                    [s for s, _ in zip([speaker for speaker, _ in turns], turns)],
-                    current_chunk_turns
-                ))):
+                for ot_text in reversed(current_chunk_turns):
                     ot_words = len(ot_text.split())
                     if overlap_words + ot_words > CHUNK_OVERLAP:
                         break
@@ -460,12 +448,13 @@ class SemanticSearchService:
 
                 current_chunk_turns = overlap_turns
                 current_word_count = overlap_words
-                # Re-extract speakers from overlap turns
+                # Re-extract speakers from overlap turns (each turn keeps its
+                # label line, so the first line carries the name)
                 current_speakers = set()
                 for ot in overlap_turns:
-                    m2 = re.match(r'^(?:(\[?(?:Speaker\s*\d+|[A-Z][a-zA-Z\s]*?)\]?):\s)', ot)
-                    if m2:
-                        current_speakers.add(m2.group(1).strip("[]"))
+                    ot_speaker = _match_speaker_label(ot)
+                    if ot_speaker:
+                        current_speakers.add(ot_speaker)
 
             current_chunk_turns.append(turn_text)
             current_word_count += turn_words
