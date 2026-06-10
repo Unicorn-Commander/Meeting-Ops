@@ -146,11 +146,27 @@ def test_summary_skips_redundant_llm_call(client, monkeypatch):
     _run()
     assert spy.calls == 1
 
-    # 3) Transcript changes -> input hash differs -> re-run.
+    # 3) Transcript changes -> input hash differs -> re-run. Since v3.33.0
+    # the prompt is built from the DIARIZED segments (transcript_simple is
+    # only the fallback), so the mutation must hit the segments — changing
+    # transcript_simple alone is correctly treated as a no-op by the guard.
     db = SessionLocal()
     try:
+        from sqlalchemy.orm.attributes import flag_modified
+
         s = db.query(RecordingSession).filter(RecordingSession.id == pk).first()
         s.transcript_simple = "A completely different conversation about hiring."
+        diarized = dict(s.transcript_diarized or {})
+        diarized["segments"] = [
+            {
+                "speaker": "Speaker 1",
+                "text": "A completely different conversation about hiring.",
+                "start": 0.0,
+                "end": 5.0,
+            }
+        ]
+        s.transcript_diarized = diarized
+        flag_modified(s, "transcript_diarized")
         db.commit()
     finally:
         db.close()
