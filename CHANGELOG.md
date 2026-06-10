@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.33.1] - 2026-06-10
+
+### Added
+- **Naming a speaker now auto-refreshes the summary — no full reprocess needed.** Renaming/enrolling a speaker already rewrote the transcript labels in place; the only stale artifact was the summary (still "Speaker 1"). All three naming paths (assign-existing, inline create, enroll) now enqueue the lightweight finalize job — identify → normalize → summarize → insights, **skipping STT + diarization** — so the summary picks up the new name in ~40-60 s instead of the ~3-4 min full reprocess. The summary's idempotency hash folds speaker names in, so a real rename re-runs the LLM while a no-op skips it. Best-effort: a queue hiccup never fails the rename. (Full reprocess remains the right tool when the *audio/transcript* needs redoing.)
+
 ## [3.33.0] - 2026-06-10
 
 **Humane speaker labels everywhere: summaries read attribution instead of guessing it, raw `SPEAKER_00` codes are gone, and the transcript view shows per-line speakers instead of "unknown".** Found via Aaron's phone call with Shafen — the summary said "the homeowners (SPEAKER_00)" and the transcript showed every line as unknown.

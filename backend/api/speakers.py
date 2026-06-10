@@ -276,6 +276,35 @@ def _get_session_or_404(db: Session, organization_id: int, session_id: int | str
     return session
 
 
+async def _enqueue_summary_refresh(session: RecordingSession) -> None:
+    """Fire-and-forget summary refresh after a speaker rename/enroll.
+
+    Renaming already rewrites the transcript labels in place — the only
+    stale artifact is the SUMMARY (it still says "Speaker 1"). Re-running
+    the full reprocess for that re-does STT + diarization (~3-4 min of GPU)
+    for nothing. Instead we enqueue ``finalize_session_job``, which runs
+    identify -> normalize -> summarize -> insights WITHOUT re-transcribing
+    (~40-60 s). The summary idempotency hash folds the speaker names into
+    its input, so a rename genuinely re-runs the LLM, while a no-op rename
+    skips it. Best-effort: a queue hiccup must never fail the rename.
+    """
+    try:
+        if (session.status or "") != "completed":
+            return  # an in-flight pipeline will summarize with the new name anyway
+        from services.job_runner import enqueue_job
+
+        job_id = await enqueue_job("finalize_session_job", session.id)
+        logger.info(
+            "speaker rename: enqueued summary refresh job=%s session=%s",
+            job_id, session.id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "speaker rename: summary refresh enqueue failed session=%s: %s",
+            session.id, exc,
+        )
+
+
 def _segments_for_label(session: RecordingSession, raw_label: str) -> list[dict]:
     diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
     segments = diarized.get("segments", []) if isinstance(diarized, dict) else []
@@ -989,6 +1018,7 @@ async def update_speaker_link(
 
     db.commit()
     db.refresh(link)
+    await _enqueue_summary_refresh(session)
     return _link_to_response(db, link)
 
 
@@ -1127,6 +1157,7 @@ async def create_speaker_for_link(
         speaker.display_name, speaker.id, session.id, link.raw_label,
         active_org.organization.id, current_user.id,
     )
+    await _enqueue_summary_refresh(session)
     return _link_to_response(db, link)
 
 
@@ -1620,6 +1651,7 @@ async def enroll_speaker_from_session(
         "Enrolled speaker '%s' (id=%d, new=%s) from session %s cluster %s (turn %.1fs-%.1fs)",
         speaker.display_name, speaker.id, created_new, session.id, link.raw_label, seg_start, seg_end,
     )
+    await _enqueue_summary_refresh(session)
     return _link_to_response(db, link)
 
 
