@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Users, Check, X, RefreshCw, AlertCircle } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
+import { showToast } from './Toast';
 
 interface SpeakerLink {
   id: number;
@@ -188,6 +189,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         await loadAll();
         setEnrollingLinkId(null);
         setEnrollName("");
+        showToast.info('Summary will update with the new name in about a minute.');
       } else {
         const txt = await res.text();
         setError(`Enroll failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
@@ -214,6 +216,9 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         const next = links.map(l => (l.id === updated.id ? updated : l));
         setLinks(next);
         if (onChange) onChange(next);
+        if (speakerId !== null) {
+          showToast.info('Summary will update with the new name in about a minute.');
+        }
       } else {
         setError(`Failed to update label (HTTP ${res.status}).`);
       }

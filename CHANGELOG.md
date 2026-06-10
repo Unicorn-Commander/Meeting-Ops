@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+## [3.34.0] - 2026-06-10
+
+**Voiceprints that actually match, tenancy-correct enrollment, honest endpoints, real export-email, and label/attribution parity across chat + RAG.** (Core fixes + a 3-agent polish swarm.)
+
+### Fixed
+- **Speaker auto-identification now pools several short turns instead of embedding one long mush.** Identify embedded the single LONGEST segment per speaker — on real calls that's a ~5-minute Parakeet merge whose embedding matches nobody (measured 0.05 self-similarity). The diarizer's own fine-grained turns (with embeddings) are now persisted (`transcript_diarized.speaker_turns`, capped) and identify pools up to 5 clean 2-45s turns per speaker (L2-normalized mean). Legacy sessions fall back to the old behavior. Identify also groups by `raw_label` so post-normalization re-identifies still line up, and stale unconfirmed speaker-links from superseded diarizations are pruned (no more phantom speakers in the naming UI).
+- **Naming a speaker on another workspace's meeting enrolled the voiceprint into the WRONG workspace.** The session-scoped naming/enroll/assign paths keyed the SpeakerProfile off the caller's ACTIVE org; a superuser naming from god-view (exactly how Aaron labeled Shafen) silently enrolled into their own workspace, where that session's identify can never see it. All three paths now use the session's org.
+- **Live meetings finally reach search + RAG without a manual reprocess.** `finalize_session_job` never indexed to Qdrant — always-on meetings were invisible to cross-meeting search/RAG until someone reprocessed, and the v3.33.x rename-refresh left stale labels/titles in the index forever. The job now indexes after summarization (mirrors reprocess Stage 5.9; delete-and-rewrite also heals renames).
+- **Per-meeting AI chat now reads attributed transcripts.** `_get_transcript_text` preferred the flat unattributed text, so "who said X" answers were guesses; it now builds "Name: utterance" lines from the diarized segments (normalized), falling back to flat text only when no segments exist.
+- **Upload pipeline label parity:** uploads now run label normalization + transcript-row resync after identify (raw `SPEAKER_00` no longer shows in an upload's transcript while its summary says "Speaker 1").
+
+### Added
+- **Export-by-email is real now** (was an honest 501): exports are sent via Postmark with the artifact attached (7MB cap), with truthful per-job `emailSent`/`emailError` reporting — never fake success. 501 only when Postmark isn't configured; 422 on malformed addresses.
+- **Toast after naming a speaker** ("Summary will update with the new name in about a minute") across desktop + mobile editors and the Speaker Library.
+- Tests: `test_pooled_embedding.py` (5), `test_meeting_management_not_implemented.py` (9), `test_batch_export_email.py` (5).
+
+### Changed
+- **`meeting_management.py` mock endpoints are now honest HTTP 501s** (fake NPU reprocess/status, in-memory templates, an analytics route reading columns that no longer exist — it 500'd on any real data). Real endpoints (export delegate, delete/update) untouched; router load order pinned by test so `/health` counts stay stable.
+
+### Audit backlog (found, not yet fixed — ranked)
+- record→stop path still summarizes flat text before identify (legacy `analyze_meeting`); summarizer prompt: short-memo fabrication risk, silent 60K-char truncation on >~80-min meetings, lighter prompt on the registry route; speaker-aware chunking regex misses hyphenated/accented names; AskBar dev-jargon fallback; `unified_agent_api` hardcoded provider list; dead `meeting_intelligence_real.py`; fabricated 0.93 confidence on browser-live segments; ~14 native confirm() dialogs; MeetingIntelligenceDashboard is fully unreachable dead code (delete next pass).
+
+
 ## [3.33.2] - 2026-06-10
 
 ### Fixed

@@ -189,6 +189,58 @@ async def finalize_session_job(
                 session_pk, exc,
             )
 
+        # ---- Step 2b: semantic index (Qdrant) ----
+        # v3.34.0 (audit finding #1): this job NEVER indexed, so (a) live
+        # always-on meetings stayed invisible to cross-meeting search + RAG
+        # until a manual reprocess, and (b) the v3.33.x rename-triggered
+        # refresh regenerated the summary but left STALE labels/title/summary
+        # in the Qdrant chunks forever. index_session delete-then-rewrites
+        # per session_id, so this also heals renames. Mirrors the reprocess
+        # Stage 5.9. Best-effort + off-thread.
+        try:
+            import asyncio as _asyncio2
+            from services.semantic_search_service import semantic_search
+
+            _segs = (
+                session.transcript_diarized.get("segments")
+                if isinstance(session.transcript_diarized, dict)
+                else None
+            )
+            if _segs:
+                _index_transcript = "\n".join(
+                    f"{(seg.get('speaker') or 'Speaker')}: {(seg.get('text') or '').strip()}"
+                    for seg in _segs
+                    if (seg.get("text") or "").strip()
+                )
+            else:
+                _index_transcript = session.transcript_simple or session.transcript or ""
+            _index_summary = session.summary or ""
+            if not _index_summary and isinstance(session.final_summary, dict):
+                _index_summary = (
+                    session.final_summary.get("executive")
+                    or session.final_summary.get("summary")
+                    or ""
+                )
+            if (_index_transcript or "").strip():
+                await _asyncio2.to_thread(
+                    semantic_search.index_session,
+                    session_id=session.session_id or str(session.id),
+                    title=session.title or session.name or "",
+                    transcript=_index_transcript,
+                    summary=_index_summary,
+                    created_at=session.created_at.isoformat() if session.created_at else "",
+                    organization_id=session.organization_id,
+                )
+                logger.info(
+                    "finalize_session_job: semantic index updated session=%s (%d segs)",
+                    session_pk, len(_segs) if _segs else 0,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "finalize_session_job: semantic index failed (non-fatal) session=%s: %s",
+                session_pk, exc,
+            )
+
         # ---- Step 3: mark completed + stamp completion ----
         try:
             from datetime import datetime, timezone

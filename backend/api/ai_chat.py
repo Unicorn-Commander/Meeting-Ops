@@ -137,22 +137,25 @@ class ChatMessage(BaseModel):
 
 
 def _get_transcript_text(session: DBRecordingSession) -> str:
-    """Extract the best available transcript text from a recording session."""
-    # Prefer simple transcript text
-    if session.transcript_simple:
-        return session.transcript_simple
+    """Extract the best available transcript text from a recording session.
 
-    # Try diarized transcript
+    v3.34.0: prefer the speaker-ATTRIBUTED transcript ("Name: utterance"
+    lines from the diarized segments, raw codes normalized to "Speaker N")
+    over the flat transcript_simple — the chat panel was answering
+    "who said X" by guessing from unattributed text, the same bug class
+    v3.33.0 fixed for summaries.
+    """
     if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
         segments = session.transcript_diarized.get("segments", [])
         if segments:
-            lines = []
-            for seg in segments:
-                speaker = seg.get("speaker", "Speaker")
-                text = seg.get("text", "")
-                if text:
-                    lines.append(f"{speaker}: {text}")
-            return "\n".join(lines)
+            from services.speaker_labels import build_attributed_transcript
+            text, _speakers = build_attributed_transcript(segments)
+            if text.strip():
+                return text
+
+    # Fall back to the flat transcript text
+    if session.transcript_simple:
+        return session.transcript_simple
 
     # Try raw transcript field (may be JSON)
     if session.transcript:

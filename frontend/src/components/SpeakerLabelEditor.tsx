@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Edit2, Check, RefreshCw, GitMerge, X, User } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
+import { showToast } from './Toast';
 
 interface SpeakerLink {
   id: number;
@@ -130,6 +131,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         setOpen(false);
         setMode('menu');
         setDraftName('');
+        showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
         const txt = await res.text();
@@ -156,6 +158,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
       );
       if (res.ok) {
         setOpen(false);
+        showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
         setError(`Assign failed (${res.status}).`);

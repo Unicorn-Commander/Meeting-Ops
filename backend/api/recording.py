@@ -1810,6 +1810,31 @@ async def _run_session_reprocess(session_pk: int) -> None:
                         seen.append(spk)
                 diarized["segments"] = segments
                 diarized["speakers"] = seen
+                # v3.34.0: persist the diarizer's own fine-grained turns
+                # (label + embedding + times). The text segments above are
+                # COARSE — Parakeet merges minutes of speech into a single
+                # segment, so identify used to embed one ~5-minute mush per
+                # speaker (measured 0.05 self-similarity on a real call).
+                # Pooling several short clean turns per speaker is what
+                # makes auto-naming actually match. Capped to bound the
+                # JSON column size.
+                turn_bank = []
+                for d in diar_segments:
+                    if not d.get("embedding"):
+                        continue
+                    try:
+                        t_dur = float(d.get("end") or 0) - float(d.get("start") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if t_dur < 1.0:
+                        continue
+                    turn_bank.append({
+                        "speaker": d.get("speaker"),
+                        "start": d.get("start"),
+                        "end": d.get("end"),
+                        "embedding": d.get("embedding"),
+                    })
+                diarized["speaker_turns"] = turn_bank[:400]
                 session.transcript_diarized = diarized
                 flag_modified(session, "transcript_diarized")
                 db.commit()

@@ -1,21 +1,57 @@
 """
-Complete Meeting Management API endpoints for the frontend
+Meeting Management API endpoints.
+
+HONESTY AUDIT (2026-06-10): this router was historically a grab-bag and
+several endpoints returned FAKE/static data. The frontend calls NONE of the
+routes this module uniquely owns (verified by grepping frontend/src — the
+only non-/api/simple call, GET /api/recording-sessions/{id} in roomsApi.ts,
+is served by api/sessions.py which main.py loads first and therefore wins
+routing). The fake endpoints now return an honest HTTP 501 instead of
+fabricated data:
+
+  - POST /api/recording-sessions            — was an in-memory mock ("DB
+    issues" workaround), unauthenticated, and shadowed by api/sessions.py
+    anyway. Real creation lives at POST /api/simple/recording-sessions.
+  - POST /api/recording-sessions/{id}/reprocess — pretended to reprocess via
+    a background task that just stamped npu_processed=True / 1500ms / 0.95
+    confidence without doing any work. Real reprocess lives at
+    POST /api/uploads/sessions/{id}/reprocess (Arq queue).
+  - GET  /api/system/npu-status             — fabricated "250x real-time"
+    NPU metrics (same family as the fake NPU banner removed in the
+    pre-onboarding sweep).
+  - /api/summarization-templates CRUD       — "persisted" to a process-local
+    list that evaporated on restart.
+  - GET  /api/analytics/meetings            — written against a pre-multi-org
+    model schema: it reads RecordingSession.npu_processed / file_size, which
+    DO NOT EXIST on the live model, so it 500'd the moment any session fell
+    in range (and returned zeros computed from nothing otherwise). It cannot
+    serve real data; 501 until rebuilt (analytics_simple.py is the real
+    analytics surface).
+
+Still REAL and intentionally kept:
+  - GET /api/recording-sessions/{id}/export — org-scoped, delegates to
+    batch_export renderers, covered by tests/test_export.py.
+  - DELETE/PATCH /api/recording-sessions/{id}, PUT .../transcript — real
+    (legacy user_id-scoped) DB operations. KNOWN DEFECTS, uncalled by the
+    frontend, left for the wave-3 backlog: DELETE reads the nonexistent
+    ``audio_file_path`` column (500s before commit, rollback keeps data
+    safe); PATCH silently drops ``starred`` (not a model column).
+  - GET /api/recording-sessions[/{id}] — real DB reads, but shadowed by
+    api/sessions.py (loaded first), so effectively dead code (also reads
+    the nonexistent legacy columns above).
+
+The router itself MUST keep loading so /health's routers_loaded count stays
+stable.
 """
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, BackgroundTasks
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import json
 import os
-import uuid
-import asyncio
-from pathlib import Path
-import subprocess
-import tempfile
 
 # Import dependencies
-from database.database import get_db, SessionLocal
+from database.database import get_db
 from database.models import RecordingSession, Transcription
 from sqlalchemy.orm import Session
 from auth.dependencies import get_current_user, get_current_organization
@@ -26,13 +62,7 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["meetings"])
 
-# Global storage for active recordings
-active_recordings = {}
-recording_processes = {}
-
-class SessionCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
+_NOT_IMPLEMENTED = HTTPException(status_code=501, detail="Not implemented")
 
 class SessionUpdate(BaseModel):
     name: Optional[str] = None
@@ -43,48 +73,15 @@ class SessionUpdate(BaseModel):
 class TranscriptUpdate(BaseModel):
     transcript: List[Dict[str, Any]]
 
-class SummarizationTemplate(BaseModel):
-    id: Optional[str] = None
-    name: str
-    category: str
-    description: str
-    icon: str = "FileText"
-    prompt: str
-    outputFormat: str = "markdown"
-    extractFields: List[str] = []
-    maxLength: int = 1500
-    temperature: float = 0.3
-    model: str = "llama3"
-    isDefault: bool = False
-
 # Recording Session Endpoints
 @router.post("/recording-sessions")
-async def create_session(
-    session_data: SessionCreate
-):
-    """Create a new recording session"""
-    # For now, just return a mock response since we're having DB issues
-    # This will allow the recording UI to work
-    session_id = str(uuid.uuid4())
-    
-    # Store in memory for this session
-    active_recordings[session_id] = {
-        "id": session_id,
-        "name": session_data.name,
-        "description": session_data.description,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "created",
-        "start_time": None,
-        "audio_chunks": []
-    }
-    
-    return {
-        "id": session_id,
-        "name": session_data.name,
-        "description": session_data.description,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "created"
-    }
+async def create_session():
+    """NOT IMPLEMENTED — was an unauthenticated in-memory mock.
+
+    This route is shadowed by api/sessions.py's POST (loaded first) in the
+    live app; real session creation is POST /api/simple/recording-sessions.
+    """
+    raise _NOT_IMPLEMENTED
 
 @router.get("/recording-sessions")
 async def list_sessions(
@@ -452,153 +449,62 @@ async def export_session(
 @router.post("/recording-sessions/{session_id}/reprocess")
 async def reprocess_session(
     session_id: str,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Reprocess a session with NPU"""
-    try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        session.status = "processing"
-        db.commit()
-        
-        # Trigger NPU reprocessing
-        background_tasks.add_task(process_with_npu, session_id, db)
-        
-        return {"status": "processing", "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to reprocess session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """NOT IMPLEMENTED — previously FAKED reprocessing (a background task
+    stamped npu_processed=True, processing_time=1500, confidence=0.95 without
+    doing any work). Real reprocess: POST /api/uploads/sessions/{id}/reprocess.
+    """
+    raise _NOT_IMPLEMENTED
 
 # NPU Status Endpoint
 @router.get("/system/npu-status")
 async def get_npu_status():
-    """Get NPU status and performance metrics"""
-    try:
-        npu_status = {
-            "status": "idle",
-            "processingSpeed": 0,
-            "device": "/dev/accel/accel0",
-            "available": False
-        }
-        
-        # Check if NPU device exists
-        if os.path.exists("/dev/accel/accel0"):
-            npu_status["available"] = True
-            npu_status["status"] = "active"
-            
-            # Check if any processing is happening
-            if len(active_recordings) > 0:
-                npu_status["status"] = "processing"
-                npu_status["processingSpeed"] = 250  # Example: 250x real-time
-        
-        return npu_status
-    except Exception as e:
-        logger.error(f"Failed to get NPU status: {e}")
-        return {"status": "error", "available": False}
+    """NOT IMPLEMENTED — previously returned fabricated NPU metrics
+    ("250x real-time"). There is no NPU in the live inference stack."""
+    raise _NOT_IMPLEMENTED
 
 # Analytics Endpoints
 @router.get("/analytics/meetings")
 async def get_meeting_analytics(
     range: str = Query(default="week", pattern="^(week|month|quarter|year|all)$"),
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Get meeting analytics for a time range"""
-    try:
-        # Calculate date range
-        end_date = datetime.now(timezone.utc)
-        if range == "week":
-            start_date = end_date - timedelta(days=7)
-        elif range == "month":
-            start_date = end_date - timedelta(days=30)
-        elif range == "quarter":
-            start_date = end_date - timedelta(days=90)
-        elif range == "year":
-            start_date = end_date - timedelta(days=365)
-        else:
-            start_date = datetime(2020, 1, 1)  # All time
-        
-        # Query sessions
-        sessions = db.query(RecordingSession).filter(
-            RecordingSession.user_id == current_user.id,
-            RecordingSession.created_at >= start_date
-        ).all()
-        
-        # Calculate stats
-        total_duration = sum(s.duration or 0 for s in sessions)
-        total_words = 0
-        npu_count = sum(1 for s in sessions if s.npu_processed)
-        
-        for session in sessions:
-            transcripts = db.query(Transcription).filter(
-                Transcription.session_id == session.id
-            ).all()
-            total_words += sum(len(t.text.split()) for t in transcripts if t.text)
-        
-        return {
-            "total_meetings": len(sessions),
-            "total_duration": total_duration,
-            "total_words": total_words,
-            "average_duration": total_duration / len(sessions) if sessions else 0,
-            "npu_processed_count": npu_count,
-            "storage_used": sum(s.file_size or 0 for s in sessions)
-        }
-    except Exception as e:
-        logger.error(f"Failed to get analytics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """NOT IMPLEMENTED — was written against a pre-multi-org schema and read
+    RecordingSession.npu_processed / file_size, which do not exist on the
+    live model: it 500'd whenever any session fell in the range. The real
+    analytics surface is api/analytics_simple.py (/api/analytics/*)."""
+    raise _NOT_IMPLEMENTED
 
-# Summarization Templates
-templates_storage = []  # In production, this would be in database
+# Summarization Templates — NOT IMPLEMENTED. The old handlers "persisted"
+# templates to a process-local list (lost on every restart) and the frontend
+# never calls these routes. 501 until a real DB-backed implementation lands.
 
 @router.get("/summarization-templates")
 async def get_templates(current_user: User = Depends(get_current_user)):
-    """Get all summarization templates"""
-    if not templates_storage:
-        # Return default templates
-        return []
-    return templates_storage
+    """NOT IMPLEMENTED — no template storage exists."""
+    raise _NOT_IMPLEMENTED
 
 @router.post("/summarization-templates")
-async def create_template(
-    template: SummarizationTemplate,
-    current_user: User = Depends(get_current_user)
-):
-    """Create a new summarization template"""
-    template.id = str(uuid.uuid4())
-    templates_storage.append(template.dict())
-    return template
+async def create_template(current_user: User = Depends(get_current_user)):
+    """NOT IMPLEMENTED — previously wrote to a process-local list."""
+    raise _NOT_IMPLEMENTED
 
 @router.put("/summarization-templates/{template_id}")
 async def update_template(
     template_id: str,
-    template: SummarizationTemplate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Update a summarization template"""
-    for i, t in enumerate(templates_storage):
-        if t["id"] == template_id:
-            template.id = template_id
-            templates_storage[i] = template.dict()
-            return template
-    raise HTTPException(status_code=404, detail="Template not found")
+    """NOT IMPLEMENTED — previously wrote to a process-local list."""
+    raise _NOT_IMPLEMENTED
 
 @router.delete("/summarization-templates/{template_id}")
 async def delete_template(
     template_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Delete a summarization template"""
-    global templates_storage
-    templates_storage = [t for t in templates_storage if t["id"] != template_id]
-    return {"status": "deleted"}
+    """NOT IMPLEMENTED — previously wrote to a process-local list."""
+    raise _NOT_IMPLEMENTED
 
 # Helper Functions
 def format_srt_time(seconds: float) -> str:
@@ -608,32 +514,3 @@ def format_srt_time(seconds: float) -> str:
     secs = int(seconds % 60)
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-
-async def process_with_npu(session_id: str, db: Session):
-    """Process audio with NPU (placeholder for real NPU processing)"""
-    try:
-        # In real implementation, this would:
-        # 1. Load audio file
-        # 2. Send to NPU for transcription
-        # 3. Get speaker diarization
-        # 4. Save results to database
-        
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id
-        ).first()
-        
-        if session:
-            session.status = "completed"
-            session.npu_processed = True
-            session.processing_time = 1500  # Example: 1.5 seconds
-            session.confidence_score = 0.95
-            db.commit()
-            
-    except Exception as e:
-        logger.error(f"NPU processing failed: {e}")
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id
-        ).first()
-        if session:
-            session.status = "failed"
-            db.commit()

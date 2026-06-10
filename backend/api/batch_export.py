@@ -53,6 +53,11 @@ class ExportJob(BaseModel):
     downloadUrl: Optional[str] = None
     error: Optional[str] = None
     options: Dict[str, Any]
+    # Email delivery outcome (only set when options.emailTo was requested).
+    # Honest reporting: emailSent is True ONLY after a 2xx from Postmark;
+    # any failure sets emailSent=False + emailError with the reason.
+    emailSent: Optional[bool] = None
+    emailError: Optional[str] = None
 
 class ExportTemplate(BaseModel):
     id: str
@@ -83,6 +88,100 @@ def _get_session_for_export(
         RecordingSession.organization_id == organization_id,
         RecordingSession.id == int_id,
     ).first()
+
+
+# ---------------------------------------------------------------------------
+# Email delivery for batch exports — REAL send via Postmark, reusing the
+# attachment-capable helper that already powers the per-meeting Email action
+# (api.session_emails._postmark_send). Imported lazily because session_emails
+# itself lazily imports renderers from this module (avoid a cycle).
+# ---------------------------------------------------------------------------
+
+# Postmark rejects messages over ~10MB total (attachment content counts
+# base64-encoded, +~33%). Cap raw attachment bytes well below that.
+_EMAIL_ATTACHMENT_MAX_BYTES = 7 * 1024 * 1024
+
+_ATTACHMENT_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+    ".srt": "text/plain",
+    ".json": "application/json",
+    ".zip": "application/zip",
+}
+
+
+def _email_configured() -> bool:
+    """True when the env carries everything _postmark_send needs."""
+    return bool(
+        os.getenv("POSTMARK_SERVER_TOKEN", "").strip()
+        and os.getenv("POSTMARK_FROM", "").strip()
+    )
+
+
+def _send_export_email(job: "ExportJob", to_email: str, artifact_path: Path) -> None:
+    """Email the finished export artifact to ``to_email`` and record the
+    outcome on the job. Never raises; never reports success it didn't get."""
+    from api.session_emails import _postmark_send  # lazy: avoid import cycle
+
+    try:
+        size = artifact_path.stat().st_size
+        if size > _EMAIL_ATTACHMENT_MAX_BYTES:
+            job.emailSent = False
+            job.emailError = (
+                f"Export is {size // (1024 * 1024)}MB — too large to email "
+                f"(limit {_EMAIL_ATTACHMENT_MAX_BYTES // (1024 * 1024)}MB). "
+                "Use the download link instead."
+            )
+            logger.warning("batch export %s: %s", job.id, job.emailError)
+            return
+
+        import base64
+
+        content_type = _ATTACHMENT_CONTENT_TYPES.get(
+            artifact_path.suffix.lower(), "application/octet-stream"
+        )
+        attachment = {
+            "Name": artifact_path.name,
+            "Content": base64.b64encode(artifact_path.read_bytes()).decode("ascii"),
+            "ContentType": content_type,
+        }
+
+        n = len(job.sessionIds)
+        subject = f"Your Meeting-Ops export ({n} meeting{'s' if n != 1 else ''}, {job.format})"
+        html_body = (
+            '<div style="font-family: Arial, sans-serif; color: #374151;">'
+            "<p>Your Meeting-Ops batch export is ready and attached.</p>"
+            f"<p><strong>{n}</strong> meeting{'s' if n != 1 else ''} &middot; "
+            f"format <strong>{job.format}</strong> &middot; file "
+            f"<strong>{artifact_path.name}</strong></p>"
+            '<hr style="border: none; border-top: 1px solid #e5e7eb;" />'
+            '<p style="color: #9ca3af; font-size: 12px;">Sent by Meeting-Ops.</p>'
+            "</div>"
+        )
+
+        result = _postmark_send(
+            to_email=to_email,
+            to_name=None,
+            subject=subject,
+            html_body=html_body,
+            attachments=[attachment],
+        )
+        if result.get("ok"):
+            job.emailSent = True
+            logger.info(
+                "batch export %s emailed to %s (message_id=%s)",
+                job.id, to_email, result.get("message_id"),
+            )
+        else:
+            job.emailSent = False
+            job.emailError = f"Email delivery failed: {result.get('error') or 'unknown error'}"
+            logger.warning("batch export %s: %s", job.id, job.emailError)
+    except Exception as exc:  # noqa: BLE001 — email must never sink the job
+        job.emailSent = False
+        job.emailError = f"Email delivery failed: {exc}"
+        logger.warning("batch export %s: email send raised: %s", job.id, exc)
+
 
 # In-memory storage for export jobs (should use database in production)
 export_jobs: Dict[str, ExportJob] = {}
@@ -126,15 +225,22 @@ async def create_batch_export(
     # canonical content to export (browser-only tier); explicit gate
     # closes the surface in case server-side fallbacks ever land.
     gate_feature_for_caller(current_user, "canonical_reprocess")
-    # Emailing batch exports is not implemented. Reject an emailTo request up
-    # front with 501 rather than accept the job and silently never send it.
-    # (Per-meeting email uses the SessionDetails "Email" action.)
+    # Email delivery is real (Postmark, attachment included) when the env is
+    # configured. When it is NOT configured we refuse up front with 501 —
+    # never accept an emailTo job we know we cannot deliver.
     if request.options.emailTo:
-        raise HTTPException(
-            status_code=501,
-            detail="Emailing batch exports is not supported. Download the file, "
-                   "or use the per-meeting Email action.",
-        )
+        if not _email_configured():
+            raise HTTPException(
+                status_code=501,
+                detail="Emailing batch exports is not available on this server "
+                       "(email delivery is not configured). Download the file "
+                       "instead, or use the per-meeting Email action.",
+            )
+        if "@" not in request.options.emailTo:
+            raise HTTPException(
+                status_code=422,
+                detail="emailTo is not a valid email address.",
+            )
     try:
         for session_id in request.sessionIds:
             if not _get_session_for_export(db, active_org.organization.id, session_id):
@@ -175,7 +281,11 @@ async def create_batch_export(
         
         logger.info(f"Created batch export job {job_id} for {len(request.sessionIds)} sessions")
         return job
-        
+
+    except HTTPException:
+        # Don't let the generic handler below re-wrap deliberate 4xx (e.g.
+        # the 404 for a session outside the active org) as a 500.
+        raise
     except Exception as e:
         logger.error(f"Failed to create batch export: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -347,37 +457,42 @@ async def process_export_job(
             exported_files.append(file_path)
         
         # Create archive if multiple files or merge requested
+        artifact_path: Optional[Path] = None
         if len(exported_files) > 1 or options.mergeFiles:
             import zipfile
             archive_path = export_dir / f"export_{job_id}.zip"
             with zipfile.ZipFile(archive_path, 'w') as zf:
                 for file_path in exported_files:
                     zf.write(file_path, file_path.name)
-            
+
             job.downloadUrl = f"/api/export/download/{job_id}/export_{job_id}.zip"
             job.fileSize = archive_path.stat().st_size
+            artifact_path = archive_path
         elif exported_files:
             # Single file
             job.downloadUrl = f"/api/export/download/{job_id}/{exported_files[0].name}"
             job.fileSize = exported_files[0].stat().st_size
-        
+            artifact_path = exported_files[0]
+
         job.status = "completed"
         job.progress = 100
         job.completedAt = datetime.now(timezone.utc)
-        
-        # Email delivery is NOT implemented for the batch route. The file was
-        # generated but not emailed; per-meeting email uses the SessionDetails
-        # "Email" action. Log loudly so this unimplemented path is auditable
-        # rather than silently swallowed. (create_batch_export 501s an emailTo
-        # request up front, so this should not normally be reached.)
+
+        # Real email delivery (Postmark + attachment) when requested.
+        # _send_export_email records the outcome on the job (emailSent /
+        # emailError) and never raises — an email failure must not flip a
+        # successfully-generated export to "failed" (download still works).
         if options.emailTo:
-            logger.warning(
-                "batch export job %s requested emailTo=%s but batch email delivery "
-                "is not implemented — file generated, NOT emailed",
-                job_id,
-                options.emailTo,
-            )
-        
+            if artifact_path is not None:
+                _send_export_email(job, options.emailTo, artifact_path)
+            else:
+                job.emailSent = False
+                job.emailError = "Export produced no file to email."
+                logger.warning(
+                    "batch export %s: emailTo=%s requested but no artifact was produced",
+                    job_id, options.emailTo,
+                )
+
     except Exception as e:
         logger.error(f"Export job {job_id} failed: {e}")
         job.status = "failed"

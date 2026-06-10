@@ -979,7 +979,10 @@ async def update_speaker_link(
         raise HTTPException(status_code=404, detail="Speaker link not found")
 
     if payload.speaker_id:
-        speaker = _get_speaker_or_404(db, active_org.organization.id, payload.speaker_id)
+        # Session-scoped: the speaker must live in the SESSION's org (the
+        # meeting's workspace), not the caller's active workspace — see the
+        # create_speaker_for_link comment (v3.34.0 god-view fix).
+        speaker = _get_speaker_or_404(db, session.organization_id, payload.speaker_id)
         link.speaker_id = speaker.id
     else:
         link.speaker_id = None
@@ -1097,19 +1100,23 @@ async def create_speaker_for_link(
             detail="This speaker label is already linked. Clear it before creating a new speaker.",
         )
 
-    # Find-or-reuse within THIS org only (org+display_name is unique; reuse
-    # avoids a DB IntegrityError and matches /enroll's behaviour).
+    # Find-or-reuse within the SESSION's org (org+display_name is unique;
+    # reuse avoids a DB IntegrityError and matches /enroll's behaviour).
+    # v3.34.0: keyed off session.organization_id, NOT the caller's active
+    # workspace — a superuser naming a speaker on another workspace's
+    # meeting (god-view) was silently enrolling the voiceprint into their
+    # OWN workspace, where this session's identify can never see it.
     speaker = (
         db.query(SpeakerProfile)
         .filter(
-            SpeakerProfile.organization_id == active_org.organization.id,
+            SpeakerProfile.organization_id == session.organization_id,
             SpeakerProfile.display_name == payload.display_name,
         )
         .first()
     )
     if speaker is None:
         speaker = SpeakerProfile(
-            organization_id=active_org.organization.id,
+            organization_id=session.organization_id,
             display_name=payload.display_name,
             email=payload.email or None,
             title=payload.title or None,
@@ -1554,10 +1561,13 @@ async def enroll_speaker_from_session(
             pass
 
     # 3) Find or create the SpeakerProfile.
+    # Session-scoped enrollment: the voiceprint belongs to the workspace the
+    # MEETING lives in (session.organization_id), not the caller's active
+    # workspace — see the create_speaker_for_link comment (v3.34.0).
     speaker = (
         db.query(SpeakerProfile)
         .filter(
-            SpeakerProfile.organization_id == active_org.organization.id,
+            SpeakerProfile.organization_id == session.organization_id,
             SpeakerProfile.display_name == payload.display_name,
         )
         .first()
@@ -1565,7 +1575,7 @@ async def enroll_speaker_from_session(
     created_new = False
     if not speaker:
         speaker = SpeakerProfile(
-            organization_id=active_org.organization.id,
+            organization_id=session.organization_id,
             display_name=payload.display_name,
             email=payload.email,
             notes=payload.notes,

@@ -373,6 +373,59 @@ def stamp_confirmed_speaker_contacts(
     return summary
 
 
+# Pooled-voiceprint tuning (v3.34.0). Short single-speaker turns make far
+# better voiceprints than one long merged segment — a 5-minute "segment"
+# averages crosstalk/echo/noise into mush (measured 0.05 self-similarity on
+# a real call). We pool up to TOP_K turns in the [MIN_S, MAX_S] band.
+_POOL_MIN_S = 2.0
+_POOL_MAX_S = 45.0
+_POOL_TOP_K = 5
+
+
+def pooled_embedding(items: list[dict]) -> Optional[list[float]]:
+    """Pool one voiceprint from several turns/segments.
+
+    Each item: {"start", "end", "embedding", ...}. Picks up to
+    ``_POOL_TOP_K`` longest turns within the clean-duration band
+    (``_POOL_MIN_S``..``_POOL_MAX_S`` seconds); if none are in band, falls
+    back to the single longest usable turn (the old behaviour). Embeddings
+    are L2-normalized, averaged, re-normalized — standard centroid pooling
+    for cosine-similarity speaker embeddings. Returns None when no item
+    carries an embedding.
+    """
+    usable: list[tuple[float, list[float]]] = []
+    for it in items or []:
+        emb = it.get("embedding")
+        if not emb:
+            continue
+        try:
+            dur = float(it.get("end") or 0) - float(it.get("start") or 0)
+        except (TypeError, ValueError):
+            continue
+        if dur < 1.0:
+            continue
+        usable.append((dur, emb))
+    if not usable:
+        return None
+    band = [u for u in usable if _POOL_MIN_S <= u[0] <= _POOL_MAX_S]
+    picked = sorted(band, key=lambda u: u[0], reverse=True)[:_POOL_TOP_K] or [
+        max(usable, key=lambda u: u[0])
+    ]
+    vecs = []
+    for _, emb in picked:
+        v = np.asarray(emb, dtype="float32")
+        n = np.linalg.norm(v)
+        if n > 0:
+            vecs.append(v / n)
+    if not vecs:
+        return None
+    mean = np.mean(vecs, axis=0)
+    n = np.linalg.norm(mean)
+    if n == 0:
+        return None
+    return (mean / n).tolist()
+
+
 def identify_speakers(
     session: RecordingSession,
     db: Session,
@@ -422,18 +475,47 @@ def identify_speakers(
             logger.info("identify_speakers skipped: %s", summary["skipped_reason"])
             return summary
 
-    # Group segments by raw label, keep the longest one per label for embedding
-    by_label: dict[str, dict] = {}
-    for idx, seg in enumerate(segments):
-        label = (seg.get("speaker") or "").strip()
+    # Group segments by their RAW diarizer label (``raw_label`` survives the
+    # "Speaker N" display normalization, so a post-rename re-identify still
+    # lines up with the diarizer's clusters). Pool one voiceprint per group:
+    # prefer the diarizer's fine-grained turns persisted in
+    # ``transcript_diarized["speaker_turns"]`` (v3.34.0) — the text segments
+    # are coarse multi-minute merges whose single embedding is too mushy to
+    # match anyone. Fallback: pool from the segments themselves (legacy
+    # sessions without a turn bank degrade to the old longest-segment pick).
+    diarized_doc = (
+        session.transcript_diarized
+        if isinstance(session.transcript_diarized, dict)
+        else {}
+    )
+    turns_by_label: dict[str, list[dict]] = {}
+    for turn in (diarized_doc.get("speaker_turns") or []):
+        t_label = (turn.get("speaker") or "").strip()
+        if t_label:
+            turns_by_label.setdefault(t_label, []).append(turn)
+
+    segs_by_label: dict[str, list[dict]] = {}
+    for seg in segments:
+        label = ((seg.get("raw_label") or seg.get("speaker")) or "").strip()
         if not label:
             continue
         duration = float(seg.get("end", 0)) - float(seg.get("start", 0))
         if duration < 0.5:
             continue
-        existing = by_label.get(label)
-        if existing is None or duration > existing["duration"]:
-            by_label[label] = {"idx": idx, "duration": duration, "segment": seg, "embedding": seg.get("embedding")}
+        segs_by_label.setdefault(label, []).append(seg)
+
+    by_label: dict[str, dict] = {}
+    for label, group in segs_by_label.items():
+        emb = pooled_embedding(turns_by_label.get(label) or group)
+        longest = max(
+            (float(s.get("end", 0)) - float(s.get("start", 0)) for s in group),
+            default=0.0,
+        )
+        by_label[label] = {
+            "duration": longest,
+            "segment": group[0],
+            "embedding": emb,
+        }
 
     if not by_label:
         summary["skipped_reason"] = "no_usable_segments"
@@ -515,6 +597,31 @@ def identify_speakers(
 
     db.flush()
 
+    # Prune stale UNCONFIRMED links left by earlier diarization passes — a
+    # reprocess re-labels the clusters, and leftover links (e.g. SPEAKER_02
+    # from the original pass) would surface phantom speakers in the naming
+    # UI. Confirmed links carry user intent and are never pruned.
+    valid_labels: set[str] = set(by_label.keys())
+    for seg in segments:
+        for k in ("raw_label", "speaker"):
+            v = (seg.get(k) or "").strip()
+            if v:
+                valid_labels.add(v)
+    pruned = 0
+    for stale in (
+        db.query(SpeakerSessionLink)
+        .filter(
+            SpeakerSessionLink.session_id == session.id,
+            SpeakerSessionLink.confirmed.is_(False),
+        )
+        .all()
+    ):
+        if (stale.raw_label or "") not in valid_labels:
+            db.delete(stale)
+            pruned += 1
+    if pruned:
+        summary["pruned_stale_links"] = pruned
+
     # Build a label -> display_name map and rewrite the diarized transcript.
     name_map: dict[str, str] = {}
     for label, link in links_by_label.items():
@@ -529,9 +636,12 @@ def identify_speakers(
         if isinstance(diarized, dict):
             new_segments = []
             for seg in diarized.get("segments", []):
-                label = seg.get("speaker", "")
-                if label in name_map:
-                    new_seg = {**seg, "speaker": name_map[label], "raw_label": label}
+                # Match on the RAW label first: post-normalization segments
+                # display "Speaker N" while carrying the diarizer code in
+                # raw_label — both must resolve to the matched name.
+                key = ((seg.get("raw_label") or seg.get("speaker")) or "")
+                if key in name_map:
+                    new_seg = {**seg, "speaker": name_map[key], "raw_label": key}
                 else:
                     new_seg = seg
                 new_segments.append(new_seg)

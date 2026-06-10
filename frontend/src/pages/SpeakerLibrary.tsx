@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { cacheKey, useHydratedState } from '../utils/cachedState';
 import { Dialog } from '../components/ui/Dialog';
 import ConfirmModal from '../components/ConfirmModal';
+import { showToast } from '../components/Toast';
 
 interface SpeakerSummary {
   id: number;
@@ -309,6 +310,7 @@ export const SpeakerLibrary: React.FC = () => {
         setAssignDialogLink(null);
         setManualSpeakerId(null);
         setSpeakerSearch('');
+        showToast.info('Summary will update with the new name in about a minute.');
         if (selectedId === speakerId) await loadDetail(speakerId);
       } else {
         setError(`Assign failed (HTTP ${res.status}).`);

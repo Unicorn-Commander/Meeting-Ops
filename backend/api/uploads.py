@@ -841,6 +841,13 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 if fingerprint_enabled:
                     from services.speaker_service import identify_speakers
                     await asyncio.to_thread(identify_speakers, session, db)
+                # v3.34.0 label parity: normalize residual raw diarizer codes
+                # ("SPEAKER_00" -> "Speaker N") + resync the transcriptions
+                # rows the UI renders — the upload pipeline skipped this, so
+                # uploads showed raw codes in the transcript while the
+                # summary said "Speaker 1" (audit finding #2).
+                from services.speaker_labels import normalize_session_speaker_labels
+                await asyncio.to_thread(normalize_session_speaker_labels, session, db)
             except Exception as exc:
                 logger.warning("Speaker diarization/identification failed for upload %s: %s", upload_id, exc)
             await _set_job_state(db, job, progress_pct=100, last_completed_stage="diarizing")
