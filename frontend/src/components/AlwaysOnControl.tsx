@@ -27,6 +27,7 @@ import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
 import AudioMeter from './AudioMeter';
 import SessionMicChip from './SessionMicChip';
 import ConfirmModal from './ConfirmModal';
+import { showConfirm } from '../utils/notifications';
 import {
   isTabCaptureSupported,
   type AudioSourceMode,
@@ -834,11 +835,12 @@ export default function AlwaysOnControl() {
                     <button
                       type="button"
                       disabled={isResuming}
-                      onClick={() => {
+                      onClick={async () => {
                         if (olderThan24h
-                          && !window.confirm(
+                          && !(await showConfirm(
                             'This recording is over 24 hours old. Upload anyway?',
-                          )) {
+                            { title: 'Old recording', confirmLabel: 'Upload anyway' },
+                          ))) {
                           return;
                         }
                         void alwaysOn.resumeOrphanSession(orphan.session_id);
@@ -855,8 +857,11 @@ export default function AlwaysOnControl() {
                     <button
                       type="button"
                       disabled={isResuming}
-                      onClick={() => {
-                        if (window.confirm('Discard this local recording? This cannot be undone.')) {
+                      onClick={async () => {
+                        if (await showConfirm(
+                          'Discard this local recording? This cannot be undone.',
+                          { title: 'Discard recording', confirmLabel: 'Discard' },
+                        )) {
                           void alwaysOn.discardOrphanSession(orphan.session_id);
                         }
                       }}

@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [3.36.1] - 2026-06-11
+
+**v3.36.0 follow-up polish.** (3-agent swarm + integration pass.)
+
+### Added
+- **Duplicate-recording banner on mobile** — `MobileSessionDetails` now shows the same "It looks like {name} also recorded this meeting → View their copy" banner as desktop (it was desktop-only in v3.36.0).
+
+### Fixed
+- **The "voice fingerprint updated" toast is now honest.** Naming endpoints return `my_voice_folded` (true / false / absent) and the UI keys off it: a fold skipped by the consistency floor or a missing sample now says so instead of claiming success on any HTTP 200.
+- **Browser-live segments no longer carry a fabricated 0.93 confidence** — the placeholder constant (browser model has no per-word probabilities) is stored as NULL; all consumers tolerate it.
+- **Native `confirm()` dialogs are gone** — every remaining `window.confirm` call site (9 files, incl. delete/destructive flows) migrated to a promise-based `showConfirm` built on the existing styled `ConfirmModal` (focus-trap, ESC, default-cancel on danger).
+- **Test-suite collection interaction fixed** — `test_pooled_embedding.py`'s module-level import split the SQLAlchemy Base registry when collected with DB-touching suites; suites now pass in one pytest invocation.
+
 ## [3.36.0] - 2026-06-10
 
 **"My Voice" portable voiceprints + same-meeting duplicate detection.** (4-agent build swarm + adversarial tenancy/privacy review + hardening pass.)

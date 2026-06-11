@@ -13,7 +13,25 @@ interface SpeakerLink {
   similarity: number | null;
   source: 'auto' | 'manual';
   confirmed: boolean;
+  /**
+   * Backend contract (speakers.py): true = a sample was folded into the
+   * caller's account voiceprint this request; false = a fold was attempted
+   * but skipped (consistency floor / dim guard / no embedding); null or
+   * absent = no fold was applicable.
+   */
+  my_voice_folded?: boolean | null;
 }
+
+/** Honest fingerprint toast keyed off `my_voice_folded` (see above). */
+const toastVoiceFold = (folded: boolean | null | undefined): void => {
+  if (folded === true) {
+    showToast.success('Your personal voice fingerprint was updated.');
+  } else if (folded === false) {
+    showToast.warning(
+      "Couldn't update your voice fingerprint from this meeting (audio didn't match or no usable sample).",
+    );
+  }
+};
 
 interface SpeakerOption {
   id: number;
@@ -189,15 +207,14 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         },
       );
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         // Re-pull both lists: a new SpeakerProfile may have been created
         // and the link is now confirmed against it.
         await loadAll();
         setEnrollingLinkId(null);
         setEnrollName("");
-        if (isMe) {
-          showToast.success('Your personal voice fingerprint was updated.');
-          setIsMe(false);
-        }
+        toastVoiceFold(data?.my_voice_folded);
+        if (isMe) setIsMe(false);
         showToast.info('Summary will update with the new name in about a minute.');
       } else {
         const txt = await res.text();
@@ -228,10 +245,8 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         const next = links.map(l => (l.id === updated.id ? updated : l));
         setLinks(next);
         if (onChange) onChange(next);
-        if (sendIsMe) {
-          showToast.success('Your personal voice fingerprint was updated.');
-          setIsMe(false);
-        }
+        toastVoiceFold(updated.my_voice_folded);
+        if (sendIsMe) setIsMe(false);
         if (speakerId !== null) {
           showToast.info('Summary will update with the new name in about a minute.');
         }

@@ -31,6 +31,7 @@ import {
   type LocalSession,
 } from '../services/localSessionStore';
 import { localAudioStore } from '../services/localAudioStore';
+import { showConfirm } from '../utils/notifications';
 
 /**
  * Local Sessions surface. Lists privacy-mode sessions persisted in
@@ -78,12 +79,11 @@ function LocalSessionsList() {
 
   const handleDelete = useCallback(
     async (id: string) => {
-      if (typeof window !== 'undefined') {
-        const ok = window.confirm(
-          'Delete this local session? The transcript, summary, and audio for this meeting will be permanently removed from this browser. Nothing on a server is affected.',
-        );
-        if (!ok) return;
-      }
+      const ok = await showConfirm(
+        'Delete this local session? The transcript, summary, and audio for this meeting will be permanently removed from this browser. Nothing on a server is affected.',
+        { title: 'Delete local session', confirmLabel: 'Delete' },
+      );
+      if (!ok) return;
       await deleteLocalSession(id);
       // Also wipe the audio blob in localAudioStore (best-effort).
       try {
@@ -399,12 +399,11 @@ function LocalSessionDetail({ id }: { id: string }) {
   );
 
   const handleDelete = useCallback(async () => {
-    if (typeof window !== 'undefined') {
-      const ok = window.confirm(
-        'Delete this local session? The audio, transcript, and summary will be permanently removed from this browser.',
-      );
-      if (!ok) return;
-    }
+    const ok = await showConfirm(
+      'Delete this local session? The audio, transcript, and summary will be permanently removed from this browser.',
+      { title: 'Delete local session', confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
     await deleteLocalSession(id);
     try {
       if (localAudioStore.isAvailable()) {
@@ -432,10 +431,11 @@ function LocalSessionDetail({ id }: { id: string }) {
     try {
       let audioBase64: string | null = null;
       if (includeAudioInJson) {
-        if (typeof window !== 'undefined') {
+        {
           const sizeMB = (audio.bytes ?? session.audioBytes ?? 0) / 1_000_000;
-          const ok = window.confirm(
+          const ok = await showConfirm(
             `Include audio in the JSON export?\n\nThe assembled audio (~${sizeMB.toFixed(1)}MB) will be embedded as base64, which can balloon the file to ~${(sizeMB * 1.37).toFixed(1)}MB. Skip this if you only need the transcript + summary.`,
+            { title: 'Include audio?', confirmLabel: 'Include audio', tone: 'primary' },
           );
           if (!ok) {
             setJsonExporting(false);

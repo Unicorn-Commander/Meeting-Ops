@@ -1,8 +1,9 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MoreVertical, X, Check, Edit2, RefreshCw, Mail, Share2,
   FileText, Brain, Users, Sparkles, Calendar, Clock, Zap, Loader2,
-  Trash2, Tag as TagIcon, Search, ChevronDown,
+  Trash2, Tag as TagIcon, Search, ChevronDown, Mic,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -51,6 +52,16 @@ interface OrgSpeaker {
   id: number;
   display_name: string;
   has_centroid: boolean;
+}
+
+/** Another user's copy of the same meeting (duplicate detection, v3.36).
+ *  Mirrors RelatedSession in pages/SessionDetails.tsx — same data contract. */
+interface RelatedSession {
+  id: number;
+  name: string;
+  recorded_by?: string | null;
+  started_at?: string | null;
+  duration?: number | null;
 }
 
 interface Props {
@@ -200,6 +211,20 @@ export default function MobileSessionDetails(props: Props) {
   const [tab, setTab] = useState<TabKey>('summary');
   const [moreOpen, setMoreOpen] = useState(false);
   const segmentRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const navigate = useNavigate();
+
+  // v3.36 duplicate detection: dismissible "{recorded_by} also recorded
+  // this meeting" banner, ported from the desktop page. Component-state
+  // only (no persistence); reset when the user navigates to a different
+  // session so each copy gets its own banner.
+  const relatedSessions: RelatedSession[] = Array.isArray(session?.related_sessions)
+    ? session.related_sessions
+    : [];
+  const [relatedBannerDismissed, setRelatedBannerDismissed] = useState(false);
+  const sessionKey = String(session?.id ?? sessionId ?? '');
+  useEffect(() => {
+    setRelatedBannerDismissed(false);
+  }, [sessionKey]);
 
   const filteredSegments = useMemo(() => {
     return segments.filter((seg) => {
@@ -394,6 +419,47 @@ export default function MobileSessionDetails(props: Props) {
         className="flex-1 min-h-0 overflow-y-auto px-3 pt-3"
         style={{ paddingBottom: audioSrc ? 'calc(env(safe-area-inset-bottom) + 96px)' : 'calc(env(safe-area-inset-bottom) + 16px)' }}
       >
+        {/* v3.36 duplicate detection: another org member also recorded this
+            same meeting. Dismissible info banner (dismiss is component-state
+            only — no persistence) with a link to each related copy's detail
+            page. Rendered above the tab content so it shows on every tab. */}
+        {!relatedBannerDismissed && relatedSessions.length > 0 && (
+          <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-3.5 mb-3 flex items-start gap-2.5">
+            <Mic className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-amber-200">
+                This meeting may have been recorded more than once
+              </h3>
+              <ul className="mt-1 space-y-1.5">
+                {relatedSessions.map((related) => (
+                  <li key={related.id} className="text-xs text-amber-200/90 leading-relaxed">
+                    <span>
+                      It looks like {related.recorded_by || 'someone else'} also recorded this meeting.
+                    </span>{' '}
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/sessions/${related.id}`)}
+                      className="font-medium text-amber-300 underline underline-offset-2 active:text-amber-100"
+                      title={related.name ? `Open "${related.name}"` : 'Open their copy'}
+                    >
+                      View their copy
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRelatedBannerDismissed(true)}
+              className="shrink-0 p-1 rounded text-amber-400/80 active:text-amber-100 active:bg-amber-500/20"
+              title="Dismiss"
+              aria-label="Dismiss duplicate-recording notice"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {tab === 'summary' && (
           <SummaryTab
             insightsLoading={insightsLoading}

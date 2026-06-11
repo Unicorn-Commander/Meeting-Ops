@@ -33,6 +33,7 @@ import {
   type LocalSession,
 } from '../services/localSessionStore';
 import { showToast } from '../components/Toast';
+import { showConfirm } from '../utils/notifications';
 
 interface Participant {
   id: string;
@@ -1401,11 +1402,12 @@ export const Sessions: React.FC = () => {
   const bulkDeleteSelected = useCallback(async () => {
     const ids = [...selectedSessionIds];
     if (ids.length === 0) return;
-    if (!confirm(
+    if (!(await showConfirm(
       ids.length === 1
         ? 'Delete the selected session? This cannot be undone.'
         : `Delete ${ids.length} selected sessions? This cannot be undone.`,
-    )) {
+      { title: ids.length === 1 ? 'Delete session' : 'Delete sessions', confirmLabel: 'Delete' },
+    ))) {
       return;
     }
 
@@ -1728,7 +1730,10 @@ export const Sessions: React.FC = () => {
 
 
   const deleteSession = async (sessionId: string) => {
-    if (!confirm('Are you sure you want to delete this session?')) return;
+    if (!(await showConfirm(
+      'Are you sure you want to delete this session?',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    ))) return;
 
     if (isLocalSessionId(sessionId)) {
       try {

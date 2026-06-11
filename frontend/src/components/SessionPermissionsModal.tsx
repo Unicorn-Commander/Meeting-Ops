@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, UserPlus, Copy, Trash2, RefreshCw, Mail, Users, ExternalLink, AlertCircle } from 'lucide-react';
 import { config } from '../config';
+import { showConfirm } from '../utils/notifications';
 import { useOrg } from '../contexts/OrgContext';
 
 type AccessLevel = 'read' | 'comment' | 'edit';
@@ -143,7 +144,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
   };
 
   const revokeCollaborator = async (collaboratorId: number) => {
-    if (!confirm('Revoke this person’s access to the meeting?')) return;
+    if (!(await showConfirm('Revoke this person’s access to the meeting?', {
+      title: 'Revoke access', confirmLabel: 'Revoke',
+    }))) return;
     setSaving(true);
     setError(null);
     try {

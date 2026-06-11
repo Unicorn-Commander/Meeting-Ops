@@ -16,7 +16,10 @@ Covers:
   (j) a bad (dim-mismatched) my-voice candidate never aborts identify;
   (k) name collision bootstraps a "(2)" profile instead of stealing a
       linked one;
-  (l) a user-CONFIRMED label gets zero my-voice bootstrap side effects.
+  (l) a user-CONFIRMED label gets zero my-voice bootstrap side effects;
+  (m) v3.36.1 fold-status surfacing: the naming responses carry
+      my_voice_folded=true on a successful is_me fold, false on a
+      floor-skipped fold, and null when no fold was applicable.
 
 Follows the seed/monkeypatch style of test_summary_idempotency.py /
 test_speakers_unassigned_and_merge.py / test_identify_with_embeddings.py:
@@ -341,6 +344,8 @@ def test_is_me_assign_folds_into_user_voice(client):
         json={"speaker_id": speaker_id, "confirmed": True, "is_me": True},
     )
     assert resp.status_code == 200, resp.text
+    # v3.36.1 fold-status surfacing: a successful is_me fold is reported.
+    assert resp.json()["my_voice_folded"] is True
 
     db = SessionLocal()
     try:
@@ -534,6 +539,8 @@ def test_is_me_on_enroll_endpoint_folds_and_claims(client, monkeypatch, tmp_path
         json={"display_name": "Enrolled Me", "is_me": True},
     )
     assert resp.status_code == 200, resp.text
+    # v3.36.1 fold-status surfacing on the enroll path too.
+    assert resp.json()["my_voice_folded"] is True
 
     db = SessionLocal()
     try:
@@ -651,6 +658,9 @@ def test_email_match_without_is_me_does_not_fold(client):
         json={"speaker_id": speaker_id, "confirmed": True, "is_me": False},
     )
     assert resp.status_code == 200, resp.text
+    # v3.36.1 fold-status surfacing: no self-claim -> no fold applicable ->
+    # null/absent (never false, which would imply an attempt was made).
+    assert resp.json().get("my_voice_folded") is None
 
     db = SessionLocal()
     try:
@@ -907,5 +917,61 @@ def test_confirmed_link_blocks_my_voice_bootstrap(client, fake_provider):
         )
         assert link.speaker_id == someone_else_id  # confirmed mapping intact
         assert link.confirmed is True
+    finally:
+        db.close()
+
+
+# ---------- (m) fold-status surfacing: floor-skipped fold -> false ----------
+
+
+def test_floor_skipped_fold_reports_false(client):
+    """An is_me naming whose pooled embedding fails the consistency floor
+    (someone ELSE's voice vs the enrolled voiceprint) still succeeds as a
+    naming, but the response reports my_voice_folded=false — the fold was
+    attempted and skipped, and the voiceprint is untouched."""
+    _, _, _, SessionLocal, _, SpeakerProfile, SpeakerSessionLink, UserVoiceProfile = _models()
+
+    org, user = _seed_user_org(slug="myvoice-foldfalse", username="myvoice_foldfalse_user")
+    # Enrolled account voiceprint pointing one way...
+    _seed_my_voice(user.id, _make_embedding(seed=121))
+    # ...and a session cluster whose embedding is ~orthogonal (random
+    # independent 256-d unit vectors), so the consistency floor skips it.
+    emb_other = _make_embedding(seed=122)
+    session_pk = _seed_session(
+        org_id=org.id, user_id=user.id, embedding=emb_other, with_turns=True
+    )
+
+    db = SessionLocal()
+    try:
+        speaker = SpeakerProfile(organization_id=org.id, display_name="Floor Skip Me")
+        db.add(speaker)
+        db.flush()
+        link = SpeakerSessionLink(
+            session_id=session_pk,
+            organization_id=org.id,
+            raw_label="SPEAKER_00",
+        )
+        db.add(link)
+        db.commit()
+        speaker_id, link_id = speaker.id, link.id
+    finally:
+        db.close()
+
+    resp = client.patch(
+        f"/api/sessions/{session_pk}/speaker-links/{link_id}",
+        headers=_login_headers(client, "myvoice_foldfalse_user", org.slug),
+        json={"speaker_id": speaker_id, "confirmed": True, "is_me": True},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["my_voice_folded"] is False
+
+    db = SessionLocal()
+    try:
+        # The naming itself landed (claim applied), the voiceprint untouched.
+        speaker = db.query(SpeakerProfile).filter(SpeakerProfile.id == speaker_id).first()
+        assert speaker.linked_user_id == user.id
+        profile = db.query(UserVoiceProfile).filter(UserVoiceProfile.user_id == user.id).first()
+        assert profile is not None
+        assert profile.sample_count == 1  # the seeded sample only — no fold
     finally:
         db.close()

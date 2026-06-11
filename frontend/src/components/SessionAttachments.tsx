@@ -29,6 +29,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { config } from '../config';
+import { showConfirm } from '../utils/notifications';
 
 // 100 MB matches the backend MAX_ATTACHMENT_BYTES — keep in sync.
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
@@ -284,7 +285,10 @@ export const SessionAttachments: React.FC<SessionAttachmentsProps> = ({
 
   const remove = async (id: string) => {
     if (!baseUrl) return;
-    if (!confirm('Delete this attachment? The file will be removed from storage.')) {
+    if (!(await showConfirm(
+      'Delete this attachment? The file will be removed from storage.',
+      { title: 'Delete attachment', confirmLabel: 'Delete' },
+    ))) {
       return;
     }
     setError(null);

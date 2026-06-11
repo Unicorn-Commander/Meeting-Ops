@@ -143,6 +143,14 @@ class SpeakerLinkResponse(BaseModel):
     similarity: Optional[float] = None
     source: str
     confirmed: bool
+    # v3.36.1 "My Voice" fold-status surfacing:
+    #   True  = a sample was folded into the caller's account voiceprint
+    #           during this request
+    #   False = a fold was attempted but skipped (consistency floor / dim
+    #           guard / no embedding)
+    #   None  = no fold was applicable (no is_me claim and the speaker is
+    #           not linked to the caller), or the best-effort attempt errored
+    my_voice_folded: Optional[bool] = None
 
 
 class SpeakerLinkUpdate(BaseModel):
@@ -353,7 +361,7 @@ def _maybe_fold_my_voice(
     emb: Optional[list[float]],
     *,
     is_me: bool,
-) -> None:
+) -> Optional[str]:
     """Best-effort (never raises): fold a pooled session embedding into the
     CALLER's account-level user_voice_profile ("My Voice", v3.36.0).
 
@@ -366,12 +374,24 @@ def _maybe_fold_my_voice(
     of the caller's account voiceprint. Folds skipped by the consistency
     floor / dim guard in fold_embedding_into_user_voice stay silent here
     (the explicit /api/me/voice/enroll-from-session endpoint surfaces them
-    as 409)."""
+    as 409).
+
+    Returns (v3.36.1 fold-status surfacing):
+      "folded"  — a sample was folded into the caller's voiceprint
+      "skipped" — a fold was applicable but skipped (consistency floor /
+                  dim guard / no usable embedding)
+      None      — not applicable (no self-claim), or the best-effort
+                  attempt errored
+    """
     try:
-        if not emb:
-            return
         if not (is_me or speaker.linked_user_id == current_user.id):
-            return
+            return None
+        if not emb:
+            logger.info(
+                "my-voice fold skipped (no embedding) user=%s (from speaker=%s)",
+                current_user.id, speaker.id,
+            )
+            return "skipped"
         from services.speaker_service import fold_embedding_into_user_voice
 
         profile, status = fold_embedding_into_user_voice(
@@ -385,15 +405,27 @@ def _maybe_fold_my_voice(
                 "my-voice fold: user=%s samples=%s (from speaker=%s)",
                 current_user.id, profile.sample_count, speaker.id,
             )
-        else:
-            logger.warning(
-                "my-voice fold skipped (%s) user=%s (from speaker=%s)",
-                status, current_user.id, speaker.id,
-            )
+            return "folded"
+        logger.warning(
+            "my-voice fold skipped (%s) user=%s (from speaker=%s)",
+            status, current_user.id, speaker.id,
+        )
+        return "skipped"
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "my-voice fold failed (non-fatal) user=%s: %s", current_user.id, exc
         )
+        return None
+
+
+def _fold_status_to_flag(status: Optional[str]) -> Optional[bool]:
+    """Map _maybe_fold_my_voice's status onto the API contract:
+    "folded" -> True, "skipped" -> False, None -> None."""
+    if status == "folded":
+        return True
+    if status == "skipped":
+        return False
+    return None
 
 
 def _segment_duration(seg: dict) -> float:
@@ -924,7 +956,12 @@ async def merge_speaker_profile(
 # ---------- session linking ----------
 
 
-def _link_to_response(db: Session, link: SpeakerSessionLink) -> SpeakerLinkResponse:
+def _link_to_response(
+    db: Session,
+    link: SpeakerSessionLink,
+    *,
+    my_voice_folded: Optional[bool] = None,
+) -> SpeakerLinkResponse:
     name = None
     if link.speaker_id:
         sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
@@ -939,6 +976,7 @@ def _link_to_response(db: Session, link: SpeakerSessionLink) -> SpeakerLinkRespo
         similarity=link.similarity,
         source=link.source,
         confirmed=link.confirmed,
+        my_voice_folded=my_voice_folded,
     )
 
 
@@ -1046,6 +1084,7 @@ async def update_speaker_link(
     # every naming improves the running centroid — including new acoustic
     # conditions (phone-band vs desk). Previously only the enroll path added
     # samples; plain assigns taught the system nothing. Best-effort.
+    fold_status: Optional[str] = None
     if payload.speaker_id and payload.confirmed:
         try:
             from services.speaker_service import add_voice_sample, pooled_embedding
@@ -1076,7 +1115,9 @@ async def update_speaker_link(
                 )
             # v3.36.0 "My Voice": the same pooled embedding also feeds the
             # caller's portable account voiceprint when this speaker is them.
-            _maybe_fold_my_voice(db, current_user, speaker, emb, is_me=payload.is_me)
+            fold_status = _maybe_fold_my_voice(
+                db, current_user, speaker, emb, is_me=payload.is_me
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "assign_confirm sample harvest failed (non-fatal) session=%s: %s",
@@ -1123,7 +1164,9 @@ async def update_speaker_link(
     db.commit()
     db.refresh(link)
     await _enqueue_summary_refresh(session, db)
-    return _link_to_response(db, link)
+    return _link_to_response(
+        db, link, my_voice_folded=_fold_status_to_flag(fold_status)
+    )
 
 
 class CreateSpeakerForLinkRequest(BaseModel):
@@ -1235,6 +1278,7 @@ async def create_speaker_for_link(
     # themself, pool an embedding from this session's turn bank (same shape
     # as the assign-confirm harvest) and fold it into their portable
     # user_voice_profile. Best-effort — never fails the naming.
+    fold_status: Optional[str] = None
     try:
         from services.speaker_service import pooled_embedding
 
@@ -1250,7 +1294,9 @@ async def create_speaker_for_link(
         my_voice_emb = pooled_embedding(my_voice_turns) or pooled_embedding(
             _segments_for_label(session, link.raw_label)
         )
-        _maybe_fold_my_voice(db, current_user, speaker, my_voice_emb, is_me=payload.is_me)
+        fold_status = _maybe_fold_my_voice(
+            db, current_user, speaker, my_voice_emb, is_me=payload.is_me
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "create_speaker_for_link my-voice harvest failed (non-fatal) session=%s: %s",
@@ -1299,7 +1345,9 @@ async def create_speaker_for_link(
         active_org.organization.id, current_user.id,
     )
     await _enqueue_summary_refresh(session, db)
-    return _link_to_response(db, link)
+    return _link_to_response(
+        db, link, my_voice_folded=_fold_status_to_flag(fold_status)
+    )
 
 
 class RediarizeRequest(BaseModel):
@@ -1760,7 +1808,7 @@ async def enroll_speaker_from_session(
     # v3.36.0 "My Voice": fold the freshly-embedded sample into the caller's
     # portable user_voice_profile when this cluster is asserted (is_me) or
     # inferred to be the caller. Best-effort — never fails the enrollment.
-    _maybe_fold_my_voice(
+    fold_status = _maybe_fold_my_voice(
         db, current_user, speaker, list(embedding), is_me=payload.is_me
     )
 
@@ -1812,7 +1860,9 @@ async def enroll_speaker_from_session(
         speaker.display_name, speaker.id, created_new, session.id, link.raw_label, seg_start, seg_end,
     )
     await _enqueue_summary_refresh(session, db)
-    return _link_to_response(db, link)
+    return _link_to_response(
+        db, link, my_voice_folded=_fold_status_to_flag(fold_status)
+    )
 
 
 class MergeLinksRequest(BaseModel):

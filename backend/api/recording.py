@@ -464,13 +464,17 @@ def _append_transcription(
     session.updated_at = _now()
 
     for seg in segments:
+        # v3.36.1 audit: a segment with NO measured confidence (browser STT)
+        # stores NULL — never a fabricated constant. The column is nullable;
+        # readers already do `confidence or <default>`.
+        confidence = seg.get("confidence")
         db.add(Transcription(
             session_id=session.id,
             text=seg["text"],
             speaker=seg.get("speaker"),
             start_time=float(seg.get("start") or 0),
             end_time=float(seg.get("end") or 0),
-            confidence=float(seg.get("confidence") or 0.95),
+            confidence=float(confidence) if confidence is not None else None,
         ))
 
     metadata = dict(session.processing_metadata or {})
@@ -795,7 +799,9 @@ async def append_client_text_chunk(
         "speaker": None,
         "start": float(offset),
         "end": float(end),
-        "confidence": 0.93,  # placeholder; browser model is INT8 + no per-word probs
+        # v3.36.1 audit: the browser model (INT8, no per-word probs) reports no
+        # confidence — store NULL instead of a fabricated constant (was 0.93).
+        "confidence": None,
         "provenance": payload.provenance,
     }
 

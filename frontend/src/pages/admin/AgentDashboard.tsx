@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { config } from '../../config';
 import { AgentEditor } from './AgentEditor';
+import { showConfirm } from '../../utils/notifications';
 
 // Define types directly to avoid import issues
 interface Agent {
@@ -229,7 +230,10 @@ export const AgentDashboard: React.FC = () => {
       return;
     }
 
-    if (!confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) {
+    if (!(await showConfirm(
+      `Delete agent "${agent.name}"? This cannot be undone.`,
+      { title: 'Delete agent', confirmLabel: 'Delete' },
+    ))) {
       return;
     }
 

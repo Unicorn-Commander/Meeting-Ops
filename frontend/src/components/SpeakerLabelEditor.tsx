@@ -3,6 +3,25 @@ import { Edit2, Check, RefreshCw, GitMerge, X, User } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { showToast } from './Toast';
+import { showConfirm } from '../utils/notifications';
+
+/**
+ * Honest "my voice fingerprint" toast keyed off the backend's
+ * `my_voice_folded` response field (speakers.py contract):
+ *   true  -> a sample really was folded into the caller's voiceprint
+ *   false -> a fold was attempted but skipped (consistency floor / dim
+ *            guard / no embedding)
+ *   null/absent -> no fold was applicable; say nothing about it
+ */
+const toastVoiceFold = (folded: boolean | null | undefined): void => {
+  if (folded === true) {
+    showToast.success('Your personal voice fingerprint was updated.');
+  } else if (folded === false) {
+    showToast.warning(
+      "Couldn't update your voice fingerprint from this meeting (audio didn't match or no usable sample).",
+    );
+  }
+};
 
 interface SpeakerLink {
   id: number;
@@ -133,13 +152,12 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         },
       );
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         setOpen(false);
         setMode('menu');
         setDraftName('');
-        if (isMe) {
-          showToast.success('Your personal voice fingerprint was updated.');
-          setIsMe(false);
-        }
+        toastVoiceFold(data?.my_voice_folded);
+        if (isMe) setIsMe(false);
         showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
@@ -166,11 +184,10 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         },
       );
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         setOpen(false);
-        if (isMe) {
-          showToast.success('Your personal voice fingerprint was updated.');
-          setIsMe(false);
-        }
+        toastVoiceFold(data?.my_voice_folded);
+        if (isMe) setIsMe(false);
         showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
@@ -184,7 +201,11 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
 
   const handleMerge = async (targetLinkId: number) => {
     if (!ownLink) return;
-    if (!confirm(`Merge "${speaker}" into "${links.find(l => l.id === targetLinkId)?.speaker_display || links.find(l => l.id === targetLinkId)?.raw_label}"? This rewrites every turn of this cluster.`)) return;
+    const target = links.find(l => l.id === targetLinkId);
+    if (!(await showConfirm(
+      `Merge "${speaker}" into "${target?.speaker_display || target?.raw_label}"? This rewrites every turn of this cluster.`,
+      { title: 'Merge speaker clusters', confirmLabel: 'Merge' },
+    ))) return;
     setBusy(true);
     setError(null);
     try {

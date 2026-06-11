@@ -41,6 +41,7 @@ import SessionAttachments from '../components/SessionAttachments';
 import SessionDetailsTabs, { type SessionDetailsTab } from '../components/SessionDetailsTabs';
 import { UpgradeBanner } from '../components/UpgradeBanner';
 import { config } from '../config';
+import { showConfirm } from '../utils/notifications';
 import { clearAllHydratedCaches } from '../utils/cachedState';
 import {
   deleteLocalSession,
@@ -1068,7 +1069,9 @@ export const SessionDetails: React.FC = () => {
   };
 
   const deleteParticipant = async (id: string) => {
-    if (!confirm('Remove this participant?')) return;
+    if (!(await showConfirm('Remove this participant?', {
+      title: 'Remove participant', confirmLabel: 'Remove',
+    }))) return;
     setParticipantBusy(true);
     setParticipantError(null);
     try {
@@ -1177,7 +1180,9 @@ export const SessionDetails: React.FC = () => {
   };
 
   const deleteActionItem = async (id: number) => {
-    if (!confirm('Remove this action item?')) return;
+    if (!(await showConfirm('Remove this action item?', {
+      title: 'Remove action item', confirmLabel: 'Remove',
+    }))) return;
     setActionUpdatingIds((prev) => new Set(prev).add(id));
     const prevSnapshot = actionItems;
     setActionItems((prev) => prev.filter((row) => row.id !== id));
