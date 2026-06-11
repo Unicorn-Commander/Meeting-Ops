@@ -1,10 +1,13 @@
 import { lazy, useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { ExternalLink } from 'lucide-react';
+import { BadgeCheck, ExternalLink, Mic, RefreshCw, Trash2 } from 'lucide-react';
 import { config } from '../config';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrg } from '../contexts/OrgContext';
 import { isAdminRole } from '../utils/roles';
+import { deleteMyVoice, getMyVoice } from '../utils/api';
+import type { MyVoiceStatus } from '../utils/api';
+import { showToast } from '../components/Toast';
 import SettingsLayout from '../components/settings/SettingsLayout';
 import type { SaveStatus } from '../components/settings/SettingsLayout';
 import {
@@ -49,6 +52,156 @@ const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'))
 const PrivacySettings = lazy(() => import('../components/settings/PrivacySettings'));
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
+
+/**
+ * "My Voice" card — personal voiceprint status + delete-on-demand.
+ *
+ * The voiceprint is user-scoped (follows the ACCOUNT, not the
+ * workspace), so it lives next to the other personal-data controls in
+ * the Privacy section. Reads GET /api/me/voice, clears via
+ * DELETE /api/me/voice behind an in-app confirm (no native confirm()).
+ */
+function MyVoiceCard() {
+  const [voice, setVoice] = useState<MyVoiceStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setVoice(await getMyVoice());
+    } catch {
+      setVoice(null);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      await deleteMyVoice();
+      setConfirmOpen(false);
+      showToast.success('Your voiceprint was deleted.');
+      await refresh();
+    } catch {
+      showToast.error('Could not delete your voiceprint. Please try again.');
+    }
+    setClearing(false);
+  };
+
+  const updatedAt = voice?.updated_at
+    ? new Date(voice.updated_at).toLocaleString()
+    : null;
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-zinc-900/60 p-4 sm:p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-fuchsia-500/15">
+            <Mic className="h-5 w-5 text-fuchsia-300" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-white">My Voice</h3>
+            <p className="text-sm text-zinc-400">
+              Your personal voice fingerprint.
+            </p>
+          </div>
+        </div>
+        {loading ? (
+          <span className="inline-flex items-center gap-1 text-xs text-zinc-500">
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            Loading…
+          </span>
+        ) : voice?.enrolled ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
+            <BadgeCheck className="h-3.5 w-3.5" />
+            Enrolled
+          </span>
+        ) : (
+          <span className="inline-flex items-center rounded-full bg-zinc-700/50 px-2.5 py-1 text-xs font-medium text-zinc-400">
+            Not enrolled
+          </span>
+        )}
+      </div>
+
+      {!loading && voice?.enrolled && (
+        <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-sm text-zinc-300">
+          <span>
+            <span className="text-zinc-500">Voice samples:</span>{' '}
+            {voice.sample_count}
+          </span>
+          {updatedAt && (
+            <span>
+              <span className="text-zinc-500">Last updated:</span> {updatedAt}
+            </span>
+          )}
+        </div>
+      )}
+
+      <p className="mt-4 text-sm text-zinc-400">
+        This is a personal voice fingerprint that follows YOUR account. It is
+        only used to automatically name you in workspaces you're a member of,
+        and it's deleted the moment you ask.
+      </p>
+      <p className="mt-2 text-sm text-zinc-400">
+        How to enroll: open any meeting where you spoke and label yourself
+        with &ldquo;This is me&rdquo; checked — every labeling refines it.
+      </p>
+
+      <div className="mt-4">
+        <button
+          onClick={() => setConfirmOpen(true)}
+          disabled={loading || clearing || !voice?.enrolled}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/40 px-3 py-1.5 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Trash2 className="h-4 w-4" />
+          Clear my voiceprint
+        </button>
+      </div>
+
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-lg border border-white/10 bg-zinc-900 p-5 shadow-xl">
+            <h4 className="text-base font-semibold text-white">
+              Clear your voiceprint?
+            </h4>
+            <p className="mt-2 text-sm text-zinc-400">
+              This permanently deletes your personal voice fingerprint, so
+              you'll no longer be auto-named in meetings. You can re-enroll
+              any time by labeling yourself in a meeting where you spoke.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmOpen(false)}
+                disabled={clearing}
+                className="rounded-lg px-3 py-1.5 text-sm text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleClear}
+                disabled={clearing}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {clearing ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Trash2 className="h-4 w-4" />
+                )}
+                Delete voiceprint
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function SettingsEnhanced() {
   const { user } = useAuth();
@@ -232,7 +385,12 @@ export default function SettingsEnhanced() {
       case 'theme':
         return <ThemeSettings />;
       case 'privacy':
-        return <PrivacySettings />;
+        return (
+          <div className="space-y-6">
+            <PrivacySettings />
+            <MyVoiceCard />
+          </div>
+        );
       case 'notifications':
         return (
           <EmptyPanel

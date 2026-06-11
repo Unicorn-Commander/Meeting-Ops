@@ -21,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 from rapidfuzz import fuzz as rapidfuzz_fuzz
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -184,6 +185,259 @@ def candidates_for_org(db: Session, organization_id: int) -> list[dict]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping speaker %d (decode failed): %s", row.id, exc)
     return out
+
+
+def my_voice_candidates_for_org(db: Session, organization_id: int) -> list[dict]:
+    """"My Voice" candidates for identification inside *organization_id*.
+
+    Voiceprints are hard tenant-scoped by design (biometric privacy). The one
+    sanctioned exception is the user's OWN account-level voiceprint
+    (user_voice_profile), and it may only participate in identification
+    inside workspaces where that user is a MEMBER — enforced here by joining
+    through user_organizations. These candidates are matched LOCALLY
+    (numpy cosine) and never sent through the external provider.identify
+    call (its speaker_id plumbing is org SpeakerProfile ids).
+    """
+    # Lazy imports: auth.models for the membership join (speaker_service
+    # otherwise has no auth dependency), database.models for reload-safety
+    # under the test fixture.
+    from auth.models import User, UserOrganization
+    from database.models import UserVoiceProfile
+
+    rows = (
+        db.query(UserVoiceProfile, User)
+        .join(User, User.id == UserVoiceProfile.user_id)
+        .join(UserOrganization, UserOrganization.user_id == UserVoiceProfile.user_id)
+        .filter(
+            UserOrganization.organization_id == organization_id,
+            UserVoiceProfile.centroid_embedding.isnot(None),
+        )
+        .all()
+    )
+    out: list[dict] = []
+    for profile, user in rows:
+        try:
+            emb = decode_embedding(profile.centroid_embedding, profile.embedding_dim)
+            if not emb:
+                logger.warning("Skipping my-voice profile user=%d (empty decoded centroid)", user.id)
+                continue
+            out.append({
+                "user": user,
+                "user_id": user.id,
+                "embedding": emb,
+                "embedding_model": profile.embedding_model,
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping my-voice profile user=%d (decode failed): %s", user.id, exc)
+    return out
+
+
+# Voiceprint-poisoning floor (v3.36.0 hardening): once a voiceprint exists,
+# a new fold must be cosine-consistent with the enrolled centroid or it is
+# SKIPPED. Cross-speaker cosine on these embeddings sits near 0; genuine
+# same-speaker pooled samples sit well above 0.30 even across acoustic
+# conditions (phone-band vs desk mic).
+MY_VOICE_FOLD_CONSISTENCY_FLOOR = float(
+    os.getenv("MY_VOICE_FOLD_CONSISTENCY_FLOOR", "0.30")
+)
+
+
+def fold_embedding_into_user_voice(
+    db: Session,
+    user_id: int,
+    embedding: list[float],
+    *,
+    embedding_model: Optional[str] = None,
+):
+    """Fold one pooled embedding into the user's account-level "My Voice"
+    profile (create the row if missing — stamping consent_at, the biometric
+    consent record; consent_at is set only via explicit user action, since
+    every caller of this function is gated on an explicit is_me claim or
+    the explicit enroll endpoint). Running-centroid via update_centroid +
+    sample_count. Caller is responsible for db.commit().
+
+    Poisoning/theft mitigation (v3.36.0 hardening): when the profile already
+    has an enrolled centroid (sample_count >= 1), the new embedding is folded
+    ONLY when it is dimensionally compatible AND cosine-consistent
+    (>= MY_VOICE_FOLD_CONSISTENCY_FLOOR) with that centroid. Inconsistent or
+    dim-mismatched samples are SKIPPED — never averaged in, and never allowed
+    to restart the centroid (a restart-on-dim-change would be a voiceprint
+    replacement primitive). Re-enrolling after an embedding-model upgrade
+    requires an explicit DELETE /api/me/voice first.
+
+    Returns ``(profile, status)`` where status is ``"folded"`` or one of
+    ``"skipped:dim_mismatch"`` / ``"skipped:low_similarity"`` so callers can
+    react (the explicit enroll endpoint surfaces skips as HTTP 409; the
+    best-effort speaker-naming folds just log).
+    """
+    from database.models import UserVoiceProfile
+
+    if not embedding:
+        raise ValueError("empty embedding")
+
+    profile = (
+        db.query(UserVoiceProfile)
+        .filter(UserVoiceProfile.user_id == user_id)
+        .first()
+    )
+    if profile is None:
+        profile = UserVoiceProfile(
+            user_id=user_id,
+            sample_count=0,
+            consent_at=datetime.now(timezone.utc),
+        )
+        db.add(profile)
+        db.flush()
+
+    old_centroid = None
+    old_count = profile.sample_count or 0
+    if profile.centroid_embedding and old_count >= 1:
+        if profile.embedding_dim not in (None, len(embedding)):
+            logger.warning(
+                "my-voice fold SKIPPED: dim mismatch %s -> %s for user=%s "
+                "(clear the voiceprint to re-enroll)",
+                profile.embedding_dim, len(embedding), user_id,
+            )
+            return profile, "skipped:dim_mismatch"
+        old_centroid = decode_embedding(profile.centroid_embedding, profile.embedding_dim)
+        if not old_centroid or len(old_centroid) != len(embedding):
+            logger.warning(
+                "my-voice fold SKIPPED: stored centroid unusable (len=%s vs %s) for user=%s",
+                len(old_centroid or []), len(embedding), user_id,
+            )
+            return profile, "skipped:dim_mismatch"
+        sim = cosine_similarity(embedding, old_centroid)
+        if sim < MY_VOICE_FOLD_CONSISTENCY_FLOOR:
+            logger.warning(
+                "my-voice fold SKIPPED: sample inconsistent with enrolled "
+                "voiceprint (cos=%.3f < %.2f) for user=%s",
+                sim, MY_VOICE_FOLD_CONSISTENCY_FLOOR, user_id,
+            )
+            return profile, "skipped:low_similarity"
+
+    new_centroid = update_centroid(old_centroid, old_count if old_centroid else 0, embedding)
+    profile.centroid_embedding = encode_embedding(new_centroid)
+    profile.embedding_dim = len(new_centroid)
+    profile.embedding_model = embedding_model or profile.embedding_model or DEFAULT_EMBEDDING_MODEL
+    profile.sample_count = old_count + 1
+    if profile.consent_at is None:
+        profile.consent_at = datetime.now(timezone.utc)
+    db.flush()
+    return profile, "folded"
+
+
+def _bootstrap_speaker_for_user(
+    db: Session,
+    organization_id: int,
+    user,
+    mv_candidate: dict,
+) -> Optional[SpeakerProfile]:
+    """Find-or-create the org SpeakerProfile for a my-voice-matched user.
+
+    Lookup order: linked_user_id, then case-insensitive display_name ==
+    user.full_name (claiming it via linked_user_id), then CREATE. The
+    (organization_id, display_name) unique index means a same-name profile
+    belonging to a DIFFERENT person forces a " (2)" suffix.
+    """
+    speaker = (
+        db.query(SpeakerProfile)
+        .filter(
+            SpeakerProfile.organization_id == organization_id,
+            SpeakerProfile.linked_user_id == user.id,
+        )
+        .first()
+    )
+
+    if speaker is None:
+        full_name = (user.full_name or "").strip()
+        if full_name:
+            # Only claim an UNLINKED same-name profile — a profile already
+            # linked to a DIFFERENT user is someone else's identity and must
+            # fall through to the suffixed-create branch below (v3.36.0
+            # hardening: name collision must never steal a linked profile).
+            speaker = (
+                db.query(SpeakerProfile)
+                .filter(
+                    SpeakerProfile.organization_id == organization_id,
+                    func.lower(SpeakerProfile.display_name) == full_name.lower(),
+                    SpeakerProfile.linked_user_id.is_(None),
+                )
+                .first()
+            )
+            if speaker is not None:
+                speaker.linked_user_id = user.id
+
+    if speaker is None:
+        base_name = (user.full_name or user.username or f"User {user.id}").strip()
+        name = base_name
+        suffix = 2
+        # Same display_name in this org but a different person — suffix.
+        while (
+            db.query(SpeakerProfile)
+            .filter(
+                SpeakerProfile.organization_id == organization_id,
+                func.lower(SpeakerProfile.display_name) == name.lower(),
+            )
+            .first()
+            is not None
+        ):
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+        speaker = SpeakerProfile(
+            organization_id=organization_id,
+            display_name=name,
+            email=user.email,
+            linked_user_id=user.id,
+            created_by_user_id=None,
+        )
+        db.add(speaker)
+
+    # Seed the org profile's voiceprint from the account centroid so the
+    # ORG library can match this person directly on the next meeting.
+    if not speaker.centroid_embedding:
+        emb = mv_candidate.get("embedding") or []
+        if emb:
+            speaker.centroid_embedding = encode_embedding(emb)
+            speaker.embedding_dim = len(emb)
+            speaker.embedding_model = mv_candidate.get("embedding_model") or DEFAULT_EMBEDDING_MODEL
+            speaker.sample_count = 1
+
+    db.flush()
+    return speaker
+
+
+def recompute_speaker_from_samples(db: Session, speaker: SpeakerProfile) -> None:
+    """Rebuild *speaker*'s centroid strictly from its own SpeakerVoiceSample
+    rows (running mean in id order; sample_count = real sample count).
+
+    A profile with NO samples — e.g. a pure my-voice-seeded bootstrap, or one
+    whose samples were all deleted — gets centroid_embedding/embedding_dim/
+    embedding_model nulled and sample_count=0. Used by speaker merge and by
+    DELETE /api/me/voice (which must purge account-voiceprint seeds from
+    every linked org profile). Caller is responsible for db.commit().
+    """
+    samples = (
+        db.query(SpeakerVoiceSample)
+        .filter(SpeakerVoiceSample.speaker_id == speaker.id)
+        .order_by(SpeakerVoiceSample.id.asc())
+        .all()
+    )
+    centroid: Optional[list[float]] = None
+    model: Optional[str] = None
+    for idx, sample in enumerate(samples):
+        vec = decode_embedding(sample.embedding, sample.embedding_dim)
+        centroid = update_centroid(centroid, idx, vec)
+        model = sample.embedding_model
+    if centroid is None:
+        speaker.centroid_embedding = None
+        speaker.embedding_dim = None
+        speaker.embedding_model = None
+        speaker.sample_count = 0
+    else:
+        speaker.centroid_embedding = encode_embedding(centroid)
+        speaker.embedding_dim = len(centroid)
+        speaker.embedding_model = model
+        speaker.sample_count = len(samples)
 
 
 def add_voice_sample(
@@ -529,6 +783,10 @@ def identify_speakers(
     # If the provider already returned per-segment embeddings, use them. If
     # not, embed each chosen segment via /embed (the slower path).
     candidates = candidates_for_org(db, session.organization_id)
+    # "My Voice" (v3.36.0): account-level voiceprints of this org's MEMBERS.
+    # Matched locally below — never sent through provider.identify (its
+    # speaker_id plumbing is org SpeakerProfile ids).
+    my_voice_candidates = my_voice_candidates_for_org(db, session.organization_id)
     label_to_speaker: dict[str, dict] = {}
 
     for label, item in by_label.items():
@@ -541,26 +799,97 @@ def identify_speakers(
             label_to_speaker[label] = {"matched": False, "reason": "no_embedding"}
             continue
 
-        if not candidates:
+        if not candidates and not my_voice_candidates:
             label_to_speaker[label] = {"matched": False, "reason": "no_enrolled_speakers"}
             continue
 
-        try:
-            result = _run_async(provider.identify(emb, candidates, threshold))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("identify(label=%s) failed: %s", label, exc)
-            label_to_speaker[label] = {"matched": False, "reason": str(exc)}
-            continue
+        # Org-library match via the provider (unchanged path).
+        org_best: Optional[tuple[int, float]] = None  # (speaker_id, similarity)
+        org_miss_reason = "below_threshold"
+        if candidates:
+            try:
+                result = _run_async(provider.identify(emb, candidates, threshold))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("identify(label=%s) failed: %s", label, exc)
+                result = None
+                org_miss_reason = str(exc)
+            best = result.get("best_match") if result else None
+            if best and best.get("matched"):
+                org_best = (best["speaker_id"], float(best["similarity"]))
 
-        best = result.get("best_match") if result else None
-        if best and best.get("matched"):
+        # My-voice match: LOCAL numpy cosine against decoded member centroids.
+        # Per-candidate guarded — one bad row (empty decode, dim mismatch,
+        # numpy error) must never abort the whole identify pass.
+        mv_best: Optional[dict] = None
+        mv_best_sim = -1.0
+        for cand in my_voice_candidates:
+            cand_emb = cand.get("embedding") or []
+            if not cand_emb or len(cand_emb) != len(emb):
+                logger.debug(
+                    "my-voice candidate user=%s skipped (dim %s vs %s)",
+                    cand.get("user_id"), len(cand_emb), len(emb),
+                )
+                continue
+            try:
+                sim = cosine_similarity(emb, cand_emb)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "my-voice cosine failed for user=%s (skipping candidate): %s",
+                    cand.get("user_id"), exc,
+                )
+                continue
+            if sim > mv_best_sim:
+                mv_best_sim = sim
+                mv_best = cand
+        mv_match = mv_best if (mv_best is not None and mv_best_sim >= threshold) else None
+
+        # A label the user already CONFIRMED gets ZERO my-voice side effects:
+        # no SpeakerProfile bootstrap, no linked_user_id claim. The persist
+        # loop below already refuses to overwrite confirmed links — this
+        # guard stops the bootstrap mutations from happening at all (the
+        # org-library result, if any, proceeds unchanged).
+        if mv_match is not None:
+            confirmed_link = (
+                db.query(SpeakerSessionLink)
+                .filter(
+                    SpeakerSessionLink.session_id == session.id,
+                    SpeakerSessionLink.raw_label == label,
+                    SpeakerSessionLink.confirmed.is_(True),
+                )
+                .first()
+            )
+            if confirmed_link is not None:
+                mv_match = None
+
+        # Decision: whichever similarity is higher wins; tie -> org library.
+        if org_best is not None and (mv_match is None or org_best[1] >= mv_best_sim):
             label_to_speaker[label] = {
                 "matched": True,
-                "speaker_id": best["speaker_id"],
-                "similarity": best["similarity"],
+                "speaker_id": org_best[0],
+                "similarity": org_best[1],
             }
+        elif mv_match is not None:
+            user = mv_match["user"]
+            speaker = _bootstrap_speaker_for_user(
+                db, session.organization_id, user, mv_match
+            )
+            if speaker is not None:
+                logger.info(
+                    "my-voice match user=%s sim=%.3f -> speaker=%s",
+                    user.id, mv_best_sim, speaker.id,
+                )
+                label_to_speaker[label] = {
+                    "matched": True,
+                    "speaker_id": speaker.id,
+                    "similarity": mv_best_sim,
+                }
+            else:
+                label_to_speaker[label] = {
+                    "matched": False,
+                    "reason": "my_voice_bootstrap_failed",
+                }
         else:
-            label_to_speaker[label] = {"matched": False, "reason": "below_threshold"}
+            label_to_speaker[label] = {"matched": False, "reason": org_miss_reason}
 
     # Persist links + rewrite diarized segments
     links_by_label: dict[str, SpeakerSessionLink] = {}

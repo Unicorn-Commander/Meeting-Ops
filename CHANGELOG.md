@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+## [3.36.0] - 2026-06-10
+
+**"My Voice" portable voiceprints + same-meeting duplicate detection.** (4-agent build swarm + adversarial tenancy/privacy review + hardening pass.)
+
+### Added
+- **"My Voice" — a portable, account-level self-voiceprint** (`user_voice_profile`, migration 045). Workspace voiceprints stay hard tenant-scoped (no cross-tenant matching, ever); My Voice adds ONE voiceprint that follows *your account* and participates in identification only inside workspaces where you're a member. On a My-Voice match, the workspace's own SpeakerProfile is auto-created/seeded from your portable centroid — so joining a new workspace means you're auto-named from your first meeting, and the workspace library refines locally from there.
+  - **"This is me" checkbox** in the speaker-naming flows (assign + create + enroll): explicitly claims the speaker as you (links it to your account, 409 if it belongs to someone else) and folds that meeting's pooled voice sample into your account voiceprint. Every self-naming in every acoustic condition (desk, phone, headset) refines it.
+  - **Settings → Privacy → My Voice card**: enrollment status, sample count, and a "Clear my voiceprint" button. `GET/DELETE /api/me/voice` + `POST /api/me/voice/enroll-from-session`.
+  - **Privacy hardening (from the adversarial review):** biometric enrollment requires an *explicit* claim — an email match alone never enrolls; a consistency floor (cosine ≥ 0.30 vs your existing centroid) blocks folding someone *else's* voice into your profile (explicit enroll surfaces it as 409); deleting My Voice also strips every org centroid that was seeded from it (org-recorded samples remain that workspace's data — documented); a my-voice match can never steal a same-name SpeakerProfile already linked to another user; user-confirmed labels get zero my-voice side effects; one bad/stale voiceprint row can no longer abort the whole identify pass.
+- **Same-meeting duplicate detection (v1: detect + link).** When two workspace members each record the same call, the session detail now shows "It looks like {name} also recorded this meeting" with a link to their copy. Computed on read (same org, different recorder, >50% time overlap of the shorter recording, >60s) — no migration, self-healing, never crosses the tenant wall, and gated to actual org members (external single-meeting collaborators see nothing).
+- Tests: `test_my_voice.py` (12), `test_related_sessions.py` (7).
+
 ## [3.35.1] - 2026-06-10
 
 ### Added

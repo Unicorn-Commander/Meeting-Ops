@@ -82,6 +82,38 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   return response;
 }
 
+// ── "My Voice" personal voiceprint API ──────────────────────────────
+// User-scoped (not org-scoped) endpoints: the voiceprint follows the
+// account across workspaces. Auth headers are injected by the global
+// fetch interceptor (installFetchInterceptor.ts).
+
+export interface MyVoiceStatus {
+  enrolled: boolean;
+  sample_count: number;
+  embedding_model: string | null;
+  updated_at: string | null;
+  consent_at: string | null;
+}
+
+/** GET /api/me/voice — current user's voiceprint enrollment status. */
+export async function getMyVoice(): Promise<MyVoiceStatus> {
+  const res = await apiFetch(`${getTargetApiBase()}/api/me/voice`);
+  if (!res.ok) {
+    throw new Error(`Failed to load voice status (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+/** DELETE /api/me/voice — delete the voiceprint (idempotent 204). */
+export async function deleteMyVoice(): Promise<void> {
+  const res = await apiFetch(`${getTargetApiBase()}/api/me/voice`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to delete voiceprint (HTTP ${res.status})`);
+  }
+}
+
 /**
  * Check if a response indicates a stale session that needs recovery.
  * Call this after apiFetch for non-critical endpoints.

@@ -166,6 +166,125 @@ def _recorded_by_name(db: Session, user_id: Optional[int]) -> Optional[str]:
     return u.full_name or u.username or u.email or f"User {u.id}"
 
 
+def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Normalize a datetime to naive-UTC so window math never mixes
+    tz-aware and naive values (Postgres returns naive, but defaults are
+    stamped tz-aware before the first round-trip)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _session_recording_window(
+    session: DBRecordingSession,
+) -> Optional[tuple[datetime, datetime, float]]:
+    """(start, end, duration_seconds) of a session's recording window, or
+    None when it can't be computed / is too short to matter.
+
+    start = started_at when set, else created_at; end = start + duration.
+    Sessions with no usable start, null duration, or duration <= 60s are
+    excluded — sub-minute blips produce garbage overlap signals."""
+    start = _naive_utc(getattr(session, "started_at", None)) or _naive_utc(
+        session.created_at
+    )
+    if start is None:
+        return None
+    try:
+        duration = float(session.duration) if session.duration is not None else None
+    except (TypeError, ValueError):
+        return None
+    if duration is None or duration <= 60.0:
+        return None
+    return start, start + timedelta(seconds=duration), duration
+
+
+def _related_sessions(db: Session, session: DBRecordingSession) -> List[dict]:
+    """Same-meeting duplicate detection, v1: detect + link (NO merge).
+
+    Two members of the same workspace can each record the SAME call; this
+    finds OTHER completed sessions in the SAME organization recorded by a
+    DIFFERENT user whose recording window overlaps this one's by more than
+    50% of the SHORTER session. Computed on read (no migration, no
+    stamping — self-healing as sessions change). Cross-org copies must
+    NEVER link: the tenant wall is the whole point.
+
+    Never raises — a detail page must not 500 because of this affordance.
+    """
+    try:
+        window = _session_recording_window(session)
+        if window is None or session.organization_id is None:
+            return []
+        start, end, duration = window
+
+        # Coarse SQL bound (cheap): same org, completed, plausible duration,
+        # start within +/- 24h of this session's start. Precise overlap math
+        # happens in Python below.
+        coarse_lo = start - timedelta(hours=24)
+        coarse_hi = start + timedelta(hours=24)
+        candidate_start = func.coalesce(
+            DBRecordingSession.started_at, DBRecordingSession.created_at
+        )
+        candidates = (
+            db.query(DBRecordingSession)
+            .filter(
+                DBRecordingSession.id != session.id,
+                DBRecordingSession.organization_id == session.organization_id,
+                DBRecordingSession.status == "completed",
+                DBRecordingSession.duration.isnot(None),
+                DBRecordingSession.duration > 60.0,
+                candidate_start >= coarse_lo,
+                candidate_start <= coarse_hi,
+            )
+            .order_by(candidate_start.asc())
+            .limit(200)
+            .all()
+        )
+
+        related: List[dict] = []
+        for cand in candidates:
+            try:
+                # DIFFERENT user required. None == None also (correctly)
+                # fails to link — two ownerless rows aren't evidence of two
+                # people recording one call.
+                if cand.user_id == session.user_id:
+                    continue
+                cand_window = _session_recording_window(cand)
+                if cand_window is None:
+                    continue
+                c_start, c_end, c_duration = cand_window
+                overlap = (min(end, c_end) - max(start, c_start)).total_seconds()
+                shorter = min(duration, c_duration)
+                if overlap <= 0.5 * shorter:
+                    continue
+                related.append(
+                    {
+                        "id": cand.id,
+                        "name": cand.name or cand.title or f"Session {cand.id}",
+                        "recorded_by": _recorded_by_name(db, cand.user_id),
+                        "started_at": c_start.isoformat(),
+                        "duration": c_duration,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 — skip one bad candidate
+                logger.warning(
+                    "related-sessions: skipping candidate %s for session %s: %s",
+                    getattr(cand, "id", "?"),
+                    session.id,
+                    exc,
+                )
+                continue
+        return related
+    except Exception as exc:  # noqa: BLE001 — never fail the detail page
+        logger.warning(
+            "related-sessions detection failed for session %s: %s",
+            getattr(session, "id", "?"),
+            exc,
+        )
+        return []
+
+
 def _brigade_graph_url_for_session(session: DBRecordingSession) -> Optional[str]:
     """Build the per-session Brigade graph deep-link, or None when this
     session has never been written to Brigade.
@@ -820,7 +939,23 @@ async def get_session(
 
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
+        # related_sessions exposes metadata (titles, recorder names, times)
+        # of OTHER sessions in the HOST org — only actual MEMBERS of that
+        # org may see it. A caller who reached this session through the
+        # collaborator fallback above (or any other non-member path) gets
+        # an empty list (v3.36.0 hardening).
+        from auth.models import UserOrganization
+        caller_is_org_member = bool(
+            session.organization_id is not None
+            and db.query(UserOrganization)
+            .filter(
+                UserOrganization.user_id == current_user.id,
+                UserOrganization.organization_id == session.organization_id,
+            )
+            .first()
+        )
+
         # Parse transcription if it exists - with safe error handling
         transcription_data = None
         if session.transcript:
@@ -914,6 +1049,15 @@ async def get_session(
             # Provenance: whose account captured/uploaded this session
             # (workspaces are shared; two members can record the same call).
             "recorded_by": _recorded_by_name(db, session.user_id),
+            # Same-meeting duplicate detection (v1 detect + link, no merge):
+            # other completed same-org sessions by a DIFFERENT user whose
+            # recording window overlaps this one's by >50% of the shorter
+            # session. Computed on read; internally guarded (never 500s),
+            # empty list when none. ORG MEMBERS ONLY — external
+            # collaborators must not see the host org's other sessions.
+            "related_sessions": (
+                _related_sessions(db, session) if caller_is_org_member else []
+            ),
             "meeting_type": session.meeting_type,
             "updated_at": session.updated_at.isoformat() if session.updated_at else None,
             # Project linking (Phase 2)

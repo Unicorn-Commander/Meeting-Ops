@@ -218,6 +218,19 @@ interface Session {
   brigade_graph_node_id?: string | null;
   brigade_synced_at?: string | null;
   brigade_graph_url?: string | null;
+  // v3.36 duplicate detection: other org members' copies of this same
+  // meeting (overlapping recordings). Optional — older payloads and
+  // local-only sessions won't carry it; empty list when none.
+  related_sessions?: RelatedSession[];
+}
+
+/** Another user's copy of the same meeting (duplicate detection, v3.36). */
+interface RelatedSession {
+  id: number;
+  name: string;
+  recorded_by?: string | null;
+  started_at?: string | null;
+  duration?: number | null;
 }
 
 interface Participant {
@@ -273,6 +286,14 @@ export const SessionDetails: React.FC = () => {
   const [deleteLocalConfirmOpen, setDeleteLocalConfirmOpen] = useState(false);
   
   const [session, setSession] = useState<Session | null>(null);
+  // v3.36 duplicate detection: dismissible "{recorded_by} also recorded
+  // this meeting" banner. Component-state only (no persistence); reset
+  // when the user navigates to a different session so each copy gets
+  // its own banner.
+  const [relatedBannerDismissed, setRelatedBannerDismissed] = useState(false);
+  useEffect(() => {
+    setRelatedBannerDismissed(false);
+  }, [sessionId]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -2482,6 +2503,49 @@ export const SessionDetails: React.FC = () => {
         {/* Free-tier upgrade banner. Hidden for paid/superuser tiers and
             self-dismissible for 7 days. See components/UpgradeBanner.tsx. */}
         <UpgradeBanner />
+        {/* v3.36 duplicate detection: another org member also recorded this
+            same meeting. Surfaced as a dismissible info banner (dismiss is
+            component-state only — no persistence) with a link to each
+            related copy's detail page. */}
+        {!relatedBannerDismissed && (session.related_sessions?.length ?? 0) > 0 && (
+          <div className="bg-amber-50 border border-amber-300 rounded-lg p-4 mb-6 flex items-start gap-3">
+            <Mic className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-amber-900">
+                This meeting may have been recorded more than once
+              </h3>
+              <ul className="mt-1 space-y-1">
+                {session.related_sessions!.map((related) => (
+                  <li
+                    key={related.id}
+                    className="text-sm text-amber-800 flex flex-wrap items-center gap-x-2"
+                  >
+                    <span>
+                      It looks like {related.recorded_by || 'someone else'} also recorded this meeting.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/sessions/${related.id}`)}
+                      className="font-medium text-amber-700 underline hover:text-amber-900 transition-colors"
+                      title={related.name ? `Open "${related.name}"` : 'Open their copy'}
+                    >
+                      View their copy
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRelatedBannerDismissed(true)}
+              className="flex-shrink-0 p-1 text-amber-500 hover:text-amber-800 rounded transition-colors"
+              title="Dismiss"
+              aria-label="Dismiss duplicate-recording notice"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">

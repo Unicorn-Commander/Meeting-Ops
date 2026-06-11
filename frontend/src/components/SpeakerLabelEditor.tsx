@@ -70,6 +70,11 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
   }>({ display_name: '', email: '', phone: '', title: '', company: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "This is me" — when checked, the assign/enroll call also updates the
+  // current user's personal voice fingerprint (is_me: true in the body).
+  // Unchecked by default and reset after each successful send so a later
+  // labeling of someone ELSE can't pollute the user's voiceprint.
+  const [isMe, setIsMe] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   const orgHeaders = (): Record<string, string> => {
@@ -124,13 +129,17 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         {
           method: 'POST',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_name: name }),
+          body: JSON.stringify({ display_name: name, ...(isMe ? { is_me: true } : {}) }),
         },
       );
       if (res.ok) {
         setOpen(false);
         setMode('menu');
         setDraftName('');
+        if (isMe) {
+          showToast.success('Your personal voice fingerprint was updated.');
+          setIsMe(false);
+        }
         showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
@@ -153,11 +162,15 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         {
           method: 'PATCH',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ speaker_id: speakerId, confirmed: true }),
+          body: JSON.stringify({ speaker_id: speakerId, confirmed: true, ...(isMe ? { is_me: true } : {}) }),
         },
       );
       if (res.ok) {
         setOpen(false);
+        if (isMe) {
+          showToast.success('Your personal voice fingerprint was updated.');
+          setIsMe(false);
+        }
         showToast.info('Summary will update with the new name in about a minute.');
         onChanged();
       } else {
@@ -262,7 +275,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
   return (
     <span className="relative inline-flex items-center">
       <button
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); setMode('menu'); setError(null); }}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); setMode('menu'); setError(null); setIsMe(false); }}
         className="inline-flex items-center gap-1 text-sm font-medium text-purple-600 hover:text-purple-800 hover:underline group"
         title="Click to rename, edit contact, or merge this speaker"
       >
@@ -310,6 +323,16 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
                   Edit contact details…
                 </button>
               )}
+
+              <label className="flex items-start gap-2 px-2 py-1.5 text-xs text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isMe}
+                  onChange={(e) => setIsMe(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 accent-purple-600"
+                />
+                <span>This is me — also update my personal voice fingerprint</span>
+              </label>
 
               {speakers.length > 0 && (
                 <div className="pt-1 pb-0.5">
@@ -376,6 +399,16 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
                 disabled={busy}
                 className="w-full rounded border border-purple-400 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
               />
+              <label className="flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isMe}
+                  onChange={(e) => setIsMe(e.target.checked)}
+                  disabled={busy}
+                  className="mt-0.5 h-3.5 w-3.5 accent-purple-600"
+                />
+                <span>This is me — also update my personal voice fingerprint</span>
+              </label>
               <div className="flex items-center justify-end gap-2">
                 <button
                   onClick={() => { setMode('menu'); setError(null); }}

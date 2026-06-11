@@ -628,6 +628,39 @@ class SpeakerSessionLink(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class UserVoiceProfile(Base):
+    """"My Voice" — ONE portable self-voiceprint per USER ACCOUNT (v3.36.0).
+
+    SpeakerProfile is hard tenant-scoped (biometric privacy: no cross-tenant
+    matching, ever). This row is the single sanctioned exception: it belongs
+    to the ACCOUNT, and it participates in identification ONLY inside
+    workspaces where that user is a member (services.speaker_service joins
+    through user_organizations at identify time — the embedding itself never
+    crosses a tenant boundary the user isn't already inside).
+
+    consent_at is the biometric consent record — stamped ONLY by explicit
+    user action (an is_me claim on a speaker-naming surface, or POST
+    /api/me/voice/enroll-from-session; never by implicit inference such as
+    an email match) and never cleared while the row exists. Deleting the row
+    (DELETE /api/me/voice) destroys the voiceprint and recomputes any org
+    SpeakerProfile centroids that were seeded from it.
+    """
+    __tablename__ = "user_voice_profile"
+    __table_args__ = (
+        Index("uq_user_voice_profile_user", "user_id", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    centroid_embedding = Column(LargeBinary, nullable=True)
+    embedding_dim = Column(Integer, nullable=True)
+    embedding_model = Column(String(100), nullable=True)
+    sample_count = Column(Integer, nullable=False, default=0, server_default="0")
+    consent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class TtsJob(Base):
     """Asynchronous TTS rendering jobs (summary single-voice and podcast multi-voice).
 

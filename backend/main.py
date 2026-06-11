@@ -410,6 +410,8 @@ _load_router(app, "founding_admin", "api.founding", router_attr="admin_router")
 
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")
+# "My Voice" portable account-level voiceprint (v3.36.0)
+_load_router(app, "my_voice", "api.my_voice")
 
 # === PHASE 4A ROUTERS ===
 _load_router(app, "uploads", "api.uploads")

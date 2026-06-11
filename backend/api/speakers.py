@@ -53,6 +53,7 @@ from services.speaker_service import (
     decode_embedding,
     encode_embedding,
     identify_speakers,
+    recompute_speaker_from_samples,
     update_centroid,
 )
 
@@ -147,6 +148,10 @@ class SpeakerLinkResponse(BaseModel):
 class SpeakerLinkUpdate(BaseModel):
     speaker_id: Optional[int] = None  # None / 0 to clear
     confirmed: bool = True
+    # v3.36.0 "My Voice": the caller asserts THIS cluster is themself. Links
+    # the speaker to the caller's account and folds the pooled session
+    # embedding into their portable user_voice_profile.
+    is_me: bool = False
 
 
 class SpeakerContactLinkUpdate(BaseModel):
@@ -326,6 +331,71 @@ def _segments_for_label(session: RecordingSession, raw_label: str) -> list[dict]
     return out
 
 
+def _apply_is_me_claim(speaker: SpeakerProfile, current_user: User) -> None:
+    """is_me assertion: bind this SpeakerProfile to the caller's account.
+
+    409 when the profile already belongs to a DIFFERENT user — "this voice
+    is me" can never silently steal someone else's identity link.
+    """
+    if speaker.linked_user_id is not None and speaker.linked_user_id != current_user.id:
+        raise HTTPException(
+            status_code=409,
+            detail="This speaker is already linked to a different user account.",
+        )
+    speaker.linked_user_id = current_user.id
+    speaker.email = speaker.email or current_user.email
+
+
+def _maybe_fold_my_voice(
+    db: Session,
+    current_user: User,
+    speaker: SpeakerProfile,
+    emb: Optional[list[float]],
+    *,
+    is_me: bool,
+) -> None:
+    """Best-effort (never raises): fold a pooled session embedding into the
+    CALLER's account-level user_voice_profile ("My Voice", v3.36.0).
+
+    Biometric enrollment requires an EXPLICIT claim (v3.36.0 hardening): the
+    fold runs only when the caller asserts is_me on THIS request, or the
+    profile is already linked to the caller (speaker.linked_user_id ==
+    current_user.id — i.e. a previous explicit is_me claim; refinement then
+    continues). An email match alone is deliberately NOT sufficient —
+    speaker emails are free-form org data and must never trigger enrollment
+    of the caller's account voiceprint. Folds skipped by the consistency
+    floor / dim guard in fold_embedding_into_user_voice stay silent here
+    (the explicit /api/me/voice/enroll-from-session endpoint surfaces them
+    as 409)."""
+    try:
+        if not emb:
+            return
+        if not (is_me or speaker.linked_user_id == current_user.id):
+            return
+        from services.speaker_service import fold_embedding_into_user_voice
+
+        profile, status = fold_embedding_into_user_voice(
+            db,
+            current_user.id,
+            emb,
+            embedding_model=speaker.embedding_model or DEFAULT_EMBEDDING_MODEL,
+        )
+        if status == "folded":
+            logger.info(
+                "my-voice fold: user=%s samples=%s (from speaker=%s)",
+                current_user.id, profile.sample_count, speaker.id,
+            )
+        else:
+            logger.warning(
+                "my-voice fold skipped (%s) user=%s (from speaker=%s)",
+                status, current_user.id, speaker.id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "my-voice fold failed (non-fatal) user=%s: %s", current_user.id, exc
+        )
+
+
 def _segment_duration(seg: dict) -> float:
     try:
         return max(0.0, float(seg.get("end") or 0) - float(seg.get("start") or 0))
@@ -384,31 +454,6 @@ def _top_matches_for_centroid(
             logger.debug("Skipping speaker match candidate %s: %s", speaker.id, exc)
     scored.sort(key=lambda item: item.similarity, reverse=True)
     return scored[:3]
-
-
-def _recompute_speaker_from_samples(db: Session, speaker: SpeakerProfile) -> None:
-    samples = (
-        db.query(SpeakerVoiceSample)
-        .filter(SpeakerVoiceSample.speaker_id == speaker.id)
-        .order_by(SpeakerVoiceSample.id.asc())
-        .all()
-    )
-    centroid: Optional[list[float]] = None
-    model: Optional[str] = None
-    for idx, sample in enumerate(samples):
-        vec = decode_embedding(sample.embedding, sample.embedding_dim)
-        centroid = update_centroid(centroid, idx, vec)
-        model = sample.embedding_model
-    if centroid is None:
-        speaker.centroid_embedding = None
-        speaker.embedding_dim = None
-        speaker.embedding_model = None
-        speaker.sample_count = 0
-    else:
-        speaker.centroid_embedding = encode_embedding(centroid)
-        speaker.embedding_dim = len(centroid)
-        speaker.embedding_model = model
-        speaker.sample_count = len(samples)
 
 
 def _delete_merged_source(db: Session, source: SpeakerProfile) -> None:
@@ -851,7 +896,7 @@ async def merge_speaker_profile(
             .update({"speaker_id": target.id}, synchronize_session=False)
         )
         db.flush()
-        _recompute_speaker_from_samples(db, target)
+        recompute_speaker_from_samples(db, target)
         _delete_merged_source(db, source)
         db.add(AuditLog(
             user_id=current_user.id,
@@ -983,6 +1028,10 @@ async def update_speaker_link(
         # meeting's workspace), not the caller's active workspace — see the
         # create_speaker_for_link comment (v3.34.0 god-view fix).
         speaker = _get_speaker_or_404(db, session.organization_id, payload.speaker_id)
+        if payload.is_me:
+            # v3.36.0 "My Voice": bind the profile to the caller (409 if it
+            # already belongs to someone else).
+            _apply_is_me_claim(speaker, current_user)
         link.speaker_id = speaker.id
     else:
         link.speaker_id = None
@@ -1025,6 +1074,9 @@ async def update_speaker_link(
                     "assign_confirm: harvested voice sample speaker=%s session=%s "
                     "(samples now %s)", speaker.id, session.id, speaker.sample_count,
                 )
+            # v3.36.0 "My Voice": the same pooled embedding also feeds the
+            # caller's portable account voiceprint when this speaker is them.
+            _maybe_fold_my_voice(db, current_user, speaker, emb, is_me=payload.is_me)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "assign_confirm sample harvest failed (non-fatal) session=%s: %s",
@@ -1088,6 +1140,8 @@ class CreateSpeakerForLinkRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
     company: Optional[str] = Field(default=None, max_length=200)
     notes: Optional[str] = Field(default=None, max_length=1000)
+    # v3.36.0 "My Voice": see SpeakerLinkUpdate.is_me.
+    is_me: bool = False
 
 
 @router.post(
@@ -1166,11 +1220,42 @@ async def create_speaker_for_link(
         db.add(speaker)
         db.flush()
 
+    if payload.is_me:
+        # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
+        # 409 when a reused same-name profile belongs to a different user.
+        _apply_is_me_claim(speaker, current_user)
+
     # Link + confirm (user-asserted match).
     link.speaker_id = speaker.id
     link.source = "manual"
     link.confirmed = True
     link.confirmed_by_user_id = current_user.id
+
+    # v3.36.0 "My Voice": when the caller asserts/implies this cluster is
+    # themself, pool an embedding from this session's turn bank (same shape
+    # as the assign-confirm harvest) and fold it into their portable
+    # user_voice_profile. Best-effort — never fails the naming.
+    try:
+        from services.speaker_service import pooled_embedding
+
+        diarized_doc = (
+            session.transcript_diarized
+            if isinstance(session.transcript_diarized, dict)
+            else {}
+        )
+        my_voice_turns = [
+            t for t in (diarized_doc.get("speaker_turns") or [])
+            if (t.get("speaker") or "").strip() == link.raw_label
+        ]
+        my_voice_emb = pooled_embedding(my_voice_turns) or pooled_embedding(
+            _segments_for_label(session, link.raw_label)
+        )
+        _maybe_fold_my_voice(db, current_user, speaker, my_voice_emb, is_me=payload.is_me)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "create_speaker_for_link my-voice harvest failed (non-fatal) session=%s: %s",
+            session.id, exc,
+        )
 
     # Rewrite transcript_diarized.segments so the SessionDetails view shows
     # the new name everywhere this raw_label appears (mirrors /enroll step 6).
@@ -1422,6 +1507,8 @@ class EnrollFromSessionRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=120)
     email: Optional[str] = Field(default=None, max_length=200)
     notes: Optional[str] = Field(default=None, max_length=1000)
+    # v3.36.0 "My Voice": see SpeakerLinkUpdate.is_me.
+    is_me: bool = False
 
 
 
@@ -1624,6 +1711,13 @@ async def enroll_speaker_from_session(
         db.flush()
         created_new = True
 
+    if payload.is_me:
+        # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
+        # 409 when a reused same-name profile belongs to a different user —
+        # raised BEFORE any link mutation / sample write (mirrors
+        # create_speaker_for_link).
+        _apply_is_me_claim(speaker, current_user)
+
     # 4) Embed the slice via speaker-svc and add as a voice sample.
     registry = get_provider_registry(db)
     provider = registry.get_speaker_svc(active_org.organization.id)
@@ -1661,6 +1755,13 @@ async def enroll_speaker_from_session(
         audio_path=audio_path,
         duration_seconds=duration,
         source_session_id=session.id,
+    )
+
+    # v3.36.0 "My Voice": fold the freshly-embedded sample into the caller's
+    # portable user_voice_profile when this cluster is asserted (is_me) or
+    # inferred to be the caller. Best-effort — never fails the enrollment.
+    _maybe_fold_my_voice(
+        db, current_user, speaker, list(embedding), is_me=payload.is_me
     )
 
     # 5) Confirm the speaker_session_link.

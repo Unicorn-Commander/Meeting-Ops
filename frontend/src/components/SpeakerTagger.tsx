@@ -52,6 +52,11 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   const [enrollingLinkId, setEnrollingLinkId] = useState<number | null>(null);
   const [enrollName, setEnrollName] = useState<string>("");
   const [enrolling, setEnrolling] = useState(false);
+  // "This is me" — when checked, the next assign/enroll also updates the
+  // current user's personal voice fingerprint (is_me: true in the body).
+  // Unchecked by default and reset after a successful send so labeling
+  // someone ELSE afterwards can't pollute the user's voiceprint.
+  const [isMe, setIsMe] = useState(false);
 
 
   const orgHeaders = (): Record<string, string> => {
@@ -180,7 +185,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         {
           method: 'POST',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_name: name }),
+          body: JSON.stringify({ display_name: name, ...(isMe ? { is_me: true } : {}) }),
         },
       );
       if (res.ok) {
@@ -189,6 +194,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         await loadAll();
         setEnrollingLinkId(null);
         setEnrollName("");
+        if (isMe) {
+          showToast.success('Your personal voice fingerprint was updated.');
+          setIsMe(false);
+        }
         showToast.info('Summary will update with the new name in about a minute.');
       } else {
         const txt = await res.text();
@@ -202,13 +211,16 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
 
   const updateLink = async (link: SpeakerLink, speakerId: number | null) => {
     setPendingLinkId(link.id);
+    // Only stamp the user's voiceprint when actually assigning a speaker
+    // (not when clearing back to Unknown).
+    const sendIsMe = isMe && speakerId !== null;
     try {
       const res = await fetch(
         `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${link.id}`,
         {
           method: 'PATCH',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ speaker_id: speakerId, confirmed: true }),
+          body: JSON.stringify({ speaker_id: speakerId, confirmed: true, ...(sendIsMe ? { is_me: true } : {}) }),
         },
       );
       if (res.ok) {
@@ -216,6 +228,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         const next = links.map(l => (l.id === updated.id ? updated : l));
         setLinks(next);
         if (onChange) onChange(next);
+        if (sendIsMe) {
+          showToast.success('Your personal voice fingerprint was updated.');
+          setIsMe(false);
+        }
         if (speakerId !== null) {
           showToast.info('Summary will update with the new name in about a minute.');
         }
@@ -341,6 +357,16 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
           {error}
         </div>
       )}
+
+      <label className="mb-3 flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={isMe}
+          onChange={(e) => setIsMe(e.target.checked)}
+          className="mt-0.5 h-3.5 w-3.5 accent-purple-600"
+        />
+        <span>This is me — also update my personal voice fingerprint when I label a speaker below</span>
+      </label>
 
       <div className="space-y-2">
         {links.map(link => {
