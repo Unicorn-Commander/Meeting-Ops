@@ -25,6 +25,8 @@ from auth.utils import (
     verify_email_verification_token,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
 # Org/membership endpoints that read more naturally under /api/organizations
@@ -477,6 +479,45 @@ async def list_current_user_orgs(
     ]
 
 
+def _delete_user_fk_references(db: Session, user_id: int) -> None:
+    """Remove or null every row that references ``users.id`` WITHOUT a delete
+    cascade, so the final ``db.delete(user)`` can flush cleanly.
+
+    Verified against auth/models.py + database/models.py + the live alembic
+    migrations (everything else FKing users.id is ondelete=CASCADE/SET NULL):
+
+      - ``UserOrganization.user_id`` (NOT NULL, no ondelete): the User
+        relationship has no delete cascade, so SQLAlchemy tries to NULL the
+        FK at flush -> IntegrityError on EVERY user delete. Bulk-delete the
+        memberships instead.
+      - ``UserOrganization.invited_by`` (nullable, no ondelete, no reverse
+        relationship): Postgres rejects the user delete while any membership
+        still names them as inviter. Null it out — invitees keep their seat.
+      - ``UploadJob.user_id`` / ``TtsJob.user_id`` (NOT NULL, no ondelete, no
+        ORM relationship): Postgres-only aborts. Session-bound jobs die with
+        the session cascade, but session-less upload jobs and TTS jobs the
+        user queued on OTHER people's shared sessions survive -> delete by
+        user_id explicitly.
+
+    AuditLog.user_id is intentionally untouched: it is nullable and the
+    User.audit_logs relationship nullifies it at flush, preserving the trail.
+    """
+    from database.models import TtsJob, UploadJob
+
+    db.query(UploadJob).filter(UploadJob.user_id == user_id).delete(
+        synchronize_session=False
+    )
+    db.query(TtsJob).filter(TtsJob.user_id == user_id).delete(
+        synchronize_session=False
+    )
+    db.query(UserOrganization).filter(
+        UserOrganization.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(UserOrganization).filter(
+        UserOrganization.invited_by == user_id
+    ).update({UserOrganization.invited_by: None}, synchronize_session=False)
+
+
 @router.delete("/me")
 async def delete_my_account(
     current_user: User = Depends(get_current_user),
@@ -484,28 +525,32 @@ async def delete_my_account(
 ):
     """Self-serve account deletion (App Review 5.1.1(v)).
 
-    *** DRAFT — destructive + runs on a LIVE prod backend. Review + test on
-    staging before deploy, and deploy to BOTH nodes (dogfood + customer). ***
-
     The iOS app calls this on the cloud Delete-Account path. The admin
     `DELETE /users/{id}` refuses self-deletion, so this is the self-serve path.
 
-    Cleanup (verified against database/models.py):
-      - `recording_sessions.user_id` is a plain Integer (NO FK) -> find + delete
-        the caller's sessions explicitly.
-      - `transcriptions.session_id` is a plain Integer (NO FK) -> delete manually
-        by session id.
-      - `action_items` + `session_collaborators` FK -> recording_sessions.id with
-        ondelete=CASCADE, so they go automatically when the sessions are deleted.
-      - `db.delete(user)` cascades personal_access_tokens (all, delete-orphan)
-        + the UserOrganization memberships.
+    WHAT IS DELETED:
+      - DB rows, in FK-safe order: the caller's Transcriptions (plain-Integer
+        session ref, no FK) + RecordingSessions (children — action_items,
+        session_collaborators, session-bound upload/tts jobs, chunk embeddings
+        — cascade at the DB level per migration 012), their UploadJobs +
+        TtsJobs, their UserOrganization memberships, then the User row itself
+        (ORM-cascades personal_access_tokens; password_reset_tokens +
+        user_voice_profile + bulk-import jobs cascade at the DB level).
+        Memberships this user *invited* are kept with invited_by nulled;
+        audit logs are kept with user_id nulled.
+      - AFTER the DB commit, best-effort per deleted session: Qdrant vectors
+        (semantic_search.delete_session) and Garage/local media objects
+        (media_storage.delete_prefix on '{org}/{session_id}/'). Failures are
+        logged and never surfaced — the DB rows are already gone, so the
+        request still returns 200.
 
-    NOT YET DONE (decide in review before deploy):
-      - Qdrant vectors for the deleted sessions (collection `meet_transcripts`).
-      - The Keycloak user itself (no admin-delete helper exists yet; a user could
-        otherwise re-auth into a fresh empty account). Full-delete vs disable?
-      - Speaker profiles owned solely by this user (audit before mass-deleting
-        anything shared at the org level).
+    NOT DELETED (known limitations):
+      - The Keycloak identity. There is no KC admin-delete helper yet, so on
+        SSO deployments (the customer node) the user can re-authenticate and
+        will be auto-provisioned a fresh, EMPTY account. Fine for "delete my
+        data", incomplete for "close my login" — needs a KC admin call.
+      - Org-level SpeakerProfiles / voice samples (org data, possibly shared;
+        created_by/linked_user FKs are SET NULL).
     """
     from database.models import RecordingSession, Transcription
 
@@ -515,28 +560,64 @@ async def delete_my_account(
         details={"username": current_user.username},
     )
 
-    session_ids = [
-        row[0]
-        for row in db.query(RecordingSession.id)
+    # Capture (pk, org_id, canonical string id) BEFORE deleting the rows —
+    # the post-commit Qdrant/media purge needs them and they're gone after.
+    session_rows = (
+        db.query(
+            RecordingSession.id,
+            RecordingSession.organization_id,
+            RecordingSession.session_id,
+        )
         .filter(RecordingSession.user_id == uid)
         .all()
+    )
+    session_pks = [row.id for row in session_rows]
+    session_refs = [
+        (row.organization_id, row.session_id or str(row.id)) for row in session_rows
     ]
-    if session_ids:
-        # No FK cascade on transcriptions -> delete by session id first.
+
+    if session_pks:
+        # No FK cascade on transcriptions -> delete by session pk first.
         db.query(Transcription).filter(
-            Transcription.session_id.in_(session_ids)
+            Transcription.session_id.in_(session_pks)
         ).delete(synchronize_session=False)
-        # Deleting the sessions cascades action_items + session_collaborators.
+        # Deleting the sessions DB-cascades action_items, session_collaborators,
+        # session-bound upload/tts jobs, chunk embeddings, attachments, ...
         db.query(RecordingSession).filter(
             RecordingSession.user_id == uid
         ).delete(synchronize_session=False)
-        # TODO(review): delete Qdrant points for these session_ids.
 
-    # TODO(review): delete the Keycloak user via a new admin helper (or disable).
-    # TODO(review): delete speaker profiles owned solely by this user.
+    # Rows that would otherwise abort the user delete on FK integrity
+    # (memberships, invited_by, session-less upload jobs, TTS jobs on
+    # other people's sessions).
+    _delete_user_fk_references(db, uid)
 
-    db.delete(current_user)  # cascades PATs + org memberships
+    db.delete(current_user)  # ORM-cascades PATs; nullifies audit_logs.user_id
     db.commit()
+
+    # Post-commit, best-effort external purge. Mirrors the canonical
+    # single-session delete (api/recording.py discard_always_on_session):
+    # import-on-use, swallow + log failures, never fail the request — the
+    # DB delete above is the authoritative "account is gone" signal.
+    for org_id, canonical_id in session_refs:
+        try:
+            from services.semantic_search_service import semantic_search
+
+            semantic_search.delete_session(canonical_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account-delete: Qdrant cleanup failed session=%s: %s",
+                canonical_id, exc,
+            )
+        try:
+            from services import media_storage
+
+            media_storage.delete_prefix(prefix=f"{org_id}/{canonical_id}/")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account-delete: media cleanup failed session=%s: %s",
+                canonical_id, exc,
+            )
 
     return {"message": "Account deleted"}
 
@@ -728,29 +809,47 @@ async def delete_user(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Delete a user account"""
+    """Admin: delete a user account.
+
+    Deletes the User row plus every row that would otherwise block it on FK
+    integrity (org memberships, invited_by backrefs, upload/TTS jobs — see
+    `_delete_user_fk_references`; without that, this endpoint 500'd with an
+    IntegrityError for ANY user with an org membership, i.e. all of them).
+    PATs cascade via the ORM; audit logs are kept with user_id nulled.
+
+    Intentionally does NOT touch the user's RecordingSessions/Transcriptions
+    (org data the admin may want to keep — recording_sessions.user_id is a
+    plain Integer with no FK, so the rows survive as org-scoped history).
+    For full data removal the user should call DELETE /api/auth/me, which
+    also purges sessions, Qdrant vectors and media objects. The Keycloak
+    identity is not deleted by either path (re-auth re-provisions a fresh
+    empty account).
+    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
+
     if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete your own account"
         )
-    
+
     # Log the action before deletion
     AuthService.log_action(
-        db, current_user.id, "user_deleted", 
+        db, current_user.id, "user_deleted",
         details={"deleted_user_id": user_id, "deleted_username": user.username}
     )
-    
+
+    # Rows that would otherwise abort the delete on FK integrity.
+    _delete_user_fk_references(db, user_id)
+
     db.delete(user)
     db.commit()
-    
+
     return {"message": "User deleted successfully"}
 
 
