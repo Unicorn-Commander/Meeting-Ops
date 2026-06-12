@@ -543,18 +543,26 @@ async def delete_my_account(
         (media_storage.delete_prefix on '{org}/{session_id}/'). Failures are
         logged and never surfaced — the DB rows are already gone, so the
         request still returns 200.
+      - AFTER the DB commit, best-effort: the user's KEYCLOAK identity
+        (services.keycloak_admin.delete_keycloak_user, keyed by email), but
+        ONLY when the KC admin client env is configured (KEYCLOAK_ADMIN_BASE
+        or KEYCLOAK_URL + KEYCLOAK_ADMIN_CLIENT_ID/SECRET). When it is, this
+        is full right-to-erasure: the SSO login is gone too. When it is NOT
+        (self-host without SSO, or admin client not yet provisioned), the
+        Keycloak identity SURVIVES and re-authenticating auto-provisions a
+        fresh, EMPTY account — data erasure is still complete, login closure
+        is not. KC failures are logged and never fail the request.
 
     NOT DELETED (known limitations):
-      - The Keycloak identity. There is no KC admin-delete helper yet, so on
-        SSO deployments (the customer node) the user can re-authenticate and
-        will be auto-provisioned a fresh, EMPTY account. Fine for "delete my
-        data", incomplete for "close my login" — needs a KC admin call.
       - Org-level SpeakerProfiles / voice samples (org data, possibly shared;
         created_by/linked_user FKs are SET NULL).
     """
     from database.models import RecordingSession, Transcription
 
     uid = current_user.id
+    # Captured BEFORE the delete/commit (the ORM instance is gone after):
+    # the post-commit Keycloak identity erasure needs the email.
+    user_email = current_user.email
     AuthService.log_action(
         db, uid, "account_self_deleted",
         details={"username": current_user.username},
@@ -618,6 +626,28 @@ async def delete_my_account(
                 "account-delete: media cleanup failed session=%s: %s",
                 canonical_id, exc,
             )
+
+    # Best-effort SSO identity erasure (right-to-erasure): without this the
+    # Keycloak identity survives and the next OIDC login silently
+    # re-provisions a fresh empty account. Config-gated (no-ops unless the
+    # KC admin client env is set) and fail-open — the DB delete above is
+    # already committed, so a KC failure must never fail the request; the
+    # log line lets an operator finish the erasure by hand.
+    try:
+        from services.keycloak_admin import delete_keycloak_user
+
+        kc_deleted = await delete_keycloak_user(user_email)
+        logger.info(
+            "account-delete: Keycloak identity for %s: %s",
+            user_email,
+            "deleted" if kc_deleted else
+            "NOT deleted (admin client unconfigured, local-only account, or KC error — see keycloak-admin logs)",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "account-delete: Keycloak identity delete failed for %s: %s",
+            user_email, exc,
+        )
 
     return {"message": "Account deleted"}
 
@@ -821,9 +851,15 @@ async def delete_user(
     (org data the admin may want to keep — recording_sessions.user_id is a
     plain Integer with no FK, so the rows survive as org-scoped history).
     For full data removal the user should call DELETE /api/auth/me, which
-    also purges sessions, Qdrant vectors and media objects. The Keycloak
-    identity is not deleted by either path (re-auth re-provisions a fresh
-    empty account).
+    also purges sessions, Qdrant vectors and media objects.
+
+    POLICY — the Keycloak identity is intentionally NOT deleted here: an
+    org admin removing a user from THIS app must not destroy the human's
+    suite-wide SSO login (the same uchub identity may back other UC apps and
+    other orgs). If the user re-authenticates they get a fresh, empty
+    Meeting-Ops account. Identity erasure belongs to the account owner via
+    the self-serve DELETE /api/auth/me (which deletes the KC user when the
+    admin client env is configured — see services.keycloak_admin).
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
