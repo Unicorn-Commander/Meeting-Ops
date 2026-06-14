@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.37.1] - 2026-06-14
+
+### Fixed
+- **Memo summaries: `executive` is now always a summary sentence, not a name.** The short/single-speaker memo prompt sometimes emitted the speaker's name in the `executive` field; the JSON contract now explicitly requires `executive` to be the 2-4 sentence overview prose (never a name or title).
+
+### Added
+- **Summary-styles info popover** on the Session Details "AI Summary" header (ⓘ): explains that the style is auto-selected by length + speaker count — **Memo** (short/solo: concise summary + key points + explicit actions) vs **Minutes** (longer/multi-speaker: full structured minutes with decisions, quotes, open questions, next steps).
+
 ## [3.37.0] - 2026-06-14
 
 **Recordings survive a backend restart/crash.** (Investigate → design → implement → adversarial-review swarm.) Trigger: a real ~2-hour always-on recording was lost when the backend was restarted mid-recording — Stop hit `audio_service.stop_recording()`, which only checks *in-memory* state (wiped by the restart), returned "Not recording this session" → **HTTP 500** → a cryptic "reset the connection" dialog → session marked `error`, audio gone.

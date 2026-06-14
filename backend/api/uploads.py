@@ -1718,10 +1718,13 @@ TRANSCRIPT:
 {transcript}
 
 ---
-After the markdown above, emit a single fenced JSON block (required for downstream tooling):
+After the markdown above, emit a single fenced JSON block (required for downstream tooling).
+"executive" MUST be the 2-4 sentence Summary prose from above — what the recording was
+about and any outcome. NEVER put a person's name, a speaker label, or the title in
+"executive"; it is a summary, not a name. Put the short title in "title".
 
 ```json
-{{"executive": "...",
+{{"executive": "<the 2-4 sentence summary prose — never a name or title>",
   "bullets": ["point", ...],
   "actions": [{{"action": "...", "owner": "...", "priority": "medium", "deadline": "Not specified"}}],
   "decisions": [],

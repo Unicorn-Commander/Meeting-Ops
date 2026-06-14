@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Zap, Brain, Search,
   FileDown, FileAudio, FileSpreadsheet, BookOpen,
   Upload, Mail, Sparkles, RefreshCw, MessageCircle, Send,
-  Briefcase, Edit2, Check, X, Trash2, Network, ChevronDown, Link2,
+  Briefcase, Edit2, Check, X, Trash2, Network, ChevronDown, Link2, Info,
 } from 'lucide-react';
 
 // Brigade Phase 2: lazy-load the 3D graph viewer so the Three.js
@@ -292,6 +292,7 @@ export const SessionDetails: React.FC = () => {
   // when the user navigates to a different session so each copy gets
   // its own banner.
   const [relatedBannerDismissed, setRelatedBannerDismissed] = useState(false);
+  const [showSummaryInfo, setShowSummaryInfo] = useState(false);
   useEffect(() => {
     setRelatedBannerDismissed(false);
   }, [sessionId]);
@@ -2752,6 +2753,47 @@ export const SessionDetails: React.FC = () => {
                       {session.metadata.total_progressive_summaries} progressive updates
                     </span>
                   )}
+                  <span className="relative inline-flex">
+                    <button
+                      type="button"
+                      onClick={() => setShowSummaryInfo((v) => !v)}
+                      className="text-gray-400 hover:text-purple-600 transition-colors"
+                      aria-label="About summary styles"
+                      title="About summary styles"
+                    >
+                      <Info className="w-4 h-4" />
+                    </button>
+                    {showSummaryInfo && (
+                      <div className="absolute left-0 top-7 z-20 w-80 p-4 bg-white border border-gray-200 rounded-lg shadow-xl text-left font-normal normal-case">
+                        <div className="flex items-start justify-between mb-2">
+                          <span className="text-sm font-semibold text-gray-800">Summary styles</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowSummaryInfo(false)}
+                            className="text-gray-400 hover:text-gray-600"
+                            aria-label="Close"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-2">
+                          The style is chosen automatically from the recording&apos;s length and how many people spoke:
+                        </p>
+                        <div className="space-y-2 text-xs text-gray-700 leading-relaxed">
+                          <div>
+                            <span className="font-semibold text-purple-700">Memo</span> — short or single-speaker
+                            recordings. A concise summary, the key points, and only explicitly-stated action items. No
+                            padded sections or invented quotes.
+                          </div>
+                          <div>
+                            <span className="font-semibold text-purple-700">Minutes</span> — longer, multi-speaker
+                            meetings. Full structured minutes: executive summary, key discussion points, decisions,
+                            action items, notable quotes, open questions, and next steps.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </span>
                 </h2>
                 
                 {/* Use final_summary first, then fall back to legacy summary field */}
