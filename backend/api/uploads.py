@@ -1724,7 +1724,7 @@ about and any outcome. NEVER put a person's name, a speaker label, or the title 
 "executive"; it is a summary, not a name. Put the short title in "title".
 
 ```json
-{{"executive": "<the 2-4 sentence summary prose — never a name or title>",
+{{"executive": "the 2-4 sentence summary from the Summary section above",
   "bullets": ["point", ...],
   "actions": [{{"action": "...", "owner": "...", "priority": "medium", "deadline": "Not specified"}}],
   "decisions": [],
@@ -1763,6 +1763,22 @@ def _direct_summarizer_provider():
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{(?:[^{}]|\{[^{}]*\})*\})", re.DOTALL)
+_SUMMARY_SECTION_RE = re.compile(
+    r"##+\s*(?:Executive\s+)?Summary\s*\n+(.+?)(?=\n##+\s|\n```|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_summary_section(text: str) -> str:
+    """Pull the markdown '## Summary' (or '## Executive Summary') body out of a
+    summarizer response — the memo executive-summary fallback when the LLM left
+    the JSON `executive` field empty or filled it with a bare name/title."""
+    m = _SUMMARY_SECTION_RE.search(text or "")
+    if not m:
+        return ""
+    # Drop leading list bullets / stray markdown so we keep clean prose.
+    body = " ".join(line.strip().lstrip("-*").strip() for line in m.group(1).splitlines())
+    return " ".join(body.split()).strip()
 
 
 def _parse_summarizer_json(text: str, *, fallback_title: str) -> dict[str, Any]:
@@ -1976,9 +1992,24 @@ async def _summarize_session(
         timeout=420,
     )
     analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
+    # executive must be a real summary sentence — never empty and never a bare
+    # name/title (the memo prompt occasionally dropped the speaker's name or
+    # nothing into it). Guarantee a usable value: prefer the LLM's executive,
+    # else the markdown "## Summary" section, else the first key points, else
+    # the title. A value under ~6 words is treated as name/title-like.
+    _exec = (analysis.get("executive") or "").strip()
+    if not _exec or len(_exec.split()) < 6:
+        _fallback = (
+            _extract_summary_section(text)
+            or " ".join(str(b).strip() for b in (analysis.get("bullets") or [])[:2]).strip()
+            or (analysis.get("title") or session.title or "").strip()
+        )
+        if _fallback:
+            _exec = _fallback
+    analysis["executive"] = _exec
     session.summary = json.dumps(analysis)
     session.final_summary = {
-        "executive": analysis.get("executive", ""),
+        "executive": _exec,
         "bullets": analysis.get("bullets", []),
         "actions": analysis.get("actions", []),
         "decisions": analysis.get("decisions", []),
