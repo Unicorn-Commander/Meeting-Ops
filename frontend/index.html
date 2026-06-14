@@ -2,17 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/brand/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/brand/pwa-512.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#7c3aed" />
+    <meta name="theme-color" content="#1b3a6b" />
     <meta name="color-scheme" content="dark light" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png" />
+    <!-- Meeting-Ops brand typography: Space Grotesk (display) + Inter (UI) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Meet-Ops" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <title>Unicorn Commander: Meeting Ops</title>
+    <title>Meeting-Ops · Meeting intelligence you self-host</title>
     <script>
       // The app is a HashRouter SPA, so it only honors /#/route. Public pages
       // (pricing/signup/login) are meant to be typed and shared as real paths,
@@ -33,9 +38,11 @@
   <body class="bg-gray-900">
     <div id="root">
       <!-- Fallback content - if you see this, React failed to mount -->
-      <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white; font-family: Arial, sans-serif;">
-        <h1 style="font-size: 24px; margin-bottom: 16px;">Loading Unicorn Commander...</h1>
-        <p style="color: #aaa;">If this message persists, React may have failed to mount.</p>
+      <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #f0f3fa; font-family: 'Space Grotesk', Arial, sans-serif;">
+        <img src="/brand/meeting-ops-mark.png" alt="Meeting-Ops" width="88" height="88" style="display:block; margin:0 auto 16px;" />
+        <h1 style="font-size: 22px; margin-bottom: 6px; letter-spacing: 0.3px;">Meeting-Ops</h1>
+        <p style="color: #d4af37; font-size: 13px; margin-bottom: 14px;">Meeting intelligence you self-host.</p>
+        <p style="color: #8895b3; font-size: 12px;">Loading… if this persists, the app failed to mount.</p>
         <noscript>
           <p style="color: #f87171; margin-top: 20px;">JavaScript is required to run this application.</p>
         </noscript>
