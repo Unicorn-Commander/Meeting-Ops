@@ -70,6 +70,7 @@ import {
 } from '../services/localSessionStore';
 import {
   createFullAudioRecorder,
+  postFinalizeAudioWithVerification,
   postFullAudio,
   type FullAudioRecorderHandle,
 } from '../utils/fullAudioRecorder';
@@ -522,6 +523,15 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   const engineRef = useRef<AlwaysOnVadEngine | null>(null);
   const stateRef = useRef<AlwaysOnState>('idle');
   const sessionRef = useRef<string | null>(null);
+  // Stable idempotency key for the CURRENT start() lifecycle. Generated
+  // once per start() (see start()) and sent on the /start-always-on create
+  // so a retried createSession() — double-click, network retry, a
+  // re-render that fires start() twice — reuses the SAME server session
+  // instead of inserting a duplicate session row. The backend dedups on
+  // this key within a 60s/active-status window and echoes
+  // `idempotent_reuse:true` when it returns the existing session. Cleared
+  // (regenerated) on every start(); null while idle.
+  const clientSessionKeyRef = useRef<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
   // v3.22.5 — stuck-state detection. We bump this whenever an audio
   // chunk lands (any path — server-text, server-audio, local-only) by
@@ -844,6 +854,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       body: JSON.stringify({
         org_id: activeOrganization.id,
         source_label: formatSourceLabel(),
+        // Idempotency guard — a retried create (double-click / network
+        // retry) reuses the existing server session instead of inserting
+        // a duplicate row. Omitted (undefined) the first time the ref
+        // hasn't been seeded so behavior is exactly as before.
+        client_session_key: clientSessionKeyRef.current ?? undefined,
       }),
     });
     if (!response.ok) {
@@ -855,6 +870,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
       throw new Error(detail || 'Failed to start always-on session.');
     }
     const session = await response.json();
+    if (session.idempotent_reuse) {
+      // The server returned an EXISTING session for our key rather than a
+      // new row — a retried create was deduped. Purely informational.
+      // eslint-disable-next-line no-console
+      console.info('[always-on] reused existing server session (idempotent create)');
+    }
     const sessionId = String(session.id);
     setCurrentSessionId(sessionId);
     sessionRef.current = sessionId;
@@ -1529,6 +1550,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     // window restarts; no chunks landed yet.
     lastChunkAtRef.current = null;
     setIsStuck(false);
+    // Mint a fresh idempotency key for this start() lifecycle. createSession
+    // sends it on /start-always-on so a retried create (double-click /
+    // network retry / a re-fired start()) reuses the same server session
+    // instead of creating the duplicate row pair the incident produced.
+    clientSessionKeyRef.current = uuid();
     // Fresh session — forget which slices we've reported to analytics.
     trackedSliceIdsRef.current = new Set();
     // Re-arm the one-time "live transcript unavailable" status note.
@@ -1615,8 +1641,16 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
           apiUrl: config.apiUrl,
           orgSlug: activeOrganization?.slug ?? null,
           timesliceMs: 30_000,
-          // No mid-recording streaming → buffer the whole file locally.
-          bufferOnly: true,
+          // v3.x DURABILITY: stream each ~30s chunk to /audio-chunks DURING
+          // recording so the server holds chunks 0..N on disk — a backend
+          // restart/crash/disconnect leaves a recoverable partial instead of
+          // a total loss. IndexedDB stays the desktop crash-recovery mirror
+          // (localPersistence) and the orphan banner is unchanged. Privacy /
+          // local-only KEEPS bufferOnly:true via `useLocalOnly` so the
+          // "nothing leaves the device" invariant holds (the recorder also
+          // forces bufferOnly when localOnly is set, but we gate here too so
+          // the intent is explicit and a privacy session never streams).
+          bufferOnly: useLocalOnly,
           localPersistence: idbAvailable,
           inMemory: useInMemoryBuffer,
           localOnly: useLocalOnly,
@@ -1709,7 +1743,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         apiUrl: config.apiUrl,
         orgSlug: activeOrganization?.slug ?? null,
         timesliceMs: 30_000,
-        bufferOnly: true,
+        // Match the durability flip in start(): keep streaming chunks to the
+        // server after a device/source hot-swap (continuing the chunk
+        // sequence via startChunkIndex). Privacy/local-only stays buffer-only.
+        bufferOnly: useLocalOnly,
         localPersistence: idbAvailable,
         inMemory: useInMemory,
         localOnly: useLocalOnly,
@@ -1783,9 +1820,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     try {
       // Tear down the full-audio recorder FIRST so it flushes the final
-      // slice into its local buffer before we read the assembled blob.
-      // v3.26.9: bufferOnly recorder — there is no server upload queue to
-      // drain; stop() just makes sure the last dataavailable landed.
+      // slice into its local buffer (and, for non-privacy sessions, streams
+      // that last chunk to the server) before we read the assembled blob.
+      // recorder.stop() drains the in-flight chunk-upload chain internally,
+      // so when it resolves the server has chunks 0..N on disk.
       const recorder = fullAudioRecorderRef.current;
       fullAudioRecorderRef.current = null;
       if (recorder) {
@@ -1990,76 +2028,148 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
             showPaidFeaturePrompt();
             throw new Error(getServerProcessingError());
           }
-          // v3.26.9 LOCAL-then-UPLOAD: a single whole-file upload. Nothing
-          // streamed during the meeting, so there is NOTHING to reconcile —
-          // the old verify-then-confirm (postFinalizeAudioWithVerification)
-          // dance is gone. We take the buffered blob (IndexedDB on desktop,
-          // in-memory on mobile), POST it ONCE to /full-audio (which fires
-          // the canonical transcribe → diarize → summarize → title
-          // reprocess), then POST /finalize, then mark the local IDB row
-          // finalized so the idle orphan rescan can't false-flag this
-          // cleanly-stopped session.
-          setStatusText('Uploading recording');
+          // v3.x DURABILITY: chunks streamed to /audio-chunks DURING the
+          // recording, so the server already holds chunks 0..N on disk. The
+          // primary Stop path is now /finalize-audio WITH a verification
+          // payload (count/bytes/sha of our local mirror) — the server
+          // reassembles what it has and either (a) matches → queues the
+          // canonical reprocess from the on-disk chunks (NO 2h re-upload),
+          // or (b) reports `incomplete` with missing_chunks → we fall back
+          // to a whole-blob /full-audio upload. The whole-blob upload is the
+          // recovery path, not the primary — that's what keeps the durable-
+          // partial benefit AND avoids re-shipping the entire meeting at
+          // Stop. Mobile / no-IDB (no local mirror to verify against) goes
+          // straight to /full-audio with the in-memory blob as before.
+          setStatusText('Finalizing recording');
           const idbActive =
             supportsLocalPersistence(deviceCapability)
             && localAudioStore.isAvailable();
 
-          // Resolve the one assembled blob to upload.
-          let uploadBlob: Blob | null = null;
+          // Resolve the assembled local mirror (verification payload +
+          // fallback blob). On the desktop IDB path this is the IndexedDB
+          // buffer; on mobile it's the in-memory blob (no sha/count, so we
+          // skip verification there and upload the whole blob directly).
+          let assembled: { blob: Blob; sha256: string; bytes: number; chunkCount: number } | null = null;
           let uploadMime = recorderMime;
           if (idbActive) {
             try {
               const localMeta = await localAudioStore.getSessionMetadata(sessionId);
               if (localMeta && localMeta.chunk_count > 0) {
-                const assembled = await localAudioStore.getAssembledBlob(sessionId);
+                const a = await localAudioStore.getAssembledBlob(sessionId);
                 // Stamp the local row finalized up front so even if the
-                // upload is slow the orphan rescan won't fire for it.
-                await localAudioStore.setSessionFinalized(sessionId, assembled.sha256);
-                uploadBlob = assembled.blob;
-                uploadMime = localMeta.mime_type || assembled.blob.type || recorderMime;
+                // upload/verify is slow the orphan rescan won't fire for it.
+                await localAudioStore.setSessionFinalized(sessionId, a.sha256);
+                assembled = a;
+                uploadMime = localMeta.mime_type || a.blob.type || recorderMime;
               }
             } catch (err) {
               // eslint-disable-next-line no-console
               console.warn('[always-on] reading IDB buffer at stop failed:', err);
             }
           } else if (inMemoryBlob && inMemoryBlob.size > 0) {
-            uploadBlob = inMemoryBlob;
             uploadMime = inMemoryBlob.type || recorderMime;
           }
 
-          if (uploadBlob && uploadBlob.size > 0) {
-            // ONE upload for the whole meeting. The server clears any
-            // chunk state, writes the blob as 000000.<ext>, and kicks the
-            // reprocess pipeline (returns reprocessing_started=true).
+          // Single shared "ship the whole blob" recovery helper. Used when
+          // verification reports a mismatch, when verification can't run
+          // (no local mirror, e.g. mobile), or when verification throws.
+          const fallbackFullAudio = async (blob: Blob | null): Promise<boolean> => {
+            if (!blob || blob.size === 0) return false;
+            setStatusText('Uploading recording');
             const result = await postFullAudio({
               apiUrl: config.apiUrl,
               orgSlug: sessionOrgSlugRef.current,
               sessionId,
-              blob: uploadBlob,
+              blob,
               mimeType: uploadMime,
             });
             if (result.reprocessing_started && idbActive) {
-              // Server owns the audio now — drop the local buffer. Async
-              // so stop() stays snappy.
               void localAudioStore.wipeSession(sessionId).catch((err) => {
                 // eslint-disable-next-line no-console
                 console.warn('[always-on] local wipe after upload failed (non-fatal):', err);
               });
             }
+            return Boolean(result.reprocessing_started);
+          };
+
+          if (assembled) {
+            // Desktop: verify the server's streamed chunks against our
+            // mirror, then finalize-from-disk (no re-upload) on a match.
+            let verified: Awaited<ReturnType<typeof postFinalizeAudioWithVerification>> | null = null;
+            try {
+              verified = await postFinalizeAudioWithVerification({
+                apiUrl: config.apiUrl,
+                orgSlug: sessionOrgSlugRef.current,
+                sessionId,
+                clientChunkCount: assembled.chunkCount,
+                clientBytesTotal: assembled.bytes,
+                clientSha256: assembled.sha256,
+              });
+            } catch (err) {
+              // Verification call itself failed (network / 5xx). Don't lose
+              // the recording — ship the whole buffered blob as recovery.
+              // eslint-disable-next-line no-console
+              console.warn('[always-on] finalize-audio verification failed; falling back to full-audio upload:', err);
+            }
+            const verifiedComplete =
+              verified
+              && (verified.reprocessing_started
+                || verified.status === 'complete'
+                || verified.reason === 'already_in_progress');
+            const verifiedIncomplete =
+              verified
+              && (verified.status === 'incomplete' || verified.reason === 'no_chunks_uploaded');
+            if (verifiedComplete) {
+              // Server reassembled the streamed chunks and kicked reprocess —
+              // no whole-file re-upload needed. Drop the local buffer.
+              if (idbActive) {
+                void localAudioStore.wipeSession(sessionId).catch((err) => {
+                  // eslint-disable-next-line no-console
+                  console.warn('[always-on] local wipe after verify failed (non-fatal):', err);
+                });
+              }
+            } else if (verifiedIncomplete || !verified) {
+              // Mismatch / missing chunks / verification couldn't run →
+              // ship the whole buffered blob so nothing is silently lost.
+              await fallbackFullAudio(assembled.blob);
+            }
+          } else if (inMemoryBlob && inMemoryBlob.size > 0) {
+            // Mobile / no-IDB: no local mirror to compute a sha against.
+            // The chunks DID stream, but the whole-blob upload is the
+            // simplest correct finalize here.
+            await fallbackFullAudio(inMemoryBlob);
           } else {
-            // No audio buffered (e.g. the user stopped before the first
-            // ~30s slice landed). Nothing to upload; /finalize below still
-            // closes the session row cleanly. Make sure the local row
-            // can't orphan-flag.
-            // eslint-disable-next-line no-console
-            console.info('[always-on] Stop with no buffered audio — finalizing text-only.');
+            // No local mirror AND no in-memory blob. Either nothing was ever
+            // captured, or the chunks streamed straight through with no
+            // local copy retained. Ask the server to finalize from whatever
+            // it has on disk WITHOUT a verification payload (omitting the
+            // body is the contract's "no-verify" path: the server reassembles
+            // the on-disk chunks and queues reprocess if any exist, restart-
+            // agnostic with zero in-memory state). A no-chunks server returns
+            // reason:'no_chunks_uploaded' and /finalize below still closes
+            // the row cleanly. We deliberately do NOT send count/bytes here —
+            // sending zeros would falsely register as a verification mismatch.
+            try {
+              await fetch(
+                `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize-audio`,
+                {
+                  method: 'POST',
+                  headers: orgHeader(sessionOrgSlugRef.current),
+                  credentials: 'include',
+                },
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.info('[always-on] Stop with no local buffer; finalize-audio probe failed (non-fatal):', err);
+            }
           }
 
           // Finalize the session row (transcript_simple finalization,
           // duration, status=completed). We hit /finalize directly rather
-          // than finalizeSession() so we DON'T also poke the legacy
-          // /finalize-audio reconcile endpoint — /full-audio already
-          // started the reprocess above.
+          // than finalizeSession() so we DON'T double-poke /finalize-audio —
+          // the audio reprocess was already kicked above (via the verified
+          // finalize-from-disk, the /full-audio fallback, or the no-body
+          // finalize-audio probe).
           setStatusText('Finalizing');
           const finalizeResp = await fetch(
             `${config.apiUrl}/api/recordings/sessions/${sessionId}/finalize`,
@@ -2099,6 +2209,7 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         slice_count: slicesSnapshot.length,
       });
       sessionRef.current = null;
+      clientSessionKeyRef.current = null;
       setCurrentSessionId(null);
       setSessionStartedAt(null);
       startedAtRef.current = null;

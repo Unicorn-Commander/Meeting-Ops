@@ -333,9 +333,16 @@ export function createFullAudioRecorder(
     indexAtCreation: number,
     blob: Blob,
   ): Promise<void> => {
-    // v3.26.9 LOCAL-then-UPLOAD: no mid-recording streaming. bufferOnly
-    // (and the stricter localOnly) skip the network entirely — the whole
-    // file is uploaded once at Stop. This is now the standard path.
+    // v3.x DURABILITY: per-chunk streaming to /audio-chunks is RE-ENABLED
+    // for non-privacy always-on. The caller (AlwaysOnContext.start) now
+    // passes `bufferOnly: false` so each ~30s chunk lands on the server's
+    // on-disk full_audio dir AS IT RECORDS — surviving a backend restart /
+    // crash / tab close, with the IndexedDB mirror kept as belt-and-
+    // suspenders. The whole-blob /full-audio upload remains the Stop-time
+    // fallback (gap recovery / mobile). Do NOT re-disable this for the
+    // standard path. Privacy / local-only (`localOnly: true`) still implies
+    // `bufferOnly: true` below so nothing leaves the device. When
+    // bufferOnly is set we skip the network entirely.
     if (bufferOnly) return;
     const form = new FormData();
     // Browser-side extension hint for the server's _safe_ext switch. We

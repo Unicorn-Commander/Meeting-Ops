@@ -65,6 +65,12 @@ ALWAYS_ON_DIR = RECORDINGS_DIR / "always_on"
 class StartAlwaysOnRequest(BaseModel):
     org_id: Optional[int] = None
     source_label: Optional[str] = Field(default=None, max_length=200)
+    # Optional client-supplied idempotency key. A retried start() (double
+    # click, network retry, a Stop-then-immediately-Start) that reuses the
+    # same key inside a short window returns the EXISTING session instead of
+    # inserting a duplicate row — the bug that created the two ~7350s rows
+    # one second apart. None => behaves exactly as before.
+    client_session_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class ServerSummaryRequest(BaseModel):
@@ -237,6 +243,61 @@ def _find_session_by_id(db: Session, session_id: str) -> Optional[RecordingSessi
         return None
 
 
+def _find_active_session_by_client_key(
+    db: Session, org_id: int, client_session_key: Optional[str]
+) -> Optional[RecordingSession]:
+    """An existing always-on session in ``org_id`` that carries
+    ``client_session_key`` in its processing_metadata, is still active
+    (recording/processing), and was created in the last 60s — or None.
+
+    Used to de-duplicate retried start() calls. Returns None immediately
+    when no key is supplied (the default), so the no-key path is unchanged.
+
+    Filters by org + active status + created_at window in SQL (portable
+    across Postgres/SQLite), then matches the JSON key in Python so we don't
+    depend on a JSONB ``->>`` operator the SQLite test fixture lacks. The
+    candidate set is tiny (one org's last-minute active always-on rows), so
+    the Python pass is cheap. NEVER raises — a dedup probe must not break
+    session creation."""
+    if not client_session_key:
+        return None
+    try:
+        from datetime import timedelta
+
+        now = _now()
+        # Coarse SQL bound only by org + active status + mode. We do NOT put
+        # the tz-aware cutoff in the WHERE clause: SQLite stores datetimes as
+        # naive ISO strings and compares them lexically, so a "+00:00"-tagged
+        # bound would mis-compare. The precise 60s window is enforced in
+        # Python below via _aware(), which normalizes both sides to UTC. The
+        # candidate set is tiny (newest 50 active always-on rows for one org).
+        candidates = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.organization_id == org_id,
+                RecordingSession.mode == "always_on",
+                RecordingSession.status.in_(("recording", "processing")),
+            )
+            .order_by(RecordingSession.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        for cand in candidates:
+            meta = cand.processing_metadata or {}
+            if not (isinstance(meta, dict) and meta.get("client_session_key") == client_session_key):
+                continue
+            created = _aware(cand.created_at)
+            if created is None or (now - created) > timedelta(seconds=60):
+                continue
+            return cand
+    except Exception as exc:  # noqa: BLE001 — dedup is best-effort
+        logger.warning(
+            "client-session-key dedup probe failed (org=%s key=%s): %s",
+            org_id, client_session_key, exc,
+        )
+    return None
+
+
 def _synthetic_org_for_internal_caller(
     db: Session, session: RecordingSession
 ) -> ActiveOrganization:
@@ -261,7 +322,7 @@ def _synthetic_org_for_internal_caller(
     return ActiveOrganization(organization=org, membership=None, role="system")
 
 
-def _session_payload(session: RecordingSession) -> dict[str, Any]:
+def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) -> dict[str, Any]:
     return {
         "id": session.session_id or str(session.id),
         "pk": session.id,
@@ -278,6 +339,9 @@ def _session_payload(session: RecordingSession) -> dict[str, Any]:
         "final_summary": session.final_summary,
         "ai_insights": session.ai_insights,
         "summary": session.summary,
+        # True only when a duplicate start() with the same client_session_key
+        # was de-duplicated to this already-existing row (see start_always_on).
+        "idempotent_reuse": idempotent_reuse,
     }
 
 
@@ -611,6 +675,22 @@ async def start_always_on(
     if request.org_id is not None and request.org_id != active_org.organization.id:
         raise HTTPException(status_code=403, detail="org_id does not match the active organization.")
 
+    # Idempotency: a retried start() (double-click / network retry) that
+    # carries the SAME client_session_key as an already-active session in
+    # this org, created in the last 60s, reuses that row instead of inserting
+    # a duplicate. This is the guard against the two-rows-one-second-apart
+    # bug. Scoped to the active org so a key can never resurface another
+    # tenant's session.
+    existing = _find_active_session_by_client_key(
+        db, active_org.organization.id, request.client_session_key
+    )
+    if existing is not None:
+        logger.info(
+            "start-always-on idempotent reuse: org=%s key=%s -> existing session %s",
+            active_org.organization.id, request.client_session_key, existing.id,
+        )
+        return _session_payload(existing, idempotent_reuse=True)
+
     started_at = _now()
     title = f"Always-on {started_at.strftime('%Y-%m-%d %H:%M')}"
     session = RecordingSession(
@@ -630,6 +710,7 @@ async def start_always_on(
         processing_metadata={
             "source_label": request.source_label,
             "created_by": "browser_always_on",
+            "client_session_key": request.client_session_key,
         },
     )
     db.add(session)

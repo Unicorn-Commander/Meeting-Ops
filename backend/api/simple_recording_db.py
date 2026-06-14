@@ -97,6 +97,10 @@ class CreateSessionRequest(BaseModel):
     project_app: Optional[str] = None      # 'project-ops' | 'crisis-ops' | None
     project_id: Optional[int] = None
     project_slug: Optional[str] = None
+    # Optional idempotency key. A retried create (double-click / network
+    # retry) with the SAME key inside a 60s window returns the existing
+    # session instead of inserting a duplicate row. None => unchanged.
+    client_session_key: Optional[str] = None
 
 
 class UpdateSessionProjectRequest(BaseModel):
@@ -478,6 +482,49 @@ def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict
     return out
 
 
+def _find_active_session_by_client_key(
+    db: Session,
+    organization_id: int,
+    client_session_key: Optional[str],
+) -> Optional[DBRecordingSession]:
+    """An existing session in this org carrying ``client_session_key`` in
+    processing_metadata, still active, created in the last 60s — or None.
+
+    De-duplicates retried create() calls. Returns None immediately for a
+    missing key, so the no-key path is unchanged. Active = active /
+    recording / processing (an /api/simple create starts as 'active'). The
+    coarse query is org + active-status only; the JSON key match + the 60s
+    window are checked in Python (portable across Postgres JSONB and the
+    SQLite test fixture, which lacks the ``->>`` operator). Never raises."""
+    if not client_session_key:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        candidates = (
+            _scoped_session_query(db, organization_id)
+            .filter(DBRecordingSession.status.in_(("active", "recording", "processing")))
+            .order_by(desc(DBRecordingSession.created_at))
+            .limit(50)
+            .all()
+        )
+        for cand in candidates:
+            meta = cand.processing_metadata or {}
+            if not (isinstance(meta, dict) and meta.get("client_session_key") == client_session_key):
+                continue
+            created = _naive_utc(cand.created_at)
+            if created is None:
+                continue
+            if (now.replace(tzinfo=None) - created) > timedelta(seconds=60):
+                continue
+            return cand
+    except Exception as exc:  # noqa: BLE001 — dedup is best-effort
+        logger.warning(
+            "create dedup probe failed (org=%s key=%s): %s",
+            organization_id, client_session_key, exc,
+        )
+    return None
+
+
 def _get_session_for_org(
     db: Session,
     organization_id: int,
@@ -506,9 +553,29 @@ async def create_session(
     db: Session = Depends(get_db)
 ) -> SessionResponse:
     """Create a new recording session in database"""
-    
+
+    # Idempotency: a retried create with the SAME client_session_key (double-
+    # click / network retry) inside a 60s window returns the existing session
+    # instead of inserting a duplicate. Org-scoped; None key => unchanged.
+    existing = _find_active_session_by_client_key(
+        db, active_org.organization.id, request.client_session_key
+    )
+    if existing is not None:
+        logger.info(
+            "create-session idempotent reuse: org=%s key=%s -> existing session %s",
+            active_org.organization.id, request.client_session_key, existing.id,
+        )
+        return SessionResponse(
+            id=existing.session_id or str(existing.id),
+            name=existing.name,
+            description=existing.description or "",
+            created_at=existing.created_at.isoformat() if existing.created_at else "",
+            status=existing.status,
+            duration=float(existing.duration or 0),
+        )
+
     session_id = str(uuid.uuid4())
-    
+
     # Create database session
     # Validate project_app if provided
     project_app = request.project_app or None
@@ -528,6 +595,11 @@ async def create_session(
         project_app=project_app,
         project_id=request.project_id if project_app else None,
         project_slug=request.project_slug if project_app else None,
+        processing_metadata=(
+            {"client_session_key": request.client_session_key}
+            if request.client_session_key
+            else None
+        ),
     )
 
     db.add(db_session)
@@ -1347,8 +1419,26 @@ async def stop_recording(
         success, audio_file = audio_service.stop_recording(session_id)
 
         if not success:
-            raise HTTPException(status_code=500, detail=f"Failed to stop recording: {audio_file}")
+            # In-memory recorder state is gone — the backend was restarted /
+            # crashed mid-recording, or this is the browser-first /
+            # DISABLE_LOCAL_AUDIO path where the server never held an ffmpeg
+            # process at all. The OLD behavior here was to 500 + stamp
+            # status='error', which is exactly what lost a real 2h recording:
+            # the chunks were durably on disk, but stop_recording() only
+            # consults wiped in-memory flags. We now NEVER 500 for this case —
+            # we look for whatever survived on the host volume (always-on
+            # chunk dir, then a half-written WAV) and finalize from that, or
+            # mark an honest no_audio terminal state. The recovery is wrapped
+            # so a genuine DB/ffmpeg failure still 500s, but only AFTER the
+            # attempt — a recoverable recording is never thrown away.
+            return await _recover_and_finalize_stop(
+                session, active_org, db, background_tasks, session_id
+            )
 
+        # ---- Happy path (live in-memory ffmpeg, e.g. Conference Room) ----
+        # UNCHANGED from before: stop_recording() returned True with the WAV
+        # path, so we finalize exactly as today. The recovery helper is NOT
+        # reached on this branch — blast radius stays minimal.
         # Normalize the audio file path to prevent double-nesting
         if audio_file:
             audio_file = os.path.normpath(os.path.abspath(audio_file))
@@ -1369,9 +1459,9 @@ async def stop_recording(
         # Save the audio file path if not already set
         if not session.audio_file and audio_file:
             session.audio_file = audio_file
-            
+
         db.commit()
-        
+
         # Stop live transcription monitoring
         try:
             from services.live_recording_transcription import live_recording_transcription
@@ -1379,7 +1469,7 @@ async def stop_recording(
             logger.info(f"Stopped live transcription for session {session_id}")
         except Exception as e:
             logger.error(f"Error stopping live transcription: {e}")
-        
+
         # Schedule background transcription and processing
         background_tasks.add_task(
             process_recording,
@@ -1387,7 +1477,7 @@ async def stop_recording(
             audio_file=audio_file,
             db_session_id=session.id
         )
-        
+
         return {
             "status": "processing",
             "session_id": session_id,
@@ -1395,12 +1485,174 @@ async def stop_recording(
             "audio_file": audio_file,
             "message": "Recording stopped, processing transcription..."
         }
-        
+
+    except HTTPException:
+        # A deliberate HTTP error (e.g. a 500 the recovery helper raised
+        # AFTER attempting recovery) — propagate as-is, do NOT downgrade the
+        # row to a generic 'error' on top of an already-considered outcome.
+        raise
     except Exception as e:
         logger.error(f"Error stopping recording: {e}")
         session.status = "error"
         db.commit()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _recover_and_finalize_stop(
+    session: DBRecordingSession,
+    active_org: ActiveOrganization,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Restart-resilient finalize for the legacy /stop endpoint.
+
+    Reached ONLY when ``audio_service.stop_recording()`` returned False —
+    i.e. the singleton holds no live in-memory state for this session (a
+    backend restart/crash wiped ``is_recording`` / ``current_session_id``,
+    or this is the browser-first path that never ran a server ffmpeg). The
+    recoverable truth lives entirely on the host volume, so we finalize from
+    whatever durably survived rather than 500'ing on stale memory:
+
+      (a) ALWAYS-ON CHUNK DIR — if the browser streamed ~30s chunks to
+          ``ALWAYS_ON_DIR/<org>/<session>/full_audio/`` (the exact dir
+          /finalize-audio + the reprocess worker already reassemble from,
+          with ZERO in-memory dependency), queue the canonical reprocess and
+          return recovered_from='always_on_chunks'. This is the centerpiece
+          fix for the lost-2h-recording incident.
+      (b) HALF-WRITTEN WAV — else a partial ``recording_{sid}_*.wav`` left by
+          a SIGKILL'd conference-room ffmpeg, handed to process_recording.
+      (c) NOTHING — else an honest 200 no_audio (privacy / mic-blocked /
+          true DISABLE_LOCAL_AUDIO no-capture). We do NOT stamp
+          status='error': there is genuinely nothing to lose, and a cryptic
+          500 is exactly the UX we're removing.
+
+    We always finalize the recording-window bookkeeping (ended_at/duration)
+    so the session is a clean terminal/processing row, never a dangling
+    'recording'. Local imports of the recording helpers + enqueue_reprocess
+    match the codebase's circular-import-avoidance pattern.
+    """
+    # Finalize the recording window regardless of which branch we take —
+    # the meeting is over even if no audio reached the server.
+    session.ended_at = datetime.now(timezone.utc)
+    if session.started_at and (session.duration is None or session.duration == 0):
+        started = session.started_at
+        ended = session.ended_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        session.duration = (ended - started).total_seconds()
+
+    # Stop live transcription monitoring (best-effort, same as happy path).
+    try:
+        from services.live_recording_transcription import live_recording_transcription
+        asyncio.create_task(live_recording_transcription.stop_monitoring())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error stopping live transcription during recovery: {e}")
+
+    canonical_id = session.session_id or str(session.id)
+
+    # ---- (a) Always-on chunks on disk -> canonical reprocess ----
+    try:
+        from api.recording import _audio_chunks_dir, _list_chunk_files
+
+        chunks_dir = _audio_chunks_dir(active_org.organization.slug, canonical_id)
+        chunk_files = _list_chunk_files(chunks_dir)
+    except Exception as e:  # noqa: BLE001 — never let a path probe 500 the stop
+        logger.warning(
+            "recovery: chunk-dir probe failed for session %s: %s", session_id, e
+        )
+        chunk_files = []
+
+    if chunk_files:
+        logger.info(
+            "stop recovery: session %s has %d always-on chunks on disk — "
+            "finalizing from disk after lost in-memory state",
+            session_id, len(chunk_files),
+        )
+        metadata = dict(session.processing_metadata or {})
+        audio_state = dict(metadata.get("full_audio") or {})
+        audio_state.update({
+            "status": "queued",
+            "source": "legacy_stop_recovery",
+            "recovered_at": datetime.now(timezone.utc).isoformat(),
+            "recovered_chunk_count": len(chunk_files),
+        })
+        metadata["full_audio"] = audio_state
+        metadata["reprocess_status"] = "queued"
+        session.processing_metadata = metadata
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(session, "processing_metadata")
+        except Exception:  # noqa: BLE001
+            pass
+        session.status = "processing"
+        db.commit()
+
+        from workers.reprocess_workers import enqueue_reprocess
+        await enqueue_reprocess(session.id, background_tasks=background_tasks)
+
+        return {
+            "status": "processing",
+            "session_id": session_id,
+            "recovered": True,
+            "recovered_from": "always_on_chunks",
+            "message": "Recording recovered after an interruption and is now processing.",
+        }
+
+    # ---- (b) Half-written WAV on disk -> process_recording ----
+    wav_path = audio_service._find_orphan_wav_on_disk(session_id)
+    if wav_path:
+        wav_path = os.path.normpath(os.path.abspath(wav_path))
+        logger.info(
+            "stop recovery: session %s finalizing from orphan WAV %s",
+            session_id, wav_path,
+        )
+        session.audio_file = wav_path
+        session.status = "processing"
+        db.commit()
+        background_tasks.add_task(
+            process_recording,
+            session_id=session.id if isinstance(session.id, int) else session.session_id,
+            audio_file=wav_path,
+            db_session_id=session.id,
+        )
+        return {
+            "status": "processing",
+            "session_id": session_id,
+            "recovered": True,
+            "recovered_from": "disk_wav",
+            "message": "Recording recovered after an interruption and is now processing.",
+        }
+
+    # ---- (c) Nothing survived -> honest, non-error terminal state ----
+    logger.info(
+        "stop recovery: session %s had no durable audio on the server "
+        "(privacy / browser-first / no-capture) — marking no_audio",
+        session_id,
+    )
+    metadata = dict(session.processing_metadata or {})
+    metadata["stop_outcome"] = "no_audio"
+    session.processing_metadata = metadata
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "processing_metadata")
+    except Exception:  # noqa: BLE001
+        pass
+    # 'cancelled' is the honest non-error terminal state for "the meeting
+    # ended but the server captured nothing" — NOT 'error' (which the UI
+    # renders as a failure + which stranded the lost recording). The empty
+    # always-on list view already hides audio-less always-on rows, so this
+    # doesn't clutter the dashboard.
+    session.status = "cancelled"
+    db.commit()
+    return {
+        "status": "no_audio",
+        "session_id": session_id,
+        "recovered": False,
+        "message": "No audio was captured for this session on the server.",
+    }
 
 async def process_recording(session_id: str, audio_file: str, db_session_id: int):
     """Background task to process recording - with guaranteed completion"""

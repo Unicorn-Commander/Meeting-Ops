@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.37.0] - 2026-06-14
+
+**Recordings survive a backend restart/crash.** (Investigate → design → implement → adversarial-review swarm.) Trigger: a real ~2-hour always-on recording was lost when the backend was restarted mid-recording — Stop hit `audio_service.stop_recording()`, which only checks *in-memory* state (wiped by the restart), returned "Not recording this session" → **HTTP 500** → a cryptic "reset the connection" dialog → session marked `error`, audio gone.
+
+### Added
+- **Durable in-recording persistence (re-enabled).** Non-privacy always-on recordings now stream audio to the server in ~30s chunks *during* recording (the already-built, unit-tested `/api/recordings/sessions/{id}/audio-chunks` → on-disk `full_audio/<idx>` pipeline; `bufferOnly` flipped off, gated on `!useLocalOnly` so **privacy/local-only still streams nothing**). At minute N the server already holds chunks 0..N on the host volume, so a process/container restart leaves the recording recoverable. Chunk upload retries with backoff and never halts the recording on a transient failure.
+
+### Fixed
+- **Restart-resilient Stop (the incident fix).** `POST /api/simple/recording-sessions/{id}/stop` no longer 500s / marks `error` when in-memory recorder state is absent. On `stop_recording()==False` it now recovers: finalize from the on-disk always-on chunk dir (→ canonical reprocess), else a half-written WAV on disk, else returns an honest `no_audio` 200 — never a silent total loss. The happy path (live in-memory ffmpeg, e.g. Conference Room) is byte-for-byte unchanged. The cryptic "reset the connection" dead-end is replaced with a clear "recording recovered / processing" message.
+- **Duplicate sessions.** `start-always-on` and the `/api/simple` create gain an optional `client_session_key` idempotency guard (60s + active-status + same-org window) so a retried create reuses the row instead of spawning the two-rows-1-second-apart pair.
+- Tests: `test_legacy_stop_recovery.py` (7, incl. the centerpiece "chunks on disk + wiped in-memory state → recovers, not 500"); `fullAudioRecorder.test.ts` (6, streaming/retry/privacy-gate). Backend regression sweep + frontend vitest 124/124 green.
+
+### Known limitations (by design, documented)
+- Durability is host-volume disk (survives process/container restart), not per-chunk Garage (volume loss not covered — deferred). Up to ~30s in-flight encoder audio can be lost on a hard crash. The legacy `/record` (non-always-on) surface does not yet chunk-stream. Per-chunk files are retained until session delete (cleanup-after-reassembly is a follow-up).
+
 ## [3.36.1] - 2026-06-11
 
 **v3.36.0 follow-up polish.** (3-agent swarm + integration pass.)

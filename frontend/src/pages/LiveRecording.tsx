@@ -928,9 +928,53 @@ export default function LiveRecording() {
         `${config.apiUrl}/api/simple/recording-sessions/${sessionData.id}/stop`,
         { method: 'POST', headers: stopHeaders }
       );
-      
-      // Continue cleanup even if stop request fails
-      
+
+      // Durability fix: /stop no longer 500s when the server lost its
+      // in-memory recorder state (backend restart / crash mid-recording).
+      // It now returns 200 with one of three shapes — surface a CLEAR,
+      // honest message for each instead of the old cryptic
+      // "reset the connection" dead-end that told the user their
+      // recording was simply gone.
+      if (stopResponse.ok) {
+        let stopBody: {
+          status?: string;
+          recovered?: boolean;
+          recovered_from?: string;
+          message?: string;
+        } | null = null;
+        try {
+          stopBody = await stopResponse.clone().json();
+        } catch {
+          /* legacy/empty body — nothing to surface */
+        }
+        if (stopBody?.recovered) {
+          // The recording survived an interruption and is now processing
+          // from the audio that was persisted to disk as it recorded.
+          showToast.success(
+            stopBody.message
+              || 'Recording recovered after an interruption and is now processing.',
+          );
+        } else if (stopBody?.status === 'no_audio') {
+          // Honest: the server genuinely captured nothing for this session
+          // (e.g. server-side audio disabled). Not an error, not a silent
+          // loss — say so plainly.
+          showToast.warning(
+            stopBody.message
+              || 'No audio was captured for this session on the server.',
+          );
+        }
+      } else {
+        // A genuine non-2xx (DB failure / unexpected exception after a
+        // recovery attempt). Do NOT tell the user the recording is just
+        // gone — partials are persisted server-side and the reprocess
+        // recovery sweep can still pick them up. Point them at Sessions.
+        showToast.warning(
+          'There was a problem finishing this recording on the server. Any audio captured so far is saved — check the Sessions page; it may still finish processing.',
+        );
+      }
+
+      // Continue cleanup regardless of the stop outcome.
+
       // Clean up transcription WebSocket only (keep audio levels running)
       if (wsRef.current) {
         wsRef.current.close();
@@ -993,7 +1037,13 @@ export default function LiveRecording() {
         }));
       }
     } catch (error) {
-      // Stop recording failed
+      // The /stop request itself never completed (network drop). The
+      // recording is NOT necessarily lost — chunks persisted server-side as
+      // it recorded and the reprocess recovery sweep can still finish it.
+      // Tell the user where to look instead of failing silently.
+      showToast.warning(
+        "Couldn't reach the server to finish this recording. Any audio captured so far is saved — check the Sessions page.",
+      );
     } finally {
       setIsProcessing(false);
     }

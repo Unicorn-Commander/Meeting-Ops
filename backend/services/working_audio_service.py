@@ -211,12 +211,70 @@ class WorkingAudioService:
             self.is_recording = False
             return False, str(e)
 
-    def stop_recording(self, session_id: str) -> tuple[bool, str]:
+    def _find_orphan_wav_on_disk(self, session_id: str) -> Optional[str]:
+        """Best-effort scan for a half-written WAV left behind when the
+        ffmpeg recorder was SIGKILL'd / the process restarted mid-record.
+
+        ffmpeg writes ``recording_{session_id}_{timestamp}.wav`` under
+        RECORDINGS_DIR. After a restart the in-memory ``current_output_file``
+        is gone, but the bytes ffmpeg already flushed (a graceful SIGINT
+        writes a valid header; an abrupt kill leaves a still-decodable
+        partial) are durable on the host volume. We return the newest
+        non-empty match so a restart-resilient /stop can finalize from it.
+
+        Pure read; returns None when nothing usable exists (the normal
+        DISABLE_LOCAL_AUDIO / browser-first case where the server captured
+        nothing). NEVER raises — recovery must not be the thing that breaks
+        a stop."""
+        try:
+            import glob
+
+            pattern = os.path.join(
+                self.RECORDINGS_DIR, f"recording_{session_id}_*.wav"
+            )
+            matches = [
+                p for p in glob.glob(pattern)
+                if os.path.isfile(p) and os.path.getsize(p) > 0
+            ]
+            if not matches:
+                return None
+            # Newest by mtime — a session restarted mid-record could have
+            # left more than one partial; the last one ffmpeg touched wins.
+            return max(matches, key=os.path.getmtime)
+        except Exception as exc:  # noqa: BLE001 — advisory recovery only
+            logger.warning(
+                "orphan-wav scan failed for session %s: %s", session_id, exc
+            )
+            return None
+
+    def stop_recording(
+        self, session_id: str, recover_from_disk: bool = False
+    ) -> tuple[bool, str]:
         """
         Stop recording.
         Returns: (success, filepath_or_error)
+
+        ``recover_from_disk`` (opt-in, default OFF): when the in-memory state
+        is gone (backend restart / SIGKILL'd ffmpeg) AND this flag is set, we
+        scan the host volume for a partial ``recording_{sid}_*.wav`` ffmpeg
+        already flushed and return ``(True, <path>)`` so a direct caller can
+        finalize from whatever survived. The default-OFF keeps the contract
+        the (False, "Not recording this session") return for the legacy
+        endpoint, which routes False into its own richer recovery helper
+        (chunk dir first, then this same disk WAV) — see
+        api.simple_recording_db._recover_and_finalize_stop. Pure-additive:
+        with the flag off, behavior is identical to before.
         """
         if not self.is_recording or self.current_session_id != session_id:
+            if recover_from_disk:
+                orphan = self._find_orphan_wav_on_disk(session_id)
+                if orphan:
+                    logger.info(
+                        "stop_recording: recovered orphan WAV for session %s after "
+                        "lost in-memory state: %s (%d bytes)",
+                        session_id, orphan, os.path.getsize(orphan),
+                    )
+                    return True, orphan
             return False, "Not recording this session"
 
         try:
