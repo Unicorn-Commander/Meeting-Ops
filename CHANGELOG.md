@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [3.38.0] - 2026-06-14
+
+### Added
+- **Speaker-name suggestions from self-introductions.** When a speaker isn't matched by voiceprint, Meeting-Ops now scans *that speaker's own* utterances for a self-introduction ("Hi, I'm John", "my name is John Smith", "John here") and offers the name as a one-click chip in the naming UI. Suggestion-only: it pre-fills the existing name field and the user still confirms; it never auto-applies, auto-creates, or auto-links. Computed on-read, gated strictly on `speaker_id IS NULL` (voice-matched/named speakers get no suggestions). Deterministic extractor with a conservative Titlecase + denylist false-positive defense (35 backend + frontend tests; 0 must-fix in adversarial review). New `name_suggestions` field on the unassigned-links + speaker-links responses.
+- **Meeting-Ops brand identity (pass 1).** Applied the approved Brand-Ops kit (the suite uses per-app identities; MO = navy/gold "comms officer"): the official mark as favicon/app-icon/sidebar logo (replacing the default Vite placeholder), a branded loading screen, navy `#1b3a6b` theme-color, the "Meeting intelligence you self-host." tagline, and Inter + Space Grotesk fonts. The full purple→navy/gold palette swap follows.
+
 ## [3.37.1] - 2026-06-14
 
 ### Fixed

@@ -54,6 +54,20 @@ interface SpeakerTopMatch {
   similarity: number;
 }
 
+/**
+ * Text-derived self-introduction suggestion for an UNIDENTIFIED speaker
+ * (backend contract: speakers.py SelfIntroName). The backend scans ONLY
+ * this one speaker's own utterances for a first-person intro ("Hi, I'm
+ * John") and offers the extracted name. `evidence` is the source sentence
+ * for the hover tooltip / audit. This is the text sibling of the
+ * voiceprint `top_matches` — always a suggestion the user confirms, never
+ * auto-applied.
+ */
+interface SelfIntroName {
+  name: string;
+  evidence?: string;
+}
+
 interface UnassignedSpeakerLink {
   id: number;
   raw_label: string;
@@ -67,6 +81,9 @@ interface UnassignedSpeakerLink {
   preview: string;
   sample_audio_url?: string | null;
   top_matches: SpeakerTopMatch[];
+  // Optional + defaults to [] server-side (backward compatible). Only
+  // populated for speaker_id IS NULL rows, which every unassigned row is.
+  name_suggestions?: SelfIntroName[];
 }
 
 const isAdminRole = (role?: string, isSuperuser?: boolean): boolean => {
@@ -616,6 +633,34 @@ export const SpeakerLibrary: React.FC = () => {
                         ))}
                       </div>
                     )}
+                    {/* Text-derived self-intro suggestions ("Hi, I'm John").
+                        Distinct amber accent so "heard them say their name"
+                        reads differently from a fuchsia voiceprint match.
+                        Clicking does NOT assign — it opens the existing
+                        Assign dialog with the name prefilled so the user
+                        still confirms (Create + assign). */}
+                    {(link.name_suggestions?.length ?? 0) > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className="text-zinc-500">Heard them introduce themselves:</span>
+                        {link.name_suggestions!.map((sugg, i) => (
+                          <button
+                            key={`${sugg.name}-${i}`}
+                            type="button"
+                            disabled={assigningLinkId === link.id}
+                            title={sugg.evidence || `Suggested from this speaker's own words: ${sugg.name}`}
+                            onClick={() => {
+                              setAssignDialogLink(link);
+                              setManualSpeakerId(null);
+                              setSpeakerSearch('');
+                              setCreateAssignName(sugg.name);
+                            }}
+                            className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-100 hover:bg-amber-500/20 disabled:opacity-50"
+                          >
+                            Suggested: {sugg.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -623,7 +668,13 @@ export const SpeakerLibrary: React.FC = () => {
                       setAssignDialogLink(link);
                       setManualSpeakerId(link.top_matches[0]?.speaker_id ?? null);
                       setSpeakerSearch('');
-                      setCreateAssignName('');
+                      // Prefill the create-new-speaker name from a self-intro
+                      // suggestion when there's no voiceprint match to pick —
+                      // the most common one-click path lands pre-filled but
+                      // still requires the user to press "Create + assign".
+                      setCreateAssignName(
+                        link.top_matches.length === 0 ? (link.name_suggestions?.[0]?.name ?? '') : '',
+                      );
                     }}
                     className="shrink-0 rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
                   >

@@ -45,6 +45,7 @@ from database.models import (
     Transcription,
 )
 from services.providers.registry import get_provider_registry
+from services.speaker_self_intro import extract_self_intro_names
 from services.speaker_service import (
     DEFAULT_EMBEDDING_MODEL,
     STORE_SPEAKER_AUDIO,
@@ -134,6 +135,16 @@ class SpeakerDetailResponse(SpeakerResponse):
     session_count: int = 0
 
 
+class SelfIntroName(BaseModel):
+    """A one-click name suggestion derived from a speaker's OWN utterances
+    (e.g. "Hi, I'm John"). Suggestion-only: the FE renders it as a chip the
+    user confirms via the existing create-speaker / assign endpoints. Never
+    auto-applied.
+    """
+    name: str
+    evidence: str = ""  # the utterance the name came from (tooltip / audit)
+
+
 class SpeakerLinkResponse(BaseModel):
     id: int
     session_id: int
@@ -143,6 +154,10 @@ class SpeakerLinkResponse(BaseModel):
     similarity: Optional[float] = None
     source: str
     confirmed: bool
+    # v3.x self-intro suggestions: populated ONLY for unidentified links
+    # (speaker_id is None). Empty for voice-matched / named / confirmed links.
+    # Backward compatible (default []): older FE bundles ignore it.
+    name_suggestions: list[SelfIntroName] = Field(default_factory=list)
     # v3.36.1 "My Voice" fold-status surfacing:
     #   True  = a sample was folded into the caller's account voiceprint
     #           during this request
@@ -194,6 +209,10 @@ class UnassignedSpeakerLinkResponse(BaseModel):
     preview: str = ""
     sample_audio_url: Optional[str] = None
     top_matches: list[SpeakerTopMatch] = Field(default_factory=list)
+    # Text-derived sibling of top_matches: self-intro name suggestions scanned
+    # from this cluster's OWN segments. Every row here is already speaker_id IS
+    # NULL (the query filters on it), so all rows are eligible.
+    name_suggestions: list[SelfIntroName] = Field(default_factory=list)
 
 
 class UnassignedSpeakerLinksPage(BaseModel):
@@ -588,6 +607,14 @@ async def list_unassigned_speaker_links(
             preview=_first_preview(segments),
             sample_audio_url=sample_audio_url,
             top_matches=_top_matches_for_centroid(db, org_id, centroid),
+            # Self-intro suggestions from THIS cluster's own segment texts
+            # only (segments already loaded above — zero extra DB work).
+            name_suggestions=[
+                SelfIntroName(**s)
+                for s in extract_self_intro_names(
+                    [str(seg.get("text") or "") for seg in segments]
+                )
+            ],
         ))
 
     next_offset = offset + len(items) if offset + len(items) < total else None
@@ -961,7 +988,11 @@ def _link_to_response(
     link: SpeakerSessionLink,
     *,
     my_voice_folded: Optional[bool] = None,
+    name_suggestions: Optional[list[SelfIntroName]] = None,
 ) -> SpeakerLinkResponse:
+    # name_suggestions is passed by the caller ONLY for unidentified links
+    # (link.speaker_id is None); assigned/named links pass nothing -> []. The
+    # helper stays free of extraction logic so it remains cheap.
     name = None
     if link.speaker_id:
         sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
@@ -977,6 +1008,7 @@ def _link_to_response(
         source=link.source,
         confirmed=link.confirmed,
         my_voice_folded=my_voice_folded,
+        name_suggestions=name_suggestions or [],
     )
 
 
@@ -1031,7 +1063,31 @@ async def list_speaker_links(
                 .all()
             )
 
-    return [_link_to_response(db, link) for link in links]
+    # Build ONE raw_label -> [segment texts] map in a single pass over the
+    # diarized segments, so we don't call _segments_for_label per link (it
+    # re-scans every segment each call). Self-intro suggestions are computed
+    # ONLY for unidentified links (speaker_id is None) from that cluster's OWN
+    # texts — an intro spoken by another cluster is structurally unreachable.
+    has_unassigned = any(link.speaker_id is None for link in links)
+    label_texts: dict[str, list[str]] = {}
+    if has_unassigned:
+        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+        for seg in (diarized.get("segments", []) if isinstance(diarized, dict) else []):
+            label = (seg.get("raw_label") or seg.get("speaker") or "").strip()
+            if not label:
+                continue
+            label_texts.setdefault(label, []).append(str(seg.get("text") or ""))
+
+    out: list[SpeakerLinkResponse] = []
+    for link in links:
+        suggestions: Optional[list[SelfIntroName]] = None
+        if link.speaker_id is None:
+            suggestions = [
+                SelfIntroName(**s)
+                for s in extract_self_intro_names(label_texts.get(link.raw_label, []))
+            ]
+        out.append(_link_to_response(db, link, name_suggestions=suggestions))
+    return out
 
 
 @router.patch("/api/sessions/{session_id}/speaker-links/{link_id}", response_model=SpeakerLinkResponse)

@@ -20,6 +20,14 @@ interface SpeakerLink {
    * absent = no fold was applicable.
    */
   my_voice_folded?: boolean | null;
+  /**
+   * Self-introduction name suggestions derived from THIS speaker's own
+   * utterances (backend contract: speakers.py SelfIntroName). Only present
+   * for unnamed links (speaker_id == null); [] otherwise. Always a
+   * suggestion the user confirms — prefills the enroll input, never
+   * auto-applies. `evidence` is the source sentence for the chip tooltip.
+   */
+  name_suggestions?: { name: string; evidence?: string }[];
 }
 
 /** Honest fingerprint toast keyed off `my_voice_folded` (see above). */
@@ -395,23 +403,46 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
               </span>
               {isEnrolling ? (
                 <>
-                  <input
-                    type="text"
-                    value={enrollName}
-                    placeholder="e.g. Aaron Stransky"
-                    autoFocus
-                    onChange={(e) => setEnrollName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !enrolling) enrollFromSession(link, enrollName);
-                      if (e.key === 'Escape') { setEnrollingLinkId(null); setEnrollName(""); }
-                    }}
-                    disabled={enrolling}
-                    className="flex-1 rounded border border-purple-400 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
+                  <div className="flex-1 flex flex-col gap-1">
+                    {/* Self-intro suggestions ("Hi, I'm John") parsed from
+                        this speaker's own lines. Clicking only prefills the
+                        name input — the user still presses Save, so nothing
+                        is auto-applied. */}
+                    {(link.name_suggestions?.length ?? 0) > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[11px] text-gray-500">Suggested:</span>
+                        {link.name_suggestions!.map((sugg, i) => (
+                          <button
+                            key={`${sugg.name}-${i}`}
+                            type="button"
+                            disabled={enrolling}
+                            title={sugg.evidence || `Heard them say: ${sugg.name}`}
+                            onClick={() => setEnrollName(sugg.name)}
+                            className="rounded-full border border-amber-400 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                          >
+                            {sugg.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      value={enrollName}
+                      placeholder="e.g. Aaron Stransky"
+                      autoFocus
+                      onChange={(e) => setEnrollName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !enrolling) enrollFromSession(link, enrollName);
+                        if (e.key === 'Escape') { setEnrollingLinkId(null); setEnrollName(""); }
+                      }}
+                      disabled={enrolling}
+                      className="w-full rounded border border-purple-400 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
                   <button
                     onClick={() => enrollFromSession(link, enrollName)}
                     disabled={enrolling || !enrollName.trim()}
-                    className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
+                    className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1 self-start"
                     title="Create speaker profile + enroll voice from this clip"
                   >
                     {enrolling ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -420,7 +451,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
                   <button
                     onClick={() => { setEnrollingLinkId(null); setEnrollName(""); }}
                     disabled={enrolling}
-                    className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                    className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50 self-start"
                   >
                     Cancel
                   </button>
@@ -434,7 +465,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
                       const v = e.target.value;
                       if (v === '__enroll__') {
                         setEnrollingLinkId(link.id);
-                        setEnrollName("");
+                        // Prefill from a self-intro suggestion ("Hi, I'm
+                        // John") when one exists — the user still presses
+                        // Save (enrollFromSession), so nothing auto-applies.
+                        setEnrollName(link.name_suggestions?.[0]?.name ?? "");
                         return;
                       }
                       updateLink(link, v ? Number(v) : null);
