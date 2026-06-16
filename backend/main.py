@@ -408,6 +408,13 @@ _load_router(app, "billing", "api.billing")
 _load_router(app, "founding", "api.founding")
 _load_router(app, "founding_admin", "api.founding", router_attr="admin_router")
 
+# === PHASE-1 BETA INVITE CODES ===
+# Gate self-serve signup behind single-use codes (REQUIRE_INVITE_CODE);
+# redeeming one comps the new user's personal org to Pro. Caller-facing
+# /api/invite-codes/{mine,config} + admin /api/admin/invite-codes mint.
+_load_router(app, "invite_codes", "api.invite_codes")
+_load_router(app, "invite_codes_admin", "api.invite_codes", router_attr="admin_router")
+
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")
 # "My Voice" portable account-level voiceprint (v3.36.0)

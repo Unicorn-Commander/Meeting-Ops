@@ -16,6 +16,7 @@ import {
   Settings2,
   Share2,
   ShieldCheck,
+  Ticket,
   Wifi,
 } from 'lucide-react';
 import type { SettingsSectionMeta } from './SettingsLayout';
@@ -77,6 +78,13 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     title: 'Privacy',
     icon: ShieldCheck,
     description: 'Product-analytics opt-out',
+    category: 'preferences',
+  },
+  {
+    id: 'invite-codes',
+    title: 'Invite codes',
+    icon: Ticket,
+    description: 'Beta invite codes you can share',
     category: 'preferences',
   },
 
@@ -320,6 +328,8 @@ export const PLACEHOLDER_SECTIONS = new Set<string>([
   // 'privacy' persists its toggle immediately (localStorage) — no backend
   // Save row needed, so we list it here to suppress the Save button.
   'privacy',
+  // 'invite-codes' is display + copy only (no settings to save).
+  'invite-codes',
   'recording-defaults',
   'integrations',
   'calendar-sync',

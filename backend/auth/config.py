@@ -30,6 +30,12 @@ class AuthConfig(BaseModel):
     
     # Registration
     ALLOW_REGISTRATION: bool = os.getenv("ALLOW_REGISTRATION", "false").lower() == "true"
+    # Phase-1 beta gate: when true, self-serve signup at POST /api/auth/register
+    # requires a valid single-use invite code (redeeming it comps the new
+    # user's personal org to Pro). When false (default), /register behaves
+    # exactly as before — open signup + admin-create paths are unaffected.
+    # Mirrors the ALLOW_REGISTRATION env pattern.
+    REQUIRE_INVITE_CODE: bool = os.getenv("REQUIRE_INVITE_CODE", "false").lower() == "true"
     DEFAULT_USER_ROLE: str = "user"
     # Public base URL of the app, used to build links in transactional emails
     # (email verification, password reset). Must be the user-facing origin.

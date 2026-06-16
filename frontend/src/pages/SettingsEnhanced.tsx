@@ -52,6 +52,7 @@ const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'))
 const PrivacySettings = lazy(() => import('../components/settings/PrivacySettings'));
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
+const InviteCodesCard = lazy(() => import('../components/settings/InviteCodesCard'));
 
 /**
  * "My Voice" card — personal voiceprint status + delete-on-demand.
@@ -405,6 +406,8 @@ export default function SettingsEnhanced() {
             description="Customizable keyboard shortcuts for start/stop/pause/marker. Coming in a future release."
           />
         );
+      case 'invite-codes':
+        return <InviteCodesCard />;
 
       // ── Recording defaults ──
       case 'recording-defaults':

@@ -219,6 +219,53 @@ class PasswordResetToken(Base):
     )
 
 
+class BetaInviteCode(Base):
+    """Phase-1 beta invite codes (single-use by default).
+
+    Self-serve signup is gated behind one of these when
+    ``auth_config.REQUIRE_INVITE_CODE`` is on. Redeeming a code at
+    /api/auth/register comps the new user's PERSONAL org to the Pro plan
+    (mirrors api/stripe_webhook._apply_org_plan_from_sub: plan='pro',
+    max_monthly_hours=None so services.quotas falls through to the Pro
+    default). Admins mint codes (POST /api/admin/invite-codes); seed users
+    hand them out. Phase 2 (NOT built here) lets an invitee mint their own.
+
+    ``max_redemptions`` defaults to 1 (single-use). ``redemption_count`` is
+    incremented ATOMICALLY at consume time (UPDATE ... WHERE id=:id AND
+    redemption_count < max_redemptions) so two parallel registrations can't
+    both burn the last seat. ``is_active`` is flipped False once the code is
+    exhausted; an admin can also pre-disable a code by setting it False.
+
+    ``created_by_user_id`` / ``redeemed_by_user_id`` are ON DELETE SET NULL
+    so deleting a user neither orphans nor cascades a code (the audit value
+    of "this code was redeemed" survives the redeemer's account deletion).
+    """
+
+    __tablename__ = "beta_invite_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(32), unique=True, index=True, nullable=False)
+    created_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    max_redemptions = Column(Integer, nullable=False, default=1)
+    redemption_count = Column(Integer, nullable=False, default=0)
+    redeemed_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    redeemed_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
+    redeemed_by = relationship("User", foreign_keys=[redeemed_by_user_id])
+
+
 class UserOrganization(Base):
     __tablename__ = "user_organizations"
     __table_args__ = (

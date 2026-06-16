@@ -16,6 +16,11 @@ from auth.dependencies import get_current_organization, get_current_user, requir
 from auth.email import send_password_reset_email, send_verification_email
 from auth.models import Organization, PasswordResetToken, User, UserOrganization
 from auth.config import auth_config
+from auth.invite_codes import (
+    comp_personal_org_to_pro,
+    consume_invite_code,
+    validate_invite_code,
+)
 from auth.tier import get_tier_features, get_user_tier
 from auth.utils import (
     generate_email_verification_token,
@@ -44,6 +49,10 @@ class UserCreate(BaseModel):
     full_name: Optional[str] = None
     organization_id: Optional[int] = None
     role: str = "user"
+    # Phase-1 beta gate (self-serve only). When auth_config.REQUIRE_INVITE_CODE
+    # is on, a valid single-use code is required to register and comps the new
+    # user's personal org to Pro. Ignored on the admin-create path.
+    invite_code: Optional[str] = None
     
     @field_validator('username')
     @classmethod
@@ -226,6 +235,23 @@ async def register(
     # personal org (not the shared default) and an email-verification link;
     # admin-created users keep the legacy behavior.
     is_self_serve = current_user is None
+
+    # Phase-1 beta gate (SELF-SERVE ONLY). When REQUIRE_INVITE_CODE is on, a
+    # valid single-use code is required to self-register; redeeming it comps
+    # the new user's personal org to Pro. Validate BEFORE create_user so a
+    # bad code never creates a user; the admin-create path (current_user set)
+    # is intentionally exempt, and when the flag is OFF this whole block is
+    # skipped so /register behaves exactly as before.
+    invite_row = None
+    if is_self_serve and auth_config.REQUIRE_INVITE_CODE:
+        try:
+            invite_row = validate_invite_code(db, user_data.invite_code)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(exc),
+            )
+
     try:
         user = AuthService.create_user(
             db,
@@ -238,6 +264,29 @@ async def register(
             created_by_id=current_user.id if current_user else None,
             personal_org=is_self_serve and user_data.organization_id is None,
         )
+        # Consume the code only AFTER create_user succeeds (a failed create
+        # raises above and must not burn a code). The consume is atomic
+        # (UPDATE ... WHERE redemption_count < max_redemptions); if a parallel
+        # registration claimed the last seat between validate + consume, this
+        # loses the race -> 403, and the just-created user is rolled back so a
+        # raced signup doesn't slip through ungated.
+        if invite_row is not None:
+            claimed = consume_invite_code(db, invite_row.id, user.id)
+            if not claimed:
+                # Lost the race for the last seat. Roll back the just-created
+                # user (and its FK refs) so a raced signup can't slip through
+                # ungated, then 403 so the client can retry with another code.
+                _delete_user_fk_references(db, user.id)
+                db.delete(user)
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="A valid invite code is required.",
+                )
+            # Comp the new user's personal org to Pro (mirrors the Stripe
+            # webhook's _apply_org_plan_from_sub: plan='pro' + clear the
+            # per-org hours override). Best-effort: a missing org is logged.
+            comp_personal_org_to_pro(db, user)
         if is_self_serve and not user.is_verified:
             # Best-effort: a mail failure must not fail signup (the user can
             # resend). send_verification_email logs + returns False if SMTP

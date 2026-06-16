@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Mail,
   Sparkles,
+  Ticket,
   UserRoundPlus,
 } from 'lucide-react';
 import { config } from '../config';
@@ -38,6 +39,12 @@ export const Signup: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  // Phase 1 private beta: GET /api/invite-codes/config tells us whether a
+  // valid invite code is REQUIRED to self-serve register. Default to
+  // `false` so the field renders as optional until the (anonymous) config
+  // probe resolves — never block the form on a slow/failed probe.
+  const [requireInviteCode, setRequireInviteCode] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   // v3.21.0: when ALLOW_REGISTRATION=false the backend returns
@@ -49,14 +56,44 @@ export const Signup: React.FC = () => {
   const [registrationClosed, setRegistrationClosed] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Pre-fill email from `?email=` query (set by Landing CTA).
+  // Pre-fill email from `?email=` query (set by Landing CTA), and the
+  // invite code from `?code=` / `?invite=` so an invite link can deep-link
+  // the field prefilled.
   useEffect(() => {
     const params = new URLSearchParams(location.search || '');
     const fromQuery = params.get('email');
     if (fromQuery) {
       setEmail(fromQuery.trim());
     }
+    const codeFromQuery = params.get('code') || params.get('invite');
+    if (codeFromQuery) {
+      setInviteCode(codeFromQuery.trim());
+    }
   }, [location.search]);
+
+  // Probe the (anonymous-callable) invite-code config on mount so we know
+  // whether to mark the invite-code field required. Soft-fail: if the
+  // probe errors we leave the field optional rather than blocking signup.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${config.apiUrl}/api/invite-codes/config`, {
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setRequireInviteCode(Boolean(data?.require_invite_code));
+        }
+      } catch {
+        /* soft-fail — field stays optional */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -81,14 +118,29 @@ export const Signup: React.FC = () => {
           username: username.trim(),
           password,
           ...(fullName.trim() ? { full_name: fullName.trim() } : {}),
+          // Phase 1 private beta: redeeming a valid code comps the new
+          // user's personal org to Pro (handled server-side). Only send a
+          // non-empty trimmed value so the optional path stays clean.
+          ...(inviteCode.trim() ? { invite_code: inviteCode.trim() } : {}),
         }),
       });
 
       if (response.status === 403) {
-        // Registration is closed (invite-only beta). Pivot to the
-        // friendly invite-confirmation surface — the Landing form has
-        // already logged the email server-side. Best-effort re-log
-        // here too in case the user typed a fresh email on the form.
+        if (requireInviteCode) {
+          // Invite-code beta is ON: a 403 means the code was missing,
+          // invalid, already redeemed, or inactive. Surface the backend's
+          // detail message inline so the user can correct the code (rather
+          // than the "registration closed" pivot, which is the
+          // ALLOW_REGISTRATION=false case below).
+          const payload = await response.json().catch(() => null);
+          throw new Error(
+            extractApiError(payload, 'That invite code could not be used. Check the code and try again.'),
+          );
+        }
+        // Registration is closed (no invite-code gate, ALLOW_REGISTRATION
+        // off). Pivot to the friendly invite-confirmation surface — the
+        // Landing form has already logged the email server-side. Best-effort
+        // re-log here too in case the user typed a fresh email on the form.
         try {
           await fetch(`${config.apiUrl}/api/landing/invite-request`, {
             method: 'POST',
@@ -300,6 +352,27 @@ export const Signup: React.FC = () => {
                       className="w-full rounded-xl border border-white/10 bg-zinc-950 px-4 py-3 text-white outline-none transition placeholder:text-zinc-500 focus:border-fuchsia-500/60"
                       placeholder="username_123"
                     />
+                  </label>
+
+                  <label className="block">
+                    <span className="mb-2 flex items-center gap-1.5 text-sm font-medium text-zinc-200">
+                      <Ticket className="h-4 w-4 text-fuchsia-300" />
+                      Invite code{requireInviteCode ? '' : ' (optional)'}
+                    </span>
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      value={inviteCode}
+                      onChange={(event) => setInviteCode(event.target.value)}
+                      required={requireInviteCode}
+                      className="w-full rounded-xl border border-white/10 bg-zinc-950 px-4 py-3 text-white outline-none transition placeholder:text-zinc-500 focus:border-fuchsia-500/60"
+                      placeholder={requireInviteCode ? 'Enter your invite code' : 'Have an invite code?'}
+                    />
+                    <span className="mt-2 block text-xs text-zinc-400">
+                      {requireInviteCode
+                        ? 'Meeting-Ops is in private beta — enter your invite code to join.'
+                        : 'Have an invite code? (optional) Redeeming one upgrades your workspace to Pro.'}
+                    </span>
                   </label>
 
                   <div className="grid gap-4 sm:grid-cols-2">
