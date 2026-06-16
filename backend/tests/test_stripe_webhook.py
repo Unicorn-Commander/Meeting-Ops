@@ -120,6 +120,38 @@ def _refresh(user):
         db.close()
 
 
+def _make_org(*, plan="free", max_monthly_hours=10):
+    """Create an org with a stale per-org hours override so a test can assert
+    the override gets CLEARED on upgrade (the v3.32.0 quota lift)."""
+    from auth.models import Organization
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        slug = "whorg" + uuid.uuid4().hex[:8]
+        org = Organization(
+            name=f"WH Org {slug}",
+            slug=slug,
+            plan=plan,
+            max_monthly_hours=max_monthly_hours,
+        )
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+        return org
+    finally:
+        db.close()
+
+
+def _refresh_org(org):
+    from auth.models import Organization
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        return db.query(Organization).filter(Organization.id == org.id).first()
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # 1. Signature verification
 # ---------------------------------------------------------------------------
@@ -246,6 +278,43 @@ def test_subscription_created_pro_price_flips_to_pro(client, monkeypatch):
     )
     assert r.status_code == 200
     assert _refresh(user).tier == "pro"
+
+
+def test_subscription_created_pro_lifts_org_plan_and_clears_quota_override(client, monkeypatch):
+    """The v3.32.0 quota lift: a Pro sub carrying meeting_ops_organization_id must
+    flip Organization.plan to 'pro' AND clear the stale max_monthly_hours override,
+    so services.quotas falls through to the 100h Pro default (10h -> 100h). The
+    other webhook tests only assert User.tier; this guards the actual quota lift
+    from silently regressing to the old tier-but-not-quota bug."""
+    user = _make_user(customer_id="cus_org_pro", tier="free")
+    org = _make_org(plan="free", max_monthly_hours=10)
+    event = {
+        "id": "evt_org_pro_" + uuid.uuid4().hex[:6],
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub_org_pro_1",
+                "status": "active",
+                "customer": "cus_org_pro",
+                "items": {"data": [{"price": {"id": "price_pro_test"}}]},
+                "metadata": {
+                    "meeting_ops_user_id": str(user.id),
+                    "meeting_ops_organization_id": str(org.id),
+                },
+            }
+        },
+    }
+    _patch_stripe(monkeypatch, event)
+    r = client.post(
+        "/api/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "ok"},
+    )
+    assert r.status_code == 200
+    assert _refresh(user).tier == "pro"
+    refreshed = _refresh_org(org)
+    assert refreshed.plan == "pro"           # quota plan follows the payment
+    assert refreshed.max_monthly_hours is None  # stale 10h override cleared -> 100h default
 
 
 def test_subscription_created_incomplete_does_not_upgrade(client, monkeypatch):
