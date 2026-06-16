@@ -316,7 +316,7 @@ function SimplifiedNavigation({
       <div className="mb-8">
         <div className={`flex items-center gap-3 ${collapsed ? 'md:justify-center md:gap-0' : ''}`}>
           <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 ring-1 ring-[#d4af37]/40 bg-[#0a1228] flex items-center justify-center">
-            <img src="/brand/pwa-192.png" alt="Meeting-Ops" className="w-full h-full object-cover" />
+            <img src="/brand/meeting-ops-mark.png?v=3" alt="Meeting-Ops" className="w-full h-full object-cover" />
           </div>
           <div className={collapsed ? 'md:hidden' : ''}>
             <div className="text-white font-semibold tracking-tight">Meeting-Ops</div>

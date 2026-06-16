@@ -342,7 +342,7 @@ export default function RAGChatPanel() {
       <div className="flex flex-col gap-2 p-3 border-b border-zinc-800">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <img src="/brand/meeting-ops-mark.png" alt="Meeting-Ops agent" className="w-7 h-7 rounded-full object-cover ring-1 ring-gold-500/40" />
+            <img src="/brand/meeting-ops-mark.png?v=3" alt="Meeting-Ops agent" className="w-7 h-7 rounded-full object-cover ring-1 ring-gold-500/40" />
             <span className="text-sm font-medium text-zinc-100">Meeting-Ops Agent</span>
           </div>
           <button
@@ -446,7 +446,7 @@ export default function RAGChatPanel() {
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.length === 0 && (
           <div className="text-center text-zinc-500 py-8">
-            <img src="/brand/meeting-ops-mark.png" alt="" className="w-16 h-16 mx-auto mb-3 rounded-full object-cover opacity-90 ring-1 ring-gold-500/30" />
+            <img src="/brand/meeting-ops-mark.png?v=3" alt="" className="w-16 h-16 mx-auto mb-3 rounded-full object-cover opacity-90 ring-1 ring-gold-500/30" />
             <p>Ask questions about your meetings across time.</p>
             <p className="text-xs mt-1">E.g. "What were the key decisions from last month?"</p>
           </div>
@@ -454,7 +454,7 @@ export default function RAGChatPanel() {
         {messages.map((msg, i) => (
           <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
             {msg.role === 'assistant' && (
-              <img src="/brand/meeting-ops-mark.png" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
+              <img src="/brand/meeting-ops-mark.png?v=3" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
             )}
             <div className={`max-w-[80%] rounded-lg px-3 py-2 ${
               msg.role === 'user'
@@ -508,7 +508,7 @@ export default function RAGChatPanel() {
         ))}
         {streaming && (
           <div className="flex gap-3">
-            <img src="/brand/meeting-ops-mark.png" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
+            <img src="/brand/meeting-ops-mark.png?v=3" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
             <div className="max-w-[80%] rounded-lg px-3 py-2 bg-zinc-800 text-zinc-100">
               <p className="text-sm whitespace-pre-wrap">{streaming}<span className="animate-pulse">|</span></p>
             </div>
@@ -516,7 +516,7 @@ export default function RAGChatPanel() {
         )}
         {loading && !streaming && (
           <div className="flex gap-3">
-            <img src="/brand/meeting-ops-mark.png" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
+            <img src="/brand/meeting-ops-mark.png?v=3" alt="" className="w-6 h-6 mt-1 rounded-full object-cover ring-1 ring-gold-500/30 flex-shrink-0" />
             <div className="rounded-lg px-3 py-2 bg-zinc-800 text-zinc-400">
               <span className="text-sm animate-pulse">Thinking...</span>
             </div>
