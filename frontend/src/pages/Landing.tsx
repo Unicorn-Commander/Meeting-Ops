@@ -79,8 +79,8 @@ export const Landing: React.FC = () => {
         {/* Header strip */}
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-500">
-              <span className="text-xl text-white">✨</span>
+            <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-[#0a1228] ring-1 ring-gold-500/40">
+              <img src="/brand/meeting-ops-mark.png?v=3" alt="Meeting-Ops" className="h-full w-full object-cover" />
             </div>
             <div>
               <div className="text-base font-semibold text-white">Meeting-Ops</div>
