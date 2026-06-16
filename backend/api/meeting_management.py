@@ -31,24 +31,26 @@ fabricated data:
 Still REAL and intentionally kept:
   - GET /api/recording-sessions/{id}/export — org-scoped, delegates to
     batch_export renderers, covered by tests/test_export.py.
-  - DELETE/PATCH /api/recording-sessions/{id}, PUT .../transcript — real
-    (legacy user_id-scoped) DB operations. KNOWN DEFECTS, uncalled by the
-    frontend, left for the wave-3 backlog: DELETE reads the nonexistent
-    ``audio_file_path`` column (500s before commit, rollback keeps data
-    safe); PATCH silently drops ``starred`` (not a model column).
-  - GET /api/recording-sessions[/{id}] — real DB reads, but shadowed by
-    api/sessions.py (loaded first), so effectively dead code (also reads
-    the nonexistent legacy columns above).
+  - PUT /api/recording-sessions/{id}/transcript — real (legacy user_id-scoped)
+    transcript replace; uncalled by the frontend but functional.
+
+WAVE-3 CLEANUP (2026-06-16): the two GET duplicates were DELETED — they were
+dead code (api/sessions.py, loaded first at the same /api/recording-sessions
+paths, shadows them) and also read pre-multi-org columns (file_size /
+npu_processed / audio_file_path) absent from the live model. The broken
+DELETE/PATCH (DELETE read the nonexistent ``audio_file_path``; PATCH wrote the
+nonexistent ``starred`` column; both uncalled by the frontend) now return an
+honest 501 pointing at the real CRUD: DELETE/PATCH
+/api/simple/recording-sessions/{id}.
 
 The router itself MUST keep loading so /health's routers_loaded count stays
 stable.
 """
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from pydantic import BaseModel
 import json
-import os
 
 # Import dependencies
 from database.database import get_db
@@ -64,12 +66,6 @@ router = APIRouter(prefix="/api", tags=["meetings"])
 
 _NOT_IMPLEMENTED = HTTPException(status_code=501, detail="Not implemented")
 
-class SessionUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    starred: Optional[bool] = None
-    tags: Optional[List[str]] = None
-
 class TranscriptUpdate(BaseModel):
     transcript: List[Dict[str, Any]]
 
@@ -83,189 +79,31 @@ async def create_session():
     """
     raise _NOT_IMPLEMENTED
 
-@router.get("/recording-sessions")
-async def list_sessions(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user),
-    skip: int = 0,
-    limit: int = 100
-):
-    """List all recording sessions for the current user"""
-    try:
-        sessions = db.query(RecordingSession).filter(
-            RecordingSession.user_id == current_user.id
-        ).offset(skip).limit(limit).all()
-        
-        result = []
-        for session in sessions:
-            # Get transcript word count and speaker count
-            transcripts = db.query(Transcription).filter(
-                Transcription.session_id == session.id
-            ).all()
-            
-            word_count = sum(len(t.text.split()) for t in transcripts if t.text)
-            speakers = set(t.speaker for t in transcripts if t.speaker)
-            
-            result.append({
-                "id": session.id,
-                "name": session.name,
-                "created_at": session.created_at.isoformat(),
-                "duration": session.duration or 0,
-                "status": session.status or "completed",
-                "file_size": session.file_size or 0,
-                "speaker_count": len(speakers),
-                "word_count": word_count,
-                "has_transcript": len(transcripts) > 0,
-                "has_summary": bool(session.summary),
-                "tags": session.tags or [],
-                "starred": session.starred or False,
-                "npu_processed": session.npu_processed or False,
-                "processing_time": session.processing_time or 0,
-                "confidence_score": session.confidence_score or 0.0
-            })
-        
-        return result
-    except Exception as e:
-        logger.error(f"Failed to list sessions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/recording-sessions/{session_id}")
-async def get_session(
-    session_id: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get detailed information about a recording session"""
-    try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Get transcripts
-        transcripts = db.query(Transcription).filter(
-            Transcription.session_id == session_id
-        ).order_by(Transcription.start_time).all()
-        
-        # Format transcript segments
-        transcript_data = []
-        speakers_data = {}
-        
-        for t in transcripts:
-            segment = {
-                "id": str(t.id),
-                "speaker": t.speaker or f"Speaker {t.speaker_id or 1}",
-                "text": t.text,
-                "start_time": t.start_time,
-                "end_time": t.end_time,
-                "confidence": t.confidence or 0.95,
-                "is_final": True,
-                "words": []  # Would need word-level timestamps from NPU
-            }
-            transcript_data.append(segment)
-            
-            # Track speaker stats
-            speaker = segment["speaker"]
-            if speaker not in speakers_data:
-                speakers_data[speaker] = {
-                    "id": speaker,
-                    "name": speaker,
-                    "color": f"text-blue-400",  # Would assign different colors
-                    "segments": 0,
-                    "totalTime": 0
-                }
-            speakers_data[speaker]["segments"] += 1
-            speakers_data[speaker]["totalTime"] += (t.end_time - t.start_time)
-        
-        # Get audio file URL
-        audio_url = f"/api/files/{session_id}/stream" if session.audio_file_path else None
-        
-        return {
-            "id": session.id,
-            "name": session.name,
-            "created_at": session.created_at.isoformat(),
-            "duration": session.duration or 0,
-            "audio_url": audio_url,
-            "transcript": transcript_data,
-            "speakers": list(speakers_data.values()),
-            "npu_processed": session.npu_processed or False,
-            "processing_time": session.processing_time or 0,
-            "summary": session.summary
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# GET /api/recording-sessions and GET /api/recording-sessions/{session_id}
+# were REMOVED (2026-06-16): dead duplicates. api/sessions.py (loaded first in
+# main.py, same /api/recording-sessions paths) shadows them, and they also read
+# pre-multi-org columns (file_size / npu_processed / audio_file_path) that don't
+# exist on the live model. The real reads live in api/sessions.py.
 
 @router.delete("/recording-sessions/{session_id}")
 async def delete_session(
     session_id: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Delete a recording session"""
-    try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Delete associated transcripts
-        db.query(Transcription).filter(
-            Transcription.session_id == session_id
-        ).delete()
-        
-        # Delete audio file if exists
-        if session.audio_file_path and os.path.exists(session.audio_file_path):
-            os.remove(session.audio_file_path)
-        
-        # Delete session
-        db.delete(session)
-        db.commit()
-        
-        return {"status": "deleted", "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to delete session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """NOT IMPLEMENTED — the legacy handler read the nonexistent
+    ``audio_file_path`` column (500'd before commit) and was never called by
+    the frontend. Real deletion: DELETE /api/simple/recording-sessions/{id}."""
+    raise _NOT_IMPLEMENTED
 
 @router.patch("/recording-sessions/{session_id}")
 async def update_session(
     session_id: str,
-    update_data: SessionUpdate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """Update session metadata"""
-    try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        if update_data.name is not None:
-            session.name = update_data.name
-        if update_data.description is not None:
-            session.description = update_data.description
-        if update_data.starred is not None:
-            session.starred = update_data.starred
-        if update_data.tags is not None:
-            session.tags = update_data.tags
-        
-        db.commit()
-        return {"status": "updated", "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to update session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """NOT IMPLEMENTED — the legacy handler wrote ``starred`` (not a model
+    column) and was never called by the frontend. Real metadata updates:
+    PATCH /api/simple/recording-sessions/{id}."""
+    raise _NOT_IMPLEMENTED
 
 @router.put("/recording-sessions/{session_id}/transcript")
 async def update_transcript(
