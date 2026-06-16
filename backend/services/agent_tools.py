@@ -67,22 +67,28 @@ def _resolve_session(
 
 def _extract_transcript_text(session: DBRecordingSession) -> str:
     """Pull the best-available transcript representation off a session row.
-    Mirrors the priority order used by ``api/ai_chat.py``."""
-    if session.transcript_simple:
-        return session.transcript_simple
 
+    Mirrors ``api/ai_chat.py:_get_transcript_text``: prefer the speaker-
+    ATTRIBUTED transcript ("Name: utterance" lines built from the diarized
+    segments, raw diarizer codes normalized to "Speaker N") over the flat
+    ``transcript_simple``. Without going through ``build_attributed_transcript``
+    the RAG agent would quote raw ``SPEAKER_00`` codes for any session that
+    never went through the label-normalization pass (satellite/companion
+    uploads, legacy rows) — while the per-meeting chat shows "Speaker 1" / real
+    names for the same data. Routing both through the one helper keeps them in
+    parity and means no raw diarizer code can reach the model.
+    """
     diarized = session.transcript_diarized
     if isinstance(diarized, dict):
         segments = diarized.get("segments", [])
         if segments:
-            lines = []
-            for seg in segments:
-                speaker = seg.get("speaker") or "Speaker"
-                text = seg.get("text") or ""
-                if text:
-                    lines.append(f"{speaker}: {text}")
-            if lines:
-                return "\n".join(lines)
+            from services.speaker_labels import build_attributed_transcript
+            text, _speakers = build_attributed_transcript(segments)
+            if text.strip():
+                return text
+
+    if session.transcript_simple:
+        return session.transcript_simple
 
     raw = session.transcript
     if raw:

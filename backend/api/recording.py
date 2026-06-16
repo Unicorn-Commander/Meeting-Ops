@@ -2027,11 +2027,11 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 else None
             )
             if _segs:
-                _index_transcript = "\n".join(
-                    f"{(seg.get('speaker') or 'Speaker')}: {(seg.get('text') or '').strip()}"
-                    for seg in _segs
-                    if (seg.get("text") or "").strip()
-                )
+                # Normalize through the shared helper so indexed snippets /
+                # citations carry "Speaker N" / real names, never raw SPEAKER_00
+                # codes — even on an edge path that skipped the normalize step.
+                from services.speaker_labels import build_attributed_transcript
+                _index_transcript, _ = build_attributed_transcript(_segs)
             else:
                 _index_transcript = session.transcript_simple or session.transcript or ""
 
