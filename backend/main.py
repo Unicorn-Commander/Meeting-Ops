@@ -292,6 +292,9 @@ _load_router(app, "auth", "auth.routes", required=True)
 # the caller's home workspace). Second router object in auth.routes so the
 # code lives with the membership helpers; loaded here via router_attr.
 _load_router(app, "organizations", "auth.routes", router_attr="organizations_router")
+# Unicorn Commander app-level OIDC SSO (/api/auth/sso/uc/*): direct Keycloak
+# login + auto-provision, used by the UC dashboard app-card for zero-click SSO.
+_load_router(app, "uc_sso", "auth.oidc_sso")
 # session_tags must precede recording so /recording-sessions/tags wins
 # routing over /recording-sessions/{session_id} (the wildcard would swallow it).
 _load_router(app, "session_tags", "api.sessions_tags")

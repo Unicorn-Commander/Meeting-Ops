@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
@@ -108,6 +109,21 @@ async def get_current_user_optional(
                     user = AuthService.get_user_by_id(db, int(user_id))
         except (JWTError, ValueError):
             pass
+
+    # Try the app-level UC-SSO session cookie set by auth/oidc_sso.py after a
+    # Keycloak login. Same JWT shape as the bearer access token (type=access,
+    # sub=user id), so it decodes through the identical path.
+    if not user:
+        cookie_token = request.cookies.get(os.getenv("UC_SSO_COOKIE_NAME", "mo_uc_session"))
+        if cookie_token:
+            try:
+                payload = decode_token(cookie_token)
+                if payload and payload.get("type") == "access":
+                    user_id = payload.get("sub")
+                    if user_id:
+                        user = AuthService.get_user_by_id(db, int(user_id))
+            except (JWTError, ValueError):
+                pass
 
     # Try API key if no valid JWT
     if not user and api_key:
