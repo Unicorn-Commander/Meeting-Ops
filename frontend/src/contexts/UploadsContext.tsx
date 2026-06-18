@@ -109,10 +109,32 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
   const [uploads, setUploads] = useState<UploadItem[]>(() => loadStoredUploads());
   const aborts = useRef<Map<string, AbortController>>(new Map());
   const sockets = useRef<Map<string, WebSocket>>(new Map());
+  const autoDismiss = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(uploads.filter(persistable).slice(-50)));
   }, [uploads]);
+
+  // Auto-clear a completed upload from the tray ~12s after it finishes, so the
+  // status notification disappears on its own once transcribing + processing
+  // are done. Failed uploads are left in place so the user can read the error
+  // (now the real STT reason) and retry.
+  useEffect(() => {
+    uploads.forEach((item) => {
+      if (item.stage === 'done' && !autoDismiss.current.has(item.localId)) {
+        const timer = setTimeout(() => {
+          autoDismiss.current.delete(item.localId);
+          setUploads((prev) => prev.filter((u) => u.localId !== item.localId));
+        }, 12000);
+        autoDismiss.current.set(item.localId, timer);
+      }
+    });
+  }, [uploads]);
+
+  useEffect(() => () => {
+    autoDismiss.current.forEach((timer) => clearTimeout(timer));
+    autoDismiss.current.clear();
+  }, []);
 
   const updateUpload = useCallback((localId: string, patch: Partial<UploadItem>) => {
     setUploads((prev) => prev.map((item) => item.localId === localId ? { ...item, ...patch } : item));

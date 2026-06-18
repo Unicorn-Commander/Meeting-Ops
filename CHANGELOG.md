@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.38.3] - 2026-06-18
+
+### Changed
+- **Completed uploads auto-clear from the upload tray.** A finished upload (stage `done`) previously stayed in the bottom-right Uploads tray until manually dismissed; it now removes itself ~12s after processing completes. Failed uploads remain in place so the error (now the real STT reason — see 3.38.2) stays visible for retry, and in-flight uploads are untouched.
+
 ## [3.38.2] - 2026-06-18
 
 ### Fixed
