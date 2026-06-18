@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.38.2] - 2026-06-18
+
+### Fixed
+- **Failed transcriptions now report the real reason instead of "no segments."** When the STT service rejected or errored on an upload — a recording exceeding the transcription service's audio-length limit (HTTP 400), a server error (500), or a timeout — the pipeline surfaced a generic "Transcription produced no segments," hiding the actual cause. The Parakeet provider now carries the service's real error (status + detail) on its result, and the upload pipeline raises that as the job's `error_message`, so the user/operator sees e.g. "Transcription service error 400: audio too long (…)", "Could not reach the transcription service: …", or a timeout note. (Surfaced while debugging a 5.8h upload whose STT failure was masked by the generic message.)
+
 ## [3.38.1] - 2026-06-18
 
 ### Fixed

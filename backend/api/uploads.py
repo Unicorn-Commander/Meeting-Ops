@@ -1185,7 +1185,10 @@ async def _transcribe_audio(
     )
     result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language), timeout=1800)
     if not result or not result.get("segments"):
-        raise RuntimeError("Transcription produced no segments.")
+        # Surface the provider's real reason (STT "audio too long" / 500 /
+        # timeout, carried on result["error"]) instead of a generic message,
+        # so the job's error_message tells the user what actually happened.
+        raise RuntimeError((result or {}).get("error") or "Transcription produced no segments.")
     # _persist_transcription expects audio_duration; the providers return
     # `duration` directly, so mirror it for back-compat.
     result.setdefault("audio_duration", result.get("duration", 0.0))

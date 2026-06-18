@@ -166,14 +166,24 @@ class LocalParakeetProvider:
                     )
         except httpx.TimeoutException:
             logger.error("Parakeet timeout transcribing %s (timeout=%ss)", audio_path, timeout)
-            return _empty_result(self.model, language or "en")
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Transcription timed out after {timeout:.0f}s — the recording may be too long for the current limit.",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Parakeet client error: %s", exc)
-            return _empty_result(self.model, language or "en")
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Could not reach the transcription service: {exc}",
+            )
 
         if resp.status_code != 200:
-            logger.error("Parakeet returned %s: %s", resp.status_code, resp.text[:200])
-            return _empty_result(self.model, language or "en")
+            detail = (resp.text or "").strip()[:300]
+            logger.error("Parakeet returned %s: %s", resp.status_code, detail)
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Transcription service error {resp.status_code}: {detail}",
+            )
 
         payload = resp.json()
         # Normalize. The svc already speaks the unified shape, but defensively
@@ -210,7 +220,10 @@ class LocalParakeetProvider:
         }
 
 
-def _empty_result(model: str, language: str) -> dict[str, Any]:
+def _empty_result(model: str, language: str, error=None) -> dict[str, Any]:
+    # `error` (when set) carries the real reason transcription yielded nothing
+    # — e.g. the STT service's "audio too long" / 500 / timeout — so the upload
+    # pipeline can surface it instead of a generic "no segments" message.
     return {
         "text": "",
         "segments": [],
@@ -220,4 +233,5 @@ def _empty_result(model: str, language: str) -> dict[str, Any]:
         "confidence": 0.0,
         "model": model,
         "rtf": None,
+        "error": error,
     }
