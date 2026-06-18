@@ -31,7 +31,11 @@ router = APIRouter(prefix="/api/uploads", tags=["Uploads"])
 ws_router = APIRouter(tags=["Uploads"])
 
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
-DEFAULT_MAX_FILE_BYTES = 524288000
+# Host-wide fallback ceiling when UPLOAD_MAX_FILE_BYTES is unset. Kept at/above
+# the largest tier cap (enterprise = 10 GB, see services/quotas.py) so a fresh
+# deploy that forgets the env can't silently cap paid tiers. 16 GB = headroom
+# for full video-meeting recordings; per-org tier quota still gates below this.
+DEFAULT_MAX_FILE_BYTES = 17179869184
 RECORDINGS_DIR = Path(os.getenv("RECORDINGS_DIR", "/app/recordings"))
 UPLOAD_ROOT = RECORDINGS_DIR / "uploads"
 

@@ -123,9 +123,14 @@ export const SessionCreator: React.FC<SessionCreatorProps> = ({
       return;
     }
 
-    // Soft client-side cap; server-side per-org quota is the source of truth.
-    if (file.size > 500 * 1024 * 1024) {
-      showToast.warning('File is larger than 500MB. Per-org quota may apply server-side.');
+    // High client-side sanity cap (16 GB). The authoritative limit is the
+    // per-org tier quota + host ceiling enforced at /uploads/start, which
+    // returns a plan-aware message; we only block here to catch an obviously
+    // wrong pick before kicking off a long chunked upload. (A full video
+    // meeting is large but legitimate — the old flat 500MB block rejected
+    // multi-GB recordings regardless of the org's plan.)
+    if (file.size > 16 * 1024 * 1024 * 1024) {
+      showToast.warning('That file is over 16 GB. Try an audio-only export, or contact support to raise your limit.');
       return;
     }
 

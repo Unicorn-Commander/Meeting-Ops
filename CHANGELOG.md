@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.38.1] - 2026-06-18
+
+### Fixed
+- **Large meeting recordings no longer blocked below your plan's limit.** Uploading a multi-GB recording (e.g. a 6.86 GB Jitsi `.webm`) failed even on the Enterprise plan — whose tier cap is 10 GB — because two host-level ceilings sat *below* the paid tiers and silently overrode them: a flat **500 MB** client-side block in the "new meeting from file" dialog, and a **2 GB** server ceiling (`UPLOAD_MAX_FILE_BYTES`) on the customer node / **500 MB** default on dogfood. All are raised to **16 GB**, which sits above the largest tier cap so the per-org tier quota — not an arbitrary host limit — is the source of truth again. The bulk-import per-file ceiling, the code default, and the example env were aligned to 16 GB for the same reason. Chunked/resumable upload and the per-org quota messages are unchanged.
+
 ## [3.38.0] - 2026-06-14
 
 ### Added
