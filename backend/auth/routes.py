@@ -646,7 +646,9 @@ async def delete_my_account(
         # account deletion (mirrors _delete_session_record).
         from database.models import ChatHistory as _ChatHistory
         db.query(_ChatHistory).filter(
-            _ChatHistory.session_key.in_([cid for (_org, cid) in session_refs])
+            _ChatHistory.session_key.in_(
+                [cid for (_org, cid, _node) in session_refs]
+            )
         ).delete(synchronize_session=False)
         # Deleting the sessions DB-cascades action_items, session_collaborators,
         # session-bound upload/tts jobs, chunk embeddings, attachments, ...
