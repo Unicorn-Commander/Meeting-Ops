@@ -135,8 +135,13 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Transcription service check failed: {e}")
 
     try:
-        from api.uploads import cleanup_stale_uploads, start_upload_pipeline_queue
+        from api.uploads import (
+            cleanup_stale_uploads,
+            recover_pending_uploads,
+            start_upload_pipeline_queue,
+        )
         await start_upload_pipeline_queue()
+        await recover_pending_uploads()
         await cleanup_stale_uploads()
         logger.info("Upload pipeline initialized")
     except Exception as e:

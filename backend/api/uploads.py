@@ -44,6 +44,9 @@ AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ATTACHABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".pdf", ".docx", ".txt", ".md"}
 PIPELINE_STAGES = ["queued", "uploading", "extracting", "transcribing", "diarizing", "summarizing", "embedding", "done"]
+RECOVERABLE_PIPELINE_STAGES = {
+    "queued", "extracting", "transcribing", "diarizing", "summarizing", "embedding",
+}
 
 
 class UploadStartRequest(BaseModel):
@@ -298,12 +301,53 @@ async def stop_upload_pipeline_queue() -> None:
     await upload_pipeline_queue.stop()
 
 
+async def recover_pending_uploads() -> int:
+    """Re-enqueue durable upload jobs left in-flight by a process restart."""
+    db = SessionLocal()
+    recovered = 0
+    try:
+        jobs = db.query(UploadJob).filter(
+            UploadJob.stage.in_(RECOVERABLE_PIPELINE_STAGES),
+        ).order_by(UploadJob.created_at).all()
+        for job in jobs:
+            job_dir = _job_dir(_org_slug_for_job(db, job), str(job.upload_id))
+            source_path = job_dir / job.filename
+            extracted_path = job_dir / "extracted.wav"
+            if not source_path.exists() and not extracted_path.exists():
+                logger.warning(
+                    "Upload %s remains %s but has no recoverable bytes",
+                    job.upload_id,
+                    job.stage,
+                )
+                continue
+            await upload_pipeline_queue.enqueue(str(job.upload_id))
+            recovered += 1
+        if recovered:
+            logger.info("Recovered %s pending upload jobs", recovered)
+        return recovered
+    finally:
+        db.close()
+
+
 async def cleanup_stale_uploads() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     db = SessionLocal()
     try:
+        stale_uploading = db.query(UploadJob).filter(
+            UploadJob.stage == "uploading",
+            UploadJob.updated_at < cutoff,
+        ).all()
+        for job in stale_uploading:
+            job.stage = "failed"
+            job.error_message = "Upload expired before all chunks were received. Please retry."
+            job.job_completed_at = datetime.now(timezone.utc)
+        if stale_uploading:
+            db.commit()
+
+        # Never delete bytes for queued or in-process rows: startup recovery
+        # needs them. Only terminal or now-expired incomplete uploads are safe.
         stale = db.query(UploadJob).filter(
-            UploadJob.stage.in_(["uploading", "queued", "failed", "cancelled"]),
+            UploadJob.stage.in_(["failed", "cancelled"]),
             UploadJob.updated_at < cutoff,
         ).all()
         for job in stale:

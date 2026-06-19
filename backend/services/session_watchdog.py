@@ -95,6 +95,7 @@ def _enabled() -> bool:
 # past any legitimate large-file batch import and short enough that the
 # UI doesn't carry zombies into the next day.
 DEFAULT_PROCESSING_WATCHDOG_HOURS = 6
+DEFAULT_UPLOAD_WATCHDOG_MINUTES = 120
 
 
 def _processing_threshold_minutes() -> int:
@@ -105,6 +106,59 @@ def _processing_threshold_minutes() -> int:
         except ValueError:
             pass
     return DEFAULT_PROCESSING_WATCHDOG_HOURS * 60
+
+
+def _upload_threshold_minutes() -> int:
+    try:
+        return max(1, int(os.getenv("UPLOAD_WATCHDOG_MINUTES", str(DEFAULT_UPLOAD_WATCHDOG_MINUTES))))
+    except ValueError:
+        return DEFAULT_UPLOAD_WATCHDOG_MINUTES
+
+
+def mark_abandoned_uploads(*, dry_run: bool = False) -> dict[str, Any]:
+    """Mark stale upload pipeline rows failed so they become retryable."""
+    if not _enabled():
+        return {"enabled": False}
+
+    from database.database import SessionLocal
+    from database.models import UploadJob
+
+    threshold_minutes = _upload_threshold_minutes()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+    stages = ("queued", "extracting", "transcribing", "diarizing", "summarizing", "embedding")
+    summary = {
+        "enabled": True,
+        "kind": "uploads",
+        "threshold_minutes": threshold_minutes,
+        "marked_failed": 0,
+        "errors": 0,
+        "dry_run": dry_run,
+    }
+    db = SessionLocal()
+    try:
+        jobs = db.query(UploadJob).filter(
+            UploadJob.stage.in_(stages),
+            UploadJob.updated_at < cutoff,
+        ).order_by(UploadJob.id).limit(_max_per_pass()).all()
+        now = datetime.now(timezone.utc)
+        for job in jobs:
+            if not dry_run:
+                job.stage = "failed"
+                job.error_message = (
+                    f"Upload pipeline stalled for more than {threshold_minutes} minutes; retry is available."
+                )
+                job.job_completed_at = now
+            summary["marked_failed"] += 1
+        if not dry_run:
+            db.commit()
+        logger.info("session_watchdog upload pass: %s", summary)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        summary["errors"] += 1
+        logger.exception("session_watchdog uploads: top-level error: %s", exc)
+    finally:
+        db.close()
+    return summary
 
 
 # How long an *empty* always-on session must have existed before the watchdog

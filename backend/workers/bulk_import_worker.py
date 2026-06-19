@@ -85,14 +85,17 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
     only status (+ ended_at + processing_metadata audit fields) change.
     Configurable via SESSION_WATCHDOG_* env vars; both default-enabled."""
     from services.session_watchdog import (
+        mark_abandoned_uploads,
         mark_abandoned_recording_sessions,
         mark_abandoned_processing_sessions,
     )
     recording_result = await asyncio.to_thread(mark_abandoned_recording_sessions)
     processing_result = await asyncio.to_thread(mark_abandoned_processing_sessions)
+    upload_result = await asyncio.to_thread(mark_abandoned_uploads)
     combined = {
         "recording": recording_result,
         "processing": processing_result,
+        "uploads": upload_result,
     }
     logger.info("arq cron: session_watchdog result=%s", combined)
     return combined

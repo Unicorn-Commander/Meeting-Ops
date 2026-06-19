@@ -200,3 +200,45 @@ def test_watchdog_respects_max_per_pass_cap(org_and_user, monkeypatch):
     # Second pass takes the next batch
     res2 = mark_abandoned_recording_sessions()
     assert res2["marked_failed"] <= 2
+
+
+def test_watchdog_marks_stalled_upload_failed_and_retryable(org_and_user, monkeypatch):
+    org_id, user_id = org_and_user
+    monkeypatch.setenv("UPLOAD_WATCHDOG_MINUTES", "30")
+    from database.database import SessionLocal
+    from database.models import UploadJob
+    from services.session_watchdog import mark_abandoned_uploads
+
+    db = SessionLocal()
+    try:
+        when = datetime.now(timezone.utc) - timedelta(hours=2)
+        job = UploadJob(
+            organization_id=org_id,
+            user_id=user_id,
+            upload_id=uuid.uuid4(),
+            filename="meeting.wav",
+            action="transcribe",
+            total_size=4,
+            bytes_received=4,
+            chunks_received=1,
+            total_chunks=1,
+            stage="transcribing",
+            created_at=when,
+            updated_at=when,
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+    finally:
+        db.close()
+
+    result = mark_abandoned_uploads()
+    assert result["marked_failed"] >= 1
+    db = SessionLocal()
+    try:
+        job = db.get(UploadJob, job_id)
+        assert job.stage == "failed"
+        assert "retry is available" in job.error_message
+        assert job.job_completed_at is not None
+    finally:
+        db.close()
