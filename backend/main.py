@@ -4,6 +4,7 @@ Clean router loading with status tracking and real timestamps.
 """
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import asyncio
@@ -27,6 +28,28 @@ loaded_routers: List[str] = []
 failed_routers: List[dict] = []
 
 audio_monitor_task = None
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Apply browser security headers to every HTTP response."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy-Report-Only"] = (
+            "default-src 'self' data: blob:; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob: https:; "
+            "font-src 'self' data:; "
+            "connect-src 'self' https: wss: http: ws: blob:; "
+            "worker-src 'self' blob:; frame-ancestors 'none'"
+        )
+        if request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower() == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
 
 
 def _load_router(app: FastAPI, name: str, module_path: str, router_attr: str = "router",
@@ -262,6 +285,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Hosted MCP endpoint bypass for CORS gating. CORSMiddleware above
 # enforces app-wide CORS, but the MCP endpoint accepts ANY origin

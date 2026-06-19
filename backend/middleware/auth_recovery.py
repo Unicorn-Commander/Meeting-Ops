@@ -62,10 +62,6 @@ class AuthRecoveryMiddleware(BaseHTTPMiddleware):
             # Process request normally
             response = await call_next(request)
             
-            # Add security headers
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["X-Frame-Options"] = "DENY"
-            
             return response
             
         except Exception as e:
