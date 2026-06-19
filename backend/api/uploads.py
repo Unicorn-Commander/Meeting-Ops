@@ -2454,6 +2454,10 @@ async def _summarize_session(
             ),
             timeout=420,
         )
+    if not (text or "").strip():
+        from services.providers.impl_llm import LLMUnavailable
+
+        raise LLMUnavailable("Summary generation returned no content")
     analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
     # executive must be a real summary sentence — never empty and never a bare
     # name/title (the memo prompt occasionally dropped the speaker's name or

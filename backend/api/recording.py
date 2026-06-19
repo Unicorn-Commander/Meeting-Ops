@@ -1974,11 +1974,18 @@ async def _run_session_reprocess(session_pk: int) -> None:
 
             await _summarize_session(db, session, template="standard")
         except Exception as exc:  # noqa: BLE001
+            md = dict(session.processing_metadata or {})
+            md["needs_summary"] = True
+            md["summary_error"] = str(exc)[:500]
+            session.processing_metadata = md
+            flag_modified(session, "processing_metadata")
+            db.commit()
             logger.warning(
                 "Reprocess summarize failed for session=%s: %s",
                 session.id,
                 exc,
             )
+            raise
 
         # Pre-warm ai_insights so the side-panel doesn't trigger a fresh
         # LLM call on first view of the reprocessed session.

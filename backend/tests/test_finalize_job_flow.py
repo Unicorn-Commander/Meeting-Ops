@@ -258,6 +258,36 @@ async def test_finalize_worker_missing_session_returns_skipped():
         user_id=None,
         org_id=None,
     )
-
     assert result["status"] == "skipped"
     assert result["reason"] == "session_missing"
+
+
+@pytest.mark.asyncio
+async def test_finalize_worker_keeps_summary_failure_retryable(monkeypatch):
+    import api.uploads as uploads_mod
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from services.providers.impl_llm import LLMUnavailable
+    from workers.finalize_workers import finalize_session_job
+
+    org_id, _, user_id = _seed_pro_user_and_org(
+        "v3183-summary-retry", "v3183_summary_retry_user",
+    )
+    session_pk, _ = _seed_always_on_session(org_id, user_id)
+
+    async def unavailable(*args, **kwargs):
+        raise LLMUnavailable("gateway unavailable")
+
+    monkeypatch.setattr(uploads_mod, "_summarize_session", unavailable)
+    result = await finalize_session_job({"job_id": "summary-retry"}, session_pk)
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    db = SessionLocal()
+    try:
+        session = db.get(RecordingSession, session_pk)
+        assert session.status == "processing"
+        assert session.processing_metadata["needs_summary"] is True
+        assert "gateway unavailable" in session.processing_metadata["summary_error"]
+    finally:
+        db.close()

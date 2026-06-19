@@ -114,6 +114,20 @@ async def finalize_session_job(
         except Exception as exc:  # noqa: BLE001
             summary_error = str(exc)[:500]
             logger.exception("finalize_session_job: summary failed session=%s", session_pk)
+            metadata = dict(session.processing_metadata or {})
+            metadata["needs_summary"] = True
+            metadata["summary_error"] = summary_error
+            session.processing_metadata = metadata
+            session.status = "processing"
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(session, "processing_metadata")
+            db.commit()
+            return {
+                "status": "failed",
+                "session_pk": session_pk,
+                "error": summary_error,
+                "retryable": True,
+            }
 
         # ---- Step 1b: auto-title fallback ----
         # _summarize_session only assigns a real title when it successfully

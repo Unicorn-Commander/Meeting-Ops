@@ -150,3 +150,22 @@ def test_registry_route_uses_structured_prompt(client, monkeypatch):
         assert "Return strict JSON with keys executive" not in prompt  # old ask gone
     finally:
         db.close()
+
+
+def test_empty_llm_response_does_not_persist_completed_summary(client, monkeypatch):
+    import api.uploads as uploads_mod
+    from services.providers.impl_llm import LLMUnavailable
+
+    class _EmptyLLM:
+        async def chat(self, **kwargs):
+            return ""
+
+    db, session = _mk_session("meeting transcript with enough content", ["Alice"])
+    monkeypatch.setattr(uploads_mod, "_direct_summarizer_provider", lambda: _EmptyLLM())
+    try:
+        with pytest.raises(LLMUnavailable):
+            asyncio.run(uploads_mod._summarize_session(db, session, force=True))
+        assert session.final_summary is None
+        assert session.summary is None
+    finally:
+        db.close()

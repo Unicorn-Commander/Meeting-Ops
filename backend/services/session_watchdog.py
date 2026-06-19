@@ -530,6 +530,7 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
         "threshold_minutes": threshold_minutes,
         "candidates": 0,
         "promoted_completed": 0,
+        "summary_retries_enqueued": 0,
         "marked_failed": 0,
         "skipped_cap": 0,
         "errors": 0,
@@ -556,6 +557,28 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
         now = datetime.now(timezone.utc)
         for sess in candidates:
             try:
+                metadata = dict(sess.processing_metadata or {})
+                if metadata.get("needs_summary"):
+                    if dry_run:
+                        summary["summary_retries_enqueued"] += 1
+                        continue
+                    import asyncio
+                    from services.job_runner import enqueue_job
+
+                    job_id = asyncio.run(enqueue_job(
+                        "finalize_session_job",
+                        sess.id,
+                        user_id=sess.user_id,
+                        org_id=sess.organization_id,
+                        owner_user_id=sess.user_id,
+                        owner_org_id=sess.organization_id,
+                    ))
+                    sess.processing_job_id = job_id
+                    metadata["summary_retry_enqueued_at"] = now.isoformat()
+                    metadata["summary_retry_job_id"] = job_id
+                    sess.processing_metadata = metadata
+                    summary["summary_retries_enqueued"] += 1
+                    continue
                 has_text = bool((sess.transcript or "").strip()) or bool(
                     getattr(sess, "transcript_diarized", None)
                 )
