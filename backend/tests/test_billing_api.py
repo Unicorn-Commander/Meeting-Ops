@@ -143,6 +143,54 @@ def test_checkout_returns_url(client, stripe_configured, monkeypatch):
     assert captured["organization_id"] is not None
 
 
+def test_checkout_with_active_sub_routes_to_portal_not_double_bill(
+    client, stripe_configured, monkeypatch
+):
+    # billing-2: an already-subscribed user clicking Subscribe again must NOT get
+    # a second Checkout session (double-bill) — they're routed to the Billing
+    # Portal instead.
+    called = {"checkout": False}
+
+    def _fake_checkout(*a, **k):
+        called["checkout"] = True
+        return "https://checkout.stripe.com/SHOULD_NOT_HAPPEN"
+
+    monkeypatch.setattr("services.stripe_client.create_checkout_session", _fake_checkout)
+    monkeypatch.setattr(
+        "services.stripe_client.get_active_subscription",
+        lambda user: {"subscription_id": "sub_1", "status": "active", "tier": "pro"},
+    )
+    monkeypatch.setattr(
+        "services.stripe_client.create_billing_portal_session",
+        lambda user, return_url: "https://billing.stripe.com/portal/test",
+    )
+    r = client.post(
+        "/api/billing/checkout", json={"plan": "pro"}, headers=_auth(client)
+    )
+    assert r.status_code == 200
+    assert r.json()["url"].startswith("https://billing.stripe.com/portal/")
+    assert called["checkout"] is False  # no second checkout was created
+
+
+def test_checkout_incomplete_sub_still_allows_checkout(
+    client, stripe_configured, monkeypatch
+):
+    # An abandoned/incomplete checkout must NOT lock the user out of trying again.
+    def _fake_create(db, user, price_id, success_url, cancel_url, organization_id=None):
+        return "https://checkout.stripe.com/test/cs_retry"
+
+    monkeypatch.setattr("services.stripe_client.create_checkout_session", _fake_create)
+    monkeypatch.setattr(
+        "services.stripe_client.get_active_subscription",
+        lambda user: {"subscription_id": "sub_x", "status": "incomplete", "tier": "pro"},
+    )
+    r = client.post(
+        "/api/billing/checkout", json={"plan": "pro"}, headers=_auth(client)
+    )
+    assert r.status_code == 200
+    assert r.json()["url"].startswith("https://checkout.stripe.com/")
+
+
 def test_checkout_400_for_unknown_plan(client, stripe_configured):
     r = client.post(
         "/api/billing/checkout",

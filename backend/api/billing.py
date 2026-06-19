@@ -189,6 +189,34 @@ async def create_checkout(
     )
     cancel_url = payload.cancel_url or f"{base}/#/pricing?upgrade=cancelled"
 
+    # billing-2: an already-subscribed user clicking "Subscribe" again would
+    # create a SECOND Stripe subscription and get double-billed. Route them to
+    # the Billing Portal (upgrade/downgrade/cancel) instead of a fresh Checkout.
+    # Only block truly-live subs — an `incomplete` status is an abandoned
+    # checkout, so those users may still start a new one. This server-side guard
+    # is authoritative even if the Pricing UI is bypassed.
+    try:
+        existing_sub = stripe_client.get_active_subscription(current_user)
+    except Exception as exc:  # noqa: BLE001
+        # Never let a Stripe lookup blip block a legitimate first purchase.
+        logger.warning("checkout: active-subscription lookup failed: %s", exc)
+        existing_sub = None
+    if existing_sub and existing_sub.get("status") in ("active", "trialing", "past_due"):
+        try:
+            portal_url = stripe_client.create_billing_portal_session(
+                current_user, return_url=f"{base}/#/pricing"
+            )
+            return CheckoutResponse(url=portal_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("checkout: portal redirect for existing sub failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "You already have an active subscription. Manage or change "
+                    "your plan from the billing portal."
+                ),
+            )
+
     try:
         url = stripe_client.create_checkout_session(
             db=db,
