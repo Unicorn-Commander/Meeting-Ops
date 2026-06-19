@@ -343,7 +343,15 @@ def _resolve_ws_user_email(websocket: WebSocket) -> Optional[str]:
     Mirrors the trust order in ``auth.dependencies.get_current_user_optional``
     so a user authenticated against the REST API the same way is recognised
     here. Returns the first non-empty email-shaped value, else None.
+
+    SECURITY: like the REST path, the forward-auth identity headers are only
+    honoured when the WS upgrade crossed the trusted proxy (X-Proxy-Auth
+    secret). A forged header on a direct-to-container upgrade must not
+    authenticate anyone. Fails open until the secret is configured.
     """
+    from auth.proxy_trust import forward_auth_trusted
+    if not forward_auth_trusted(websocket.headers):
+        return None
     candidates = [
         websocket.headers.get("x-auth-request-email"),
         websocket.headers.get("x-forwarded-email"),

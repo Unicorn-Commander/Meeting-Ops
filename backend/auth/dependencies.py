@@ -10,6 +10,7 @@ from database.database import get_db
 from auth.models import User
 from auth.organization import ActiveOrganization, is_global_admin, parse_group_list, resolve_active_organization
 from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat
+from auth.proxy_trust import forward_auth_trusted
 from auth.service import AuthService
 from auth.utils import decode_token, check_permission
 
@@ -57,13 +58,25 @@ async def get_current_user_optional(
     # Keycloak doesn't always emit a discrete email claim; preferred_username
     # often holds it, so we fall through several headers and accept the first
     # value that looks like an email.
-    sso_email = _first_email(
-        request.headers.get("X-Auth-Request-Email"),
-        request.headers.get("X-Forwarded-Email"),
-        request.headers.get("X-Auth-Request-Preferred-Username"),
-        request.headers.get("X-Forwarded-Preferred-Username"),
-        request.headers.get("X-Auth-Request-User"),
-        request.headers.get("X-Forwarded-User"),
+    #
+    # SECURITY: these headers are only honoured when the request crossed the
+    # trusted proxy (forward_auth_trusted checks the X-Proxy-Auth secret). On a
+    # shared docker network an untrusted co-tenant could otherwise forge the
+    # identity + groups headers → auth bypass + superuser escalation. When the
+    # gate is unconfigured it fails open (current behaviour); once the secret is
+    # set, forged headers are ignored and the caller falls through to JWT /
+    # cookie / PAT / API-key below.
+    sso_email = (
+        _first_email(
+            request.headers.get("X-Auth-Request-Email"),
+            request.headers.get("X-Forwarded-Email"),
+            request.headers.get("X-Auth-Request-Preferred-Username"),
+            request.headers.get("X-Forwarded-Preferred-Username"),
+            request.headers.get("X-Auth-Request-User"),
+            request.headers.get("X-Forwarded-User"),
+        )
+        if forward_auth_trusted(request.headers)
+        else None
     )
     if sso_email:
         sso_username = (
