@@ -7,8 +7,15 @@ from .models import Base
 # Get database URL from environment or use PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://meetingops:REMOVED@localhost:5434/meeting_sessions")
 
-# Create engine
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+# Validate pooled connections before checkout and retire long-lived connections
+# before common Postgres/pgbouncer idle limits. These options are safe for the
+# SQLite test/dev pool as well.
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
