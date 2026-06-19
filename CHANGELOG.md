@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.39.0] - 2026-06-19
+
+### Added
+- **Map-reduce summarization for long meetings (behind a toggle).** The completion-pass summarizer fed the whole transcript to one LLM call, capped at ~50K tokens — so meetings beyond ~4–5h were truncated (the summary covered only the first portion, stamped "covers ~X%"). New `MEETING_OPS_SUMMARY_MAPREDUCE` mode (default **off**) chunks long transcripts on **speaker-turn boundaries** (~28K tokens/chunk, ~1.5K overlap — both configurable via `MEETING_OPS_SUMMARY_CHUNK_TOKENS` / `_OVERLAP_TOKENS`), summarizes each chunk into a structured speaker-attributed digest (**map**), then synthesizes the digests into the final notes (**reduce**) — covering the **entire** meeting with every LLM call bounded to one chunk. The reduce emits the **identical** `final_summary` JSON contract (no frontend/downstream change); short meetings (≤ one chunk) use the existing single-call path **byte-for-byte unchanged**; any map-reduce failure falls back to the single call. Map chunk-calls run with bounded concurrency. Stamps `summary_mode` + `summary_chunks` in processing_metadata.
+
 ## [3.38.5] - 2026-06-18
 
 ### Changed

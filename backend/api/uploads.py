@@ -1829,6 +1829,360 @@ def _markdown_from_response(text: str) -> str:
     return text.strip()
 
 
+# ---------------------------------------------------------------------------
+# Map-reduce summarization (v3.36.0) — full coverage of arbitrarily long
+# meetings, behind MEETING_OPS_SUMMARY_MAPREDUCE (default OFF).
+#
+# The single-call path (above/below) caps the transcript at ~50K/60K tokens,
+# so an 8-hour meeting (~96K tokens) is summarized only through its first
+# ~4-5h and stamped `summary_truncated`. The back half is lost. When the
+# toggle is ON and the attributed transcript exceeds the chunk size, we
+# instead: split the diarized speaker-turns into chunk_tokens windows (never
+# mid-utterance, with overlap for continuity), summarize each chunk into a
+# small structured JSON (MAP), then synthesize all the chunk-JSONs into the
+# final summary in the EXACT existing final_summary contract (REDUCE). Every
+# LLM call is bounded to the chunk size, so the whole meeting is covered.
+#
+# The reduce step deliberately emits the SAME fenced markdown + JSON a
+# single call produces, so its output flows through the identical
+# parse/write block in _summarize_session — the contract cannot drift.
+# Best-effort like the single-call summarizer: any failure (a map chunk or
+# the reduce) logs a warning and falls back to the single-call (truncated)
+# path; it never crashes the finalize pipeline.
+# ---------------------------------------------------------------------------
+
+
+def _mapreduce_enabled() -> bool:
+    return os.getenv("MEETING_OPS_SUMMARY_MAPREDUCE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate. No tokenizer is bundled in this stack (even
+    ai_chat.py budgets by raw chars), so we use the standard ~4 chars/token
+    heuristic. Only used to decide chunk boundaries — approximate is fine."""
+    return len(text or "") // 4
+
+
+def _mapreduce_chunk_tokens() -> int:
+    try:
+        return max(2000, int(os.getenv("MEETING_OPS_SUMMARY_CHUNK_TOKENS", "28000")))
+    except ValueError:
+        return 28000
+
+
+def _mapreduce_overlap_tokens() -> int:
+    try:
+        return max(0, int(os.getenv("MEETING_OPS_SUMMARY_CHUNK_OVERLAP_TOKENS", "1500")))
+    except ValueError:
+        return 1500
+
+
+def _fmt_clock(seconds: float) -> str:
+    """Seconds -> H:MM:SS (or M:SS) for the per-chunk time range labels."""
+    try:
+        total = int(max(0.0, float(seconds)))
+    except (TypeError, ValueError):
+        return "0:00"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _chunk_segments(
+    segments: list[dict[str, Any]],
+    label_map: Optional[dict[str, str]],
+    *,
+    chunk_tokens: int,
+    overlap_tokens: int,
+) -> list[dict[str, Any]]:
+    """Split diarized segments into ~chunk_tokens windows on speaker-turn
+    boundaries (never mid-segment), carrying ~overlap_tokens of the previous
+    window's trailing segments into the next for continuity.
+
+    Each returned chunk is ``{"index", "text", "speakers", "start", "end"}``
+    where ``text`` is a speaker-attributed transcript (same renderer the
+    single-call path uses) and start/end are the chunk's rough time range.
+
+    A single segment larger than chunk_tokens becomes its own (oversized)
+    chunk rather than being split mid-utterance — the per-chunk LLM call can
+    still summarize it; only the byte cap of one call is exceeded, by design,
+    to keep speaker turns intact.
+    """
+    from services.speaker_labels import build_attributed_transcript
+
+    # Keep only segments with real text; preserve order (callers pass the
+    # diarized order, which build_attributed_transcript also relies on).
+    usable = [s for s in segments if (s.get("text") or "").strip()]
+    if not usable:
+        return []
+
+    def _seg_tokens(seg: dict[str, Any]) -> int:
+        return _estimate_tokens(seg.get("text") or "")
+
+    chunks: list[dict[str, Any]] = []
+    cur: list[dict[str, Any]] = []
+    cur_tok = 0
+
+    def _emit(segs: list[dict[str, Any]]) -> None:
+        if not segs:
+            return
+        text, speakers = build_attributed_transcript(segs, label_map)
+        if not text.strip():
+            return
+        starts = [float(s.get("start") or 0) for s in segs]
+        ends = [float(s.get("end") or s.get("start") or 0) for s in segs]
+        chunks.append({
+            "index": len(chunks),
+            "text": text,
+            "speakers": speakers,
+            "start": min(starts) if starts else 0.0,
+            "end": max(ends) if ends else 0.0,
+        })
+
+    for seg in usable:
+        tok = _seg_tokens(seg)
+        # Adding this turn would overflow the window -> close the current
+        # window first, then seed the next one with an overlap tail.
+        if cur and cur_tok + tok > chunk_tokens:
+            _emit(cur)
+            # Carry trailing segments (~overlap_tokens) into the next window.
+            tail: list[dict[str, Any]] = []
+            tail_tok = 0
+            for prev in reversed(cur):
+                ptok = _seg_tokens(prev)
+                if tail and tail_tok + ptok > overlap_tokens:
+                    break
+                tail.insert(0, prev)
+                tail_tok += ptok
+                if tail_tok >= overlap_tokens:
+                    break
+            cur = list(tail)
+            cur_tok = tail_tok
+        cur.append(seg)
+        cur_tok += tok
+        # A lone giant segment already exceeds the window on its own -> flush
+        # it as its own chunk so it is never split mid-utterance.
+        if cur_tok >= chunk_tokens and len(cur) == 1:
+            _emit(cur)
+            cur = []
+            cur_tok = 0
+    _emit(cur)
+    return chunks
+
+
+# Per-chunk MAP prompt. Asks for a small, speaker-attributed JSON digest of
+# one slice of the meeting — faithful, no fabrication. The reduce step
+# consumes these (not the raw transcript). The time range lets reduce order
+# things across chunks.
+MEETING_OPS_MAP_PROMPT = """You are analyzing ONE PORTION (chunk {n} of {total}, covering roughly {start}–{end} of the meeting) of a longer meeting transcript. Summarize ONLY what appears in this chunk — do not speculate about other parts of the meeting.
+
+{speaker_context}
+
+Rules:
+- Use ONLY information explicitly stated in this chunk. Never fabricate.
+- Attribute every point, decision, and quote to the speaker who said it, exactly as labeled in the transcript. Never output machine codes like SPEAKER_00.
+- Quote only words that actually appear below. If a section has nothing, return an empty list.
+
+---
+TRANSCRIPT (chunk {n} of {total}):
+{transcript}
+
+---
+Output ONLY a single fenced JSON block (no prose before or after) with this exact shape:
+
+```json
+{{"key_points": ["point (Speaker Name)", ...],
+  "decisions": ["decision (decided by Speaker)", ...],
+  "action_items": [{{"task": "...", "assignee": "Speaker or Not specified"}}],
+  "quotes": [{{"text": "exact words from this chunk", "speaker": "Speaker Name"}}],
+  "open_questions": ["..."],
+  "notable": ["any other substantive context worth carrying forward"]}}
+```
+"""
+
+
+# REDUCE prompt. Adapts the full single-call summarizer prompt: instead of a
+# raw transcript it receives the structured chunk digests, and it must
+# synthesize across the WHOLE meeting, dedupe, and keep speaker names. The
+# output sections + fenced JSON are IDENTICAL to MEETING_OPS_SUMMARIZER_STYLE_PROMPT
+# so the reduce response flows through the same parse/write block unchanged.
+MEETING_OPS_REDUCE_PROMPT = """You are synthesizing the FINAL notes for a long meeting that was analyzed in {total} sequential chunks. Below are the structured, speaker-attributed digests of each chunk, in chronological order. Together they cover the ENTIRE meeting.
+
+{speaker_context}
+
+Synthesize a SINGLE coherent set of meeting notes spanning the whole meeting:
+- Merge and DEDUPLICATE points, decisions, action items, and quotes that recur across chunks (the chunks overlap slightly, so the same item may appear more than once — report it once).
+- Preserve speaker attribution exactly as given in the digests. Never output machine codes like SPEAKER_00, and never invent speakers or details not present in the digests.
+- Order topics and events as they unfolded across the meeting (the digests are in order).
+
+Output the following sections in order. Include ALL substantive information from the digests.
+
+## Executive Summary
+Write 2-3 sentences capturing the meeting's main purpose, key outcomes, and overall tone — across the FULL meeting.
+
+## Key Discussion Points
+For each major topic discussed, create a numbered section:
+1. **[Topic Title]**
+   - [Key point] ([Speaker Name] raised this)
+   - [Supporting detail or counterpoint] ([Speaker Name])
+   Include all perspectives shared, areas of agreement, and disagreements.
+
+## Action Items
+Create a markdown table with these columns:
+| Owner | Action | Priority | Deadline |
+For each action item explicitly stated. If owner/deadline not stated, write "Not specified."
+
+## Key Decisions
+List each decision made during the meeting:
+- **[Decision]** - Made by [who], rationale: [why, if discussed]
+
+## Key Quotes
+Select up to 5 notable quotes that capture important positions, commitments, or insights:
+> "[Exact words from a digest]" - [Speaker Name]
+> Context: [One sentence explaining why this quote matters]
+
+## Next Steps
+- [Next step with responsible person if mentioned]
+
+## Open Questions
+- [Any unresolved items that need follow-up]
+
+IMPORTANT: If a section has no genuine content across the digests, write "None identified." under that heading — never invent, pad, or infer items to fill a section. Quote only words that appear in the digests.
+
+---
+CHUNK DIGESTS:
+{digests}
+
+---
+After the markdown sections above, emit a single fenced JSON block with the same content split into structured keys. This is required for downstream tooling. The fenced block looks like:
+
+```json
+{{"executive": "...",
+  "bullets": ["topic 1: point", "topic 2: point", ...],
+  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "..."}}],
+  "decisions": ["decision (decided by Speaker)", ...],
+  "questions": ["..."],
+  "quotes": [{{"text": "...", "speaker": "...", "context": "..."}}],
+  "next_steps": ["..."],
+  "minutes": "the full markdown output above as a single string",
+  "title": "short descriptive title for this meeting"}}
+```
+"""
+
+
+async def _summarize_mapreduce(
+    llm,
+    *,
+    system_prompt: str,
+    speaker_context: str,
+    chunks: list[dict[str, Any]],
+    style_prefix: str = "",
+) -> str:
+    """Run the map (per-chunk) + reduce (synthesis) passes and return the
+    reduce response text — the SAME fenced markdown + JSON a single call
+    returns, so the caller feeds it through the existing parse/write block.
+
+    Map chunk-calls are independent and run with bounded concurrency
+    (semaphore of 3). Results are reassembled in chunk order before reduce.
+    Raises on any unrecoverable failure (no usable map output, or the reduce
+    LLM call returns empty); the caller catches and falls back to the
+    single-call path.
+    """
+    total = len(chunks)
+    extra = {
+        "top_p": 0.9,
+        "top_k": 30,
+        "presence_penalty": 1.2,
+        "repetition_penalty": 1.0,
+    }
+    sem = asyncio.Semaphore(3)
+
+    async def _map_one(chunk: dict[str, Any]) -> Optional[dict[str, Any]]:
+        prompt = MEETING_OPS_MAP_PROMPT.format(
+            n=chunk["index"] + 1,
+            total=total,
+            start=_fmt_clock(chunk["start"]),
+            end=_fmt_clock(chunk["end"]),
+            speaker_context=speaker_context,
+            transcript=chunk["text"],
+        )
+        if style_prefix:
+            prompt = f"{style_prefix}\n\n{prompt}"
+        try:
+            async with sem:
+                text = await asyncio.wait_for(
+                    llm.chat(
+                        system_prompt=system_prompt,
+                        user_prompt=prompt,
+                        max_tokens=4096,
+                        temperature=0.6,
+                        extra_params=extra,
+                    ),
+                    timeout=300,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("map-reduce: chunk %d/%d LLM call failed: %s", chunk["index"] + 1, total, exc)
+            return None
+        data = _parse_summarizer_json(text, fallback_title="")
+        return {
+            "index": chunk["index"],
+            "range": f"{_fmt_clock(chunk['start'])}–{_fmt_clock(chunk['end'])}",
+            "speakers": chunk.get("speakers") or [],
+            "key_points": data.get("key_points") or [],
+            "decisions": data.get("decisions") or [],
+            "action_items": data.get("action_items") or [],
+            "quotes": data.get("quotes") or [],
+            "open_questions": data.get("open_questions") or data.get("questions") or [],
+            "notable": data.get("notable") or [],
+        }
+
+    results = await asyncio.gather(*(_map_one(c) for c in chunks))
+    digests = [r for r in results if r is not None]
+    if not digests:
+        raise RuntimeError("map-reduce produced no usable chunk digests")
+    digests.sort(key=lambda d: d["index"])
+
+    # Serialize the digests compactly for the reduce prompt. They are small
+    # (a few hundred tokens each), so the reduce call stays well within one
+    # chunk's budget even for very long meetings.
+    digest_blocks: list[str] = []
+    for d in digests:
+        block = {k: d[k] for k in (
+            "key_points", "decisions", "action_items", "quotes",
+            "open_questions", "notable",
+        )}
+        digest_blocks.append(
+            f"### Chunk {d['index'] + 1} of {total} ({d['range']}) — "
+            f"speakers: {', '.join(d['speakers']) if d['speakers'] else 'n/a'}\n"
+            + json.dumps(block, ensure_ascii=False)
+        )
+    digests_text = "\n\n".join(digest_blocks)
+
+    reduce_prompt = MEETING_OPS_REDUCE_PROMPT.format(
+        total=total,
+        speaker_context=speaker_context,
+        digests=digests_text,
+    )
+    if style_prefix:
+        reduce_prompt = f"{style_prefix}\n\n{reduce_prompt}"
+
+    reduce_text = await asyncio.wait_for(
+        llm.chat(
+            system_prompt=system_prompt,
+            user_prompt=reduce_prompt,
+            max_tokens=8192,
+            temperature=0.6,
+            extra_params=extra,
+        ),
+        timeout=420,
+    )
+    if not (reduce_text or "").strip():
+        raise RuntimeError("map-reduce reduce step returned empty output")
+    return reduce_text
+
+
 async def _summarize_session(
     db: Session,
     session: RecordingSession,
@@ -1845,15 +2199,21 @@ async def _summarize_session(
     # — so the model had to GUESS who said what, and raw pyannote codes
     # (SPEAKER_00) leaked straight into summaries. Raw codes are normalized
     # to "Speaker N" here even if the session predates label normalization.
-    from services.speaker_labels import build_attributed_transcript
+    from services.speaker_labels import build_attributed_transcript, normalized_label_map
 
     transcript = ""
     speakers_seen: list[str] = []
+    # Kept for the map-reduce path: the raw diarized speaker-turns and the
+    # ONE shared label map, so chunking renders every chunk with the same
+    # "Speaker N" numbering the whole-transcript render used (recomputing the
+    # map per chunk would renumber speakers differently across chunks).
+    segments: list[dict[str, Any]] = []
+    label_map: Optional[dict[str, str]] = None
     diarized = session.transcript_diarized
     if isinstance(diarized, dict) and diarized.get("segments"):
-        transcript, speakers_seen = build_attributed_transcript(
-            diarized.get("segments") or []
-        )
+        segments = diarized.get("segments") or []
+        label_map = normalized_label_map([s.get("speaker") or "" for s in segments])
+        transcript, speakers_seen = build_attributed_transcript(segments, label_map)
     if not transcript.strip():
         transcript = session.transcript_simple or ""
     if not transcript.strip():
@@ -1977,27 +2337,78 @@ async def _summarize_session(
             )
             return
 
-    # Qwen3.6 inference params per the model card + Meeting Minutes
-    # tuning: temperature 0.6, top_p 0.9, top_k 30, presence_penalty 1.2,
-    # repetition_penalty 1.0. These reduce both repetition loops (the
-    # Qwen model card explicitly warns greedy decoding causes loops) and
-    # off-topic drift. Pass them through extra_params so generic
-    # OpenAI-compatible endpoints get them too.
-    text = await asyncio.wait_for(
-        llm.chat(
-            system_prompt=system_prompt,
-            user_prompt=prompt,
-            max_tokens=8192,
-            temperature=0.6,
-            extra_params={
-                "top_p": 0.9,
-                "top_k": 30,
-                "presence_penalty": 1.2,
-                "repetition_penalty": 1.0,
-            },
-        ),
-        timeout=420,
-    )
+    # Map-reduce decision (v3.36.0). Engage ONLY when the toggle is on AND the
+    # attributed transcript is longer than one chunk AND there are real
+    # speaker-turns to split on AND this isn't a short memo. Otherwise the
+    # single-call path below runs UNCHANGED — the short/one-chunk case must be
+    # byte-for-byte the current behavior, so it is never routed through the new
+    # prompts. On any map-reduce failure we fall through to the single call,
+    # which keeps `truncated` honest (the truncated body is what it summarized).
+    chunk_tokens = _mapreduce_chunk_tokens()
+    summary_mode = "single"
+    summary_chunks = 0
+    text: Optional[str] = None
+    if (
+        _mapreduce_enabled()
+        and not is_memo
+        and segments
+        and _estimate_tokens(transcript) > chunk_tokens
+    ):
+        chunks = _chunk_segments(
+            segments,
+            label_map,
+            chunk_tokens=chunk_tokens,
+            overlap_tokens=_mapreduce_overlap_tokens(),
+        )
+        if len(chunks) > 1:
+            try:
+                logger.info(
+                    "Summarizing session=%s via map-reduce: %d chunks (~%d tokens, chunk_tokens=%d)",
+                    session.id, len(chunks), _estimate_tokens(transcript), chunk_tokens,
+                )
+                text = await _summarize_mapreduce(
+                    llm,
+                    system_prompt=system_prompt,
+                    speaker_context=speaker_context,
+                    chunks=chunks,
+                    # Mirror the single-call route difference: registry route
+                    # carries the org-template guidance prefix, direct route
+                    # does not (direct uses the verbatim spec'd system prompt).
+                    style_prefix=(style if direct is None else ""),
+                )
+                summary_mode = "mapreduce"
+                summary_chunks = len(chunks)
+                truncated = False  # full coverage — every chunk was summarized
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "map-reduce summarization failed for session=%s (%s) — "
+                    "falling back to single-call (truncated) path",
+                    session.id, exc,
+                )
+                text = None
+
+    # Single-call path (default, and the fallback). Qwen3.6 inference params
+    # per the model card + Meeting Minutes tuning: temperature 0.6, top_p 0.9,
+    # top_k 30, presence_penalty 1.2, repetition_penalty 1.0. These reduce both
+    # repetition loops (the Qwen model card explicitly warns greedy decoding
+    # causes loops) and off-topic drift. Pass them through extra_params so
+    # generic OpenAI-compatible endpoints get them too.
+    if text is None:
+        text = await asyncio.wait_for(
+            llm.chat(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                max_tokens=8192,
+                temperature=0.6,
+                extra_params={
+                    "top_p": 0.9,
+                    "top_k": 30,
+                    "presence_penalty": 1.2,
+                    "repetition_penalty": 1.0,
+                },
+            ),
+            timeout=420,
+        )
     analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
     # executive must be a real summary sentence — never empty and never a bare
     # name/title (the memo prompt occasionally dropped the speaker's name or
@@ -2056,9 +2467,13 @@ async def _summarize_session(
     summary_md = dict(session.processing_metadata or {})
     summary_md["summary_input_hash"] = summary_input_hash
     # Truncation disclosure (v3.35.0, audit #7): record when the summary saw
-    # only part of the transcript so the UI/exports can surface it.
+    # only part of the transcript so the UI/exports can surface it. Map-reduce
+    # (v3.36.0) covers the whole meeting, so it sets summary_truncated=False.
     summary_md["summary_truncated"] = bool(truncated)
     summary_md["summary_prompt_variant"] = "memo" if is_memo else "full"
+    summary_md["summary_mode"] = summary_mode
+    if summary_mode == "mapreduce":
+        summary_md["summary_chunks"] = summary_chunks
     session.processing_metadata = summary_md
     flag_modified(session, "processing_metadata")
 
