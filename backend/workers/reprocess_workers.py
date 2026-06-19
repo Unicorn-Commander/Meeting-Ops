@@ -176,6 +176,9 @@ async def reprocess_session_job(
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("reprocess_session_job crash session=%s", session_pk)
+        from services.transient_errors import is_transient_error, retry_transient
+        if is_transient_error(exc):
+            await retry_transient(ctx, exc)
         return {"status": "failed", "session_pk": session_pk, "error": str(exc)[:500]}
     finally:
         if lock_token:

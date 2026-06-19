@@ -28,6 +28,8 @@ import json
 import logging
 from typing import Any
 
+from arq import Retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,6 +124,9 @@ async def finalize_session_job(
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(session, "processing_metadata")
             db.commit()
+            from services.transient_errors import is_transient_error, retry_transient
+            if is_transient_error(exc):
+                await retry_transient(ctx, exc)
             return {
                 "status": "failed",
                 "session_pk": session_pk,
@@ -336,10 +341,15 @@ async def finalize_session_job(
         }
     except asyncio.CancelledError:
         raise
+    except Retry:
+        raise
     except Exception as exc:
         logger.exception(
             "finalize_session_job: unexpected crash session=%s", session_pk,
         )
+        from services.transient_errors import is_transient_error, retry_transient
+        if is_transient_error(exc):
+            await retry_transient(ctx, exc)
         return {
             "status": "failed",
             "session_pk": session_pk,

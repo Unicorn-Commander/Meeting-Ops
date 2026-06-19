@@ -2148,6 +2148,9 @@ async def _run_session_reprocess(session_pk: int) -> None:
             failed_at=_now().isoformat(),
             error=str(exc)[:500],
         )
+        from services.transient_errors import is_transient_error
+        if is_transient_error(exc):
+            raise
     finally:
         db.close()
 

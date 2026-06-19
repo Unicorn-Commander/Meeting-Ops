@@ -20,6 +20,8 @@ import asyncio
 import logging
 from typing import Any
 
+from arq import Retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +80,9 @@ async def render_tts_summary_job(
             audio_bytes = await provider.synthesize(text, voice=voice, format=fmt)
         except Exception as exc:  # noqa: BLE001
             logger.exception("render_tts_summary_job: provider error")
+            from services.transient_errors import is_transient_error, retry_transient
+            if is_transient_error(exc):
+                await retry_transient(ctx, exc)
             return {
                 "status": "failed",
                 "error": f"provider_error: {exc}"[:500],
@@ -103,8 +108,13 @@ async def render_tts_summary_job(
         }
     except asyncio.CancelledError:
         raise
+    except Retry:
+        raise
     except Exception as exc:
         logger.exception("render_tts_summary_job: crashed")
+        from services.transient_errors import is_transient_error, retry_transient
+        if is_transient_error(exc):
+            await retry_transient(ctx, exc)
         return {
             "status": "failed",
             "error": str(exc)[:500],
@@ -173,6 +183,9 @@ async def render_tts_podcast_job(
             return {"status": "failed", "error": "not_implemented", "session_pk": session_pk}
         except Exception as exc:  # noqa: BLE001
             logger.exception("render_tts_podcast_job: provider error")
+            from services.transient_errors import is_transient_error, retry_transient
+            if is_transient_error(exc):
+                await retry_transient(ctx, exc)
             return {
                 "status": "failed",
                 "error": f"provider_error: {exc}"[:500],
@@ -198,8 +211,13 @@ async def render_tts_podcast_job(
         }
     except asyncio.CancelledError:
         raise
+    except Retry:
+        raise
     except Exception as exc:
         logger.exception("render_tts_podcast_job: crashed")
+        from services.transient_errors import is_transient_error, retry_transient
+        if is_transient_error(exc):
+            await retry_transient(ctx, exc)
         return {
             "status": "failed",
             "error": str(exc)[:500],

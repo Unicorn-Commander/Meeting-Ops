@@ -264,6 +264,7 @@ async def test_finalize_worker_missing_session_returns_skipped():
 
 @pytest.mark.asyncio
 async def test_finalize_worker_keeps_summary_failure_retryable(monkeypatch):
+    from arq import Retry
     import api.uploads as uploads_mod
     from database.database import SessionLocal
     from database.models import RecordingSession
@@ -279,10 +280,8 @@ async def test_finalize_worker_keeps_summary_failure_retryable(monkeypatch):
         raise LLMUnavailable("gateway unavailable")
 
     monkeypatch.setattr(uploads_mod, "_summarize_session", unavailable)
-    result = await finalize_session_job({"job_id": "summary-retry"}, session_pk)
-
-    assert result["status"] == "failed"
-    assert result["retryable"] is True
+    with pytest.raises(Retry):
+        await finalize_session_job({"job_id": "summary-retry", "job_try": 1}, session_pk)
     db = SessionLocal()
     try:
         session = db.get(RecordingSession, session_pk)
