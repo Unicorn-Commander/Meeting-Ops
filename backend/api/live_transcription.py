@@ -99,6 +99,11 @@ async def create_retroactive_session(
 @router.websocket("/ws")
 async def live_transcription_websocket(websocket: WebSocket):
     """WebSocket for live transcription updates"""
+    from auth.ws_auth import enforce_ws_auth
+
+    ok, _user = await enforce_ws_auth(websocket)
+    if not ok:
+        return
     await websocket.accept()
     
     try:

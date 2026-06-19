@@ -118,6 +118,10 @@ def test_ws_upload_progress_rejects_without_token(client):
     _expect_closed_1008(client, f"/ws/uploads/{_uuid.uuid4()}")
 
 
+def test_ws_live_transcription_rejects_without_token(client):
+    _expect_closed_1008(client, "/api/live-transcription/ws")
+
+
 def test_ws_transcription_accepts_with_valid_token_own_session(client):
     org_id, _, user_id = _seed_user_and_org("ws-auth-c", "ws_auth_c")
     sid = _create_session(org_id, user_id)
