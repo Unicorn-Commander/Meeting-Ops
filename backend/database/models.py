@@ -4,6 +4,7 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
 import uuid
+import json
 
 Base = declarative_base()
 
@@ -76,6 +77,7 @@ class RecordingSession(Base):
     summary = Column(Text)
     progressive_summaries = Column(JSON)  # List of summaries during recording
     final_summary = Column(JSON)  # Comprehensive final analysis
+    summary_preview = Column(String(300), nullable=True)
     ai_insights = Column(JSON)  # Legacy field for compatibility
     processing_metadata = Column(JSON)  # Processing stats and metadata (renamed from metadata)
     generated_emails = Column(JSON)  # Generated follow-up emails
@@ -166,6 +168,21 @@ def _sync_recording_session_speaker_count(mapper, connection, target):
     speakers = diarized.get("speakers") if isinstance(diarized, dict) else None
     if isinstance(speakers, list):
         target.speaker_count = len({str(s) for s in speakers if s})
+    preview = None
+    if isinstance(target.final_summary, dict):
+        preview = target.final_summary.get("executive") or target.final_summary.get("summary")
+    if not preview and target.summary:
+        raw = target.summary
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                preview = parsed.get("executive") or parsed.get("summary") if isinstance(parsed, dict) else raw
+            except (ValueError, TypeError):
+                preview = raw
+        elif isinstance(raw, dict):
+            preview = raw.get("executive") or raw.get("summary")
+    if preview:
+        target.summary_preview = " ".join(str(preview).split())[:300]
 
 
 Index(
@@ -323,6 +340,7 @@ class ActionItem(Base):
 class Transcription(Base):
     """Transcription model - matches actual database schema"""
     __tablename__ = "transcriptions"
+    __table_args__ = (Index("ix_transcriptions_session_speaker", "session_id", "speaker"),)
     
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, nullable=False)  # Foreign key to RecordingSession.id (integer)

@@ -79,6 +79,7 @@ state change with the same HF model — no Docker/compose changes.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -146,6 +147,23 @@ MAX_FILE_AUDIO_SECONDS = float(
 # call. Bump only if we add a true batch endpoint. Env knob so the
 # spike's leak_bench.py can sweep it without code changes.
 BATCH_SIZE = int(os.getenv("SORTFORMER_BATCH_SIZE", "1"))
+_gpu_semaphore = asyncio.Semaphore(max(1, int(os.getenv("MAX_CONCURRENT_DIARIZATIONS", "1"))))
+
+
+@asynccontextmanager
+async def _gpu_slot():
+    try:
+        await asyncio.wait_for(_gpu_semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="GPU is at capacity; retry shortly",
+            headers={"Retry-After": "5"},
+        ) from exc
+    try:
+        yield
+    finally:
+        _gpu_semaphore.release()
 
 # v2.2.0 canonical-hybrid path: /diarize-file-upload diarizes with
 # Sortformer then asks meet-speaker-svc (wespeaker) for a per-turn voice
@@ -697,7 +715,8 @@ async def diarize_stream(
         )
 
     try:
-        result = _diarize_wav_array(wav)
+        async with _gpu_slot():
+            result = await asyncio.to_thread(_diarize_wav_array, wav)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -807,7 +826,8 @@ async def diarize_file(
         )
 
     try:
-        result = _diarize_path(audio_path)
+        async with _gpu_slot():
+            result = await asyncio.to_thread(_diarize_path, audio_path)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -904,7 +924,8 @@ async def diarize_file_upload(
         )
 
     try:
-        result = _diarize_wav_array(wav)
+        async with _gpu_slot():
+            result = await asyncio.to_thread(_diarize_wav_array, wav)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

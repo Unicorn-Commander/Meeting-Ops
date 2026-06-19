@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -64,6 +65,23 @@ _diarizer_backend: Optional[str] = None
 _diarizer_load_error: Optional[str] = None
 # Task #79 v2: /diarize request counter, used to gate periodic empty_cache().
 _diarize_request_count: int = 0
+_gpu_semaphore = asyncio.Semaphore(max(1, int(os.getenv("MAX_CONCURRENT_DIARIZATIONS", "1"))))
+
+
+@asynccontextmanager
+async def _gpu_slot():
+    try:
+        await asyncio.wait_for(_gpu_semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="GPU is at capacity; retry shortly",
+            headers={"Retry-After": "5"},
+        ) from exc
+    try:
+        yield
+    finally:
+        _gpu_semaphore.release()
 
 
 def _load_embedder():
@@ -294,7 +312,8 @@ async def embed(
     else:
         raw = await audio.read()
     wav, _ = _read_audio(raw)
-    emb = _embed(wav)
+    async with _gpu_slot():
+        emb = await asyncio.to_thread(_embed, wav)
     logger.info("/embed dim=%d took=%.2fs", len(emb), time.time() - started)
     return EmbedResponse(
         embedding=emb,
@@ -466,14 +485,15 @@ async def diarize(
     # uvicorn worker can still service /health (and queue a second request)
     # while a diarization runs — otherwise a long meeting stalls the loop and
     # can trip a false-unhealthy healthcheck. (v3.29.0)
-    return await asyncio.to_thread(
-        _run_diarization_on_wav,
-        wav,
-        return_embeddings=return_embeddings,
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-    )
+    async with _gpu_slot():
+        return await asyncio.to_thread(
+            _run_diarization_on_wav,
+            wav,
+            return_embeddings=return_embeddings,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
 
 
 @app.post("/identify", response_model=IdentifyResponse)

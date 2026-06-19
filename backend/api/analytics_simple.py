@@ -4,7 +4,7 @@ Provides real analytics data from sessions and transcription segments
 """
 
 from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy import desc, func
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
@@ -44,7 +44,13 @@ async def get_analytics_summary(
             start_date = now - timedelta(days=30)  # Default to month
         
         # Get sessions in date range
-        sessions = db.query(DBRecordingSession).filter(
+        sessions = db.query(DBRecordingSession).options(load_only(
+            DBRecordingSession.id,
+            DBRecordingSession.duration,
+            DBRecordingSession.created_at,
+            DBRecordingSession.status,
+            DBRecordingSession.summary,
+        )).filter(
             DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.created_at >= start_date,
             DBRecordingSession.status.in_(["completed", "processing"])
@@ -157,27 +163,43 @@ async def get_session_analytics(
 ) -> List[Dict[str, Any]]:
     """Get recent session analytics with real data including speaker counts"""
     try:
-        sessions = db.query(DBRecordingSession).filter(
+        sessions = db.query(DBRecordingSession).options(load_only(
+            DBRecordingSession.id,
+            DBRecordingSession.session_id,
+            DBRecordingSession.name,
+            DBRecordingSession.title,
+            DBRecordingSession.created_at,
+            DBRecordingSession.duration,
+            DBRecordingSession.status,
+            DBRecordingSession.summary,
+        )).filter(
             DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.status.in_(["completed", "processing"])
         ).order_by(desc(DBRecordingSession.created_at)).limit(limit).all()
         
+        session_ids = [session.id for session in sessions]
+        speaker_counts = {}
+        if session_ids:
+            speaker_counts = {
+                int(session_id): int(count)
+                for session_id, count in db.query(
+                    Transcription.session_id,
+                    func.count(func.distinct(Transcription.speaker)),
+                ).filter(
+                    Transcription.session_id.in_(session_ids),
+                    Transcription.speaker.isnot(None),
+                ).group_by(Transcription.session_id).all()
+            }
+
         result = []
         for session in sessions:
-            # Count distinct speakers from transcription segments
-            speaker_count = db.query(
-                func.count(func.distinct(Transcription.speaker))
-            ).filter(
-                Transcription.session_id == session.id,
-                Transcription.speaker.isnot(None),
-            ).scalar() or 0
 
             result.append({
                 "id": session.session_id or str(session.id),
                 "name": session.name or session.title or f"Session {session.id}",
                 "created_at": session.created_at.isoformat() if session.created_at else None,
                 "duration": session.duration or 0,
-                "speakers": speaker_count,
+                "speakers": speaker_counts.get(session.id, 0),
                 "status": session.status,
                 "has_ai_summary": bool(session.summary)
             })
@@ -280,7 +302,10 @@ async def get_duration_trends(
         else:
             start_date = now - timedelta(days=30)
 
-        sessions = db.query(DBRecordingSession).filter(
+        sessions = db.query(DBRecordingSession).options(load_only(
+            DBRecordingSession.created_at,
+            DBRecordingSession.duration,
+        )).filter(
             DBRecordingSession.organization_id == active_org.organization.id,
             DBRecordingSession.created_at >= start_date,
             DBRecordingSession.status.in_(["completed", "processing"]),
