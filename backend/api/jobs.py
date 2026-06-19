@@ -21,9 +21,10 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
-from services.job_runner import get_job_status
+from auth.organization import ActiveOrganization
+from services.job_runner import get_job_owner, get_job_status
 
 router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 async def get_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
 ) -> dict:
     """Status snapshot for an async job.
 
@@ -50,6 +52,15 @@ async def get_job(
     404 when the job ID is unknown to arq (already evicted from the
     keep_result window, or never existed).
     """
+    owner = await get_job_owner(job_id)
+    if not current_user.is_superuser:
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if owner["org_id"] != active_org.organization.id:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if owner["user_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Job belongs to another user.")
+
     payload = await get_job_status(job_id)
     if payload.get("status") == "not_found":
         raise HTTPException(status_code=404, detail="Job not found.")

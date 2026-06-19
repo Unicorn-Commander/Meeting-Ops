@@ -331,7 +331,12 @@ async def _enqueue_summary_refresh(session: RecordingSession, db: Session) -> No
             return  # an in-flight pipeline will summarize with the new name anyway
         from services.job_runner import enqueue_job
 
-        job_id = await enqueue_job("finalize_session_job", session.id)
+        job_id = await enqueue_job(
+            "finalize_session_job",
+            session.id,
+            owner_user_id=session.user_id,
+            owner_org_id=session.organization_id,
+        )
         if job_id:
             session.processing_job_id = job_id
             db.add(session)

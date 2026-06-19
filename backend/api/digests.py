@@ -256,6 +256,8 @@ async def get_digest(
             period,
             date,
             project_id=str(project_id) if project_id is not None else None,
+            owner_user_id=current_user.id,
+            owner_org_id=active_org.organization.id,
         )
         # Stamp the digest row if one already exists so future workers
         # can drift-check.

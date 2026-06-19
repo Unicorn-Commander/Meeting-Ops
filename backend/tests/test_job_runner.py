@@ -49,6 +49,31 @@ async def test_enqueue_job_calls_arq_with_function_name():
 
 
 @pytest.mark.asyncio
+async def test_enqueue_job_stamps_owner_without_forwarding_metadata():
+    from services import job_runner
+
+    mock_job = MagicMock(job_id="arq-owned-1")
+    mock_pool = AsyncMock()
+    mock_pool.enqueue_job = AsyncMock(return_value=mock_job)
+
+    with patch.object(job_runner, "get_arq_pool", AsyncMock(return_value=mock_pool)):
+        result = await job_runner.enqueue_job(
+            "finalize_session_job",
+            42,
+            owner_user_id=7,
+            owner_org_id=9,
+        )
+
+    assert result == "arq-owned-1"
+    mock_pool.enqueue_job.assert_awaited_once_with("finalize_session_job", 42)
+    mock_pool.setex.assert_awaited_once()
+    owner_key, ttl, value = mock_pool.setex.await_args.args
+    assert owner_key.endswith("arq-owned-1")
+    assert ttl >= 3600
+    assert value == '{"user_id": 7, "org_id": 9}'
+
+
+@pytest.mark.asyncio
 async def test_enqueue_job_idempotency_window_dedupes_same_args():
     """Inside the 5-minute window, a second enqueue with identical args
     returns the cached job_id and does NOT call arq again."""
@@ -187,14 +212,17 @@ def test_jobs_endpoint_returns_404_for_unknown_job(client):
     try:
         existing = db.query(User).filter(User.username == "jobs_user").first()
         if not existing:
-            db.add(User(
+            existing = User(
                 email="jobs@meeting-ops.local",
                 username="jobs_user",
                 hashed_password=get_password_hash("admin123"),
-                is_active=True, is_verified=True, is_superuser=False,
+                is_active=True, is_verified=True, is_superuser=True,
                 tier="pro",
-            ))
-            db.commit()
+            )
+            db.add(existing)
+        else:
+            existing.is_superuser = True
+        db.commit()
     finally:
         db.close()
 
@@ -209,7 +237,8 @@ def test_jobs_endpoint_returns_404_for_unknown_job(client):
         return {"job_id": job_id, "status": "not_found", "result": None, "error": None,
                 "queued_at": None, "started_at": None, "finished_at": None}
 
-    with patch("api.jobs.get_job_status", side_effect=fake_status):
+    with patch("api.jobs.get_job_owner", AsyncMock(return_value=None)), \
+         patch("api.jobs.get_job_status", side_effect=fake_status):
         resp = client.get(
             "/api/jobs/does-not-exist",
             headers={"Authorization": f"Bearer {token}"},
@@ -222,20 +251,36 @@ def test_jobs_endpoint_returns_status_for_known_job(client):
     """/api/jobs/{id} returns the job_runner payload as-is when status
     is anything other than not_found."""
     from auth.utils import get_password_hash
-    from auth.models import User
+    from auth.models import Organization, User, UserOrganization
     from database.database import SessionLocal
 
     db = SessionLocal()
     try:
-        if not db.query(User).filter(User.username == "jobs_user2").first():
-            db.add(User(
+        user = db.query(User).filter(User.username == "jobs_user2").first()
+        if not user:
+            user = User(
                 email="jobs2@meeting-ops.local",
                 username="jobs_user2",
                 hashed_password=get_password_hash("admin123"),
                 is_active=True, is_verified=True, is_superuser=False,
                 tier="pro",
-            ))
+            )
+            db.add(user)
             db.commit()
+            db.refresh(user)
+        org = db.query(Organization).filter(Organization.slug == "jobs-org").first()
+        if not org:
+            org = Organization(name="Jobs Org", slug="jobs-org", is_active=True)
+            db.add(org)
+            db.commit()
+            db.refresh(org)
+        if not db.query(UserOrganization).filter(
+            UserOrganization.user_id == user.id,
+            UserOrganization.organization_id == org.id,
+        ).first():
+            db.add(UserOrganization(user_id=user.id, organization_id=org.id, role="admin"))
+            db.commit()
+        user_id, org_id = user.id, org.id
     finally:
         db.close()
 
@@ -258,11 +303,40 @@ def test_jobs_endpoint_returns_status_for_known_job(client):
     async def fake_status(job_id):
         return payload
 
-    with patch("api.jobs.get_job_status", side_effect=fake_status):
+    with patch(
+        "api.jobs.get_job_owner",
+        AsyncMock(return_value={"user_id": user_id, "org_id": org_id}),
+    ), patch("api.jobs.get_job_status", side_effect=fake_status):
         resp = client.get(
             "/api/jobs/abc-123",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MeetingOps-Org": "jobs-org",
+            },
         )
 
     assert resp.status_code == 200
     assert resp.json() == payload
+
+
+def test_jobs_endpoint_rejects_cross_org_owner(client):
+    login = client.post(
+        "/api/auth/login",
+        data={"username": "jobs_user2", "password": "admin123"},
+    )
+    token = login.json()["access_token"]
+
+    with patch(
+        "api.jobs.get_job_owner",
+        AsyncMock(return_value={"user_id": -1, "org_id": -1}),
+    ), patch("api.jobs.get_job_status", AsyncMock()) as status_mock:
+        response = client.get(
+            "/api/jobs/foreign-job",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MeetingOps-Org": "jobs-org",
+            },
+        )
+
+    assert response.status_code == 404
+    status_mock.assert_not_awaited()

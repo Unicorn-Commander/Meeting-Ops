@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 # across the cluster. The worker functions themselves are responsible
 # for being safe to run twice (drift checks + MERGE semantics).
 _IDEMPOTENCY_WINDOW_SECONDS = 300
+_OWNER_TTL_SECONDS = int(os.getenv("JOB_OWNER_TTL_SECONDS", "604800"))
+_OWNER_KEY_PREFIX = "meeting-ops:job-owner:"
 _idempotency_cache: dict[str, tuple[str, float]] = {}
 
 
@@ -77,7 +79,13 @@ def _gc_idempotency_cache() -> None:
         _idempotency_cache.pop(k, None)
 
 
-async def enqueue_job(function_name: str, *args: Any, **kwargs: Any) -> str:
+async def enqueue_job(
+    function_name: str,
+    *args: Any,
+    owner_user_id: int | None = None,
+    owner_org_id: int | None = None,
+    **kwargs: Any,
+) -> str:
     """Enqueue an arq job by registered function name.
 
     Within the idempotency window (default 5 minutes), an identical
@@ -106,11 +114,35 @@ async def enqueue_job(function_name: str, *args: Any, **kwargs: Any) -> str:
         )
 
     _idempotency_cache[key] = (job.job_id, time.time() + _IDEMPOTENCY_WINDOW_SECONDS)
+    if owner_user_id is None or owner_org_id is None:
+        logger.warning("job_runner: job %s enqueued without ownership stamp", job.job_id)
+    else:
+        await pool.setex(
+            f"{_OWNER_KEY_PREFIX}{job.job_id}",
+            _OWNER_TTL_SECONDS,
+            json.dumps({"user_id": owner_user_id, "org_id": owner_org_id}),
+        )
     logger.info(
         "job_runner: enqueued fn=%s job_id=%s args=%s",
         function_name, job.job_id, args[:3],  # truncate args in logs
     )
     return job.job_id
+
+
+async def get_job_owner(job_id: str) -> dict[str, int] | None:
+    """Return the Redis ownership stamp for a generic Arq job."""
+    pool = await get_arq_pool()
+    raw = await pool.get(f"{_OWNER_KEY_PREFIX}{job_id}")
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        value = json.loads(raw)
+        return {"user_id": int(value["user_id"]), "org_id": int(value["org_id"])}
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("job_runner: invalid ownership stamp for job %s", job_id)
+        return None
 
 
 def _status_to_string(status: JobStatus | None) -> str:

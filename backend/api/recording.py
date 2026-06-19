@@ -989,6 +989,8 @@ async def finalize_always_on_session(
             session.id,
             user_id=current_user.id,
             org_id=active_org.organization.id,
+            owner_user_id=current_user.id,
+            owner_org_id=active_org.organization.id,
         )
         session.processing_job_id = job_id
         db.commit()

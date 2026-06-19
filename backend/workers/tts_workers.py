@@ -194,7 +194,6 @@ async def render_tts_podcast_job(
             "format": fmt,
             "bytes": out_path.stat().st_size,
             "audio_url": f"/api/sessions/{session_pk}/tts/podcast.{fmt}",
-            "script": script,
             "speakers": speakers,
         }
     except asyncio.CancelledError:

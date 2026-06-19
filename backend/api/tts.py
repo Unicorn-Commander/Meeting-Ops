@@ -266,6 +266,8 @@ async def synthesize_summary(
             session_id,
             voice,
             format,
+            owner_user_id=current_user.id,
+            owner_org_id=active_org.organization.id,
         )
         response.status_code = 202
         return {
@@ -563,6 +565,8 @@ async def synthesize_podcast(
             host_voice,
             analyst_voice,
             format,
+            owner_user_id=current_user.id,
+            owner_org_id=active_org.organization.id,
         )
         response.status_code = 202
         return {
