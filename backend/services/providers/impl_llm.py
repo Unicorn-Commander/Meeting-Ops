@@ -12,6 +12,66 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
 
+# External / frontier hosts that would 400 on an unknown ``chat_template_kwargs``
+# field. We only ever send that field to the local OpenAI-compatible llama.cpp /
+# LiteLLM gateway, never to these.
+_EXTERNAL_LLM_HOSTS = (
+    "api.openai.com",
+    "api.anthropic.com",
+    "openrouter.ai",
+    "api.lambdalabs.com",
+    "bedrock-runtime",
+    "amazonaws.com",
+    "api.cohere.ai",
+    "googleapis.com",
+    "api.mistral.ai",
+    "api.groq.com",
+    "api.together.xyz",
+    "api.deepseek.com",
+)
+
+
+def _disable_thinking_enabled() -> bool:
+    """Master kill-switch for the enable_thinking injection.
+
+    Defaults ON (thinking suppressed) to keep Meeting-Ops's server LLM calls
+    fast on the local Qwen. Set ``MEETING_OPS_DISABLE_THINKING=false`` (or 0 /
+    no / off) to stop injecting the field — e.g. if a future local model
+    needs its reasoning trace on by default."""
+    return os.getenv("MEETING_OPS_DISABLE_THINKING", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+    )
+
+
+def _is_local_qwen(model: str, endpoint: str) -> bool:
+    """True only when it is safe to send ``chat_template_kwargs.enable_thinking``:
+    the target model is a Qwen (its chat template honors the flag) AND the
+    endpoint is the local OpenAI-compatible gateway (not a frontier API that
+    would 400 on the unknown field)."""
+    if "qwen" not in (model or "").lower():
+        return False
+    host = (endpoint or "").lower()
+    return not any(ext in host for ext in _EXTERNAL_LLM_HOSTS)
+
+
+def apply_enable_thinking(payload: dict, model: str, endpoint: str, thinking: bool) -> dict:
+    """Conditionally stamp ``chat_template_kwargs.enable_thinking`` onto a
+    chat-completions payload.
+
+    Only mutates the payload when (a) the env kill-switch is on AND (b) the
+    target is a local Qwen model — otherwise the field is left off so non-Qwen
+    or external/frontier endpoints don't 400 on the unknown key. ``thinking``
+    is the caller's intent (False = suppress the <think> trace, the default).
+    Idempotent and safe to call on any payload dict."""
+    if _disable_thinking_enabled() and _is_local_qwen(model, endpoint):
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
+    else:
+        payload.pop("chat_template_kwargs", None)
+    return payload
+
 
 class LiteLLMProvider:
     def __init__(
@@ -41,6 +101,9 @@ class LiteLLMProvider:
         # Some LiteLLM upstreams (notably the openai provider for Gemma 4 GGUFs)
         # reject the `reasoning_effort` field outright. We rely on
         # `chat_template_kwargs.enable_thinking=...` to flip reasoning on/off.
+        # The field is only injected for a local Qwen target (and only while the
+        # MEETING_OPS_DISABLE_THINKING kill-switch is on) — apply_enable_thinking
+        # keeps it off external/frontier endpoints that would 400 on it.
         payload: dict = {
             "model": self.model,
             "messages": [
@@ -50,8 +113,8 @@ class LiteLLMProvider:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
-            "chat_template_kwargs": {"enable_thinking": bool(self.thinking)},
         }
+        apply_enable_thinking(payload, self.model, self.endpoint, self.thinking)
         if extra_params:
             # Merge model-tuning knobs (top_p, top_k, presence_penalty,
             # repetition_penalty, etc.) without clobbering the core fields.

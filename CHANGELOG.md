@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.38.5] - 2026-06-18
+
+### Changed
+- **Qwen `enable_thinking=false` is now gated + env-controllable.** Meeting-Ops already disabled the Qwen reasoning step on its LLM calls (a speed win), but sent `chat_template_kwargs.enable_thinking` *unconditionally* — which would 400 against a frontier/non-Qwen endpoint (BYOK). It's now applied only when the target is a local Qwen model (name contains "qwen" + not an external host like api.openai.com / anthropic / openrouter), funnelled through one helper in `LiteLLMProvider._build_payload` (covering summaries, titles, chat, insights, digests, RAG agent). New `MEETING_OPS_DISABLE_THINKING` env flag (default on) toggles it without a code change. No change to the local-Qwen path (still no-think); removes the latent 400 for frontier models.
+
 ## [3.38.4] - 2026-06-18
 
 ### Fixed

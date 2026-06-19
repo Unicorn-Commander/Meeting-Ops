@@ -35,6 +35,7 @@ from services.agent_tools import (
     load_recent_history,
     persist_turn,
 )
+from services.providers.impl_llm import apply_enable_thinking
 from services.providers.registry import get_provider_registry
 
 logger = logging.getLogger(__name__)
@@ -116,8 +117,10 @@ async def _call_llm_with_tools(
         "temperature": 0.3,
         "max_tokens": 1024,
         "stream": False,
-        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
     }
+    # Only stamps enable_thinking for a local Qwen target (gated by
+    # MEETING_OPS_DISABLE_THINKING); left off external/frontier endpoints.
+    apply_enable_thinking(payload, model, endpoint, enable_thinking)
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.post(
@@ -149,8 +152,9 @@ async def _stream_llm_final(
         "temperature": 0.4,
         "max_tokens": 1024,
         "stream": True,
-        "chat_template_kwargs": {"enable_thinking": False},
     }
+    # Final-answer turn: never want the <think> trace. Gated to local Qwen.
+    apply_enable_thinking(payload, model, endpoint, thinking=False)
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         async with client.stream(
