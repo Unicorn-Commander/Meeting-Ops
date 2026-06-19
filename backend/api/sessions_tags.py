@@ -80,8 +80,7 @@ def _can_edit(
 ) -> bool:
     if getattr(user, "is_superuser", False):
         return True
-    role = (active_org.user_role or "").lower() if hasattr(active_org, "user_role") else ""
-    if role in {"admin", "manager"}:
+    if active_org.role_name in {"owner", "admin", "manager"}:
         return True
     if session.user_id and session.user_id == user.id:
         return True

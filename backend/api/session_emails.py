@@ -255,8 +255,7 @@ async def email_attendees(
     session = _get_session_or_404(db, active_org.organization.id, session_id)
 
     # Auth: org admin/manager or session creator
-    role = (active_org.user_role or "").lower() if hasattr(active_org, "user_role") else ""
-    is_admin = role in {"admin", "manager"}
+    is_admin = active_org.role_name in {"owner", "admin", "manager"}
     is_creator = bool(session.user_id) and session.user_id == current_user.id
     if not (is_admin or is_creator or getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Not permitted to email attendees for this session")

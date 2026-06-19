@@ -96,3 +96,12 @@ def test_analytics_meetings_returns_501(client):
     )
     assert response.status_code == 501
     assert response.json()["detail"] == "Not implemented"
+
+
+def test_legacy_transcript_replace_returns_501(client):
+    response = client.put(
+        "/api/recording-sessions/123/transcript",
+        json={"transcript": []},
+        headers=_admin_headers(client),
+    )
+    assert response.status_code == 501

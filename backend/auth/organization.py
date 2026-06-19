@@ -35,6 +35,11 @@ class ActiveOrganization:
     membership: Optional[UserOrganization]
     role: str
 
+    @property
+    def role_name(self) -> str:
+        """Canonical normalized role accessor for authorization checks."""
+        return (self.role or "").strip().lower()
+
 
 def normalize_group_name(group: str) -> str:
     normalized = group.strip().lower()

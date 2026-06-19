@@ -112,39 +112,8 @@ async def update_transcript(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Update the transcript for a session"""
-    try:
-        session = db.query(RecordingSession).filter(
-            RecordingSession.id == session_id,
-            RecordingSession.user_id == current_user.id
-        ).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Delete existing transcripts
-        db.query(Transcription).filter(
-            Transcription.session_id == session_id
-        ).delete()
-        
-        # Add new transcripts
-        for segment in transcript_data.transcript:
-            transcript = Transcription(
-                session_id=session_id,
-                speaker=segment.get("speaker"),
-                speaker_id=segment.get("speaker_id"),
-                text=segment.get("text", ""),
-                start_time=segment.get("start_time", 0),
-                end_time=segment.get("end_time", 0),
-                confidence=segment.get("confidence", 0.95)
-            )
-            db.add(transcript)
-        
-        db.commit()
-        return {"status": "updated", "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to update transcript: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Disabled legacy transcript replacement; use the scoped edit API."""
+    raise _NOT_IMPLEMENTED
 
 @router.get("/recording-sessions/{session_id}/export")
 async def export_session(

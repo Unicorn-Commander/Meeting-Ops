@@ -1009,6 +1009,12 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4429, reason="rate_limited")
         return
 
+    from auth.ws_auth import ws_user_can_access_session
+    if not ws_user_can_access_session(user, session_id):
+        ws_close_codes_total.labels(code="1008").inc()
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     ws_connections_total.labels(tier=user_tier, result="accepted").inc()
     # Register this session for the SIGTERM drain hook + bump the
