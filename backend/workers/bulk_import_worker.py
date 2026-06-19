@@ -39,6 +39,12 @@ from services.bulk_import_queue import (
 logger = logging.getLogger(__name__)
 
 
+async def worker_startup(ctx: dict[str, Any]) -> None:
+    from services.sentry import init_sentry
+
+    init_sentry()
+
+
 async def process_bulk_file(ctx: dict[str, Any], file_id: str) -> dict[str, Any]:
     """Arq task: process one bulk-import file."""
     file_uuid = uuid.UUID(file_id)
@@ -149,6 +155,7 @@ class WorkerSettings:
         os.getenv("ARQ_REDIS_URL") or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
     )
     job_timeout = 3600
+    on_startup = worker_startup
 
 
 _arq_pool = None

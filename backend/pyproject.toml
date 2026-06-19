@@ -52,6 +52,7 @@ python-magic = "^0.4.27"
 # Monitoring & Performance
 psutil = "^5.9.8"
 prometheus-client = "^0.21.0"
+sentry-sdk = {extras = ["fastapi"], version = "^2.0.0"}
 
 # Development Tools
 pytest = "^8.0.0"

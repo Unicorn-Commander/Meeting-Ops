@@ -85,6 +85,14 @@ def test_worker_has_backend_model_service_env():
     )
 
 
+def test_sentry_env_is_present_on_backend_and_worker():
+    data = yaml.safe_load(COMPOSE.read_text())
+    services = data["services"]
+    for service_name in ("backend", "meet-bulk-import-worker"):
+        env_names = _env_names(services[service_name])
+        assert {"SENTRY_DSN", "SENTRY_ENVIRONMENT"} <= env_names
+
+
 def test_meet_host_model_urls_have_a_matching_container():
     """If a service points SPEAKER_SVC_URL / PARAKEET_SERVER_URL / SORTFORMER_URL
     at ``http://meet-<svc>:<port>``, a service with that ``container_name`` must

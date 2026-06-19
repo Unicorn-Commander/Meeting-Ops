@@ -3,6 +3,7 @@
 
 # Core Framework
 fastapi==0.115.14
+sentry-sdk[fastapi]>=2.0
 uvicorn[standard]==0.35.0
 python-multipart==0.0.12
 websockets==12.0

@@ -24,6 +24,9 @@ from auth.dependencies import get_current_user
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from services.sentry import init_sentry
+init_sentry()
+
 # Router loading status tracking
 loaded_routers: List[str] = []
 failed_routers: List[dict] = []
