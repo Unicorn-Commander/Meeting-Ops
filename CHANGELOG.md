@@ -1,5 +1,40 @@
 ## [Unreleased]
 
+## [3.40.0] - 2026-06-19
+
+Enterprise/SaaS production-readiness hardening — a multi-agent audit (59 verified
+findings) driven to completion: a critical SSO trust-boundary fix, per-workspace
+billing correctness, and table-stakes security / reliability / observability /
+data-lifecycle work. Browser-first moat unchanged; no API contract changes.
+Deployed + live-verified on dogfood.
+
+### Security
+- **SSO forward-auth trust boundary (critical).** Identity headers (`X-Auth-Request-*`/`-Groups`, the latter drives `is_superuser`) are now honored ONLY when the request carries a matching `X-Proxy-Auth` secret (Traefik-injected → oauth2-proxy-passed). Closes an auth-bypass / superuser-escalation forgeable by any container on the shared docker network. Fails open until `PROXY_AUTH_SHARED_SECRET` is set, then enforces.
+- **Fail-closed `SECRET_KEY` boot guard.** The backend refuses to boot on an unset / placeholder / <32-char signing key in a real deployment (removes the public hardcoded fallback that allowed JWT forgery). Dev/test/CI keep a labelled insecure fallback.
+- **HTTP security headers** middleware (X-Frame-Options DENY / CSP frame-ancestors / nosniff / Referrer-Policy / HSTS on https).
+- **WebSocket auth.** The job-progress, live-transcription, and remote-audio sockets now authenticate the handshake and scope by owner/org. `WS_REQUIRE_AUTH` (default true) is a kill-switch for instant rollback — now actually wired into the backend + worker compose env.
+
+### Billing & multi-tenancy
+- **Per-workspace server-compute billing (billing-1).** Paid server-compute now requires the **active organization's** plan to cover the feature, not just the buyer's global `User.tier`. A single Pro seat no longer unlocks paid compute in every org the buyer belongs to. Internal-service callers and superusers bypass; the check is threaded through every server-compute path (record/finalize/reprocess, summary/TTS, uploads, bulk import, speaker library, AI chat / cross-meeting search, agent-write). A paid user acting in an unpaid workspace now gets a clear `This workspace's plan does not include this capability` 403.
+- **No double-billing (billing-2).** Starting a second Checkout while already subscribed returns the Billing Portal instead of creating a duplicate subscription.
+- **Tenancy isolation.** Brigade knowledge-graph writes are fail-closed per org; async job status is org-scoped.
+
+### Reliability
+- Interactive upload pipeline recovery + watchdog (no longer strands on deploy/crash); deep `/health/ready` + `/api/ready` readiness probes (detect db/redis/qdrant/llm/stt outages); retryable failed summaries; connection-pool pre-ping; Arq transient-failure retries.
+
+### Observability
+- Privacy-safe Sentry init (PII scrub), React render error boundaries, HTTP metrics + request tracing.
+
+### Performance
+- Cursor pagination of session lists (tenants past ~2000 meetings can see their tail; the list no longer re-fetches every row's full transcript); a dedicated interactive Arq worker lane so bulk import no longer starves live finalize; trimmed analytics + GPU guards.
+
+### Data lifecycle
+- **Right-to-erasure on delete.** All session-delete paths now purge Qdrant embeddings + per-meeting chat history (previously orphaned).
+- **Per-room retention opt-in.** New `Room.retention_enabled` (migration 049, default off): a room drives deletion only when explicitly opted in, otherwise sessions fall back to the org/deployment policy — closing the implicit 90-day-purge footgun from `default_retention_days`'s server default. The daily compliance purge stays DISABLED by default and honors legal holds.
+
+### Notes
+- The frontend tier UI (`useTierFeatures`) still reflects the user's global tier; the backend is now the per-workspace authority, so a paid user in an unpaid workspace sees enabled UI but gets a clear 403. Aligning the UI to the active-org plan is a follow-up.
+
 ## [3.39.0] - 2026-06-19
 
 ### Added
