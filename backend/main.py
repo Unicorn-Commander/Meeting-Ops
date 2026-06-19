@@ -3,6 +3,7 @@ Meeting-Ops Backend - Production main.py
 Clean router loading with status tracking and real timestamps.
 """
 from fastapi import FastAPI, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -561,10 +562,23 @@ async def health_check():
     }
 
 
+@app.get("/health/ready")
+@app.get("/api/ready")
+async def readiness_check():
+    """Deep readiness probe for storage, queues, and completion services."""
+    from services.readiness import run_readiness_checks
+
+    payload = await run_readiness_checks()
+    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return JSONResponse(payload, status_code=200 if payload["ready"] else 503)
+
+
 @app.get("/api/status")
 async def get_status():
     """Get system status"""
     try:
+        from services.readiness import run_readiness_checks
+        readiness = await run_readiness_checks()
         npu_available = os.path.exists("/dev/accel/accel0")
 
         from services.transcription_service import transcription_service
@@ -580,7 +594,7 @@ async def get_status():
             logger.error(f"Failed to get audio devices: {e}")
 
         return {
-            "status": "healthy",
+            "status": "healthy" if readiness["ready"] else "degraded",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "transcription": {
                 "ready": transcription_ready,
@@ -600,10 +614,11 @@ async def get_status():
             },
             "services": {
                 "recording": True,
-                "transcription": transcription_ready,
-                "ai_notes": True,
+                "transcription": readiness["dependencies"]["stt"]["ok"],
+                "ai_notes": readiness["dependencies"]["llm"]["ok"],
                 "websockets": True
             },
+            "dependencies": readiness["dependencies"],
             "routers": {
                 "loaded": len(loaded_routers),
                 "failed": len(failed_routers),
@@ -611,7 +626,10 @@ async def get_status():
         }
     except Exception as e:
         logger.error(f"Error getting status: {e}")
-        return {"status": "error", "error": str(e)}
+        return JSONResponse(
+            {"status": "error", "error": str(e)},
+            status_code=503,
+        )
 
 
 @app.get("/api/audio-devices")
