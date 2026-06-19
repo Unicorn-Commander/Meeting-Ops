@@ -640,6 +640,14 @@ async def delete_my_account(
         db.query(Transcription).filter(
             Transcription.session_id.in_(session_pks)
         ).delete(synchronize_session=False)
+        # chat_history has no FK to recording_sessions (plain string
+        # session_key), so it isn't cascaded — purge the per-meeting AI chat
+        # for every deleted session so transcript-derived PII doesn't survive
+        # account deletion (mirrors _delete_session_record).
+        from database.models import ChatHistory as _ChatHistory
+        db.query(_ChatHistory).filter(
+            _ChatHistory.session_key.in_([cid for (_org, cid) in session_refs])
+        ).delete(synchronize_session=False)
         # Deleting the sessions DB-cascades action_items, session_collaborators,
         # session-bound upload/tts jobs, chunk embeddings, attachments, ...
         db.query(RecordingSession).filter(

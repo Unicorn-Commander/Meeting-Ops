@@ -850,10 +850,27 @@ def apply_delete_session(
     except Exception:
         pass
 
-    from database.models import Transcription
+    from database.models import Transcription, ChatHistory
     db.query(Transcription).filter(Transcription.session_id == session_pk).delete()
+    # Purge per-meeting AI chat history (string session_key, no FK cascade) and,
+    # below, the vector-store embeddings — so an agent-initiated delete erases
+    # the same data the UI delete now does (see _delete_session_record).
+    try:
+        db.query(ChatHistory).filter(
+            ChatHistory.session_key == session_uuid,
+            ChatHistory.organization_id == org_id,
+        ).delete(synchronize_session=False)
+    except Exception:
+        pass
     db.delete(session)
     db.flush()
+
+    # Best-effort vector-store purge (import-on-use; mirrors recording.py).
+    try:
+        from services.semantic_search_service import semantic_search
+        semantic_search.delete_session(session_uuid)
+    except Exception:
+        pass
 
     return {
         "id": session_pk,
