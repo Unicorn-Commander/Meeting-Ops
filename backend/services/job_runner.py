@@ -190,7 +190,11 @@ async def get_job_status(job_id: str) -> dict[str, Any]:
         }
     """
     pool = await get_arq_pool()
-    job = Job(job_id, pool)
+    # Jobs are enqueued onto INTERACTIVE_QUEUE_NAME; the queued/deferred state is
+    # read queue-scoped (zscore on the queue key), so Job() MUST use the same
+    # queue name or a still-queued job reports not_found -> a spurious 404 in the
+    # enqueue->pickup window (digest/tts/finalize poll path).
+    job = Job(job_id, pool, _queue_name=INTERACTIVE_QUEUE_NAME)
 
     try:
         info = await job.info()

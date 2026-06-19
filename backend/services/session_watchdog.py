@@ -563,16 +563,35 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
                         summary["summary_retries_enqueued"] += 1
                         continue
                     import asyncio
-                    from services.job_runner import enqueue_job
+                    from arq import create_pool
+                    from arq.connections import RedisSettings
 
-                    job_id = asyncio.run(enqueue_job(
-                        "finalize_session_job",
-                        sess.id,
-                        user_id=sess.user_id,
-                        org_id=sess.organization_id,
-                        owner_user_id=sess.user_id,
-                        owner_org_id=sess.organization_id,
-                    ))
+                    # Enqueue on a FRESH short-lived pool bound to THIS asyncio.run()
+                    # loop. job_runner's module-global pool is bound to whatever loop
+                    # first created it; reusing it here (the watchdog runs sync, via
+                    # asyncio.to_thread, so asyncio.run spins a brand-new loop) raises
+                    # "got Future attached to a different loop" — which the per-session
+                    # try/except swallowed, so this retry silently never fired.
+                    async def _enqueue_summary_retry(session_id: int):
+                        pool = await create_pool(RedisSettings.from_dsn(
+                            os.getenv("ARQ_REDIS_URL")
+                            or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
+                        ))
+                        try:
+                            job = await pool.enqueue_job(
+                                "finalize_session_job",
+                                session_id,
+                                user_id=sess.user_id,
+                                org_id=sess.organization_id,
+                                _queue_name=os.getenv(
+                                    "ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive"
+                                ),
+                            )
+                            return job.job_id if job else None
+                        finally:
+                            await pool.close()
+
+                    job_id = asyncio.run(_enqueue_summary_retry(sess.id))
                     sess.processing_job_id = job_id
                     metadata["summary_retry_enqueued_at"] = now.isoformat()
                     metadata["summary_retry_job_id"] = job_id

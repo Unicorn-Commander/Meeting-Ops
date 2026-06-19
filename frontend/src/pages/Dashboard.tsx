@@ -113,7 +113,12 @@ export default function Dashboard() {
         return;
       }
       const data = await res.json();
-      const list: DashboardSession[] = Array.isArray(data) ? data : [];
+      // The list endpoint now returns {items, next_cursor, has_more} (pagination,
+      // performance-1/2/4); older shape was a bare array. Read .items first so the
+      // Dashboard doesn't silently show zero sessions.
+      const list: DashboardSession[] = Array.isArray(data)
+        ? data
+        : (data?.items ?? []);
       setSessions(list);
       setError(null);
       setLoading(false);

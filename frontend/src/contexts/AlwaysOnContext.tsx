@@ -2793,7 +2793,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
         }> = [];
         try {
           const data = await probeResp.json();
-          rows = Array.isArray(data) ? data : (data?.sessions ?? []);
+          // List endpoint now returns {items,...} (pagination, performance-1/2/4).
+          // Must read .items first — otherwise this probe sees 0 rows and can wipe
+          // the local claim for a legitimately-recording always-on session.
+          rows = Array.isArray(data) ? data : (data?.items ?? data?.sessions ?? []);
         } catch {
           // Bogus response — fail safe.
           return;
