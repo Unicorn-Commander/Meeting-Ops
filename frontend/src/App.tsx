@@ -12,6 +12,7 @@ import { RecordingIndicator } from './components/RecordingIndicator';
 import { DragDropOverlay } from './components/DragDropOverlay';
 import { UploadTray } from './components/UploadTray';
 import { ReconnectingOverlay } from './components/ReconnectingOverlay';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { PWAUpdate } from './components/PWAUpdate';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import { initPostHog, track, PENDING_CHECKOUT_KEY } from './utils/posthog';
@@ -57,13 +58,14 @@ function App() {
   }, []);
 
   return (
-    <Router>
-      <ThemeProvider>
-        <AuthProvider>
-          <OrgProvider>
-            <AlwaysOnProvider>
-              <RecordingProvider>
-                <UploadsProvider>
+    <ErrorBoundary scope="app">
+      <Router>
+        <ThemeProvider>
+          <AuthProvider>
+            <OrgProvider>
+              <AlwaysOnProvider>
+                <RecordingProvider>
+                  <UploadsProvider>
                   <div className="min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
                     <ReconnectingOverlay />
                     <PWAUpdate />
@@ -83,13 +85,14 @@ function App() {
                       pauseOnHover
                     />
                   </div>
-                </UploadsProvider>
-              </RecordingProvider>
-            </AlwaysOnProvider>
-          </OrgProvider>
-        </AuthProvider>
-      </ThemeProvider>
-    </Router>
+                  </UploadsProvider>
+                </RecordingProvider>
+              </AlwaysOnProvider>
+            </OrgProvider>
+          </AuthProvider>
+        </ThemeProvider>
+      </Router>
+    </ErrorBoundary>
   );
 }
 

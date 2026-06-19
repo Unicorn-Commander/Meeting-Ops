@@ -38,6 +38,7 @@ import LegalFooter from './components/LegalFooter';
 import { useAlwaysOn } from './contexts/AlwaysOnContext';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 
 // Desktop sidebar collapsed-state persistence. Mobile open/close is
@@ -429,7 +430,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-gray-500">No organization access.</div></div>;
   }
 
-  return <AppLayout>{children}</AppLayout>;
+  return (
+    <AppLayout>
+      <ErrorBoundary scope="page" resetKey={window.location.hash}>{children}</ErrorBoundary>
+    </AppLayout>
+  );
 }
 
 /**
@@ -458,7 +463,11 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     // Silently bounce, no flash of forbidden content.
     return <Navigate to="/dashboard" replace />;
   }
-  return <AppLayout>{children}</AppLayout>;
+  return (
+    <AppLayout>
+      <ErrorBoundary scope="page" resetKey={window.location.hash}>{children}</ErrorBoundary>
+    </AppLayout>
+  );
 }
 
 /**
