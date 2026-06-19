@@ -15,6 +15,7 @@ from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy.orm import Session
 
 from auth.models import AuditLog, User
+from auth.organization import load_organization
 from auth.tier import gate_feature_for_caller
 from .agent_write_tools import (
     apply_add_tag,
@@ -211,7 +212,9 @@ async def propose_action(
     if entry is None:
         raise HTTPException(status_code=400, detail=f"Unknown action '{action}'")
 
-    gate_feature_for_caller(user, entry["feature"])
+    # billing-1: agent-write capability must be covered by the ACTIVE
+    # workspace plan too, not just the user's global tier. Superusers bypass.
+    gate_feature_for_caller(user, entry["feature"], load_organization(db, org_id))
 
     builder = entry["build"]
     proposal_core = builder(db=db, user=user, org_id=org_id, payload=payload)
@@ -267,6 +270,7 @@ async def propose_action(
 
 def _validate_proposal_context(
     *,
+    db: Session,
     proposal: dict[str, Any],
     user: User,
     org_id: int,
@@ -285,7 +289,9 @@ def _validate_proposal_context(
     entry = ACTION_REGISTRY.get(proposal.get("action") or "")
     if entry is None:
         raise HTTPException(status_code=400, detail="Unknown proposal action")
-    gate_feature_for_caller(user, entry["feature"])
+    # billing-1: re-check the active workspace plan at confirm/cancel time too,
+    # mirroring propose_action. Superusers bypass inside the gate.
+    gate_feature_for_caller(user, entry["feature"], load_organization(db, org_id))
 
 
 async def confirm_action(
@@ -301,7 +307,7 @@ async def confirm_action(
     proposal = await _consume_proposal(confirmation_token)
     if not proposal:
         raise HTTPException(status_code=404, detail="Confirmation token not found or expired")
-    _validate_proposal_context(proposal=proposal, user=user, org_id=org_id)
+    _validate_proposal_context(db=db, proposal=proposal, user=user, org_id=org_id)
 
     expected_hash = proposal.get("payload_hash")
     actual_hash = _payload_hash(proposal["action"], proposal.get("payload") or {})
@@ -375,7 +381,7 @@ async def cancel_action(
     proposal = await _consume_proposal(confirmation_token)
     if not proposal:
         raise HTTPException(status_code=404, detail="Confirmation token not found or expired")
-    _validate_proposal_context(proposal=proposal, user=user, org_id=org_id)
+    _validate_proposal_context(db=db, proposal=proposal, user=user, org_id=org_id)
 
     _audit(
         db,

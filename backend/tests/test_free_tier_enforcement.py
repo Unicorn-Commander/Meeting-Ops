@@ -82,6 +82,22 @@ def _user(tier: str = "free", is_superuser: bool = False):
     )
 
 
+def _org_stub(plan: str = "free"):
+    """Minimal stand-in for an ActiveOrganization for the org-side gate
+    (billing-1). The gate machinery unwraps ``.organization`` then reads
+    ``.plan``, mirroring auth.organization.ActiveOrganization."""
+
+    class _Org:
+        def __init__(self, p):
+            self.plan = p
+
+    class _Active:
+        def __init__(self, p):
+            self.organization = _Org(p)
+
+    return _Active(plan)
+
+
 # ---------------------------------------------------------------------------
 # Unit: require_feature (dependency factory)
 # ---------------------------------------------------------------------------
@@ -92,7 +108,7 @@ def test_require_feature_403s_free_user():
 
     checker = require_feature("canonical_reprocess")
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(checker(current_user=_user("free")))
+        asyncio.run(checker(current_user=_user("free"), active_org=_org_stub("free")))
     assert exc.value.status_code == 403
     assert "canonical_reprocess" in exc.value.detail
 
@@ -100,18 +116,37 @@ def test_require_feature_403s_free_user():
 def test_require_feature_passes_pro_and_enterprise():
     from auth.tier import require_feature
 
+    # billing-1: the gate now also requires the ACTIVE org's plan to cover the
+    # feature, so a covering org is passed alongside the paid user.
     checker = require_feature("canonical_reprocess")
-    assert asyncio.run(checker(current_user=_user("pro"))).tier == "pro"
-    assert asyncio.run(checker(current_user=_user("enterprise"))).tier == "enterprise"
+    assert asyncio.run(
+        checker(current_user=_user("pro"), active_org=_org_stub("pro"))
+    ).tier == "pro"
+    assert asyncio.run(
+        checker(current_user=_user("enterprise"), active_org=_org_stub("enterprise"))
+    ).tier == "enterprise"
 
 
 def test_require_feature_superuser_passes():
     from auth.tier import require_feature
 
     checker = require_feature("canonical_reprocess")
-    # is_superuser overrides to enterprise even with tier='free'.
+    # is_superuser overrides to enterprise even with tier='free', AND bypasses
+    # the per-workspace org gate (here a FREE org) — support/dev access.
     su = _user("free", is_superuser=True)
-    assert asyncio.run(checker(current_user=su)) is su
+    assert asyncio.run(checker(current_user=su, active_org=_org_stub("free"))) is su
+
+
+def test_require_feature_pro_user_in_free_org_denied():
+    """billing-1: a Pro user whose ACTIVE workspace is on the free plan is
+    denied — one paid seat must not unlock compute in an unpaid org."""
+    from auth.tier import require_feature
+
+    checker = require_feature("canonical_reprocess")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(checker(current_user=_user("pro"), active_org=_org_stub("free")))
+    assert exc.value.status_code == 403
+    assert "workspace" in exc.value.detail.lower()
 
 
 def test_require_feature_unknown_feature_raises_at_definition():
@@ -162,6 +197,73 @@ def test_gate_feature_for_caller_unknown_feature_raises():
 
 
 # ---------------------------------------------------------------------------
+# billing-1: per-workspace (active-org) gate — test BOTH directions
+# ---------------------------------------------------------------------------
+
+
+def test_gate_feature_for_caller_pro_user_free_org_denied():
+    """A Pro user acting in a FREE workspace is denied server compute — the
+    active org's plan is authoritative per workspace (the core billing-1 fix)."""
+    from auth.tier import gate_feature_for_caller
+
+    with pytest.raises(HTTPException) as exc:
+        gate_feature_for_caller(_user("pro"), "canonical_reprocess", _org_stub("free"))
+    assert exc.value.status_code == 403
+    assert "workspace" in exc.value.detail.lower()
+
+
+def test_gate_feature_for_caller_pro_user_pro_org_allowed():
+    """Paid user in a paid workspace: allowed (no raise)."""
+    from auth.tier import gate_feature_for_caller
+
+    gate_feature_for_caller(_user("pro"), "canonical_reprocess", _org_stub("pro"))
+
+
+def test_gate_feature_for_caller_internal_bypasses_org_gate():
+    """Internal-service principals bypass even with a free active org."""
+    from auth.tier import gate_feature_for_caller
+
+    class _FakeInternalCaller:
+        service = "room_recorder"  # no .tier
+
+    gate_feature_for_caller(
+        _FakeInternalCaller(), "canonical_reprocess", _org_stub("free")
+    )
+
+
+def test_gate_feature_for_caller_superuser_bypasses_org_gate():
+    """Superuser (support/dev) bypasses the per-workspace gate in a free org."""
+    from auth.tier import gate_feature_for_caller
+
+    gate_feature_for_caller(
+        _user("free", is_superuser=True), "canonical_reprocess", _org_stub("free")
+    )
+
+
+def test_gate_feature_for_caller_two_arg_unchanged():
+    """2-arg form (no active_org) keeps legacy user-only behavior — backward
+    compatible with call sites we did not thread an org through."""
+    from auth.tier import gate_feature_for_caller
+
+    gate_feature_for_caller(_user("pro"), "canonical_reprocess")  # allowed
+    with pytest.raises(HTTPException):
+        gate_feature_for_caller(_user("free"), "canonical_reprocess")  # denied
+
+
+def test_org_covers_feature_unknown_plan_is_safe():
+    """An unrecognized org plan (drift / manual edit) must NOT KeyError; it
+    fails safe to free-tier features."""
+    from auth.tier import TIER_FEATURES, get_org_tier_features, org_covers_feature
+
+    class _Org:
+        plan = "founders_friend"  # not a known tier
+
+    assert org_covers_feature(_Org(), "canonical_reprocess") is False
+    assert get_org_tier_features(_Org()) == TIER_FEATURES["free"]
+    assert org_covers_feature(None, "canonical_reprocess") is False
+
+
+# ---------------------------------------------------------------------------
 # Integration: real gated endpoints, free vs pro
 # ---------------------------------------------------------------------------
 
@@ -200,6 +302,16 @@ def _seed_user_and_org(slug, username, tier):
             )
             db.add(user); db.commit(); db.refresh(user)
         user.tier = tier
+        # billing-1: align the org plan with the seeded user tier so paid
+        # users sit in a paid workspace (server compute now also requires the
+        # ACTIVE org's plan to cover the feature). Mirrors
+        # stripe_webhook._org_plan_for_tier (free→free, enterprise→enterprise,
+        # any other paid tier→pro).
+        org.plan = (
+            "enterprise" if tier == "enterprise"
+            else "free" if (tier or "free") == "free"
+            else "pro"
+        )
         db.commit()
         mem = (
             db.query(UserOrganization)
@@ -209,6 +321,19 @@ def _seed_user_and_org(slug, username, tier):
         if not mem:
             db.add(UserOrganization(user_id=user.id, organization_id=org.id, role="admin")); db.commit()
         return org.id, org.slug, user.id
+    finally:
+        db.close()
+
+
+def _set_org_plan(org_id, plan):
+    """Force an org onto a specific plan (billing-1 integration tests that need
+    a paid USER in an explicitly-FREE workspace, the leak case)."""
+    Organization, _, _, SessionLocal, _ = _models()
+    db = SessionLocal()
+    try:
+        org = db.query(Organization).filter(Organization.id == org_id).first()
+        org.plan = plan
+        db.commit()
     finally:
         db.close()
 
@@ -330,6 +455,36 @@ def test_free_tier_blocked_from_uploads_transcribe(client, tmp_path, monkeypatch
         },
     )
     assert pro_resp.status_code in (200, 202), pro_resp.text
+
+
+def test_billing1_pro_user_in_free_org_denied_server_compute(client, tmp_path, monkeypatch):
+    """billing-1 (integration, the leak case): a Pro user whose ACTIVE workspace
+    is on the FREE plan is denied server compute, even though their global tier
+    is Pro. Mirror: the SAME pro user in a PAID workspace is allowed."""
+    from api import uploads
+    monkeypatch.setattr(uploads, "RECORDINGS_DIR", tmp_path)
+    monkeypatch.setattr(uploads, "UPLOAD_ROOT", tmp_path / "uploads")
+
+    payload = {
+        "filename": "meeting.webm",
+        "total_size": 1024,
+        "content_type": "audio/webm",
+        "action": "transcribe",
+    }
+
+    # Pro user, but their workspace is forced onto the free plan → DENIED.
+    org_id, org_slug, _ = _seed_user_and_org("b1-pro-in-free", "b1_pro_in_free", "pro")
+    _set_org_plan(org_id, "free")
+    headers = _login_headers(client, "b1_pro_in_free", "admin123", org_slug)
+    denied = client.post("/api/uploads/start", headers=headers, json=payload)
+    assert denied.status_code == 403, denied.text
+    assert "workspace" in denied.text.lower()
+
+    # Same tier user, but now in a paid workspace → ALLOWED.
+    org_id2, org_slug2, _ = _seed_user_and_org("b1-pro-in-pro", "b1_pro_in_pro", "pro")
+    headers2 = _login_headers(client, "b1_pro_in_pro", "admin123", org_slug2)
+    allowed = client.post("/api/uploads/start", headers=headers2, json=payload)
+    assert allowed.status_code in (200, 202), allowed.text
 
 
 def test_unauth_admin_routers_require_auth(client):

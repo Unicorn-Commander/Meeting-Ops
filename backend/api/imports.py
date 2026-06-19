@@ -205,7 +205,7 @@ async def create_job(
 ) -> JobCreateResponse:
     """Create an empty bulk import job. Returns job_id which the client
     then POSTs files into."""
-    gate_feature_for_caller(current_user, "bulk_import")  # v3.0.0 tier gate: server batch ingest is paid-tier
+    gate_feature_for_caller(current_user, "bulk_import", active_org)  # v3.0.0 tier gate: server batch ingest is paid-tier
     job = BulkImportJob(
         id=uuid.uuid4(),
         user_id=current_user.id,
@@ -241,7 +241,7 @@ async def upload_file_to_job(
     runs the SHA-256 + dedup + RecordingSession create + reprocess
     pipeline; this endpoint just lands the bytes + the row.
     """
-    gate_feature_for_caller(current_user, "bulk_import")  # v3.0.0 tier gate: server batch ingest is paid-tier
+    gate_feature_for_caller(current_user, "bulk_import", active_org)  # v3.0.0 tier gate: server batch ingest is paid-tier
     job = _get_job_for_user(db, job_id, current_user, active_org)
     if job.status in ("complete", "cancelled", "failed"):
         raise HTTPException(

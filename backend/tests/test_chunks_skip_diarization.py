@@ -52,7 +52,7 @@ def _seed_user_and_org(slug: str, username: str = "diaroff_admin"):
         # Reuse-or-create org
         org = db.query(Organization).filter(Organization.slug == slug).first()
         if not org:
-            org = Organization(name=slug.replace("-", " ").title(), slug=slug, is_active=True)
+            org = Organization(name=slug.replace("-", " ").title(), slug=slug, is_active=True, plan="enterprise")  # billing-1: paid workspace matches the enterprise user
             db.add(org)
             db.commit()
             db.refresh(org)

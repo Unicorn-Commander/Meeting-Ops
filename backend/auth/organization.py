@@ -120,6 +120,16 @@ def ensure_default_organization(db: Session) -> Organization:
     return ensure_organization(db, DEFAULT_ORG_SLUG, name=DEFAULT_ORG_NAME)
 
 
+def load_organization(db: Session, org_id: int) -> Optional[Organization]:
+    """Fetch an Organization by primary key, or None.
+
+    Convenience for code paths (agent-write tools, WebSocket handlers) that
+    hold an ``org_id`` / ``session.organization_id`` and need the Organization
+    row to run a per-workspace billing gate (the ``active_org`` argument to
+    ``auth.tier.gate_feature_for_caller``)."""
+    return db.query(Organization).filter(Organization.id == org_id).first()
+
+
 def sync_user_organizations(
     db: Session,
     user: User,

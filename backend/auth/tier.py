@@ -22,12 +22,15 @@ the quota service lands it should consume these same numbers via
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import Depends, HTTPException
 
-from auth.dependencies import get_current_active_user
+from auth.dependencies import get_current_active_user, get_current_organization
 from auth.models import User
+
+logger = logging.getLogger(__name__)
 
 
 TIER_FEATURES: dict[str, dict[str, Any]] = {
@@ -318,6 +321,7 @@ def require_feature(feature: str):
 
     async def checker(
         current_user: User = Depends(get_current_active_user),
+        active_org: Any = Depends(get_current_organization),
     ) -> User:
         if not get_tier_features(current_user).get(feature):
             raise HTTPException(
@@ -325,6 +329,21 @@ def require_feature(feature: str):
                 detail=(
                     f"This action needs a paid tier "
                     f"(missing capability: {feature})"
+                ),
+            )
+        # billing-1: server compute must ALSO be covered by the ACTIVE
+        # workspace's plan, not just the user's global tier — otherwise one
+        # paid seat unlocks compute in every org the buyer belongs to.
+        # Superusers (support/dev, who resolve to enterprise) bypass the
+        # workspace gate so they can debug inside any org.
+        if not getattr(current_user, "is_superuser", False) and not org_covers_feature(
+            active_org, feature
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"This workspace's plan does not include this capability "
+                    f"({feature}). Upgrade the active organization to use it."
                 ),
             )
         return current_user
@@ -344,7 +363,44 @@ def get_org_tier(org: Any) -> str:
     return ((getattr(org, "plan", None) or "free")).lower()
 
 
-def gate_feature_for_caller(caller: Any, feature: str) -> None:
+def get_org_tier_features(org: Any) -> dict[str, Any]:
+    """Return the feature dict for an Organization's plan tier.
+
+    Org-side counterpart to `get_tier_features`. KeyError-safe: `Organization.
+    plan` is meant to be one of free/pro/enterprise (the Stripe webhook's
+    `_org_plan_for_tier` only ever writes those), but if a row holds an
+    unrecognized plan string (manual edit / cross-node drift) we fail SAFE by
+    treating it as `free` and logging loudly, rather than 500-ing a request on
+    a `TIER_FEATURES[...]` KeyError. There is deliberately no founding-member
+    overlay here — that's a per-USER perk, not a workspace plan.
+    """
+    tier = get_org_tier(org)
+    features = TIER_FEATURES.get(tier)
+    if features is None:
+        logger.warning(
+            "Organization plan %r is not a known tier; gating it as 'free'. "
+            "Known tiers: %s",
+            tier,
+            sorted(TIER_FEATURES),
+        )
+        return TIER_FEATURES["free"]
+    return features
+
+
+def org_covers_feature(org: Any, feature: str) -> bool:
+    """True if the organization's plan tier includes `feature`.
+
+    `org` may be an `Organization`, an `ActiveOrganization` wrapper, or None
+    (treated as free → denies paid features). This is the org-side
+    authoritative per-workspace billing gate (billing-1).
+    """
+    resolved = getattr(org, "organization", org)
+    return bool(get_org_tier_features(resolved).get(feature))
+
+
+def gate_feature_for_caller(
+    caller: Any, feature: str, active_org: Any = None
+) -> None:
     """Inline tier gate for endpoints that resolve the caller themselves.
 
     Endpoints using `Depends(get_internal_or_user)` get back EITHER a real
@@ -353,8 +409,18 @@ def gate_feature_for_caller(caller: Any, feature: str) -> None:
     trusted infrastructure, not subject to user billing tiers. A real `User`
     whose effective tier lacks `feature` gets a 403.
 
-    Call this right after the caller is resolved, before doing any work:
-        gate_feature_for_caller(caller, "canonical_reprocess")
+    billing-1: when `active_org` is supplied AND the caller is a real
+    (non-superuser) User, the ACTIVE WORKSPACE's plan must ALSO cover the
+    feature. This makes paid server-compute authoritative on the org being
+    charged, not just the buyer's global tier — so one paid seat no longer
+    unlocks compute in every org the buyer belongs to. `active_org=None`
+    (the default) keeps the legacy user-only behavior, so existing 2-arg
+    callers and trusted internal paths are unchanged. `active_org` may be an
+    `ActiveOrganization` wrapper or a bare `Organization`.
+
+    Call this right after the caller (and, when applicable, the active org)
+    is resolved, before doing any work:
+        gate_feature_for_caller(caller, "canonical_reprocess", active_org)
     """
     if feature not in _KNOWN_FEATURES:
         raise ValueError(
@@ -374,3 +440,15 @@ def gate_feature_for_caller(caller: Any, feature: str) -> None:
             status_code=403,
             detail=f"This action needs a paid tier (missing capability: {feature})",
         )
+    # billing-1 per-workspace gate. Superusers (support/dev, who resolve to
+    # enterprise on the user side) also bypass the workspace gate so they can
+    # debug inside any org.
+    if active_org is not None and not getattr(caller, "is_superuser", False):
+        if not org_covers_feature(active_org, feature):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"This workspace's plan does not include this capability "
+                    f"({feature}). Upgrade the active organization to use it."
+                ),
+            )

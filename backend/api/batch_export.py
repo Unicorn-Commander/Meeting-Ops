@@ -224,7 +224,7 @@ async def create_batch_export(
     # v3.18.3: defense-in-depth tier gate. Free users have no server-side
     # canonical content to export (browser-only tier); explicit gate
     # closes the surface in case server-side fallbacks ever land.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
     # Email delivery is real (Postmark, attachment included) when the env is
     # configured. When it is NOT configured we refuse up front with 501 —
     # never accept an emailTo job we know we cannot deliver.
@@ -358,7 +358,7 @@ async def create_export_template(
     """Create a new export template"""
     # v3.18.3: tier gate templates so free users can't seed configs that
     # would only get exercised by the gated batch endpoint.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
     template.id = str(uuid.uuid4())
     export_templates.append(template)
     export_template_scope[template.id] = {

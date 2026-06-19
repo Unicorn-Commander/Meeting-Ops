@@ -248,7 +248,7 @@ async def send_chat_message(
     # context). Basic, Pro, Suite, Enterprise all get this — Free is
     # still browser-only. Was canonical_reprocess until v3.22.x; switched
     # so Basic users (text tier) can ask questions about their meetings.
-    gate_feature_for_caller(current_user, "ai_chat_over_corpus")
+    gate_feature_for_caller(current_user, "ai_chat_over_corpus", active_org)
 
     # Look up the recording session
     session = db.query(DBRecordingSession).filter(
@@ -516,7 +516,7 @@ async def rag_query(
     # v3.23.0 tier gate: cross-meeting RAG is a TEXT-search-plus-LLM op
     # over the user's existing server-stored transcript corpus. Basic
     # tier ships with this enabled. Free is browser-only.
-    gate_feature_for_caller(current_user, "cross_meeting_search")
+    gate_feature_for_caller(current_user, "cross_meeting_search", active_org)
 
     import time
 

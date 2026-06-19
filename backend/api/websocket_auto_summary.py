@@ -351,7 +351,7 @@ async def control_auto_summarization(
             return {"status": "success", "data": status}
 
         elif action == "force":
-            gate_feature_for_caller(current_user, "qwen36_summary")  # server LLM run
+            gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # server LLM run
             summary = await auto_summarization_service.force_summary(session_id)
             if summary:
                 return {"status": "success", "summary": summary}

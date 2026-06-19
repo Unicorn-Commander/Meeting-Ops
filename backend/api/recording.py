@@ -730,7 +730,6 @@ async def upload_always_on_chunk(
     caller: Any = Depends(get_internal_or_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     # Dual-auth: real user OR room_recorder loopback. Internal callers
     # write to a session they already own by ID (the recorder spawned it
     # via the rooms API). We resolve org context from the session row
@@ -754,6 +753,10 @@ async def upload_always_on_chunk(
         session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
+    # on the session's WORKSPACE. Internal-service callers bypass; a real user
+    # must be in an org whose plan covers it. Gated after org/session resolve.
+    gate_feature_for_caller(caller, "canonical_reprocess", active_org)
     if getattr(session, "mode", "upload") != "always_on":
         raise HTTPException(status_code=409, detail="Session is not an always-on session.")
     if session.status not in {"recording", "processing", "paused"}:
@@ -838,7 +841,6 @@ async def append_client_text_chunk(
 
     Provenance lives in JSONB; no schema migration required.
     """
-    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty transcript text.")
@@ -866,6 +868,10 @@ async def append_client_text_chunk(
         session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
+    # on the session's WORKSPACE. Internal-service callers bypass; a real user
+    # must be in an org whose plan covers it. Gated after org/session resolve.
+    gate_feature_for_caller(caller, "canonical_reprocess", active_org)
     if getattr(session, "mode", "upload") != "always_on":
         raise HTTPException(status_code=409, detail="Session is not an always-on session.")
     if session.status not in {"recording", "processing", "paused"}:
@@ -962,7 +968,7 @@ async def finalize_always_on_session(
     flipped to 'completed' and the Brigade + Project-Ops writes will have
     fired (best-effort).
     """
-    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)  # v3.0.0 tier gate: paid-tier server processing
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -1208,7 +1214,7 @@ async def summarize_with_server_llm(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.0.0 tier gate: paid-tier server processing
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.0.0 tier gate: paid-tier server processing
     transcript = request.transcript.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript is required.")
@@ -1262,7 +1268,7 @@ async def summarize_slice(
     Used by the always-on live summary feature when the user has picked
     'Server' as their in-browser AI model (or when WebGPU is unavailable).
     """
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.0.0 tier gate: paid-tier server processing
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.0.0 tier gate: paid-tier server processing
     transcript = request.transcript.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript is required.")
@@ -1398,7 +1404,7 @@ async def create_summary_slice(
     Returns 422 when there isn't enough new transcript since the previous
     slice; 503 when the LLM provider fails.
     """
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: "Summarize now" runs the server LLM
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: "Summarize now" runs the server LLM
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -1501,7 +1507,6 @@ async def append_audio_chunk(
     use this path, but plumbing dual-auth in from day one means we don't
     have to retrofit when it grows audio export.
     """
-    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     if isinstance(caller, InternalServiceCaller):
         session = _find_session_by_id(db, session_id)
         if not session:
@@ -1521,6 +1526,10 @@ async def append_audio_chunk(
         session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
+    # on the session's WORKSPACE. Internal-service callers bypass; a real user
+    # must be in an org whose plan covers it. Gated after org/session resolve.
+    gate_feature_for_caller(caller, "canonical_reprocess", active_org)
     if getattr(session, "mode", "upload") != "always_on":
         raise HTTPException(status_code=409, detail="Session is not an always-on session.")
     # We accept chunks while recording OR after stop — the frontend may
@@ -2339,7 +2348,7 @@ async def finalize_audio(
     use this path; if we ever ship browser audio capture from a non-user
     context we can flip this to dual-auth like /audio-chunks.
     """
-    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)  # v3.0.0 tier gate: paid-tier server processing
     session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -2504,7 +2513,6 @@ async def post_full_audio(
     future internal-only crash recovery path doesn't need an auth
     retrofit.
     """
-    gate_feature_for_caller(caller, "canonical_reprocess")  # v3.0.0 tier gate: paid-tier server processing
     if isinstance(caller, InternalServiceCaller):
         session = _find_session_by_id(db, session_id)
         if not session:
@@ -2523,6 +2531,10 @@ async def post_full_audio(
         session = _find_session(db, session_id, active_org.organization.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
+    # on the session's WORKSPACE. Internal-service callers bypass; a real user
+    # must be in an org whose plan covers it. Gated after org/session resolve.
+    gate_feature_for_caller(caller, "canonical_reprocess", active_org)
     if getattr(session, "mode", "upload") != "always_on":
         raise HTTPException(status_code=409, detail="Session is not an always-on session.")
     if session.status in {"completed", "cancelled", "error"}:

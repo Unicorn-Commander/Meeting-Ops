@@ -131,15 +131,20 @@ def two_orgs(client):
     suffix = uuid.uuid4().hex[:6]
 
     try:
+        # billing-1: both orgs are on a paid plan so the enterprise test user's
+        # requests pass the per-workspace tier gate and actually reach the
+        # cross-org isolation check under test (a free org would 403 first).
         org_a = Organization(
             name=f"Org Alpha {suffix}",
             slug=f"alpha-{suffix}",
             is_active=True,
+            plan="enterprise",
         )
         org_b = Organization(
             name=f"Org Bravo {suffix}",
             slug=f"bravo-{suffix}",
             is_active=True,
+            plan="enterprise",
         )
         db.add_all([org_a, org_b])
         db.commit()

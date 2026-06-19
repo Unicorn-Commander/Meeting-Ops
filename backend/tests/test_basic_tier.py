@@ -77,6 +77,14 @@ def _seed_user_and_org(slug, username, tier):
             db.commit()
             db.refresh(user)
         user.tier = tier
+        # billing-1: align the org plan with the seeded user tier (server
+        # compute now also requires the ACTIVE org's plan to cover the
+        # feature). Mirrors stripe_webhook._org_plan_for_tier.
+        org.plan = (
+            "enterprise" if tier == "enterprise"
+            else "free" if (tier or "free") == "free"
+            else "pro"
+        )
         db.commit()
         mem = (
             db.query(UserOrganization)

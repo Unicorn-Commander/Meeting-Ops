@@ -251,7 +251,7 @@ async def email_attendees(
     # summaries / canonical transcript to email out (browser-only tier), so
     # this endpoint should never be reachable for them. Explicit gate
     # prevents a future regression silently re-opening the surface.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
     session = _get_session_or_404(db, active_org.organization.id, session_id)
 
     # Auth: org admin/manager or session creator

@@ -231,7 +231,7 @@ async def synthesize_summary(
     202 + `{job_id, status_url}`; the frontend polls `/api/jobs/<id>` for
     completion and then GETs `tts/summary.<ext>` for the bytes.
     """
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: vocal summary runs the server LLM + TTS
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: vocal summary runs the server LLM + TTS
     session = _resolve_session(session_id, db, active_org.organization.id)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
@@ -517,7 +517,7 @@ async def synthesize_podcast(
     `result.speakers` are included in the job result so the UI can show
     the script as soon as the worker finishes).
     """
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: podcast TTS runs the server LLM + TTS
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: podcast TTS runs the server LLM + TTS
     session = _resolve_session(session_id, db, active_org.organization.id)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
@@ -707,7 +707,7 @@ async def start_summary_job(
     """Enqueue an async summary TTS job. Returns immediately with job_id; the
     caller subscribes to /ws/tts/{job_id} for progress events. Pre-renders to
     the same path as the sync endpoint so cached audio remains compatible."""
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: vocal summary runs the server LLM + TTS
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: vocal summary runs the server LLM + TTS
     from database.models import TtsJob
     from services.tts_jobs import tts_queue, ws_manager
     import uuid as _uuid
@@ -748,7 +748,7 @@ async def start_podcast_job(
     """Enqueue an async podcast TTS job. Returns immediately with job_id; the
     caller subscribes to /ws/tts/{job_id} for progress events. Returns 501
     when the active provider does not support multi-voice synthesis."""
-    gate_feature_for_caller(current_user, "qwen36_summary")  # v3.29.0 moat fix: podcast TTS runs the server LLM + TTS
+    gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: podcast TTS runs the server LLM + TTS
     from database.models import TtsJob
     from services.tts_jobs import tts_queue
     import uuid as _uuid

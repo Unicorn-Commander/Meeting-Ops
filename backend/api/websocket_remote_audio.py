@@ -338,6 +338,28 @@ async def websocket_remote_audio(websocket: WebSocket, session_id: str):
 
         db_session_id = session.id
 
+        # billing-1: the pre-accept gate above only checked the caller's global
+        # tier. Paid server compute must ALSO require the SESSION'S workspace to
+        # be on a covering plan — else a user who is Pro in another org could
+        # stream paid compute into a FREE org's session. Superusers bypass.
+        if not user.is_superuser:
+            from auth.organization import load_organization
+            from auth.tier import org_covers_feature
+
+            sess_org = load_organization(db, session.organization_id)
+            if not org_covers_feature(sess_org, "canonical_reprocess"):
+                logger.warning(
+                    f"Remote-audio: workspace plan lacks canonical_reprocess for "
+                    f"session {session_id} (org_id={session.organization_id}) - "
+                    f"rejecting 4403"
+                )
+                await websocket.send_json(
+                    {"type": "error", "message": "Workspace plan does not include server processing"}
+                )
+                await websocket.close(code=4403)
+                db.close()
+                return
+
         if resuming and file_path:
             # Re-open the WAV file in append mode via raw file handle
             # We can't use ProgressiveWAVWriter here because the header

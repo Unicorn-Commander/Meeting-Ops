@@ -380,7 +380,7 @@ async def start_upload(
         # corpus chat / search but NO audio upload (that's the line
         # between Basic and Pro). Pro/Suite/Enterprise still pass; Free
         # and Basic both 403 here.
-        gate_feature_for_caller(current_user, "audio_upload")
+        gate_feature_for_caller(current_user, "audio_upload", active_org)
 
     # Per-org tier quota check (file size, concurrent uploads, monthly hours).
     # Raises HTTPException(402/429) with a structured detail payload so the
@@ -411,7 +411,7 @@ async def start_upload(
         # diarization + summary pipeline (run_upload_pipeline) just like a
         # transcribe-upload, so it must carry the same audio_upload gate
         # (Free/Basic 403). Previously only the "transcribe" branch gated.
-        gate_feature_for_caller(current_user, "audio_upload")
+        gate_feature_for_caller(current_user, "audio_upload", active_org)
         if not request.target_session_id:
             raise HTTPException(status_code=400, detail="target_session_id is required for attach uploads.")
         target_session = _find_session(db, request.target_session_id, active_org.organization.id)
@@ -676,7 +676,7 @@ async def reprocess_session(
     so callers can use whichever they already have in hand. Mirrors the
     lookup pattern used by ai_chat and other session-scoped endpoints.
     """
-    gate_feature_for_caller(current_user, "canonical_reprocess")  # v3.29.0 moat fix: reprocess runs the paid server pipeline
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)  # v3.29.0 moat fix: reprocess runs the paid server pipeline
     rec = (
         db.query(RecordingSession)
         .filter(

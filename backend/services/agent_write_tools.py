@@ -582,8 +582,13 @@ def apply_trigger_reprocess(
     # user's agent could reach the GPU reprocess pipeline through the
     # agent-write path, bypassing the gate every direct endpoint in
     # api.recording enforces. Superusers resolve to enterprise.
+    from auth.organization import load_organization
     from auth.tier import gate_feature_for_caller
-    gate_feature_for_caller(user, "canonical_reprocess")
+
+    # billing-1: gate on the SESSION'S workspace plan, not just the agent
+    # user's global tier — the agent-write reprocess path must obey per-org
+    # billing like the direct endpoints do. Superusers bypass inside the gate.
+    gate_feature_for_caller(user, "canonical_reprocess", load_organization(db, org_id))
 
     expected = proposal.get("before") or {}
     metadata = session.processing_metadata if isinstance(session.processing_metadata, dict) else {}

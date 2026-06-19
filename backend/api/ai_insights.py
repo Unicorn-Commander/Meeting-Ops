@@ -158,7 +158,7 @@ async def get_meeting_insights(
         # v3.18.2 tier gate: insight generation runs the server LLM.
         # Cached reads above stay open (cache only exists if a paid run
         # generated it earlier), but actual generation is paid-tier.
-        gate_feature_for_caller(current_user, "canonical_reprocess")
+        gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
         # Generate insights using the org's configured LLM
         insights = await _generate_ai_insights(

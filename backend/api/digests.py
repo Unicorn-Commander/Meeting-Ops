@@ -244,7 +244,7 @@ async def get_digest(
     # v3.18.2 tier gate: digest generation runs the server LLM (multiple
     # chat calls to mini-summarize + synthesize). Cached digests above
     # are free for any tier to read; new generation is paid-tier.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     # v3.18.3: enqueue + 202 + poll. Fall back to inline if arq is
     # unavailable so dev/test envs without Redis keep working.

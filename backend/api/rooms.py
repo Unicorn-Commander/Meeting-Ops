@@ -862,7 +862,7 @@ async def start_recording(
     # posts chunks via InternalServiceCaller (legitimately bypassing the
     # gate once started). Gate at start so free orgs cannot kick off the
     # server pipeline at all.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     if room.status == "recording":
         raise HTTPException(

@@ -70,7 +70,7 @@ def _seed_user_org(*, slug: str, username: str, role: str = "user", full_name: s
     try:
         org = db.query(Organization).filter(Organization.slug == slug).first()
         if not org:
-            org = Organization(name=slug.replace("-", " ").title(), slug=slug, is_active=True)
+            org = Organization(name=slug.replace("-", " ").title(), slug=slug, is_active=True, plan="pro")  # billing-1: paid workspace matches the pro user
             db.add(org)
             db.commit()
             db.refresh(org)

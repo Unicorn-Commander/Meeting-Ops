@@ -139,7 +139,7 @@ async def enroll_my_voice_from_session(
     """
     # Same write gate as the speaker-library naming surfaces — enrollment
     # mutates persistent voiceprint state.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
 
     # Same org-resolution/access pattern as api.speakers: the session must
     # live in the caller's active organization (membership enforced by

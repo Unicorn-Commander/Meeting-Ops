@@ -26,7 +26,7 @@ def _seed_pro_user_and_org(slug, username):
     try:
         org = db.query(Organization).filter(Organization.slug == slug).first()
         if not org:
-            org = Organization(name=slug, slug=slug, is_active=True)
+            org = Organization(name=slug, slug=slug, is_active=True, plan="pro")  # billing-1: paid workspace matches the pro user
             db.add(org); db.commit(); db.refresh(org)
         user = db.query(User).filter(User.username == username).first()
         if not user:

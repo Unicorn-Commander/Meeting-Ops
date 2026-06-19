@@ -664,7 +664,7 @@ async def create_speaker(
 ):
     # v3.18.3: speaker_library write paths gated by tier. Read paths
     # (list/get) stay open so a downgraded org doesn't lose visibility.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     existing = (
         db.query(SpeakerProfile)
@@ -741,7 +741,7 @@ async def update_speaker(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     if payload.display_name is not None:
@@ -780,7 +780,7 @@ async def update_speaker_contact_link(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Confirm or clear a SpeakerProfile -> Contact-Ops person link."""
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     speaker.contact_id = (payload.contact_id.strip() if payload.contact_id else None)
@@ -800,7 +800,7 @@ async def delete_speaker(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     # Detach session links so the deletion is a pure soft-unlink for transcripts.
@@ -824,7 +824,7 @@ async def upload_voice_sample(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
 
@@ -877,7 +877,7 @@ async def delete_voice_sample(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
     sample = (
@@ -931,7 +931,7 @@ async def merge_speaker_profile(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     org_id = active_org.organization.id
     source_id = payload.source_id
@@ -1109,7 +1109,7 @@ async def update_speaker_link(
     # v3.18.3: speaker_library write gate. Tagging a raw label to a Speaker
     # mutates persistent library state, so free users (no speaker_library)
     # don't get it.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     link = (
         db.query(SpeakerSessionLink)
@@ -1276,7 +1276,7 @@ async def create_speaker_for_link(
     duplicate, no 409/500 from the org+name unique constraint).
     """
     # v3.18.3: speaker_library write gate (creates+links persistent library state).
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
 
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     link = (
@@ -1721,7 +1721,7 @@ async def enroll_speaker_from_session(
     save a voice sample (ECAPA embedding), and confirm the speaker_link.
     """
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
 
     import os
     import subprocess
@@ -1954,7 +1954,7 @@ async def merge_speaker_links(
     to target. Source link row is deleted.
     """
     # v3.18.3: speaker_library write gate.
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
 
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -2073,7 +2073,7 @@ async def identify_speakers_endpoint(
     """Re-run speaker identification on a finished session. Useful after
     enrolling new speakers or to refresh stale mappings."""
     # v3.18.3: speaker_library write gate (mutates speaker_links on the session).
-    gate_feature_for_caller(current_user, "speaker_library")
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     summary = identify_speakers(session, db)
     # identify_speakers rewrote transcript_diarized speaker names for any

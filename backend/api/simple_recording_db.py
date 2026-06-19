@@ -926,7 +926,7 @@ async def semantic_search_sessions(
     will match transcripts discussing finances even without the exact words."""
     # v3.23.0 tier gate: cross-meeting semantic search is a TEXT-corpus
     # operation. Basic + higher get it; Free is browser-only.
-    gate_feature_for_caller(current_user, "cross_meeting_search")
+    gate_feature_for_caller(current_user, "cross_meeting_search", active_org)
     try:
         from services.semantic_search_service import semantic_search
         results = semantic_search.search(
@@ -1325,7 +1325,7 @@ async def start_recording(
     # v3.18.1 tier gate: paid-tier server processing — starting a server
     # recording triggers STT/diarization/summary at stop, all server-side.
     # Free is browser-only and must never reach this path.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     # Get session from database - handle both session_id and integer id
     session = _get_session_for_org(db, active_org.organization.id, session_id)
@@ -1409,7 +1409,7 @@ async def stop_recording(
     # recording to stop — this closes the direct-/stop-without-/start vector
     # and makes the server-compute gate explicit. gate_feature_for_caller
     # bypasses the internal room-recorder token, so Conference Room is unaffected.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     # Get session from database - handle both session_id and integer id
     session = _get_session_for_org(db, active_org.organization.id, session_id)
@@ -2516,7 +2516,7 @@ async def bulk_export_sessions(
     import zipfile
     from fastapi.responses import StreamingResponse
 
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     org_id = active_org.organization.id
 
@@ -2976,7 +2976,7 @@ async def start_always_on(
     # get 403. Inert on the cloud node (no USB mic) so this can't regress it;
     # the org-scoping refactor of retroactive-session creation stays deferred
     # to a desktop/USB-mic test pass.
-    gate_feature_for_caller(current_user, "canonical_reprocess")
+    gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
     from services.always_on_recorder import always_on_recorder
 
     device_id = body.device_id if body else None

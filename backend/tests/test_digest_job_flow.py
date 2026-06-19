@@ -29,6 +29,14 @@ def _seed_user(slug, username, tier):
         if not org:
             org = Organization(name=slug, slug=slug, is_active=True)
             db.add(org); db.commit(); db.refresh(org)
+        # billing-1: align the org plan with the seeded user tier (server
+        # compute now also requires the ACTIVE org's plan to cover the feature).
+        org.plan = (
+            "enterprise" if tier == "enterprise"
+            else "free" if (tier or "free") == "free"
+            else "pro"
+        )
+        db.commit()
         user = db.query(User).filter(User.username == username).first()
         if not user:
             user = User(

@@ -69,9 +69,11 @@ def two_orgs(client):
     try:
         org_a = Organization(
             name=f"Org Alpha {suffix}", slug=f"alpha-{suffix}", is_active=True,
+            plan="enterprise",  # billing-1: paid workspace matches the enterprise users
         )
         org_b = Organization(
             name=f"Org Bravo {suffix}", slug=f"bravo-{suffix}", is_active=True,
+            plan="enterprise",  # billing-1: paid workspace matches the enterprise users
         )
         db.add_all([org_a, org_b])
         db.commit()
