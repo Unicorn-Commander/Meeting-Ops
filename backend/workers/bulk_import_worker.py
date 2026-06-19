@@ -37,6 +37,8 @@ from services.bulk_import_queue import (
 )
 
 logger = logging.getLogger(__name__)
+BATCH_QUEUE_NAME = os.getenv("ARQ_BATCH_QUEUE", "meeting-ops:batch")
+INTERACTIVE_QUEUE_NAME = os.getenv("ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive")
 
 
 async def worker_startup(ctx: dict[str, Any]) -> None:
@@ -156,6 +158,24 @@ class WorkerSettings:
     )
     job_timeout = 3600
     on_startup = worker_startup
+    queue_name = BATCH_QUEUE_NAME
+
+
+class InteractiveWorkerSettings:
+    """Reserved lane for user-facing completion work."""
+
+    functions = [
+        finalize_session_job,
+        generate_digest_job,
+        render_tts_summary_job,
+        render_tts_podcast_job,
+        reprocess_session_job,
+    ]
+    max_jobs = max(1, int(os.getenv("ARQ_INTERACTIVE_WORKERS", "2")))
+    redis_settings = WorkerSettings.redis_settings
+    job_timeout = WorkerSettings.job_timeout
+    on_startup = worker_startup
+    queue_name = INTERACTIVE_QUEUE_NAME
 
 
 _arq_pool = None
@@ -188,6 +208,7 @@ async def enqueue_file(file_id: uuid.UUID) -> str:
         "process_bulk_file",
         file_id=str(file_id),
         job_id=f"bulk-import-{file_id}",
+        _queue_name=BATCH_QUEUE_NAME,
     )
     return j.job_id
 

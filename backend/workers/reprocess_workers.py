@@ -272,7 +272,10 @@ async def enqueue_reprocess(
             # Arq reserved kwargs are underscore-prefixed (_job_id, _defer_by).
             # lock_token rides along as a positional arg so the job can
             # compare-and-delete only its OWN lock on finish.
-            kwargs: dict[str, Any] = {"_job_id": f"reprocess-{session_pk}-{lock_token[:8]}"}
+            kwargs: dict[str, Any] = {
+                "_job_id": f"reprocess-{session_pk}-{lock_token[:8]}",
+                "_queue_name": os.getenv("ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive"),
+            }
             if defer:
                 kwargs["_defer_by"] = defer
             job = await pool.enqueue_job(

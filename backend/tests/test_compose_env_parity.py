@@ -93,6 +93,15 @@ def test_sentry_env_is_present_on_backend_and_worker():
         assert {"SENTRY_DSN", "SENTRY_ENVIRONMENT"} <= env_names
 
 
+def test_arq_queue_lanes_are_wired_to_backend_and_workers():
+    data = yaml.safe_load(COMPOSE.read_text())
+    services = data["services"]
+    required = {"ARQ_BATCH_QUEUE", "ARQ_INTERACTIVE_QUEUE", "ARQ_INTERACTIVE_WORKERS"}
+    for service_name in ("backend", "meet-bulk-import-worker", "meet-interactive-worker"):
+        assert required <= _env_names(services[service_name])
+    assert services["meet-bulk-import-worker"]["container_name"] != services["meet-interactive-worker"]["container_name"]
+
+
 def test_meet_host_model_urls_have_a_matching_container():
     """If a service points SPEAKER_SVC_URL / PARAKEET_SERVER_URL / SORTFORMER_URL
     at ``http://meet-<svc>:<port>``, a service with that ``container_name`` must

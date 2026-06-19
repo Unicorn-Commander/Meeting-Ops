@@ -45,7 +45,10 @@ async def test_enqueue_job_calls_arq_with_function_name():
     args, kwargs = mock_pool.enqueue_job.call_args
     assert args[0] == "finalize_session_job"
     assert args[1] == 42
-    assert kwargs == {"user_id": 7}
+    assert kwargs == {
+        "user_id": 7,
+        "_queue_name": job_runner.INTERACTIVE_QUEUE_NAME,
+    }
 
 
 @pytest.mark.asyncio
@@ -65,7 +68,11 @@ async def test_enqueue_job_stamps_owner_without_forwarding_metadata():
         )
 
     assert result == "arq-owned-1"
-    mock_pool.enqueue_job.assert_awaited_once_with("finalize_session_job", 42)
+    mock_pool.enqueue_job.assert_awaited_once_with(
+        "finalize_session_job",
+        42,
+        _queue_name=job_runner.INTERACTIVE_QUEUE_NAME,
+    )
     mock_pool.setex.assert_awaited_once()
     owner_key, ttl, value = mock_pool.setex.await_args.args
     assert owner_key.endswith("arq-owned-1")
@@ -88,7 +95,10 @@ async def test_enqueue_job_propagates_bound_request_id():
         request_id_var.reset(token)
 
     mock_pool.enqueue_job.assert_awaited_once_with(
-        "finalize_session_job", 42, request_id="request-abc",
+        "finalize_session_job",
+        42,
+        _queue_name=job_runner.INTERACTIVE_QUEUE_NAME,
+        request_id="request-abc",
     )
 
 

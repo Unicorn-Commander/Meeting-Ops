@@ -43,6 +43,7 @@ from arq.jobs import Job, JobStatus
 from workers.bulk_import_worker import get_arq_pool
 
 logger = logging.getLogger(__name__)
+INTERACTIVE_QUEUE_NAME = os.getenv("ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive")
 
 
 # Idempotency window: (function_name, args_hash) -> (job_id, expires_at).
@@ -113,7 +114,12 @@ async def enqueue_job(
         worker_kwargs["request_id"] = request_id
 
     pool = await get_arq_pool()
-    job = await pool.enqueue_job(function_name, *args, **worker_kwargs)
+    job = await pool.enqueue_job(
+        function_name,
+        *args,
+        _queue_name=INTERACTIVE_QUEUE_NAME,
+        **worker_kwargs,
+    )
     if job is None:
         # arq returns None when the configured `_job_id` already exists.
         # We don't pass _job_id, so this shouldn't happen — but if it

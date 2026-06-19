@@ -2,10 +2,9 @@
 
 Extends the existing UploadPipelineQueue pattern (api/uploads.py) with:
 
-  * Semaphore-capped worker pool. Default concurrency is 2, overridable
-    via env BULK_IMPORT_WORKERS. Two is the budget the design doc spec'd —
-    one reprocess slot stays reserved for live single-file uploads so a
-    bulk import never starves a user who just stopped recording.
+  * Batch work is routed to a dedicated Arq queue. User-facing finalize,
+    reprocess, digest, and TTS jobs run on a separate interactive worker,
+    so a large import cannot consume their reserved capacity.
 
   * Per-file pipeline:
       1. SHA-256 the assembled audio (skip if already computed at upload).
@@ -847,4 +846,3 @@ async def list_all_jobs(
         return q.all()
     finally:
         db.close()
-
