@@ -1203,10 +1203,11 @@ export const roomsApi = {
       if (!isMockFallback(err)) throw err;
       // Try the other known endpoint shape as a fallback.
       try {
-        return await request<RecordingSessionSummary[]>(
+        const page = await request<{ items: RecordingSessionSummary[] } | RecordingSessionSummary[]>(
           `/api/simple/recording-sessions?room_id=${roomId}`,
           { orgSlug, method: 'GET' },
         );
+        return Array.isArray(page) ? page : page.items;
       } catch (err2) {
         if (!isMockFallback(err2)) throw err2;
         await pseudoSleep();

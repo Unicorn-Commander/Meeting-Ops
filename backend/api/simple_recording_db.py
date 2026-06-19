@@ -7,8 +7,9 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, or_, func
+from sqlalchemy.orm import Session, defer
+from sqlalchemy import and_, desc, or_, func
+import base64
 import asyncio
 import os
 import re
@@ -133,7 +134,6 @@ class SessionResponse(BaseModel):
     status: str
     duration: float
     audio_file: Optional[str] = None
-    transcription: Optional[dict] = None
     participants: List[ParticipantSummary] = []
     tags: List[str] = []
     summary_preview: Optional[str] = None
@@ -623,16 +623,30 @@ async def create_session(
 _VALID_SORT_KEYS = {"created_at_desc", "meeting_date_desc", "meeting_date_asc"}
 
 
+def _encode_sessions_cursor(session: DBRecordingSession) -> str:
+    payload = json.dumps({
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "id": session.id,
+    }, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_sessions_cursor(cursor: str) -> tuple[datetime, int]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        return datetime.fromisoformat(payload["created_at"]), int(payload["id"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid sessions cursor") from exc
+
+
 @router.get("/recording-sessions")
 async def list_sessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
-    # Sessions.tsx now requests limit=1000 by default (no real pagination
-    # yet — power users were silently losing the tail at the old 100 default).
-    # le=2000 caps the payload at something an admin tool can hit without
-    # being a DoS vector.
-    limit: int = Query(100, ge=1, le=2000),
+    limit: int = Query(50, ge=1, le=200),
+    cursor: Optional[str] = Query(None),
     tags: Optional[str] = Query(None, description="Comma-separated tags; AND filter"),
     sort: Optional[str] = Query(
         None,
@@ -659,7 +673,7 @@ async def list_sessions(
             "for support/ops — the default views are member-scoped for privacy."
         ),
     ),
-) -> List[SessionResponse]:
+) -> dict:
     """List all recording sessions from database"""
 
     org_names_by_id: dict[int, str] = {}
@@ -699,6 +713,15 @@ async def list_sessions(
             )
     else:
         query = _scoped_session_query(db, active_org.organization.id)
+    query = query.options(
+        defer(DBRecordingSession.transcript),
+        defer(DBRecordingSession.transcript_simple),
+        defer(DBRecordingSession.transcript_diarized),
+        defer(DBRecordingSession.progressive_summaries),
+        defer(DBRecordingSession.ai_insights),
+        defer(DBRecordingSession.generated_emails),
+        defer(DBRecordingSession.extra_data),
+    )
     if tags:
         wanted = [t.strip() for t in tags.split(",") if t.strip()]
         if wanted:
@@ -734,6 +757,17 @@ async def list_sessions(
             # view back, which is the safer fail-open shape here.
             pass
     sort_key = sort if sort in _VALID_SORT_KEYS else "created_at_desc"
+    if cursor and sort_key != "created_at_desc":
+        raise HTTPException(status_code=400, detail="Cursor pagination requires created_at_desc sort")
+    if cursor:
+        cursor_created_at, cursor_id = _decode_sessions_cursor(cursor)
+        query = query.filter(or_(
+            DBRecordingSession.created_at < cursor_created_at,
+            and_(
+                DBRecordingSession.created_at == cursor_created_at,
+                DBRecordingSession.id < cursor_id,
+            ),
+        ))
     if sort_key in ("meeting_date_desc", "meeting_date_asc"):
         # Coalesce so a null meeting_date falls back to started_at and
         # finally to created_at. Keeps newly-uploaded sessions visible
@@ -746,9 +780,11 @@ async def list_sessions(
         order_clause = desc(effective) if sort_key == "meeting_date_desc" else effective
         query = query.order_by(order_clause, desc(DBRecordingSession.id))
     else:
-        query = query.order_by(desc(DBRecordingSession.created_at))
+        query = query.order_by(desc(DBRecordingSession.created_at), desc(DBRecordingSession.id))
 
-    sessions = query.limit(limit).all()
+    rows = query.limit(limit + 1).all()
+    has_more = len(rows) > limit
+    sessions = rows[:limit]
     session_org_ids = sorted({
         int(session.organization_id)
         for session in sessions
@@ -781,14 +817,6 @@ async def list_sessions(
 
     result = []
     for session in sessions:
-        # Parse transcription if it exists
-        transcription_data = None
-        if session.transcript:
-            try:
-                transcription_data = json.loads(session.transcript) if isinstance(session.transcript, str) else session.transcript
-            except (json.JSONDecodeError, ValueError, TypeError):
-                transcription_data = {"text": session.transcript} if session.transcript else None
-
         result.append(SessionResponse(
             id=session.session_id or str(session.id),
             name=session.name or session.title or f"Session {session.id}",
@@ -798,11 +826,10 @@ async def list_sessions(
             status=session.status or "completed",
             duration=session.duration or 0.0,
             audio_file=session.audio_file,
-            transcription=transcription_data,
             participants=_participants_payload(session),
             tags=_tags_payload(session),
             summary_preview=_summary_preview(session),
-            speaker_count=_speaker_count(session),
+            speaker_count=int(session.speaker_count or 0),
             speakers=speakers_by_session.get(session.id, []),
             project_app=session.project_app,
             project_id=session.project_id,
@@ -818,7 +845,11 @@ async def list_sessions(
             ),
         ))
 
-    return result
+    return {
+        "items": result,
+        "next_cursor": _encode_sessions_cursor(sessions[-1]) if has_more and sessions else None,
+        "has_more": has_more,
+    }
 
 
 class SearchResult(BaseModel):

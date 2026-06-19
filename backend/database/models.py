@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Date, Time, Text, Float, Boolean, JSON, ForeignKey, Index, func
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Date, Time, Text, Float, Boolean, JSON, ForeignKey, Index, func, event
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
@@ -72,6 +72,7 @@ class RecordingSession(Base):
     transcript = Column(Text)  # Added transcript column
     transcript_simple = Column(Text)  # Simple text transcript without speakers
     transcript_diarized = Column(JSON)  # Full diarized transcript with speakers
+    speaker_count = Column(Integer, default=0, nullable=False, server_default="0")
     summary = Column(Text)
     progressive_summaries = Column(JSON)  # List of summaries during recording
     final_summary = Column(JSON)  # Comprehensive final analysis
@@ -156,6 +157,23 @@ class RecordingSession(Base):
             "status": self.status,
             "extra_data": self.extra_data
         }
+
+
+@event.listens_for(RecordingSession, "before_insert")
+@event.listens_for(RecordingSession, "before_update")
+def _sync_recording_session_speaker_count(mapper, connection, target):
+    diarized = target.transcript_diarized
+    speakers = diarized.get("speakers") if isinstance(diarized, dict) else None
+    if isinstance(speakers, list):
+        target.speaker_count = len({str(s) for s in speakers if s})
+
+
+Index(
+    "ix_recording_sessions_org_created_id",
+    RecordingSession.organization_id,
+    RecordingSession.created_at.desc(),
+    RecordingSession.id.desc(),
+)
 
 
 class SessionCollaborator(Base):

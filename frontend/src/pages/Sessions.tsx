@@ -241,16 +241,7 @@ function sessionDividerLabel(
 }
 
 function deriveSpeakerCount(session: Session): number {
-  if (typeof session.speaker_count === 'number' && session.speaker_count > 0) {
-    return session.speaker_count;
-  }
-  const segs = (session as any)?.transcription?.segments;
-  if (!Array.isArray(segs) || segs.length === 0) return 0;
-  const set = new Set<string>();
-  for (const s of segs) {
-    if (s && s.speaker) set.add(s.speaker);
-  }
-  return set.size;
+  return typeof session.speaker_count === 'number' ? session.speaker_count : 0;
 }
 
 function truncate(text: string, max: number): string {
@@ -826,6 +817,8 @@ export const Sessions: React.FC = () => {
   // hasn't arrived yet, which would otherwise show "No sessions found" for ~1s.
   const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   // Auto-refresh: poll the list while it's on (default on) so a new/just-
   // processed meeting appears without a manual reload; the Refresh button
   // forces it immediately.
@@ -1185,7 +1178,12 @@ export const Sessions: React.FC = () => {
   // Local-only sessions (privacy mode) live in IndexedDB and are merged
   // in here so the rest of the UI is unaware of the split. The merge
   // sorts by created_at descending so the chronological mix is correct.
-  const fetchSessions = async ({ showSpinner = true }: { showSpinner?: boolean } = {}) => {
+  const fetchSessions = async ({
+    showSpinner = true,
+    cursor = null,
+    append = false,
+  }: { showSpinner?: boolean; cursor?: string | null; append?: boolean } = {}) => {
+    if (append) setLoadingMore(true);
     if (showSpinner) {
       setLoading(true);
     } else {
@@ -1204,12 +1202,8 @@ export const Sessions: React.FC = () => {
       if (allTenants && isSuperuser) {
         params.set('all_tenants', 'true');
       }
-      // The backend list defaults to limit=100 (no Query()-enforced max). With
-      // power users carrying hundreds of meetings, the default silently
-      // chopped the tail off the list with no UI affordance to load more.
-      // Bump to 1000 — handles every real user today without making the
-      // payload silly. Real pagination ships in v3.25 (see Sessions roadmap).
-      params.set('limit', '1000');
+      params.set('limit', '50');
+      if (cursor) params.set('cursor', cursor);
       if (selectedTags.length > 0) {
         params.set('tags', selectedTags.map(encodeURIComponent).join(','));
       }
@@ -1237,7 +1231,8 @@ export const Sessions: React.FC = () => {
       let serverSessions: Session[] = [];
       if (serverRes.status === 'fulfilled' && serverRes.value.ok) {
         const data = await serverRes.value.json();
-        serverSessions = Array.isArray(data) ? data : [];
+        serverSessions = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+        setNextCursor(Array.isArray(data) ? null : (data?.next_cursor ?? null));
       } else if (serverRes.status === 'fulfilled') {
         console.error('Failed to fetch sessions:', serverRes.value.status, serverRes.value.statusText);
       } else {
@@ -1254,7 +1249,8 @@ export const Sessions: React.FC = () => {
       // we still de-dupe defensively).
       const seen = new Set<string>();
       const merged: Session[] = [];
-      for (const s of [...serverSessions, ...localSessions]) {
+      const prior = append ? sessions : [];
+      for (const s of [...prior, ...serverSessions, ...localSessions]) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         merged.push(s);
@@ -1272,6 +1268,7 @@ export const Sessions: React.FC = () => {
       } else {
         setRefreshing(false);
       }
+      setLoadingMore(false);
     }
   };
 
@@ -2848,6 +2845,19 @@ export const Sessions: React.FC = () => {
               dateBasis={dateBasis}
             />
           )
+        )}
+
+        {nextCursor && !searchQuery && (
+          <div className="my-6 flex justify-center">
+            <button
+              type="button"
+              disabled={loadingMore}
+              onClick={() => fetchSessions({ showSpinner: false, cursor: nextCursor, append: true })}
+              className="rounded-lg border border-gray-700 bg-gray-900 px-5 py-2 text-sm text-gray-200 hover:border-purple-500 hover:text-white disabled:opacity-50"
+            >
+              {loadingMore ? 'Loading…' : 'Load more sessions'}
+            </button>
+          </div>
         )}
 
         {/* Bulk-action toolbar — visible whenever >= 1 session is selected.

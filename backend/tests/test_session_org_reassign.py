@@ -194,7 +194,7 @@ def test_list_endpoint_respects_active_org_header(client, org_move_world):
     }
     response = client.get("/api/simple/recording-sessions", headers=headers)
     assert response.status_code == 200, response.text
-    rows = response.json()
+    rows = response.json()["items"]
 
     assert any(row["id"] == org_move_world["session_a_public_id"] for row in rows)
     assert all(row["organization_id"] == org_move_world["org_a_id"] for row in rows)
@@ -211,7 +211,7 @@ def test_list_endpoint_can_include_all_user_orgs(client, org_move_world):
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    rows = response.json()
+    rows = response.json()["items"]
     ids = {row["id"] for row in rows}
 
     assert org_move_world["session_a_public_id"] in ids

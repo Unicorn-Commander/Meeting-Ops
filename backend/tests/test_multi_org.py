@@ -88,7 +88,7 @@ def test_org_isolation_blocks_cross_org_session_access(client):
 
     list_response = client.get("/api/simple/recording-sessions", headers=headers)
     assert list_response.status_code == 200
-    sessions = list_response.json()
+    sessions = list_response.json()["items"]
     assert [session["name"] for session in sessions] == ["Org X Session"]
 
     cross_org_response = client.get(
@@ -142,9 +142,9 @@ def test_active_org_header_switches_visible_sessions(client):
     alpha_headers = _login_headers(client, username, "Password123", alpha_slug)
     alpha_response = client.get("/api/simple/recording-sessions", headers=alpha_headers)
     assert alpha_response.status_code == 200
-    assert [session["name"] for session in alpha_response.json()] == ["Alpha Session"]
+    assert [session["name"] for session in alpha_response.json()["items"]] == ["Alpha Session"]
 
     beta_headers = _login_headers(client, username, "Password123", beta_slug)
     beta_response = client.get("/api/simple/recording-sessions", headers=beta_headers)
     assert beta_response.status_code == 200
-    assert [session["name"] for session in beta_response.json()] == ["Beta Session"]
+    assert [session["name"] for session in beta_response.json()["items"]] == ["Beta Session"]

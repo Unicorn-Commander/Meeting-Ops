@@ -512,7 +512,7 @@ def test_no_cross_org_leak_http(client, two_orgs, fake_qdrant, path_under_test):
             headers=headers_a,
         )
         assert response.status_code == 200, response.text
-        rows = response.json()
+        rows = response.json()["items"]
         for row in rows:
             assert row.get("id") != org_b_session, (
                 f"Leak: /api/simple/recording-sessions listed org B session: {row}"

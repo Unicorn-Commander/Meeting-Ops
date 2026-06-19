@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Sessions } from '../pages/Sessions';
@@ -147,5 +147,37 @@ describe('Sessions', () => {
 
     await waitFor(() => expect(screen.getByText('Sessions')).toBeInTheDocument());
     await waitFor(() => expect(screen.getAllByText('Weekly Sync').length).toBeGreaterThan(0));
+  });
+
+  it('loads the next cursor page', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('recording-sessions?')) {
+        const secondPage = url.includes('cursor=next-page');
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{
+              id: secondPage ? 'session-2' : 'session-1',
+              name: secondPage ? 'Older Meeting' : 'Weekly Sync',
+              created_at: secondPage ? '2024-12-01T10:00:00Z' : '2025-01-01T10:00:00Z',
+              updated_at: '2025-01-01T10:00:00Z',
+              status: 'completed',
+              has_transcript: false,
+              has_audio: false,
+            }],
+            next_cursor: secondPage ? null : 'next-page',
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<MemoryRouter><Sessions /></MemoryRouter>);
+
+    const loadMore = await screen.findByRole('button', { name: 'Load more sessions' });
+    fireEvent.click(loadMore);
+    await waitFor(() => expect(screen.getAllByText('Older Meeting').length).toBeGreaterThan(0));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('cursor=next-page'))).toBe(true);
   });
 });

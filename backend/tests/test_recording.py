@@ -26,7 +26,7 @@ def test_create_session(client):
 
 
 def test_list_sessions(client):
-    """GET /api/simple/recording-sessions returns a list."""
+    """GET /api/simple/recording-sessions returns a cursor page."""
     # Create a session first
     client.post(
         "/api/simple/recording-sessions",
@@ -36,8 +36,29 @@ def test_list_sessions(client):
     response = client.get("/api/simple/recording-sessions", headers=_auth_headers(client))
     assert response.status_code == 200
     data = response.json()
-    assert isinstance(data, list)
-    assert len(data) >= 1
+    assert isinstance(data["items"], list)
+    assert len(data["items"]) >= 1
+    assert "transcription" not in data["items"][0]
+
+
+def test_list_sessions_cursor_has_no_duplicates(client):
+    headers = _auth_headers(client)
+    for index in range(3):
+        client.post(
+            "/api/simple/recording-sessions",
+            json={"name": f"Cursor Session {index}"},
+            headers=headers,
+        )
+
+    first = client.get("/api/simple/recording-sessions?limit=2", headers=headers).json()
+    assert first["next_cursor"]
+    second = client.get(
+        f"/api/simple/recording-sessions?limit=2&cursor={first['next_cursor']}",
+        headers=headers,
+    ).json()
+    first_ids = {item["id"] for item in first["items"]}
+    second_ids = {item["id"] for item in second["items"]}
+    assert first_ids.isdisjoint(second_ids)
 
 
 def test_get_session_detail(client):
