@@ -19,7 +19,7 @@ import time
 
 # Database imports
 from database.database import get_db
-from database.models import RecordingSession as DBRecordingSession, Transcription
+from database.models import RecordingSession as DBRecordingSession, Transcription, ChatHistory
 
 # Import the working audio service
 from services.working_audio_service import audio_service
@@ -2214,6 +2214,11 @@ def _delete_session_record(
     lookup (e.g. `_get_session_for_org`) — this helper does no auth/org
     checks of its own.
     """
+    # Canonical string id used by the vector store + per-meeting chat history
+    # (both keyed by this string, NOT by the integer PK/FK). Capture it BEFORE
+    # db.delete(session) so it survives the row removal.
+    canonical_id = session.session_id or str(session.id)
+
     # Delete audio file if it exists
     if session.audio_file and os.path.exists(session.audio_file):
         try:
@@ -2236,9 +2241,32 @@ def _delete_session_record(
         Transcription.session_id == session.id
     ).delete()
 
+    # Delete this meeting's AI chat history. chat_history.session_key is a
+    # plain string key with NO FK to recording_sessions, so nothing cascades
+    # it — without this, transcript-derived PII survives "deletion". Org-scoped
+    # as defense-in-depth. (The org-level cross-meeting RAG history is keyed
+    # separately and intentionally left alone.)
+    try:
+        db.query(ChatHistory).filter(
+            ChatHistory.session_key == canonical_id,
+            ChatHistory.organization_id == session.organization_id,
+        ).delete(synchronize_session=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Chat-history purge failed for session {session_id}: {exc}")
+
     # Delete session
     db.delete(session)
     db.commit()
+
+    # Purge the vector-store embeddings so a deleted meeting no longer surfaces
+    # in semantic search / cross-meeting RAG. Best-effort + import-on-use (keeps
+    # qdrant off the cold-start path); mirrors the always-on discard path in
+    # recording.py. Runs AFTER commit so a qdrant hiccup can't block the delete.
+    try:
+        from services.semantic_search_service import semantic_search
+        semantic_search.delete_session(canonical_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Qdrant cleanup failed for session {session_id}: {exc}")
 
 
 @router.delete("/recording-sessions/{session_id}")
