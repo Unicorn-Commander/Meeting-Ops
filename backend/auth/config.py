@@ -1,11 +1,54 @@
+import logging
 import os
 from datetime import timedelta
 from typing import Optional
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
+
+# security-2: the JWT signing key MUST be a strong, deployment-specific secret.
+# A known/empty key lets anyone forge {"sub":"<id>","type":"access"} tokens and
+# authenticate as any user/superuser — a full auth bypass. We refuse to boot on
+# a weak key in any real deployment (fail-closed), and only fall back to a
+# clearly-labelled insecure dev key when ENVIRONMENT marks a dev/test/CI run.
+_PLACEHOLDER_SECRETS = {
+    "your-secret-key-change-this-in-production",
+    "your-secret-key-change-in-production",
+    "your-secret-key-here",
+    "changeme",
+}
+# Relaxed (dev fallback allowed) ONLY for these explicit non-deployment envs.
+# Anything else — including UNSET — is treated as a real deployment and is
+# fail-closed, so a prod box that forgets to set ENVIRONMENT still refuses a
+# weak key. Tests set ENVIRONMENT=test in conftest.
+_RELAXED_ENVS = {"dev", "development", "test", "testing", "local", "ci"}
+_DEV_FALLBACK_SECRET = "dev-insecure-secret-key-do-not-use-outside-local-dev-0123456789"
+
+
+def _resolve_secret_key() -> str:
+    raw = os.getenv("SECRET_KEY", "") or ""
+    env = os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "")).strip().lower()
+    relaxed = env in _RELAXED_ENVS
+    weak = (not raw) or (raw in _PLACEHOLDER_SECRETS) or (len(raw) < 32)
+    if weak and not relaxed:
+        raise RuntimeError(
+            "SECRET_KEY is unset, a known placeholder, or shorter than 32 chars. "
+            "Refusing to boot: a forgeable JWT signing key is a full auth bypass. "
+            "Set a strong random SECRET_KEY (e.g. `openssl rand -hex 32`). For "
+            "local dev/CI set ENVIRONMENT=dev (or test) to use an insecure fallback."
+        )
+    if weak:
+        logger.warning(
+            "SECRET_KEY is unset/weak; using an INSECURE dev fallback because "
+            "ENVIRONMENT=%s. This must never happen in a real deployment.", env or "<unset>"
+        )
+        return _DEV_FALLBACK_SECRET
+    return raw
+
+
 class AuthConfig(BaseModel):
     # JWT settings
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+    SECRET_KEY: str = _resolve_secret_key()
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7

@@ -1,4 +1,10 @@
-"""Simplified auth for Docker deployment"""
+"""Simplified auth for Docker deployment.
+
+DEAD CODE: this router is not imported/mounted anywhere (the live auth is
+auth/routes.py + auth/config.py). Kept only to avoid churn; the hardcoded
+SECRET_KEY placeholder was removed (security-2) so this file can never ship a
+forgeable signing key even if something imports it.
+"""
 from fastapi import APIRouter, HTTPException, Depends, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -11,7 +17,7 @@ import os
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 security = HTTPBearer()
 
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+SECRET_KEY = os.getenv("SECRET_KEY", "")  # security-2: no hardcoded fallback
 ALGORITHM = "HS256"
 
 class LoginRequest(BaseModel):

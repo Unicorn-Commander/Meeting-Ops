@@ -8,6 +8,11 @@ _db_fd, _db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 
+# security-2: mark this a relaxed env so auth.config's SECRET_KEY boot-guard
+# allows the insecure dev fallback instead of refusing to boot. Real deployments
+# leave ENVIRONMENT unset (=> strict) and must supply a strong SECRET_KEY.
+os.environ.setdefault("ENVIRONMENT", "test")
+
 # Point RECORDINGS_DIR to a writable temp dir so bulk-import integration
 # tests can create fake audio files without hitting the Docker-only path.
 _rec_dir = tempfile.mkdtemp(prefix="meeting_ops_recordings_")
