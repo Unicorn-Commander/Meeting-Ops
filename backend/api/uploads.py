@@ -23,6 +23,7 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
+from auth.ws_auth import enforce_ws_auth
 from database.database import SessionLocal, get_db
 from database.models import RecordingSession, Transcription, UploadJob
 
@@ -2494,6 +2495,9 @@ def _find_session(db: Session, session_id: str, org_id: int) -> Optional[Recordi
 
 @ws_router.websocket("/ws/uploads/{job_id}")
 async def uploads_websocket(websocket: WebSocket, job_id: str):
+    ok, user = await enforce_ws_auth(websocket)
+    if not ok:
+        return
     db = SessionLocal()
     try:
         try:
@@ -2501,7 +2505,13 @@ async def uploads_websocket(websocket: WebSocket, job_id: str):
         except ValueError:
             await websocket.close(code=1008)
             return
-        job = db.query(UploadJob).filter(UploadJob.upload_id == uid).first()
+        query = db.query(UploadJob).filter(UploadJob.upload_id == uid)
+        if user is not None and not getattr(user, "is_superuser", False):
+            query = query.filter(
+                UploadJob.organization_id.in_(getattr(user, "_org_ids", [])),
+                UploadJob.user_id == user.id,
+            )
+        job = query.first()
         if not job:
             await websocket.close(code=1008)
             return

@@ -34,6 +34,7 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
+from auth.ws_auth import enforce_ws_auth
 from database.database import get_db
 from database.models import RecordingSession
 from services.providers.registry import ProviderRegistry, get_provider_registry
@@ -824,27 +825,40 @@ async def tts_progress_websocket(websocket: WebSocket, job_id: str):
     from services.tts_jobs import ws_manager
     import uuid as _uuid
 
+    ok, user = await enforce_ws_auth(websocket)
+    if not ok:
+        return
+
     try:
         _uuid.UUID(job_id)
     except (ValueError, TypeError):
         await websocket.close(code=1008, reason="invalid job_id")
         return
 
+    from database.database import SessionLocal
+    from database.models import TtsJob
+    db = SessionLocal()
+    try:
+        query = db.query(TtsJob).filter(TtsJob.job_id == _uuid.UUID(job_id))
+        if user is not None and not getattr(user, "is_superuser", False):
+            query = query.filter(
+                TtsJob.organization_id.in_(getattr(user, "_org_ids", [])),
+                TtsJob.user_id == user.id,
+            )
+        job = query.first()
+        if not job:
+            await websocket.close(code=1008, reason="job not found")
+            return
+        from services.tts_jobs import _job_payload
+        initial_payload = _job_payload(job)
+    finally:
+        db.close()
+
     await ws_manager.connect(job_id, websocket)
     try:
         # Send the current state immediately so the client doesn't wait for
         # the next event to render initial progress.
-        from database.database import SessionLocal
-        from database.models import TtsJob
-        db = SessionLocal()
-        try:
-            job = db.query(TtsJob).filter(TtsJob.job_id == _uuid.UUID(job_id)).first()
-            if job:
-                from services.tts_jobs import _job_payload
-                await websocket.send_json(_job_payload(job))
-        finally:
-            db.close()
-
+        await websocket.send_json(initial_payload)
         # Keep the socket open; the worker pool broadcasts via ws_manager.
         while True:
             await websocket.receive_text()
