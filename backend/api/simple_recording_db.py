@@ -289,29 +289,6 @@ def _related_sessions(db: Session, session: DBRecordingSession) -> List[dict]:
         return []
 
 
-def _brigade_graph_url_for_session(session: DBRecordingSession) -> Optional[str]:
-    """Build the per-session Brigade graph deep-link, or None when this
-    session has never been written to Brigade.
-
-    The frontend uses the presence of this URL to decide whether to
-    render the "View in Brigade graph" link on SessionDetails. We do
-    the URL construction server-side so the client doesn't need to
-    know the active tenancy mode (which depends on the
-    BRIGADE_TENANCY_MODE env var the backend already reads)."""
-    if not getattr(session, "brigade_graph_node_id", None):
-        return None
-    try:
-        from services.brigade_writer import build_brigade_graph_url
-
-        return build_brigade_graph_url(session)
-    except Exception as exc:  # noqa: BLE001
-        # Defensive — the URL builder is pure but if env parsing flips
-        # an unexpected exception we'd rather show nothing than 500
-        # the entire session detail.
-        logger.debug("brigade graph url builder failed: %s", exc)
-        return None
-
-
 def _summary_preview(session: DBRecordingSession, max_chars: int = 220) -> Optional[str]:
     """Pull a short plain-text snippet of the AI summary for the list view.
 
@@ -1201,13 +1178,12 @@ async def get_session(
             # store_entity; brigade_synced_at stamps the last
             # successful write; brigade_graph_url is pre-built so the
             # client doesn't need to know the tenancy mode.
-            "brigade_graph_node_id": getattr(session, "brigade_graph_node_id", None),
+            "brigade_synced": bool(getattr(session, "brigade_graph_node_id", None)),
             "brigade_synced_at": (
                 session.brigade_synced_at.isoformat()
                 if getattr(session, "brigade_synced_at", None)
                 else None
             ),
-            "brigade_graph_url": _brigade_graph_url_for_session(session),
         }
         
     except HTTPException:
@@ -2237,7 +2213,7 @@ def _delete_session_record(
     db: Session,
     session: DBRecordingSession,
     session_id: str,
-) -> None:
+) -> Optional[tuple[int, str]]:
     """Hard-delete one already-org-scoped session: local audio file, durable
     Garage copies, transcriptions, then the row itself + commit.
 
@@ -2247,6 +2223,10 @@ def _delete_session_record(
     lookup (e.g. `_get_session_for_org`) — this helper does no auth/org
     checks of its own.
     """
+    brigade_ref = None
+    if session.brigade_graph_node_id:
+        brigade_ref = (session.organization_id, session.brigade_graph_node_id)
+
     # Delete audio file if it exists
     if session.audio_file and os.path.exists(session.audio_file):
         try:
@@ -2272,6 +2252,7 @@ def _delete_session_record(
     # Delete session
     db.delete(session)
     db.commit()
+    return brigade_ref
 
 
 @router.delete("/recording-sessions/{session_id}")
@@ -2288,7 +2269,15 @@ async def delete_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    _delete_session_record(db, session, session_id)
+    brigade_ref = _delete_session_record(db, session, session_id)
+    if brigade_ref:
+        try:
+            from services.brigade_writer import delete_session_from_brigade
+            result = await delete_session_from_brigade(*brigade_ref)
+            if not result.ok:
+                logger.warning("Brigade delete failed session=%s: %s", session_id, result.detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Brigade delete failed session=%s: %s", session_id, exc)
 
     return {"message": "Session deleted successfully"}
 
@@ -2338,12 +2327,21 @@ async def bulk_delete_sessions(
             continue
 
         try:
-            _delete_session_record(db, session, session_id)
+            brigade_ref = _delete_session_record(db, session, session_id)
             deleted += 1
         except Exception as exc:  # noqa: BLE001
             db.rollback()
             logger.warning(f"Bulk delete failed for session {session_id}: {exc}")
             failed.append({"id": session_id, "reason": str(exc)[:200]})
+            continue
+        if brigade_ref:
+            try:
+                from services.brigade_writer import delete_session_from_brigade
+                result = await delete_session_from_brigade(*brigade_ref)
+                if not result.ok:
+                    logger.warning("Brigade bulk delete failed session=%s: %s", session_id, result.detail)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Brigade bulk delete failed session=%s: %s", session_id, exc)
 
     return {"deleted": deleted, "failed": failed}
 

@@ -218,7 +218,7 @@ interface Session {
   // BRIGADE_API_KEY is unset (writer runs in log-only mode).
   brigade_graph_node_id?: string | null;
   brigade_synced_at?: string | null;
-  brigade_graph_url?: string | null;
+  brigade_synced?: boolean;
   // v3.36 duplicate detection: other org members' copies of this same
   // meeting (overlapping recordings). Optional — older payloads and
   // local-only sessions won't carry it; empty list when none.
@@ -2663,12 +2663,11 @@ export const SessionDetails: React.FC = () => {
                 action items + topics + decisions into Brigade's
                 FalkorDB graph, surface a deep-link to the 3D viewer.
                 Backend stamps brigade_synced_at + brigade_graph_node_id
-                on success and the API echoes a pre-built
-                brigade_graph_url so we don't have to know the graph
-                name on the client. The full embedded viewer lands in
+                on success and the API exposes only a boolean sync state;
+                graph routing remains server-side. The embedded viewer lands in
                 Phase 2 of the integration; for now this is a
                 lightweight "open in Brigade" affordance. */}
-            {session.brigade_graph_url && brigadeIntegrationEnabled && (
+            {session.brigade_synced && brigadeIntegrationEnabled && (
               <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
                 <div className="flex items-start gap-3">
                   <span className="font-semibold text-indigo-900">

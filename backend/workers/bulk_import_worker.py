@@ -73,6 +73,13 @@ async def media_retention_task(ctx: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+async def data_retention_purge_task(ctx: dict[str, Any]) -> dict[str, Any]:
+    from services.data_retention import run_data_retention_purge
+    result = await asyncio.to_thread(run_data_retention_purge)
+    logger.info("arq cron: data_retention_purge result=%s", result)
+    return result
+
+
 async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
     """Every-30-min cron: clear two classes of zombies.
 
@@ -144,6 +151,7 @@ class WorkerSettings:
     # recordings set tight (see services/session_watchdog.py).
     cron_jobs = [
         cron(media_retention_task, hour={4}, minute={30}),
+        cron(data_retention_purge_task, hour={5}, minute={0}),
         cron(session_watchdog_task, minute={0, 30}),
         # Weekly meeting digest email — Monday 13:00 UTC, summarizing the
         # previous Mon-Sun week per opted-in org (see

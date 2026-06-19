@@ -624,13 +624,15 @@ async def delete_my_account(
             RecordingSession.id,
             RecordingSession.organization_id,
             RecordingSession.session_id,
+            RecordingSession.brigade_graph_node_id,
         )
         .filter(RecordingSession.user_id == uid)
         .all()
     )
     session_pks = [row.id for row in session_rows]
     session_refs = [
-        (row.organization_id, row.session_id or str(row.id)) for row in session_rows
+        (row.organization_id, row.session_id or str(row.id), row.brigade_graph_node_id)
+        for row in session_rows
     ]
 
     if session_pks:
@@ -656,7 +658,7 @@ async def delete_my_account(
     # single-session delete (api/recording.py discard_always_on_session):
     # import-on-use, swallow + log failures, never fail the request — the
     # DB delete above is the authoritative "account is gone" signal.
-    for org_id, canonical_id in session_refs:
+    for org_id, canonical_id, brigade_node_id in session_refs:
         try:
             from services.semantic_search_service import semantic_search
 
@@ -666,6 +668,20 @@ async def delete_my_account(
                 "account-delete: Qdrant cleanup failed session=%s: %s",
                 canonical_id, exc,
             )
+        if brigade_node_id:
+            try:
+                from services.brigade_writer import delete_session_from_brigade
+                result = await delete_session_from_brigade(org_id, brigade_node_id)
+                if not result.ok:
+                    logger.warning(
+                        "account-delete: Brigade cleanup failed session=%s: %s",
+                        canonical_id, result.detail,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "account-delete: Brigade cleanup failed session=%s: %s",
+                    canonical_id, exc,
+                )
         try:
             from services import media_storage
 

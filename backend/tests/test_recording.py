@@ -1,5 +1,6 @@
 """Tests for recording session CRUD endpoints"""
 import uuid
+from unittest.mock import AsyncMock, patch
 
 
 def _auth_headers(client):
@@ -99,6 +100,38 @@ def test_delete_session(client):
     # Verify it's gone
     get_response = client.get(f"/api/simple/recording-sessions/{session_id}", headers=_auth_headers(client))
     assert get_response.status_code == 404
+
+
+def test_delete_session_purges_brigade_subgraph(client):
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from services.brigade_client import BrigadeWriteResult
+
+    headers = _auth_headers(client)
+    created = client.post(
+        "/api/simple/recording-sessions",
+        json={"name": "Brigade Delete Session"},
+        headers=headers,
+    ).json()
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.session_id == created["id"]).first()
+        session.brigade_graph_node_id = f"meeting_ops_meeting_{session.id}"
+        org_id = session.organization_id
+        node_id = session.brigade_graph_node_id
+        db.commit()
+    finally:
+        db.close()
+
+    delete_graph = AsyncMock(return_value=BrigadeWriteResult(ok=True, mode="live"))
+    with patch("services.brigade_writer.delete_session_from_brigade", delete_graph):
+        response = client.delete(
+            f"/api/simple/recording-sessions/{created['id']}",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    delete_graph.assert_awaited_once_with(org_id, node_id)
 
 
 def test_delete_session_not_found(client):

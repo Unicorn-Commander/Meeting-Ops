@@ -2748,7 +2748,6 @@ async def get_brigade_graph(
     # Local imports keep cold-start fast — this endpoint isn't on the
     # critical recording path.
     from services.brigade_client import BrigadeClient
-    from services.brigade_writer import build_brigade_graph_url
 
     # 1. Resolve session within the active org. Cross-org returns 404.
     session_query = db.query(RecordingSession).filter(

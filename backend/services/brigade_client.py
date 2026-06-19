@@ -239,6 +239,47 @@ class BrigadeClient:
             payload=payload,
         )
 
+    async def delete_entity_subgraph(
+        self,
+        *,
+        name: str,
+        agent_id: str,
+    ) -> BrigadeWriteResult:
+        """Delete an entity and its meeting-owned child subgraph.
+
+        New Brigade builds expose the cascade endpoint. During rolling
+        upgrades, a 404/405 falls back to a redacted tombstone so content is
+        no longer returned even before the delete API reaches that node.
+        """
+        if not self.is_live:
+            logger.info("brigade_client noop delete_entity_subgraph name=%s", name)
+            return BrigadeWriteResult(ok=True, mode="noop")
+        try:
+            async with self._client_ctx() as client:
+                response = await client.delete(
+                    f"{self._base_url}/api/v1/knowledge/store/entity/{name}",
+                    params={"agent_id": agent_id, "cascade": "true"},
+                    headers=self._headers(),
+                )
+            if response.status_code < 400 or response.status_code == 404:
+                return BrigadeWriteResult(ok=True, mode="live")
+            if response.status_code != 405:
+                return BrigadeWriteResult(
+                    ok=False,
+                    mode="error",
+                    detail=f"delete HTTP {response.status_code}: {response.text[:200]}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("brigade_client delete failed name=%s: %s", name, exc)
+            return BrigadeWriteResult(ok=False, mode="error", detail=str(exc)[:200])
+
+        return await self.upsert_entity(
+            name=name,
+            entity_type="Meeting",
+            properties={"deleted": True, "redacted": True, "content": "", "summary": ""},
+            agent_id=agent_id,
+        )
+
     async def stats(self) -> BrigadeWriteResult:
         """Connectivity probe. Never raises; used by tests + the
         reconciliation job to decide whether to drain."""

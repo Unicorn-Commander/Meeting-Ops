@@ -47,7 +47,7 @@ from auth.tier import require_feature
 from database.database import get_db
 from database.models import SpeakerProfile
 from services.brigade_client import BrigadeClient
-from services.brigade_writer import TENANCY_SHARED, _resolve_tenancy, _speaker_node_name  # noqa: F401
+from services.brigade_writer import _speaker_node_name
 from services.kg_hydrate import hydrate_nodes, parse_node_id
 
 # Reuse the per-session shaper: same Brigade payload -> {nodes, links, focus}.
@@ -72,20 +72,6 @@ _STRIPPED_NODE_PROPS = {
     "org_id", "graph", "graph_name", "tenancy_mode", "completion_mode",
     "created_by", "created_at", "distance",
 }
-
-
-def _person_graph_url(speaker_node: str, organization_id: int) -> Optional[str]:
-    """Deep-link to Brigade's knowledge UI focused on this speaker.
-
-    NOTE: Brigade's UI does not yet honor ``?graph=``/``?focus=`` (it degrades
-    to the default graph view) until the pending Brigade PR ships.
-    """
-    base = os.getenv("BRIGADE_PUBLIC_URL", "https://brigade.magicunicorn.dev").rstrip("/")
-    try:
-        graph_name = _resolve_tenancy(organization_id).graph_name
-    except Exception:  # pragma: no cover - URL is best-effort
-        return None
-    return f"{base}/knowledge?graph={graph_name}&focus={speaker_node}"
 
 
 async def _fetch_connected_context(

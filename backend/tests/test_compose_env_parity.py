@@ -102,6 +102,14 @@ def test_arq_queue_lanes_are_wired_to_backend_and_workers():
     assert services["meet-bulk-import-worker"]["container_name"] != services["meet-interactive-worker"]["container_name"]
 
 
+def test_retention_env_is_present_on_backend_and_worker():
+    data = yaml.safe_load(COMPOSE.read_text())
+    services = data["services"]
+    required = {"MEETING_RETENTION_ENABLED", "MEETING_RETENTION_DAYS", "MEETING_RETENTION_MAX_PER_RUN"}
+    for service_name in ("backend", "meet-bulk-import-worker"):
+        assert required <= _env_names(services[service_name])
+
+
 def test_meet_host_model_urls_have_a_matching_container():
     """If a service points SPEAKER_SVC_URL / PARAKEET_SERVER_URL / SORTFORMER_URL
     at ``http://meet-<svc>:<port>``, a service with that ``container_name`` must

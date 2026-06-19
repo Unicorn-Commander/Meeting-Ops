@@ -85,7 +85,7 @@ VALID_TENANCY_MODES = {
     TENANCY_PER_ORG_INSTANCE,
 }
 
-DEFAULT_TENANCY_MODE = TENANCY_SHARED
+DEFAULT_TENANCY_MODE = TENANCY_PER_ORG_GRAPH
 DEFAULT_SHARED_GRAPH_BASENAME = "meeting_ops_canonical"
 PER_ORG_GRAPH_PREFIX = "meeting_ops_org"
 
@@ -210,6 +210,16 @@ def _meeting_node_name(session_pk: int) -> str:
     cross-org collision is structurally impossible.
     """
     return f"meeting_ops_meeting_{session_pk}"
+
+
+async def delete_session_from_brigade(org_id: int, node_name: str) -> BrigadeWriteResult:
+    """Best-effort cascading erasure for one Meeting-Ops graph node."""
+    target = _resolve_tenancy(org_id, strict=True)
+    client = BrigadeClient()
+    try:
+        return await client.delete_entity_subgraph(name=node_name, agent_id=target.agent_id)
+    finally:
+        await client.aclose()
 
 
 def _speaker_node_name(speaker_id: int) -> str:
@@ -721,42 +731,9 @@ async def _write_all(
     )
 
 
-def build_brigade_graph_url(session: Any) -> Optional[str]:
-    """Build the frontend deep-link to Brigade's 3D viewer for this
-    session's graph + focus node.
-
-    Returns None when the session has never been synced (the
-    ``brigade_graph_node_id`` column is NULL) — the frontend uses that
-    to decide whether to render the link at all.
-
-    URL shape (the Brigade UI's KnowledgeGraph.jsx accepts ``?graph=``
-    + ``?focus=`` as soft-state parameters; per the design doc the
-    ``?graph=`` param itself lands as a Phase 3 Brigade-side PR. We
-    ship the link anyway — it degrades to the default graph view when
-    Brigade doesn't yet honor the params, which is the right UX).
-    """
-    if not session.brigade_graph_node_id:
-        return None
-    # Reconstruct the graph name from the env-resolved tenancy mode.
-    # This matches the writer's _resolve_tenancy at the moment the
-    # link is requested. Note: if the deployment env changes between
-    # write time and read time, the link will still point at the
-    # current graph (which is what an operator wants — the data is
-    # already there).
-    target = _resolve_tenancy(session.organization_id)
-    base = os.getenv(
-        "BRIGADE_PUBLIC_URL", "https://brigade.magicunicorn.dev"
-    ).rstrip("/")
-    return (
-        f"{base}/knowledge"
-        f"?graph={target.graph_name}"
-        f"&focus={session.brigade_graph_node_id}"
-    )
-
-
 __all__ = [
     "write_meeting_to_brigade",
-    "build_brigade_graph_url",
+    "delete_session_from_brigade",
     "TENANCY_SHARED",
     "TENANCY_PER_ORG_GRAPH",
     "TENANCY_PER_ORG_INSTANCE",
