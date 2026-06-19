@@ -80,6 +80,18 @@ class ConferenceRoom(Base):
         default=90,
         server_default="90",
     )
+    # Explicit per-room retention opt-in. `default_retention_days` carries a
+    # server_default of 90, so honoring it unconditionally would silently purge
+    # every room-attached session at 90 days even when the org set NO retention
+    # policy. The scheduled purge (services/data_retention.py) only uses a room's
+    # horizon when this flag is set; otherwise the session falls back to the
+    # org-level policy (or no purge). Default off → no implicit deletes.
+    retention_enabled = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     schedule_json = Column(JSONB, nullable=True)
     legal_hold = Column(
         Boolean,

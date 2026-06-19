@@ -54,7 +54,17 @@ def run_data_retention_purge(*, dry_run: bool = False) -> dict:
                 if room and room.legal_hold:
                     result["legal_hold_skipped"] += 1
                     continue
-                retention_days = int(room.default_retention_days) if room else org_days
+                # Retention landmine fix: a room's default_retention_days has a
+                # server_default of 90, so honoring it unconditionally would purge
+                # every room-attached session at 90 days even when the org set no
+                # policy. Require an explicit per-room opt-in (retention_enabled,
+                # migration 049); otherwise the session falls back to the org-level
+                # policy (org_days, default 0 = never). getattr keeps this safe if
+                # the column predates the migration.
+                if room and getattr(room, "retention_enabled", False):
+                    retention_days = int(room.default_retention_days)
+                else:
+                    retention_days = org_days
                 if retention_days <= 0:
                     continue
                 age_from = session.ended_at or session.created_at
