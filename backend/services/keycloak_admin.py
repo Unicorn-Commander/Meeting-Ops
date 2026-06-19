@@ -84,7 +84,8 @@ def is_configured() -> bool:
 
 def _client() -> httpx.AsyncClient:
     """httpx client factory — a seam so tests can swap in a MockTransport."""
-    return httpx.AsyncClient(timeout=_TIMEOUT)
+    from middleware.request_context import outbound_request_headers
+    return httpx.AsyncClient(timeout=_TIMEOUT, headers=outbound_request_headers())
 
 
 # ── public API ─────────────────────────────────────────────────────────

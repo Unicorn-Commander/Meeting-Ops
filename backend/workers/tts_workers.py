@@ -32,9 +32,12 @@ async def render_tts_summary_job(
     session_pk: int,
     voice: str | None,
     fmt: str,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Render the single-voice summary TTS audio off the request path."""
     import os
+    from middleware.request_context import bind_request_id
+    bind_request_id(request_id or ctx.get("job_id"))
 
     from database.database import SessionLocal
     from database.models import RecordingSession
@@ -132,9 +135,12 @@ async def render_tts_podcast_job(
     host_voice: str | None,
     analyst_voice: str | None,
     fmt: str,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Render the two-voice podcast TTS audio + script off the request path."""
     import json
+    from middleware.request_context import bind_request_id
+    bind_request_id(request_id or ctx.get("job_id"))
 
     from database.database import SessionLocal
     from database.models import RecordingSession

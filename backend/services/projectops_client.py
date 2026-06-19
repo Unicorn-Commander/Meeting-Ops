@@ -294,7 +294,8 @@ class _TokenSource:
         result. Caller MUST hold ``self._lock``. Raises
         ``ProjectOpsClientError`` on failure."""
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=self._timeout)
+            from middleware.request_context import outbound_request_headers
+            self._http = httpx.AsyncClient(timeout=self._timeout, headers=outbound_request_headers())
         assert self._token_url and self._client_id and self._client_secret
         try:
             resp = await self._http.post(
@@ -643,7 +644,8 @@ class ProjectOpsClient:
         if self._injected_client is not None:
             return _AsyncClientCtx(self._injected_client, owns=False)
         if self._owned_client is None:
-            self._owned_client = httpx.AsyncClient(timeout=self._timeout)
+            from middleware.request_context import outbound_request_headers
+            self._owned_client = httpx.AsyncClient(timeout=self._timeout, headers=outbound_request_headers())
         return _AsyncClientCtx(self._owned_client, owns=False)
 
     async def _request_with_retries(

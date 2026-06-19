@@ -24,7 +24,8 @@ class WhisperServerClient:
     def is_available(self) -> bool:
         """Check if whisper-server is healthy"""
         try:
-            with httpx.Client(timeout=5.0) as client:
+            from middleware.request_context import outbound_request_headers
+            with httpx.Client(timeout=5.0, headers=outbound_request_headers()) as client:
                 resp = client.get(f"{self.base_url}/health")
                 self._available = resp.status_code == 200 and resp.json().get("status") == "ok"
                 return self._available
@@ -61,7 +62,8 @@ class WhisperServerClient:
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 timeout = max(30.0, 30.0 + file_size_mb)
 
-                with httpx.Client(timeout=timeout) as client:
+                from middleware.request_context import outbound_request_headers
+                with httpx.Client(timeout=timeout, headers=outbound_request_headers()) as client:
                     resp = client.post(
                         f"{self.base_url}/inference",
                         files=files,

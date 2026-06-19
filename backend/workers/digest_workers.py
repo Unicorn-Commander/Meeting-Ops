@@ -30,12 +30,15 @@ async def generate_digest_job(
     period: str,
     date_str: str,
     project_id: str | int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Generate a digest off the request path.
 
     Returns a payload matching the legacy `DigestResponse` so the
     frontend can render it directly from the job result.
     """
+    from middleware.request_context import bind_request_id
+    bind_request_id(request_id or ctx.get("job_id"))
     from database.database import SessionLocal
     from database.models import MeetingDigest
 

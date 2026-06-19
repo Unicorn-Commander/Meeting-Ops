@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass
 import os
 import sys
+from middleware.request_context import outbound_request_headers
 
 
 @dataclass
@@ -252,7 +253,7 @@ class OpenAIProvider(ModelProvider):
         if "tools" in parameters.provider_params:
             payload["tools"] = parameters.provider_params["tools"]
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=outbound_request_headers()) as session:
             async with session.post(
                 f"{self.api_base}/chat/completions",
                 headers=self.headers,
@@ -299,7 +300,7 @@ class OpenAIProvider(ModelProvider):
             "stream": True
         }
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=outbound_request_headers()) as session:
             async with session.post(
                 f"{self.api_base}/chat/completions",
                 headers=self.headers,
@@ -321,7 +322,7 @@ class OpenAIProvider(ModelProvider):
     
     async def list_models(self) -> List[str]:
         """List available OpenAI models"""
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=outbound_request_headers()) as session:
             async with session.get(
                 f"{self.api_base}/models",
                 headers=self.headers
@@ -381,7 +382,7 @@ class AnthropicProvider(ModelProvider):
         if parameters.stop_sequences:
             payload["stop_sequences"] = parameters.stop_sequences
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=outbound_request_headers()) as session:
             async with session.post(
                 f"{self.api_base}/messages",
                 headers=self.headers,
@@ -429,7 +430,7 @@ class AnthropicProvider(ModelProvider):
         if system_prompt:
             payload["system"] = system_prompt
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=outbound_request_headers()) as session:
             async with session.post(
                 f"{self.api_base}/messages",
                 headers=self.headers,

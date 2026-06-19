@@ -38,6 +38,7 @@ async def finalize_session_job(
     session_pk: int,
     user_id: int | None = None,
     org_id: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the always-on finalize pipeline for a session.
 
@@ -52,6 +53,8 @@ async def finalize_session_job(
     matches the arq job_id we're running, a newer job claimed the row
     and we bail before touching summary / insights / Brigade / PO.
     """
+    from middleware.request_context import bind_request_id
+    bind_request_id(request_id or ctx.get("job_id"))
     from database.database import SessionLocal
     from database.models import RecordingSession, Transcription
 

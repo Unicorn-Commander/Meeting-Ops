@@ -156,6 +156,7 @@ async def reprocess_session_job(
     org_id: Optional[int] = None,
     audio_hours: float = 0.0,
     lock_token: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run the whole-file reprocess for a session inside the bounded worker.
 
@@ -168,6 +169,8 @@ async def reprocess_session_job(
     reprocess of the same session isn't blocked. Compare-and-delete by
     ``lock_token`` so we only clear OUR lock. ``lock_token=None`` (e.g. a job
     enqueued by pre-lock code still in the queue across a deploy) is a no-op."""
+    from middleware.request_context import bind_request_id
+    bind_request_id(request_id or ctx.get("job_id"))
     try:
         from api.recording import _run_session_reprocess
         await _run_session_reprocess(session_pk)

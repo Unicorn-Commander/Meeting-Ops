@@ -195,7 +195,8 @@ async def projectops_federation_token(workspace_id: str) -> Optional[str]:
     if not workspace_id:
         return None
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        from middleware.request_context import outbound_request_headers
+        async with httpx.AsyncClient(timeout=_TIMEOUT, headers=outbound_request_headers()) as client:
             return await _project_ops_token(client, workspace_id)
     except Exception as exc:  # noqa: BLE001
         # Defensive: a token miss must never break finalize.

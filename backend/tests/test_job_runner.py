@@ -74,6 +74,25 @@ async def test_enqueue_job_stamps_owner_without_forwarding_metadata():
 
 
 @pytest.mark.asyncio
+async def test_enqueue_job_propagates_bound_request_id():
+    from middleware.request_context import bind_request_id, request_id_var
+    from services import job_runner
+
+    mock_pool = AsyncMock()
+    mock_pool.enqueue_job = AsyncMock(return_value=MagicMock(job_id="trace-job"))
+    token = bind_request_id("request-abc")
+    try:
+        with patch.object(job_runner, "get_arq_pool", AsyncMock(return_value=mock_pool)):
+            await job_runner.enqueue_job("finalize_session_job", 42)
+    finally:
+        request_id_var.reset(token)
+
+    mock_pool.enqueue_job.assert_awaited_once_with(
+        "finalize_session_job", 42, request_id="request-abc",
+    )
+
+
+@pytest.mark.asyncio
 async def test_enqueue_job_idempotency_window_dedupes_same_args():
     """Inside the 5-minute window, a second enqueue with identical args
     returns the cached job_id and does NOT call arq again."""

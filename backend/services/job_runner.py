@@ -84,6 +84,7 @@ async def enqueue_job(
     *args: Any,
     owner_user_id: int | None = None,
     owner_org_id: int | None = None,
+    request_id: str | None = None,
     **kwargs: Any,
 ) -> str:
     """Enqueue an arq job by registered function name.
@@ -103,8 +104,16 @@ async def enqueue_job(
         )
         return existing_job_id
 
+    if request_id is None:
+        from middleware.request_context import current_request_id
+        current = current_request_id()
+        request_id = current if current != "-" else None
+    worker_kwargs = dict(kwargs)
+    if request_id:
+        worker_kwargs["request_id"] = request_id
+
     pool = await get_arq_pool()
-    job = await pool.enqueue_job(function_name, *args, **kwargs)
+    job = await pool.enqueue_job(function_name, *args, **worker_kwargs)
     if job is None:
         # arq returns None when the configured `_job_id` already exists.
         # We don't pass _job_id, so this shouldn't happen — but if it

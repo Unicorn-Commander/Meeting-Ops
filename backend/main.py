@@ -24,6 +24,9 @@ from auth.dependencies import get_current_user
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from middleware.request_context import RequestIdMiddleware, configure_request_logging
+configure_request_logging()
+
 from services.sentry import init_sentry
 init_sentry()
 
@@ -296,6 +299,9 @@ app.add_middleware(
 )
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIdMiddleware)
+from middleware.http_metrics import HttpMetricsMiddleware
+app.add_middleware(HttpMetricsMiddleware)
 
 # Hosted MCP endpoint bypass for CORS gating. CORSMiddleware above
 # enforces app-wide CORS, but the MCP endpoint accepts ANY origin
