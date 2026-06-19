@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Edit2, Check, RefreshCw, GitMerge, X, User } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
@@ -95,6 +96,42 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
   // labeling of someone ELSE can't pollute the user's voiceprint.
   const [isMe, setIsMe] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Fixed-position coords for the portaled popover, computed from the
+  // trigger button's viewport rect and clamped to stay fully on-screen
+  // (so the 288px popover is usable on narrow phones).
+  const [pos, setPos] = useState<{ top: number; left: number; width: number }>({
+    top: 0,
+    left: 0,
+    width: 288,
+  });
+
+  // Compute the popover's fixed coordinates from the trigger's rect,
+  // clamping to the viewport (~8px margin) and flipping above the trigger
+  // when it would overflow the bottom edge.
+  const updatePosition = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(288, window.innerWidth - 16);
+    // Horizontal: align to the trigger's left, clamp into the viewport.
+    let left = rect.left;
+    if (left + width + margin > window.innerWidth) {
+      left = window.innerWidth - width - margin;
+    }
+    if (left < margin) left = margin;
+    // Vertical: prefer just below the trigger; if the popover would run
+    // off the bottom, flip it above. Measure the rendered popover height
+    // when available, else fall back to a sensible estimate.
+    const popoverHeight = popoverRef.current?.offsetHeight ?? 320;
+    let top = rect.bottom + 4;
+    if (top + popoverHeight + margin > window.innerHeight) {
+      const above = rect.top - 4 - popoverHeight;
+      top = above >= margin ? above : Math.max(margin, window.innerHeight - popoverHeight - margin);
+    }
+    setPos({ top, left, width });
+  };
 
   const orgHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = {};
@@ -110,25 +147,44 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
   );
   const otherLinks = links.filter((l) => l.id !== ownLink?.id);
 
-  // Close on outside click + Escape.
+  // Close on outside pointerdown (mouse + touch) + Escape. Ignore
+  // pointerdowns inside the popover (popoverRef) and inside the trigger
+  // button (triggerRef) so tapping the trigger toggles instead of
+  // double-firing a close.
   useEffect(() => {
     if (!open) return;
-    const onClick = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setMode('menu');
-      }
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (popoverRef.current?.contains(target)) return;
+      if (triggerRef.current?.contains(target)) return;
+      setOpen(false);
+      setMode('menu');
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { setOpen(false); setMode('menu'); }
     };
-    document.addEventListener('mousedown', onClick);
+    document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
+
+  // Recompute the popover position when it opens and keep it anchored to
+  // the trigger while open as the page scrolls or the viewport resizes.
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+    const onMove = () => updatePosition();
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode]);
 
   const handleEnroll = async () => {
     if (!ownLink) {
@@ -296,6 +352,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
   return (
     <span className="relative inline-flex items-center">
       <button
+        ref={triggerRef}
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); setMode('menu'); setError(null); setIsMe(false); }}
         className="inline-flex items-center gap-1 text-sm font-medium text-purple-600 hover:text-purple-800 hover:underline group"
         title="Click to rename, edit contact, or merge this speaker"
@@ -304,11 +361,12 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         <Edit2 className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
       </button>
 
-      {open && (
+      {open && createPortal(
         <div
           ref={popoverRef}
           onClick={(e) => e.stopPropagation()}
-          className="absolute left-0 top-full mt-1 z-30 w-72 rounded-lg border border-gray-200 bg-white shadow-xl text-gray-800"
+          style={{ position: 'fixed', top: pos.top, left: pos.left, width: pos.width }}
+          className="z-[100] rounded-lg border border-gray-200 bg-white shadow-xl text-gray-800"
         >
           <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
             <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Speaker</span>
@@ -544,7 +602,8 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
               </div>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </span>
   );

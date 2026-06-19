@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [3.38.4] - 2026-06-18
+
+### Fixed
+- **Speaker assignment now works on mobile.** The inline assign / rename / merge popover was `absolute`-positioned inside the scrolling transcript (so it rendered off-screen / clipped on phones) and only closed on `mousedown` (ignoring touch). It now renders through a portal with viewport-clamped `fixed` positioning — flipping above the label if it would overflow the bottom — and closes on `pointerdown`, so it's usable on touch devices.
+- **Renaming/identifying a speaker now refreshes the summary.** Three per-session speaker operations — `identify-speakers`, speaker-link merge, and re-diarize — updated the transcript's speaker names but left the meeting summary referencing stale labels (e.g. "Speaker 1" after a participant was named after the summary was generated). They now enqueue the existing best-effort, async summary-refresh job so the summary regenerates from the freshly-named transcript. (The transcript itself was already correctly named; this closes the gap for the summary.)
+
 ## [3.38.3] - 2026-06-18
 
 ### Changed

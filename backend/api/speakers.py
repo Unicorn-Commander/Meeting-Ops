@@ -1503,6 +1503,11 @@ async def _run_rediarize_task(
         flag_modified(session, "processing_metadata")
         db.commit()
         logger.info("rediarize_task done for session %s: %d unique speakers", session.id, unique)
+        # Re-diarization rewrote the whole transcript (new clusters + re-matched
+        # names), so the existing summary references stale labels. Regenerate it
+        # from the fresh, named transcript. Best-effort — the helper never
+        # raises, and a regen failure must not fail the rediarize.
+        await _enqueue_summary_refresh(session, db)
     except Exception as exc:  # noqa: BLE001
         logger.exception("rediarize_task failed for session %s", session_pk)
         try:
@@ -2047,6 +2052,9 @@ async def merge_speaker_links(
         "Merged speaker link %s into %s for session %s (%d segments + %d rows updated)",
         source.raw_label, target.raw_label, session.id, len(diarized.get("segments", []) or []), len(rows),
     )
+    # The merge rewrote this session's transcript labels — regenerate the
+    # summary so it stops referencing the merged-away cluster. Best-effort.
+    await _enqueue_summary_refresh(session, db)
     return [_link_to_response(db, link) for link in remaining]
 
 
@@ -2063,4 +2071,11 @@ async def identify_speakers_endpoint(
     gate_feature_for_caller(current_user, "speaker_library")
     session = _get_session_or_404(db, active_org.organization.id, session_id)
     summary = identify_speakers(session, db)
+    # identify_speakers rewrote transcript_diarized speaker names for any
+    # newly-matched clusters; regenerate the summary so it picks up the new
+    # names instead of the stale "Speaker N". Only when something linked —
+    # the summary-input hash would no-op an unchanged transcript anyway, but
+    # this avoids enqueuing a job that can't change anything. Best-effort.
+    if summary.get("linked"):
+        await _enqueue_summary_refresh(session, db)
     return IdentifyResponse(**summary)
