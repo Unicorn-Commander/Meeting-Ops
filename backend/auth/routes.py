@@ -21,7 +21,7 @@ from auth.invite_codes import (
     consume_invite_code,
     validate_invite_code,
 )
-from auth.tier import get_tier_features, get_user_tier
+from auth.tier import get_org_tier_features, get_tier_features, get_user_tier
 from auth.utils import (
     generate_email_verification_token,
     get_password_hash,
@@ -81,6 +81,12 @@ class UserResponse(BaseModel):
     # without a follow-up round trip. See backend/auth/tier.py.
     tier: str = "free"
     tier_features: dict[str, Any] = {}
+    # billing-1: the ACTIVE workspace's feature dict (from its plan). The
+    # frontend renders the EFFECTIVE capability = AND(tier_features,
+    # active_org_features) so a paid user in an unpaid workspace sees gated UI
+    # instead of an enabled control the backend then 403s. Empty when there's
+    # no active org (no restriction). Mirrors auth.tier.get_org_tier_features.
+    active_org_features: dict[str, Any] = {}
     # Stripe billing surface — populated so the frontend can render the
     # "Founding 100" badge + the right Pricing-page CTA on the very first
     # render after login. `founding_cohort` is the cohort label (e.g.
@@ -121,6 +127,12 @@ class OrganizationMembershipResponse(BaseModel):
     slug: str
     role: str
     is_active: bool
+    # billing-1: the workspace's plan (free/pro/enterprise). The backend gate is
+    # authoritative per active workspace, so the frontend needs this to render
+    # the EFFECTIVE capability = min(user tier, active-org plan) instead of
+    # showing enabled UI that the backend then 403s. Already loaded on the ORM
+    # row — no extra query.
+    plan: str = "free"
 
 
 class SetDefaultOrganizationRequest(BaseModel):
@@ -140,6 +152,7 @@ def _serialize_memberships(user: User) -> list[dict]:
                 slug=organization.slug,
                 role=membership.role,
                 is_active=organization.is_active,
+                plan=(organization.plan or "free"),
             ).model_dump()
         )
 
@@ -173,6 +186,7 @@ def _build_user_response(
                 "slug": active_org.slug,
                 "role": active_role or ("superuser" if user.is_superuser else "viewer"),
                 "is_active": active_org.is_active,
+                "plan": (active_org.plan or "free"),
             }
 
     return UserResponse(
@@ -189,6 +203,7 @@ def _build_user_response(
         active_organization=active_organization,
         tier=get_user_tier(user),
         tier_features=get_tier_features(user),
+        active_org_features=(get_org_tier_features(active_org) if active_org else {}),
         is_founding_member=bool(getattr(user, "is_founding_member", False)),
         founding_cohort=getattr(user, "founding_cohort", None),
         has_stripe_customer=bool(getattr(user, "stripe_customer_id", None)),

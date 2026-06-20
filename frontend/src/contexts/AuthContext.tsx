@@ -157,6 +157,11 @@ export interface User {
   default_organization_id?: number | null;
   tier?: Tier;
   tier_features?: TierFeatures;
+  // billing-1: the ACTIVE workspace's capability dict (from its plan). The
+  // backend gates server-compute per active workspace, so the effective UI
+  // capability is AND(tier_features, active_org_features). Empty/absent => no
+  // workspace restriction (e.g. before /api/auth/me lands).
+  active_org_features?: TierFeatures;
 }
 
 interface AuthContextType {

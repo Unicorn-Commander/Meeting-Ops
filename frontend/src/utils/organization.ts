@@ -4,6 +4,9 @@ export interface OrganizationMembership {
   slug: string;
   role: string;
   is_active: boolean;
+  // billing-1: the workspace's plan (free/pro/enterprise). Lets the UI show a
+  // workspace-upgrade prompt naming the org when it's the limiting factor.
+  plan?: string;
 }
 
 export const ORG_STORAGE_KEY = 'meetingops.activeOrg';
