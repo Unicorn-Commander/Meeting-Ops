@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [3.40.3] - 2026-06-19
+
+### Fixed
+- **`infinity` (embeddings) readiness probe authenticates against the gateway.**
+  Same class as the v3.40.2 llm-probe fix: the probe did an unauthenticated
+  `GET {base}/health`, which the LiteLLM gateway 401s (and hangs when authed),
+  so prod read `infinity: down` even though embeddings/rerank work (verified
+  `/v1/embeddings` → 200 with the key). It now tries an authenticated
+  `GET {endpoint}/models` first (`INFINITY_API_KEY` / `LITELLM_API_KEY` /
+  `OPENAI_API_KEY`), falling back to the unauthenticated `/health` a direct
+  Infinity server exposes (behaviour-neutral on bigboy). Prod `/health/ready` is
+  now fully green across all eight dependencies.
+
 ## [3.40.2] - 2026-06-19
 
 ### Fixed

@@ -81,6 +81,26 @@ async def _probe_infinity() -> dict[str, Any]:
         or os.getenv("INFINITY_ENDPOINT")
         or "http://unicorn-infinity-proxy:8086/v1"
     ).rstrip("/")
+    # When embeddings route through the LiteLLM gateway (prod), the gateway's
+    # /health 401s unauthenticated (and hangs when authed), but an authenticated
+    # /models returns 200. Try that first; fall back to the unauthenticated
+    # /health that a direct Infinity server exposes (bigboy).
+    api_key = (
+        os.getenv("INFINITY_API_KEY")
+        or os.getenv("LITELLM_API_KEY")
+        or os.getenv("OPENAI_API_KEY", "")
+    )
+    if api_key:
+        models_url = f"{endpoint}/models"
+        try:
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(
+                    models_url, headers={"Authorization": f"Bearer {api_key}"}
+                )
+                if resp.status_code == 200:
+                    return {"ok": True, "url": models_url}
+        except Exception:  # noqa: BLE001 - fall back to /health below
+            pass
     base = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
     return await _http_health(f"{base}/health")
 
