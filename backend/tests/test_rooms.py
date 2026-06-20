@@ -77,8 +77,8 @@ def room_world(client):
     db = SessionLocal()
     suffix = uuid.uuid4().hex[:6]
     try:
-        org_a = Organization(name=f"Alpha {suffix}", slug=f"alpha-{suffix}", is_active=True)
-        org_b = Organization(name=f"Bravo {suffix}", slug=f"bravo-{suffix}", is_active=True)
+        org_a = Organization(name=f"Alpha {suffix}", slug=f"alpha-{suffix}", is_active=True, plan="pro")
+        org_b = Organization(name=f"Bravo {suffix}", slug=f"bravo-{suffix}", is_active=True, plan="pro")
         db.add_all([org_a, org_b])
         db.commit()
         db.refresh(org_a)
@@ -97,6 +97,13 @@ def room_world(client):
             UserOrganization(user_id=outsider_a.id, organization_id=org_a.id, role="user"),
             UserOrganization(user_id=admin_b.id, organization_id=org_b.id, role="admin"),
         ])
+        db.commit()
+
+        # Room recording is the canonical_reprocess (Pro) gate — both the user
+        # tier AND the active-org plan must cover it (billing-1). The users that
+        # start/grant recordings are on Pro in this paid workspace.
+        admin_a.tier = "pro"
+        member_a.tier = "pro"
         db.commit()
 
         ctx = {

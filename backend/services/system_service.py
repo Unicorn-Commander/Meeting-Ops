@@ -5,7 +5,14 @@ import json
 import subprocess
 import re
 import socket
-import netifaces
+try:
+    # Optional: only used by get_network_info(). netifaces is a C-extension that
+    # can fail to build/install on newer Pythons; guard the import so its absence
+    # can't drop this whole module — and with it any router that imports
+    # SystemService (e.g. the auth-bearing websocket_auto_summary router).
+    import netifaces
+except Exception:  # pragma: no cover - environment-dependent
+    netifaces = None
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
@@ -229,7 +236,16 @@ class SystemService:
         try:
             # Get hostname
             hostname = socket.gethostname()
-            
+
+            if netifaces is None:
+                # netifaces unavailable — return hostname + safe defaults instead
+                # of erroring (network introspection is non-critical telemetry).
+                return NetworkInfo(
+                    hostname=hostname, ipAddress="0.0.0.0", gateway="0.0.0.0",
+                    interface="unknown", dns1="8.8.8.8", dns2="8.8.4.4",
+                    ipMode="dhcp", vlan=None,
+                )
+
             # Get primary network interface
             gws = netifaces.gateways()
             default_interface = gws['default'].get(netifaces.AF_INET, [None, None])[1]

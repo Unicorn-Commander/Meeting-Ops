@@ -132,8 +132,8 @@ def slice_world(client):
     db = SessionLocal()
     suffix = uuid.uuid4().hex[:6]
     try:
-        org_a = Organization(name=f"Alpha {suffix}", slug=f"alpha-{suffix}", is_active=True)
-        org_b = Organization(name=f"Bravo {suffix}", slug=f"bravo-{suffix}", is_active=True)
+        org_a = Organization(name=f"Alpha {suffix}", slug=f"alpha-{suffix}", is_active=True, plan="pro")
+        org_b = Organization(name=f"Bravo {suffix}", slug=f"bravo-{suffix}", is_active=True, plan="pro")
         db.add_all([org_a, org_b])
         db.commit()
         db.refresh(org_a)
@@ -145,6 +145,12 @@ def slice_world(client):
             UserOrganization(user_id=user_a.id, organization_id=org_a.id, role="admin"),
             UserOrganization(user_id=user_b.id, organization_id=org_b.id, role="admin"),
         ])
+        db.commit()
+
+        # Summary-slice POST is the qwen36_summary (Pro) gate — both the user
+        # tier AND the active-org plan must cover it (billing-1).
+        user_a.tier = "pro"
+        user_b.tier = "pro"
         db.commit()
 
         room_a = _seed_room(db, org_a.id, name=f"Room {suffix}")

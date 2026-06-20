@@ -97,7 +97,10 @@ def sat_world(client):
     db = SessionLocal()
     suffix = uuid.uuid4().hex[:6]
     try:
-        org = Organization(name=f"SatAuth {suffix}", slug=f"satauth-{suffix}", is_active=True)
+        # Satellite capture is a paid-tier (Pro/Enterprise) capability gated on
+        # the ORG plan (_gate_satellite_for_org → get_org_tier), so the device
+        # path 200s. Without a paid plan the device-auth assert 403s.
+        org = Organization(name=f"SatAuth {suffix}", slug=f"satauth-{suffix}", is_active=True, plan="enterprise")
         db.add(org)
         db.commit()
         db.refresh(org)
