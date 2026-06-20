@@ -487,6 +487,60 @@ def test_unmatched_voice_auto_creates_persistent_profile(client, fake_provider):
         db.close()
 
 
+def test_hydrate_renders_live_speaker_name(client):
+    """v3.44 dynamic rendering: hydrate_diarized_speaker_names resolves the speaker
+    NAME live from the current profile via the session link, so a renamed profile
+    shows instantly even when the stored segment.speaker is the OLD (stale) name —
+    no transcript rewrite needed at serve time."""
+    import uuid as _uuid
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from database.models import RecordingSession, SpeakerProfile, SpeakerSessionLink
+    from services.speaker_service import hydrate_diarized_speaker_names
+
+    db = SessionLocal()
+    try:
+        org = Organization(name="hy-org", slug=f"hy-{_uuid.uuid4().hex[:8]}", is_active=True)
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+        sp = SpeakerProfile(organization_id=org.id, display_name="Vince Palmer", sample_count=1)
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        sess = RecordingSession(
+            session_id=f"hy-{_uuid.uuid4().hex[:12]}",
+            name="Hydrate Test",
+            organization_id=org.id,
+            status="completed",
+            # Stored segment carries the OLD/stale baked name on purpose.
+            transcript_diarized={
+                "segments": [
+                    {"start": 0.0, "end": 5.0, "speaker": "Speaker 9Z9Z",
+                     "raw_label": "SPEAKER_00", "text": "hi"},
+                ],
+                "speakers": ["Speaker 9Z9Z"],
+            },
+        )
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        db.add(SpeakerSessionLink(
+            session_id=sess.id, organization_id=org.id,
+            raw_label="SPEAKER_00", speaker_id=sp.id, confirmed=True,
+        ))
+        db.commit()
+
+        hydrated = hydrate_diarized_speaker_names(sess.transcript_diarized, db, sess.id)
+        # Live-resolved to the CURRENT profile name, not the stale stored one.
+        assert hydrated["segments"][0]["speaker"] == "Vince Palmer"
+        assert hydrated["speakers"] == ["Vince Palmer"]
+        # The stored ORM value is untouched (read-only hydration).
+        assert sess.transcript_diarized["segments"][0]["speaker"] == "Speaker 9Z9Z"
+    finally:
+        db.close()
+
+
 def test_rename_propagates_to_history(client):
     """v3.43 (A): naming an auto-created profile re-labels its PAST meetings —
     both the diarized transcript and the summary text."""

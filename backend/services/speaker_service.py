@@ -104,6 +104,71 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom)
 
 
+def hydrate_diarized_speaker_names(diarized, db: Session, session_id: int):
+    """Return a COPY of a diarized doc with each segment's speaker NAME resolved
+    LIVE from the current SpeakerProfile via the session's links (raw_label ->
+    speaker_id -> display_name). v3.44: this is what lets a rename show instantly
+    everywhere without rewriting the stored transcript — the profile-id lives in
+    the SpeakerSessionLink, so we render the name at serve time instead of baking
+    it. Read-only: no commit, no ORM mutation. Segments with no resolvable link
+    keep their stored name (backward-compatible). Cheap: 2 indexed queries +
+    in-memory map; safe to call on every serve."""
+    if not isinstance(diarized, dict):
+        return diarized
+    segs = diarized.get("segments")
+    if not segs:
+        return diarized
+    try:
+        links = (
+            db.query(SpeakerSessionLink)
+            .filter(
+                SpeakerSessionLink.session_id == session_id,
+                SpeakerSessionLink.speaker_id.isnot(None),
+            )
+            .all()
+        )
+        if not links:
+            return diarized
+        spk_ids = {l.speaker_id for l in links}
+        names = {
+            sp.id: sp.display_name
+            for sp in db.query(SpeakerProfile).filter(SpeakerProfile.id.in_(spk_ids)).all()
+        }
+        label_to_name: dict[str, str] = {}
+        for l in links:
+            nm = names.get(l.speaker_id)
+            if nm:
+                label_to_name[(l.raw_label or "").strip()] = nm
+        if not label_to_name:
+            return diarized
+        dirty = False
+        new_segs = []
+        for seg in segs:
+            key = ((seg.get("raw_label") or seg.get("speaker")) or "").strip()
+            nm = label_to_name.get(key)
+            if nm and seg.get("speaker") != nm:
+                new_segs.append({**seg, "speaker": nm})
+                dirty = True
+            else:
+                new_segs.append(seg)
+        if not dirty:
+            return diarized
+        out = dict(diarized)
+        out["segments"] = new_segs
+        if "speakers" in out:
+            seen, ordered = set(), []
+            for seg in new_segs:
+                s = seg.get("speaker")
+                if s and s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            out["speakers"] = ordered
+        return out
+    except Exception:  # noqa: BLE001 - serving must never fail on hydration
+        logger.exception("hydrate_diarized_speaker_names failed session=%s", session_id)
+        return diarized
+
+
 # ---------- DB helpers ----------
 
 

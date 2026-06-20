@@ -26,7 +26,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -741,6 +741,7 @@ async def get_speaker(
 async def update_speaker(
     speaker_id: int,
     payload: SpeakerUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
@@ -787,10 +788,14 @@ async def update_speaker(
     # in (transcript labels + summary text), so naming a once-anonymous voice
     # retroactively corrects history. Cheap + best-effort — never fails the rename.
     if renamed:
-        try:
-            apply_rename_to_history(db, speaker, old_display_name)
-        except Exception:  # noqa: BLE001
-            logger.exception("apply_rename_to_history failed for speaker=%s", speaker.id)
+        # Propagate the rename to past meetings OFF the request path so the rename
+        # returns instantly even for a speaker in many meetings. The session-detail
+        # view renders names live (hydrate_diarized_speaker_names) so the UI is
+        # correct immediately; this background pass updates the stored transcripts
+        # + summaries for exports/chat/index.
+        background_tasks.add_task(
+            _propagate_rename_bg, speaker.id, active_org.organization.id, old_display_name
+        )
     return _to_response(speaker)
 
 
@@ -1843,6 +1848,31 @@ def apply_rename_to_history(db: Session, speaker: SpeakerProfile, old_name: str)
     logger.info("apply_rename_to_history: speaker=%s %r->%r relabeled %d past meeting(s)",
                 speaker.id, old_name, new_name, affected)
     return affected
+
+
+def _propagate_rename_bg(speaker_id: int, org_id: int, old_name: str) -> None:
+    """Background task: re-label a renamed speaker's past meetings OFF the request
+    path so the rename returns instantly even for a speaker in many meetings. The
+    session-detail view renders names live (hydrate_diarized_speaker_names), so the
+    UI is correct immediately; this catches up the stored transcripts + summaries
+    for exports/chat/index. Opens its own DB session (request session is closed)."""
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        sp = (
+            db.query(SpeakerProfile)
+            .filter(
+                SpeakerProfile.id == speaker_id,
+                SpeakerProfile.organization_id == org_id,
+            )
+            .first()
+        )
+        if sp is not None:
+            apply_rename_to_history(db, sp, old_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("background rename propagation failed speaker=%s", speaker_id)
+    finally:
+        db.close()
 
 
 @router.post(

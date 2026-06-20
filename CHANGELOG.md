@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.44.0] - 2026-06-20
+
+### Changed
+- **Live speaker-name rendering + instant renames (scale refinement).** The
+  session-detail transcript now resolves each speaker's NAME live from the current
+  SpeakerProfile via the session links (`hydrate_diarized_speaker_names`) at serve
+  time, rather than relying solely on the name baked into each segment — so a
+  rename shows in the transcript view immediately. The rename's history
+  propagation (re-labeling past meetings' stored transcripts + summaries) now runs
+  **off the request path** as a background task, so renaming a speaker that appears
+  in many meetings returns instantly instead of blocking on N transcript rewrites.
+  Read-only hydration (no ORM mutation), backward-compatible (segments without a
+  resolvable link keep their stored name). Fully dynamic rendering across exports /
+  RAG-index / satellite is mapped as a follow-on; those catch up via the
+  background pass (or manual reindex).
+
 ## [3.43.0] - 2026-06-20
 
 Persistent speaker identity — give every voice a stable identity and let naming
