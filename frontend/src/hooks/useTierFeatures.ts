@@ -72,10 +72,15 @@ export function useTierFeatures(): UseTierFeaturesReturn {
       !(key in (orgFeatures as object)) ||
       Boolean(orgFeatures?.[key]);
 
-    const effective = {} as TierFeatures;
+    // Start from the user's features (this preserves non-boolean keys like the
+    // numeric quotas max_sessions_per_month / max_session_minutes) and AND only
+    // the BOOLEAN capability flags with the active workspace's plan.
+    const effective: TierFeatures = { ...userFeatures };
     (Object.keys(userFeatures) as (keyof TierFeatures)[]).forEach((key) => {
-      (effective as Record<string, unknown>)[key] =
-        Boolean(userFeatures[key]) && orgCovers(key);
+      if (typeof userFeatures[key] === 'boolean') {
+        (effective as unknown as Record<string, unknown>)[key] =
+          Boolean(userFeatures[key]) && orgCovers(key);
+      }
     });
 
     const limitedBy = (key: keyof TierFeatures): FeatureLimit => {
