@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+## [3.42.0] - 2026-06-20
+
+Speaker-identification quality: stop fingerprint poisoning + bring browser
+recordings to upload-grade speaker ID.
+
+### Added
+- **Browser↔upload pipeline parity.** When an always-on (browser) recording is
+  stopped and its audio is available server-side, `/finalize` now routes through
+  the SAME full completion pass as an uploaded file — canonical Parakeet 1.1B STT
+  + pyannote diarization + speaker **identification** — instead of the light
+  summary-only finalize that left browser recordings with generic "Speaker 1/2".
+  Privacy-mode / text-only / diarization-off sessions keep the light path so
+  nothing extra leaves the device. Idempotent with the explicit `/finalize-audio`.
+
+### Fixed
+- **Speaker fingerprint poisoning.** `add_voice_sample` now enforces a consistency
+  floor (`SPEAKER_ENROLL_CONSISTENCY_FLOOR`, default = the identify threshold):
+  once a profile has an enrolled centroid, a sample whose cosine to it is below
+  the floor — i.e. a mislabeled or mixed diarization cluster (two voices pooled) —
+  is **no longer averaged into the voiceprint**. That averaging was drifting
+  centroids toward the wrong voice and compounding mis-IDs across sessions
+  (observed live: a 0.487-similarity "Jordan" sample, a 0.514 "Vinny"). Enrollment
+  is also **idempotent per source session** (re-confirming a speaker no longer
+  double-weights that cluster). The first sample still bootstraps the identity.
+  Ports the guard the account-level "My Voice" path already had to org profiles.
+
 ## [3.41.2] - 2026-06-20
 
 ### Fixed

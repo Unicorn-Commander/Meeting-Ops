@@ -984,6 +984,51 @@ async def finalize_always_on_session(
     db.commit()
     db.refresh(session)
 
+    # v3.42 browser<->upload PARITY: when the full recording audio is available
+    # server-side, run the SAME full completion pass as an uploaded file
+    # (canonical Parakeet 1.1B STT + pyannote diarization + speaker
+    # IDENTIFICATION), not just the light finalize (summary over the on-device
+    # live segments). This is what gives browser recordings upload-grade
+    # transcripts + NAMED speakers instead of generic "Speaker 1/2". Privacy /
+    # text-only sessions (no server audio) and diarization-off orgs keep the
+    # light path so nothing extra leaves the device. The reprocess enqueue is
+    # idempotent (the in_progress guard) so a later /finalize-audio is a no-op.
+    canonical_id = session.session_id or str(session.id)
+    try:
+        chunks_dir = _audio_chunks_dir(active_org.organization.slug, canonical_id)
+        has_server_audio = bool(_list_chunk_files(chunks_dir)) or bool(session.audio_file)
+    except Exception:  # noqa: BLE001
+        has_server_audio = bool(session.audio_file)
+    if has_server_audio and not _org_diarization_off(db, session.organization_id):
+        metadata = dict(session.processing_metadata or {})
+        metadata["reprocess_status"] = "queued"
+        fa = dict(metadata.get("full_audio") or {})
+        fa.update({"status": "queued", "queued_at": _now().isoformat(), "trigger": "finalize_stop"})
+        metadata["full_audio"] = fa
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+        db.commit()
+        try:
+            from workers.reprocess_workers import enqueue_reprocess
+            await enqueue_reprocess(session.id, background_tasks=background_tasks)
+            logger.info(
+                "finalize_always_on_session: routed STOP through the FULL reprocess "
+                "(STT+diarize+identify) for upload parity session=%s", session_id,
+            )
+            response.status_code = 202
+            payload = _session_payload(session)
+            payload["reprocessing_started"] = True
+            payload["status_url"] = f"/api/simple/recording-sessions/{canonical_id}"
+            return payload
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "finalize_always_on_session: full-reprocess enqueue failed session=%s: "
+                "%s — falling back to the light finalize", session_id, exc,
+            )
+            # fall through to finalize_session_job below
+
+    # Light path (privacy / text-only / diarization-off, or reprocess enqueue
+    # failed): summary + insights over the existing on-device segments.
     # Enqueue the long-running work. Falls back to the legacy in-band
     # path if arq is unavailable (test env, ARQ_ENABLED=false) so the
     # endpoint stays functional in dev without Redis.

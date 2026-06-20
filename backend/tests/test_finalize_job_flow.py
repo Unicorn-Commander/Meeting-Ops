@@ -127,6 +127,46 @@ def test_finalize_returns_202_with_job_id(client):
     assert body.get("status_url") == "/api/jobs/arq-finalize-1"
 
 
+def test_finalize_with_audio_routes_to_full_reprocess(client):
+    """v3.42 browser<->upload parity: when the always-on session has server-side
+    audio, /finalize routes through the FULL reprocess (STT+diarize+identify),
+    not the light finalize — so browser recordings get upload-grade transcripts
+    + named speakers. Sessions without audio (privacy/text-only) keep the light
+    path (covered by test_finalize_returns_202_with_job_id)."""
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    org_id, org_slug, user_id = _seed_pro_user_and_org("v342-parity", "v342_parity_user")
+    headers = _login(client, "v342_parity_user", org_slug)
+    session_pk, session_id = _seed_always_on_session(org_id, user_id)
+
+    # Give the session server-side audio so the parity path triggers.
+    db = SessionLocal()
+    try:
+        s = db.query(RecordingSession).filter(RecordingSession.id == session_pk).first()
+        s.audio_file = "/tmp/fake_full_audio.wav"
+        db.commit()
+    finally:
+        db.close()
+
+    mock_reprocess = AsyncMock()
+    with patch("workers.reprocess_workers.enqueue_reprocess", mock_reprocess):
+        resp = client.post(
+            f"/api/recordings/sessions/{session_id}/finalize", headers=headers,
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json().get("reprocessing_started") is True
+    mock_reprocess.assert_awaited_once()
+
+    db = SessionLocal()
+    try:
+        s = db.query(RecordingSession).filter(RecordingSession.id == session_pk).first()
+        assert (s.processing_metadata or {}).get("reprocess_status") == "queued"
+    finally:
+        db.close()
+
+
 def test_finalize_stamps_processing_job_id_on_session(client):
     """After enqueue, the session row carries the arq job_id so the
     worker can drift-check it later."""

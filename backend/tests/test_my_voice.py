@@ -618,6 +618,59 @@ def test_enroll_consistency_floor_rejects_mismatched_voice(client):
     assert resp.json()["sample_count"] == 1
 
 
+def test_org_enroll_floor_and_idempotency(client):
+    """ORG SpeakerProfile add_voice_sample: bootstraps on the first sample,
+    accepts a consistent refinement, REJECTS an inconsistent (mixed/wrong-
+    cluster) sample instead of poisoning the centroid, and is idempotent per
+    source_session so a re-confirm doesn't double-weight one cluster."""
+    import numpy as np
+    from database.database import SessionLocal
+    from database.models import SpeakerProfile
+    from services.speaker_service import add_voice_sample, cosine_similarity
+
+    org, _user = _seed_user_org(slug="org-enroll-floor", username="org_enroll_floor_user")
+    db = SessionLocal()
+    try:
+        sp = SpeakerProfile(organization_id=org.id, display_name="Org Floor Test")
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+
+        base = _make_embedding(seed=71)
+        # First sample bootstraps the identity unconditionally.
+        s1 = add_voice_sample(db, sp, base, source="session",
+                              embedding_model="m", source_session_id=1001)
+        assert s1 is not None and sp.sample_count == 1
+
+        # Consistent refinement (base + small noise -> high cosine) is accepted.
+        arr = np.asarray(base, dtype="float32")
+        noise = np.asarray(_make_embedding(seed=72), dtype="float32") * 0.05
+        consistent = (arr + noise)
+        consistent = (consistent / np.linalg.norm(consistent)).tolist()
+        assert cosine_similarity(consistent, base) > 0.9
+        s2 = add_voice_sample(db, sp, consistent, source="assign_confirm",
+                              embedding_model="m", source_session_id=1002)
+        assert s2 is not None and sp.sample_count == 2
+
+        # Inconsistent (independent ~orthogonal vector = someone else's voice)
+        # is REJECTED -> None, centroid/count untouched (no poisoning).
+        other = _make_embedding(seed=99)
+        s3 = add_voice_sample(db, sp, other, source="assign_confirm",
+                              embedding_model="m", source_session_id=1003)
+        assert s3 is None
+        assert sp.sample_count == 2
+
+        # Idempotent: re-confirming the SAME session returns the existing sample
+        # and does not add another (no double-weight in the running mean).
+        s4 = add_voice_sample(db, sp, consistent, source="assign_confirm",
+                              embedding_model="m", source_session_id=1002)
+        assert s4 is not None and s4.id == s2.id
+        assert sp.sample_count == 2
+    finally:
+        db.rollback()
+        db.close()
+
+
 # ---------- (h) email match alone must NOT fold (no implicit biometric consent) ----------
 
 

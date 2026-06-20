@@ -1163,17 +1163,24 @@ async def update_speaker_link(
                 _segments_for_label(session, link.raw_label)
             )
             if emb and (speaker.embedding_dim in (None, len(emb))):
-                add_voice_sample(
+                _vs = add_voice_sample(
                     db, speaker, emb,
                     source="assign_confirm",
                     embedding_model=speaker.embedding_model
                     or "pyannote/wespeaker-voxceleb-resnet34-LM",
                     source_session_id=session.id,
                 )
-                logger.info(
-                    "assign_confirm: harvested voice sample speaker=%s session=%s "
-                    "(samples now %s)", speaker.id, session.id, speaker.sample_count,
-                )
+                if _vs is not None:
+                    logger.info(
+                        "assign_confirm: harvested voice sample speaker=%s session=%s "
+                        "(samples now %s)", speaker.id, session.id, speaker.sample_count,
+                    )
+                else:
+                    logger.info(
+                        "assign_confirm: voice sample NOT folded (inconsistent/mixed "
+                        "cluster) speaker=%s session=%s — link still confirmed, "
+                        "voiceprint protected", speaker.id, session.id,
+                    )
             # v3.36.0 "My Voice": the same pooled embedding also feeds the
             # caller's portable account voiceprint when this speaker is them.
             fold_status = _maybe_fold_my_voice(

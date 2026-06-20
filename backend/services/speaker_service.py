@@ -36,6 +36,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL = os.getenv("SPEAKER_EMBEDDING_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM")
 DEFAULT_IDENTIFY_THRESHOLD = float(os.getenv("SPEAKER_IDENTIFY_THRESHOLD", "0.55"))
+# Poisoning guard for ORG SpeakerProfile enrollment (v3.42): once a profile has
+# an enrolled centroid, only fold in a sample that is cosine-consistent with it.
+# A mislabeled/mixed diarization cluster (e.g. two voices pooled) sits below this
+# floor; folding it in drifts the centroid toward the wrong voice and compounds
+# mis-IDs. Defaults to the identify threshold — a sample that wouldn't even MATCH
+# the profile should not TRAIN it. (Distinct from the lenient account-level
+# MY_VOICE_FOLD_CONSISTENCY_FLOOR, which is an is_me-gated single identity.)
+SPEAKER_ENROLL_CONSISTENCY_FLOOR = float(
+    os.getenv("SPEAKER_ENROLL_CONSISTENCY_FLOOR", str(DEFAULT_IDENTIFY_THRESHOLD))
+)
 STORE_SPEAKER_AUDIO = os.getenv("STORE_SPEAKER_AUDIO", "false").lower() in ("1", "true", "yes")
 SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD = float(os.getenv("SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD", "0.80"))
 
@@ -451,10 +461,70 @@ def add_voice_sample(
     duration_seconds: Optional[float] = None,
     source_session_id: Optional[int] = None,
     source_segment_idx: Optional[int] = None,
-) -> SpeakerVoiceSample:
-    """Persist a sample, refresh the centroid, and bump sample_count."""
+) -> Optional[SpeakerVoiceSample]:
+    """Persist a sample, refresh the centroid, and bump sample_count.
+
+    Returns the SpeakerVoiceSample, or skips and returns:
+      * the EXISTING sample — idempotency: a sample from the same
+        ``source_session_id`` already exists, so re-confirming a session does
+        not double-weight that cluster in the running mean.
+      * ``None`` — consistency floor: once the profile has an enrolled centroid
+        (sample_count >= 1), a sample whose cosine to the centroid is below
+        SPEAKER_ENROLL_CONSISTENCY_FLOOR is NOT folded in. A mislabeled/mixed
+        diarization cluster (two voices pooled, or a wrong confirm) sits below
+        the floor; averaging it in is exactly what drifts a centroid toward the
+        wrong voice and compounds mis-IDs. The FIRST sample (sample_count 0)
+        always bootstraps the identity. Mirrors fold_embedding_into_user_voice.
+
+    Callers may ignore the return: the per-session speaker LINK/label is set by
+    the caller regardless, so a session is still named correctly even when its
+    cluster is too mixed to safely train the fingerprint.
+    """
     if not embedding:
         raise ValueError("empty embedding")
+
+    # Idempotency — at most one sample per (speaker, source_session).
+    if source_session_id is not None:
+        existing = (
+            db.query(SpeakerVoiceSample)
+            .filter(
+                SpeakerVoiceSample.speaker_id == speaker.id,
+                SpeakerVoiceSample.source_session_id == source_session_id,
+            )
+            .first()
+        )
+        if existing is not None:
+            logger.info(
+                "add_voice_sample: idempotent skip — speaker=%s already has a sample "
+                "from session=%s (no double-weight)", speaker.id, source_session_id,
+            )
+            return existing
+
+    old_centroid = (
+        decode_embedding(speaker.centroid_embedding, speaker.embedding_dim)
+        if speaker.centroid_embedding else None
+    )
+    old_count = speaker.sample_count or 0
+
+    # Consistency floor — refine an established centroid only with a consistent
+    # sample; the first sample bootstraps the identity unconditionally.
+    if old_centroid is not None and old_count >= 1:
+        if speaker.embedding_dim not in (None, len(embedding)) or len(old_centroid) != len(embedding):
+            logger.warning(
+                "add_voice_sample SKIPPED: dim mismatch %s -> %s for speaker=%s",
+                speaker.embedding_dim, len(embedding), speaker.id,
+            )
+            return None
+        sim = cosine_similarity(embedding, old_centroid)
+        if sim < SPEAKER_ENROLL_CONSISTENCY_FLOOR:
+            logger.warning(
+                "add_voice_sample SKIPPED: sample inconsistent with voiceprint "
+                "(cos=%.3f < %.2f) speaker=%s source=%s session=%s — not folding a "
+                "likely mixed/mislabeled cluster into the centroid",
+                sim, SPEAKER_ENROLL_CONSISTENCY_FLOOR, speaker.id, source, source_session_id,
+            )
+            return None
+
     sample = SpeakerVoiceSample(
         speaker_id=speaker.id,
         organization_id=speaker.organization_id,
@@ -469,11 +539,7 @@ def add_voice_sample(
     )
     db.add(sample)
 
-    old_centroid = (
-        decode_embedding(speaker.centroid_embedding, speaker.embedding_dim)
-        if speaker.centroid_embedding else None
-    )
-    new_centroid = update_centroid(old_centroid, speaker.sample_count, embedding)
+    new_centroid = update_centroid(old_centroid, old_count, embedding)
     speaker.centroid_embedding = encode_embedding(new_centroid)
     speaker.embedding_dim = len(new_centroid)
     speaker.embedding_model = embedding_model
