@@ -179,6 +179,31 @@ class TestProviderRegistrySTTRouting:
             db.rollback()
             db.close()
 
+    def test_gateway_resolves_when_provider_name_set(self, app, monkeypatch):
+        """provider_name in {openai,gateway,litellm} -> OpenAITranscriptionProvider,
+        endpoint from OPENAI_API_BASE, model defaults to 'parakeet'."""
+        monkeypatch.setenv("OPENAI_API_BASE", "http://gw.example:4000/v1")
+        monkeypatch.delenv("STT_OPENAI_URL", raising=False)
+        from services.providers.registry import ProviderRegistry
+        from services.providers.impl_stt import OpenAITranscriptionProvider
+        _, _, _, SessionLocal, OrgProviderSettings = _models()
+        db = SessionLocal()
+        try:
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+            org = _seed_org(db, "Gateway STT Org", "gateway-stt-org")
+            db.add(OrgProviderSettings(
+                organization_id=org.id, service_kind="stt", provider_name="gateway",
+            ))
+            db.commit()
+            stt = ProviderRegistry(db).get_stt(org_id=org.id)
+            assert isinstance(stt, OpenAITranscriptionProvider)
+            assert stt.endpoint == "http://gw.example:4000/v1"
+            assert stt.model == "parakeet"
+        finally:
+            db.rollback()
+            db.close()
+
     def test_unknown_provider_falls_back_to_whisper(self, app):
         from services.providers.registry import ProviderRegistry
         from services.providers.impl_stt import LocalWhisperProvider
@@ -276,3 +301,79 @@ class TestSTTProviderProtocol:
                 assert result["segments"] == []
 
         asyncio.run(_exercise())
+
+
+class TestOpenAIGatewaySTTProvider:
+    """The gateway STT provider is a drop-in: same signature, same normalized
+    return shape, and it parses the OpenAI verbose_json the gateway returns."""
+
+    def test_shares_signature_and_empty_shape(self, tmp_path):
+        from services.providers.impl_stt import (
+            LocalParakeetProvider,
+            OpenAITranscriptionProvider,
+        )
+
+        gw = OpenAITranscriptionProvider(endpoint="http://gw:4000/v1", model="parakeet")
+        sig = inspect.signature(gw.transcribe)
+        assert "audio_path" in sig.parameters and "language" in sig.parameters
+        assert inspect.iscoroutinefunction(gw.transcribe)
+
+        result = asyncio.run(gw.transcribe("/tmp/_nope_meeting_ops.wav"))
+        for key in ("text", "segments", "words", "duration", "language", "model"):
+            assert key in result
+        assert result["text"] == "" and result["segments"] == []
+
+    def test_parses_openai_verbose_json(self, tmp_path, monkeypatch):
+        """Feed the exact shape the live gateway returned (segments without a
+        per-segment confidence; OpenAI extra fields) and assert normalization."""
+        from services.providers import impl_stt
+        from services.providers.impl_stt import OpenAITranscriptionProvider
+
+        audio = tmp_path / "clip.wav"
+        audio.write_bytes(b"RIFFxxxxWAVE")  # provider only checks existence + opens it
+
+        canned = {
+            "text": "welcome everyone to today's test meeting",
+            "language": "en",
+            "task": "transcribe",
+            "duration": 33.71,
+            "segments": [{
+                "id": 0, "seek": 0, "start": 0.16, "end": 33.52,
+                "text": "welcome everyone to today's test meeting",
+                "avg_logprob": 0.0, "no_speech_prob": 0.0, "temperature": 0.0,
+            }],
+            "words": [{"word": "welcome", "start": 0.16, "end": 0.5}],
+        }
+
+        class _Resp:
+            status_code = 200
+            text = ""
+            def json(self):
+                return canned
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def post(self, *a, **k):
+                return _Resp()
+
+        monkeypatch.setattr(impl_stt.httpx, "AsyncClient", _Client)
+
+        prov = OpenAITranscriptionProvider(
+            endpoint="http://gw:4000/v1", model="parakeet", api_key="k"
+        )
+        result = asyncio.run(prov.transcribe(str(audio)))
+        assert result["text"] == "welcome everyone to today's test meeting"
+        assert len(result["segments"]) == 1
+        seg = result["segments"][0]
+        assert seg["start"] == 0.16 and seg["end"] == 33.52
+        assert seg["text"] == "welcome everyone to today's test meeting"
+        assert seg["confidence"] == 0.97  # default when the gateway omits it
+        assert result["language"] == "en"
+        assert result["duration"] == pytest.approx(33.71)
+        assert result["model"] == "parakeet"
+        assert result["words"][0]["word"] == "welcome"

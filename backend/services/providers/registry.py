@@ -289,6 +289,24 @@ class ProviderRegistry:
         endpoint_override = settings.get("endpoint_url") or ""
         model = model_override or settings.get("model_name") or ""
 
+        # Route STT through the OpenAI-compatible gateway (model 'parakeet' →
+        # the midboy1 parakeet-openai-shim) — single-endpoint, metered,
+        # cloud-failover-ready. Opt-in via STT_DEFAULT_PROVIDER=openai or a
+        # per-org Provider Setting; native Parakeet below stays the default.
+        if provider_name in ("openai", "gateway", "litellm"):
+            from .impl_stt import OpenAITranscriptionProvider
+            endpoint = (
+                endpoint_override
+                or os.getenv("STT_OPENAI_URL")
+                or os.getenv("OPENAI_API_BASE")
+                or DEFAULT_LITELLM_ENDPOINT
+            )
+            return OpenAITranscriptionProvider(
+                endpoint=endpoint,
+                model=model or os.getenv("STT_OPENAI_MODEL", "parakeet"),
+                api_key=self.get_api_key(org_id, "stt"),
+            )
+
         if provider_name in ("parakeet", "nemo", "parakeet-tdt"):
             from .impl_stt import LocalParakeetProvider
             endpoint = endpoint_override or os.getenv(

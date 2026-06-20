@@ -220,6 +220,118 @@ class LocalParakeetProvider:
         }
 
 
+class OpenAITranscriptionProvider:
+    """Calls an OpenAI-Whisper-compatible /v1/audio/transcriptions endpoint.
+
+    Drop-in for LocalParakeetProvider (same signature + normalized return
+    shape) but speaks the OpenAI audio API, so MO can route STT through the
+    commander LiteLLM gateway (model ``parakeet`` → the midboy1
+    parakeet-openai-shim → meet-parakeet-svc) instead of calling the native
+    /transcribe directly. Going through the gateway gives STT the same
+    single-endpoint + per-call metering + cloud-failover-ready story as the LLM
+    and embeddings. The native LocalParakeetProvider stays the default/fallback
+    (STT_DEFAULT_PROVIDER), so the critical transcription path is never forced
+    onto the gateway without an explicit opt-in.
+    """
+
+    def __init__(
+        self,
+        endpoint: str = "",
+        model: str = "parakeet",
+        api_key: str = "",
+        return_word_timestamps: bool = True,
+    ):
+        # ``endpoint`` is the OpenAI base (…/v1); we POST {endpoint}/audio/transcriptions.
+        self.endpoint = (endpoint or "").rstrip("/") or "http://unicorn-litellm:4000/v1"
+        self.model = model
+        self.api_key = api_key
+        self.return_word_timestamps = return_word_timestamps
+
+    async def transcribe(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = "en",
+    ) -> dict[str, Any]:
+        if not os.path.exists(audio_path):
+            logger.error("Audio file not found: %s", audio_path)
+            return _empty_result(self.model, language or "en")
+
+        timeout = _http_timeout_for_path(audio_path, base=60.0, per_mb=2.0)
+        data = {
+            "model": self.model,
+            "language": language or "en",
+            "response_format": "verbose_json",
+        }
+        if self.return_word_timestamps:
+            # OpenAI word-level timestamps; the shim maps this to Parakeet's.
+            data["timestamp_granularities[]"] = "word"
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            with open(audio_path, "rb") as f:
+                files = {"file": (os.path.basename(audio_path), f, "audio/wav")}
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self.endpoint}/audio/transcriptions",
+                        files=files,
+                        data=data,
+                        headers=headers,
+                    )
+        except httpx.TimeoutException:
+            logger.error("Gateway STT timeout transcribing %s (timeout=%ss)", audio_path, timeout)
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Transcription timed out after {timeout:.0f}s — the recording may be too long for the current limit.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Gateway STT client error: %s", exc)
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Could not reach the transcription service: {exc}",
+            )
+
+        if resp.status_code != 200:
+            detail = (resp.text or "").strip()[:300]
+            logger.error("Gateway STT returned %s: %s", resp.status_code, detail)
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Transcription service error {resp.status_code}: {detail}",
+            )
+
+        payload = resp.json()
+        # OpenAI verbose_json: {text, language, duration, segments:[{start,end,text,…}], words?}
+        segments = []
+        for seg in payload.get("segments") or []:
+            segments.append({
+                "text": (seg.get("text") or "").strip(),
+                "start": float(seg.get("start") or 0),
+                "end": float(seg.get("end") or 0),
+                "confidence": float(seg.get("confidence") or 0.97),
+                "speaker": seg.get("speaker"),
+            })
+        words = []
+        for w in payload.get("words") or []:
+            words.append({
+                "word": (w.get("word") or w.get("text") or "").strip(),
+                "start": float(w.get("start") or 0),
+                "end": float(w.get("end") or 0),
+                "confidence": float(w.get("confidence") or 0.99),
+            })
+        actual_model = payload.get("model") or self.model
+        return {
+            "text": (payload.get("text") or "").strip(),
+            "segments": segments,
+            "words": words,
+            "duration": float(payload.get("duration") or 0.0),
+            "language": payload.get("language", language or "en") or (language or "en"),
+            "confidence": float(payload.get("confidence") or 0.97),
+            "model": actual_model,
+            "rtf": payload.get("rtf"),
+        }
+
+
 def _empty_result(model: str, language: str, error=None) -> dict[str, Any]:
     # `error` (when set) carries the real reason transcription yielded nothing
     # — e.g. the STT service's "audio too long" / 500 / timeout — so the upload

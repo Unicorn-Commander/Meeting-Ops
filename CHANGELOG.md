@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+## [3.41.0] - 2026-06-20
+
+### Added
+- **Gateway audio: STT/TTS can route through the OpenAI-compatible gateway.** A new
+  `OpenAITranscriptionProvider` (drop-in for `LocalParakeetProvider` — same signature
+  + normalized return shape) lets MO call an OpenAI `/v1/audio/transcriptions`
+  endpoint, i.e. the commander LiteLLM gateway (`model=parakeet` → the midboy1
+  parakeet-openai-shim). `get_stt` resolves it for `provider_name` /
+  `STT_DEFAULT_PROVIDER` in `{openai, gateway, litellm}` (endpoint from
+  `STT_OPENAI_URL`/`OPENAI_API_BASE`, model `STT_OPENAI_MODEL` default `parakeet`,
+  key via the org's STT key → gateway key). TTS already speaks OpenAI
+  `/v1/audio/speech`, so Kokoro rides the same gateway by pointing `KOKORO_ENDPOINT`
+  at it. This puts audio on the suite's **single, metered, cloud-failover-ready
+  gateway rail** alongside LLM + embeddings.
+  - **Native Parakeet stays the default/fallback** (`STT_DEFAULT_PROVIDER=parakeet`),
+    so the critical transcription path is opt-in onto the gateway and instantly
+    revertible. Verified end-to-end against the live gateway (real transcription +
+    synthesis) before enabling; `STT_DEFAULT_PROVIDER` is now env-overridable in the
+    unicorncommander compose (backend + worker anchor).
+
 ## [3.40.3] - 2026-06-19
 
 ### Fixed
