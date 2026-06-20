@@ -85,7 +85,11 @@ class ProviderRegistry:
                 return decrypt_api_key(encrypted)
             except Exception:
                 pass
-        if service_kind == "llm":
+        # The default key is the gateway key; every service that can route
+        # through the gateway (llm/stt/tts/embeddings/reranking) authenticates
+        # with it. Native/in-cluster endpoints ignore the Authorization header,
+        # so returning it is harmless when stt/tts run on the direct path.
+        if service_kind in ("llm", "stt", "tts", "embeddings", "reranking"):
             return DEFAULT_LITELLM_API_KEY
         return ""
 

@@ -204,6 +204,26 @@ class TestProviderRegistrySTTRouting:
             db.rollback()
             db.close()
 
+    def test_gateway_kinds_get_default_key(self, app, monkeypatch):
+        """get_api_key returns the default (gateway) key for every gateway-routed
+        kind — not just llm — so gateway STT/TTS authenticate. Non-gateway kinds
+        (e.g. diarization) still get no default."""
+        from services.providers import registry as reg_mod
+        monkeypatch.setattr(reg_mod, "DEFAULT_LITELLM_API_KEY", "sk-gw-default")
+        _, _, _, SessionLocal, OrgProviderSettings = _models()
+        db = SessionLocal()
+        try:
+            db.query(OrgProviderSettings).delete()
+            db.commit()
+            r = reg_mod.ProviderRegistry(db)
+            assert r.get_api_key(424242, "stt") == "sk-gw-default"
+            assert r.get_api_key(424242, "tts") == "sk-gw-default"
+            assert r.get_api_key(424242, "llm") == "sk-gw-default"
+            assert r.get_api_key(424242, "diarization") == ""
+        finally:
+            db.rollback()
+            db.close()
+
     def test_unknown_provider_falls_back_to_whisper(self, app):
         from services.providers.registry import ProviderRegistry
         from services.providers.impl_stt import LocalWhisperProvider

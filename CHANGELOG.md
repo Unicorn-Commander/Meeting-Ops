@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.41.1] - 2026-06-20
+
+### Fixed
+- **Gateway STT/TTS authenticate.** `get_api_key()` only returned the default
+  (gateway) key for `service_kind == "llm"`, so the new gateway-routed STT + TTS
+  providers got an empty key and the gateway 401'd ("No api key passed in"). It now
+  returns the default key for every gateway-routed kind (`llm/stt/tts/embeddings/
+  reranking`); native/in-cluster endpoints ignore the Authorization header, so it's
+  harmless on the direct path. (Caught by the in-situ end-to-end check before any
+  user traffic hit the flipped path.)
+
 ## [3.41.0] - 2026-06-20
 
 ### Added
