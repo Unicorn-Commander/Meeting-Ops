@@ -72,6 +72,26 @@ async def _probe_diarization() -> dict[str, Any]:
 
 async def _probe_tts() -> dict[str, Any]:
     endpoint = os.getenv("KOKORO_ENDPOINT", "http://unicorn-kokoro:8880").rstrip("/")
+    # Gateway-routed TTS (KOKORO_ENDPOINT -> the LiteLLM gateway): /health 401s
+    # unauthenticated, but an authenticated /v1/models returns 200. Try that
+    # first; fall back to the unauthenticated /health a direct Kokoro exposes.
+    api_key = (
+        os.getenv("KOKORO_API_KEY")
+        or os.getenv("LITELLM_API_KEY")
+        or os.getenv("OPENAI_API_KEY", "")
+    )
+    if api_key:
+        base = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+        models_url = f"{base}/v1/models"
+        try:
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(
+                    models_url, headers={"Authorization": f"Bearer {api_key}"}
+                )
+                if resp.status_code == 200:
+                    return {"ok": True, "url": models_url}
+        except Exception:  # noqa: BLE001 - fall back to /health below
+            pass
     return await _http_health(f"{endpoint}/health")
 
 

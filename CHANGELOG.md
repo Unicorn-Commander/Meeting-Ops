@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.41.2] - 2026-06-20
+
+### Fixed
+- **`tts` readiness probe authenticates against the gateway** (companion to the
+  v3.40.2/3.40.3 llm + infinity probe fixes). Once `KOKORO_ENDPOINT` points at the
+  gateway, the old unauthenticated `/health` probe 401'd → prod read `tts: down`
+  even though synthesis worked. It now tries an authenticated `/v1/models` first,
+  `/health` fallback for a direct Kokoro (behaviour-neutral on bigboy). With this,
+  every gateway-routed dependency (llm, embeddings, stt-via-direct-fallback, tts)
+  reports honestly and prod `/health/ready` is fully green again.
+
 ## [3.41.1] - 2026-06-20
 
 ### Fixed
