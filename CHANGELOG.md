@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+## [3.40.2] - 2026-06-19
+
+### Fixed
+- **`default_llm()` honors the configured gateway/LLM base.** The org-less default
+  provider (used by the `/health/ready` `llm` probe + any background job without an
+  org context) hardcoded `http://unicorn-litellm:4000/v1` — a container name that
+  resolves on bigboy but **fails name resolution on prod** (centerdeep, no such
+  container), so prod read `llm: down` even though summaries worked via the direct
+  path. `DEFAULT_LITELLM_ENDPOINT` now reads `LITELLM_API_BASE` / `OPENAI_API_BASE`
+  / `OPENAI_BASE_URL` first, falling back to the container name (behaviour-neutral
+  on bigboy). The gateway key already reaches the container via the compose's
+  `LITELLM_API_KEY → OPENAI_API_KEY` mapping, so the probe now authenticates and
+  greens.
+
 ## [3.40.1] - 2026-06-19
 
 Follow-ups to the v3.40.0 hardening + the prod (unicorncommander.ai) rollout.

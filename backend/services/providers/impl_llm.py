@@ -10,7 +10,17 @@ from .protocols import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
+# Honor the deploy's configured gateway/LLM base before the in-cluster default.
+# On bigboy OPENAI_API_BASE is the in-network litellm container (resolves); on
+# prod (centerdeep, no such container) it's the tailnet gateway. Without this the
+# org-less default_llm() path (readiness probe + background jobs) hardcodes the
+# container name and fails name resolution off-cluster.
+DEFAULT_LITELLM_ENDPOINT = (
+    os.getenv("LITELLM_API_BASE")
+    or os.getenv("OPENAI_API_BASE")
+    or os.getenv("OPENAI_BASE_URL")
+    or "http://unicorn-litellm:4000/v1"
+)
 
 
 class LLMUnavailable(RuntimeError):

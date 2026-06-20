@@ -12,7 +12,15 @@ logger = logging.getLogger(__name__)
 _SERVICE_KINDS = ("llm", "stt", "tts", "embeddings", "reranking", "diarization")
 _TASKS = {"llm": ("fast", "quality", "chat")}
 
-DEFAULT_LITELLM_ENDPOINT = "http://unicorn-litellm:4000/v1"
+# Honor the deploy's configured gateway/LLM base (tailnet gateway on prod, the
+# in-cluster litellm container on bigboy) before the container-name default, so
+# the org-less default_llm() path resolves off-cluster too.
+DEFAULT_LITELLM_ENDPOINT = (
+    os.getenv("LITELLM_API_BASE")
+    or os.getenv("OPENAI_API_BASE")
+    or os.getenv("OPENAI_BASE_URL")
+    or "http://unicorn-litellm:4000/v1"
+)
 # Honor either LITELLM_API_KEY (preferred) or OPENAI_API_KEY for compat with
 # deploys that historically only set OPENAI_API_KEY.
 DEFAULT_LITELLM_API_KEY = os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
