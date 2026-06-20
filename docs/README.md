@@ -2,7 +2,7 @@
 
 Design and architecture documents for UC-Meeting-Ops.
 
-Last updated: 2026-05-27.
+Last updated: 2026-06-20.
 
 This directory contains design notes, architecture decisions, operational
 references, and roadmap documents. Status labels describe the document's
@@ -39,6 +39,10 @@ Phased plan to bring Meeting-Ops to mobile, watch, and native devices. Phase A c
 
 - [`conference-room-design.md`](conference-room-design.md) (1136 lines). Status: Phase 1 shipped, Phases 2-5 designed. Multi-room native model, USB mic primary path, chunk-based recording, room abstraction, satellite integration, and future administrative lifecycle.
 
+## Speaker intelligence
+
+- [`speaker-intelligence-design.md`](speaker-intelligence-design.md). Status: live (shipped v3.42.0–v3.45.0, on prod and dogfood). How Meeting-Ops turns an anonymous diarized transcript into stable, named people recognised across meetings, and how naming a speaker once fixes them everywhere. Covers the three tables (`speaker` / `speaker_voice_sample` / `speaker_session_link`) with embeddings stored as raw little-endian float32 bytes; pyannote diarization in `meet-speaker-svc` with the clustering threshold; cosine identification against enrolled centroids at `SPEAKER_IDENTIFY_THRESHOLD`; persistent UNNAMED auto-created profiles (v3.43); the anti-poisoning enrollment consistency floor + idempotency (v3.42); the key dynamic-name-rendering architecture (v3.44 → v3.45) where the display name is resolved live at serve time from the current profile via `hydrate_diarized_*`, so a rename is one row update and `apply_rename_to_history` only fixes summary free text off the request path; the rename / re-summarize flow; and a table of the `SPEAKER_*` env knobs. Real `file:function` references throughout.
+
 ## Agent platform (planning)
 
 - [`agent-platform-roadmap.md`](agent-platform-roadmap.md). Status: planning. The next arc — conversational + app-driving + voice agent. Inventories the existing foundation (per-meeting + cross-meeting RAG in `ai_chat.py` + Qdrant, the Brigade FalkorDB graph, the 8 read-only MCP tools, the `agents.py`/`agent_tools.py` framework, TTS/STT building blocks), names the gaps, and lays out a 4-phase plan (solidify RAG + graph → safe app-control MCP write tools → agent runtime → voice) plus the key design decisions and operational context.
@@ -59,5 +63,6 @@ Phased plan to bring Meeting-Ops to mobile, watch, and native devices. Phase A c
 2. Read [`phase-b-server-live-streaming.md`](phase-b-server-live-streaming.md) and [`phase-c1-native-ios-design.md`](phase-c1-native-ios-design.md) in either order. Together they explain the forward mobile and native roadmap.
 3. Read [`bulk-audio-import-design.md`](bulk-audio-import-design.md). It is concrete near-term implementation work.
 4. Skim the conference-room, Brigade, appliance, and screen-recording documents as needed for the feature area being changed.
+5. Read [`speaker-intelligence-design.md`](speaker-intelligence-design.md) when working on diarization, speaker identification, voiceprints, or the speaker-naming UI. It documents the live persistent-identity and dynamic-name-rendering system.
 
 This file is hand-maintained alongside design-document commits. It can lag behind the directory. If exact counts matter, verify them with `wc -l docs/*.md`.

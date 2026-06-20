@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+## [3.46.0] - 2026-06-20
+
+### Added
+- **In-app Help — Speaker Intelligence sections.** New end-user help topics on the
+  Help page (`frontend/src/pages/Help.tsx`, "For everyone" tier): automatic speaker
+  identification + persistent cross-meeting identity (stable handles like
+  "Speaker 3F2A"), "name once → fixed in every past meeting, instantly," why
+  confirming a speaker is safe (the anti-poisoning consistency floor), browser
+  recording = full quality, and a strengthened Privacy-mode explanation.
+
+### Documentation
+- **README rewrite (accurate + current).** Reworked the top-level README around the
+  browser-first moat, the speaker-intelligence system, and the *real* live stack —
+  fixing long-stale references (it still claimed "Granite 3.3" for the LLM and
+  "whisper.cpp" for STT; the actual stack is Qwen 3.6 35B-A3B-Vision via LiteLLM +
+  in-browser/server Parakeet + pyannote `community-1`). Refreshed tiers, quick
+  start, API summary, and status to v3.45.0.
+- **New `docs/speaker-intelligence-design.md`** (engineer-facing): data model
+  (speaker / speaker_voice_sample / speaker_session_link), diarization, cosine
+  identification + thresholds, persistent auto-profiles (v3.43), the anti-poisoning
+  enrollment floor (v3.42), and the dynamic name-rendering single-source-of-truth
+  (v3.44–v3.45). Indexed in `docs/README.md` (last-updated → 2026-06-20).
+
 ## [3.45.0] - 2026-06-20
 
 ### Changed

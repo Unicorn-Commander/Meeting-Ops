@@ -200,6 +200,17 @@ function EveryoneTier() {
       </section>
 
       <section className="space-y-4">
+        <SectionHeader icon={Zap} title="Browser recording = full quality" iconClass="text-amber-400" />
+        <p className="text-zinc-300">
+          Recording straight in your browser now runs the exact same transcription
+          and speaker-identification pipeline as uploading an audio file. There's
+          no quality trade-off for hitting Record instead of importing — whichever
+          way the audio gets in, you get the same finished transcript, the same
+          "who said what," and the same summary.
+        </p>
+      </section>
+
+      <section className="space-y-4">
         <SectionHeader icon={Download} title="Uploading an existing recording" />
         <p className="text-zinc-300">
           Already have an audio file? Use{' '}
@@ -252,16 +263,64 @@ function EveryoneTier() {
       </section>
 
       <section className="space-y-4">
-        <SectionHeader icon={Users} title="Naming the speakers" />
+        <SectionHeader icon={Users} title="Who said what — automatic speaker identification" />
         <p className="text-zinc-300">
-          Until a voice is recognized, the transcript labels it generically
-          ("Speaker 1"). When you open a meeting that still has unnamed speakers, a
-          highlighted <span className="text-zinc-100">"name the speakers"</span>{' '}
-          prompt sits right at the top of the record — pick who each voice is from
-          the dropdown (it pre-fills its best guess, so it's usually one tap each).
-          Naming a voice once teaches the system, so that person is recognized
-          automatically in later meetings, and your summaries and search start
-          using real names instead of "Speaker 1."
+          Meeting-Ops separates every voice in a recording (this is called{' '}
+          <span className="text-zinc-100">diarization</span>) and matches each one
+          against the people it has heard before. Anyone it recognizes is labeled
+          by name automatically — you don't have to do anything.
+        </p>
+        <p className="text-zinc-300">
+          Every voice gets a <span className="text-zinc-100">stable identity</span>{' '}
+          that sticks with that person from meeting to meeting. Once a person is
+          known, they're recognized in future meetings on their own. A voice it
+          hasn't met yet shows up under a steady handle like{' '}
+          <span className="text-zinc-100">"Speaker 3F2A"</span> — not a throwaway
+          "Speaker 1" that changes every time — so you can give it a name once and
+          have it stick.
+        </p>
+      </section>
+
+      <section className="space-y-4">
+        <SectionHeader icon={Tag} title="Name a speaker once — it fixes every meeting, instantly" />
+        <p className="text-zinc-300">
+          When you open a meeting with unnamed voices, a highlighted{' '}
+          <span className="text-zinc-100">"name the speakers"</span> prompt sits
+          right at the top of the record — pick who each voice is from the dropdown
+          (it pre-fills its best guess, so it's usually one tap each).
+        </p>
+        <p className="text-zinc-300">
+          The moment you name a speaker, that name shows up{' '}
+          <span className="text-zinc-100">everywhere that person has spoken</span> —
+          across every past meeting's transcript, not just this one — right away,
+          with no waiting and nothing to re-run. The name is shown live from that
+          person's profile, so it's correct everywhere at once. Meeting summaries
+          for those past meetings get updated to use the real name too.
+        </p>
+        <p className="text-sm text-zinc-400">
+          Want a past meeting's summary rewritten now that you've named someone?
+          Open the <span className="text-zinc-200">Speakers</span> page, pick the
+          person, and choose{' '}
+          <span className="text-zinc-200">Re-summarize past meetings</span> to
+          regenerate their earlier summaries on demand.
+        </p>
+      </section>
+
+      <section className="space-y-4">
+        <SectionHeader icon={ShieldCheck} title="Confirming a speaker is safe" iconClass="text-emerald-400" />
+        <p className="text-zinc-300">
+          Each time you confirm or correct who a voice belongs to, you're teaching
+          the system what that person sounds like, so it recognizes them more
+          reliably next time. Confirming only ever{' '}
+          <span className="text-zinc-100">improves</span> accuracy — it can't make
+          things worse.
+        </p>
+        <p className="text-zinc-300">
+          There's a built-in safeguard for that: a consistency floor that quietly
+          ignores a segment that doesn't actually sound like the person — a
+          mislabeled clip, or one where two voices overlap. That means a stray bad
+          segment can never corrupt someone's saved voice, no matter what you
+          confirm. So go ahead and confirm freely.
         </p>
       </section>
 
@@ -344,12 +403,15 @@ function EveryoneTier() {
       </section>
 
       <section className="space-y-4">
-        <SectionHeader icon={Lock} title="Local Sessions & privacy (on-device)" iconClass="text-emerald-400" />
+        <SectionHeader icon={Lock} title="Your recordings, your device — Privacy mode" iconClass="text-emerald-400" />
         <p className="text-zinc-300">
           Meeting-Ops can run entirely on your own computer. With{' '}
           <span className="text-zinc-100">Privacy mode</span> on (the lock icon in
-          the recorder), your audio never leaves your device — the transcript and
-          summary are produced right in your browser and stored locally.
+          the recorder), the audio is processed{' '}
+          <span className="text-zinc-100">entirely in your browser</span> and never
+          leaves your device — the transcript, the speaker identification, and the
+          summary are all produced right there on your machine and stored locally.
+          Nothing is uploaded.
         </p>
         <p className="text-zinc-300">
           Those recordings live under{' '}
