@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle, ChevronDown, ChevronRight, Link2, Check } from 'lucide-react';
+import { Users, Plus, Mic, Trash2, Upload, RefreshCw, AlertCircle, X, Search, AlertTriangle, ChevronDown, ChevronRight, Link2, Check, HelpCircle, Sparkles } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -20,6 +20,13 @@ interface SpeakerSummary {
   has_centroid: boolean;
   contact_id?: string | null;
   contact_link_confirmed?: boolean;
+  /**
+   * Backend contract (v3.43.0 "persistent speaker identity"): true = an
+   * auto-created profile that has NOT yet been named by a human. Its
+   * `display_name` is a stable machine handle like "Speaker 3F2A". Surface
+   * these as "unconfirmed — tap to name" so users know to confirm them.
+   */
+  auto_generated?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -158,6 +165,10 @@ export const SpeakerLibrary: React.FC = () => {
   const [contactResults, setContactResults] = useState<ContactOpsPerson[]>([]);
   const [contactSearching, setContactSearching] = useState(false);
   const [contactLinking, setContactLinking] = useState(false);
+  // v3.43.0: re-summarize a speaker's past meetings (regenerates every AI
+  // summary this speaker appears in). Tracks the in-flight speaker id so the
+  // button can show a spinner + disable while the enqueue request is open.
+  const [resummarizingId, setResummarizingId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const orgHeaders = (): Record<string, string> => {
@@ -510,6 +521,38 @@ export const SpeakerLibrary: React.FC = () => {
     }
   };
 
+  // v3.43.0 — POST /api/speakers/{id}/resummarize-history (no body).
+  // Regenerates the AI summary of every past meeting this speaker appears
+  // in. Most useful right after naming an auto-generated speaker so old
+  // summaries pick up the real name. Returns sessions_total +
+  // resummaries_enqueued; we surface the enqueued count via the toast.
+  const resummarizeHistory = async (id: number) => {
+    setResummarizingId(id);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/speakers/${id}/resummarize-history`,
+        { method: 'POST', headers: orgHeaders() },
+      );
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const count = Number(data?.resummaries_enqueued ?? 0);
+        if (count > 0) {
+          showToast.info(
+            `Re-summarizing ${count} past meeting${count === 1 ? '' : 's'}…`,
+          );
+        } else {
+          showToast.info('No past meetings needed re-summarizing.');
+        }
+      } else {
+        setError(`Re-summarize failed (HTTP ${res.status}).`);
+      }
+    } catch {
+      setError('Network error re-summarizing past meetings.');
+    } finally {
+      setResummarizingId(null);
+    }
+  };
+
   const filteredSpeakers = speakers.filter(s =>
     s.display_name.toLowerCase().includes(speakerSearch.trim().toLowerCase())
   );
@@ -738,12 +781,21 @@ export const SpeakerLibrary: React.FC = () => {
                         : 'text-zinc-300 hover:bg-zinc-800/50'
                     }`}
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="font-medium truncate">{s.display_name}</span>
                       {s.has_centroid && (
-                        <Mic className="w-3 h-3 text-emerald-400" />
+                        <Mic className="w-3 h-3 shrink-0 text-emerald-400" />
                       )}
                     </div>
+                    {/* v3.43.0: auto-created profiles whose name is still a
+                        machine handle ("Speaker 3F2A"). Surface a muted
+                        "tap to name" cue so users know to confirm them. */}
+                    {s.auto_generated && (
+                      <span className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300">
+                        <HelpCircle className="h-3 w-3" />
+                        Unconfirmed · tap to name
+                      </span>
+                    )}
                     <div className="text-xs text-zinc-500 mt-0.5">
                       {s.sample_count} sample{s.sample_count === 1 ? '' : 's'}
                       {s.email ? ` · ${s.email}` : ''}
@@ -763,7 +815,18 @@ export const SpeakerLibrary: React.FC = () => {
             <>
               <div className="flex items-start justify-between mb-3">
                 <div>
-                  <h2 className="text-base font-semibold text-zinc-100">{detail.display_name}</h2>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-base font-semibold text-zinc-100">{detail.display_name}</h2>
+                    {/* v3.43.0: this profile is auto-created and still
+                        carries a machine handle — prompt the user to rename
+                        it (the existing rename flow auto-relabels history). */}
+                    {detail.auto_generated && (
+                      <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                        <HelpCircle className="h-3 w-3" />
+                        Unconfirmed — name this speaker
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-zinc-500 mt-0.5">
                     {detail.email || 'No email on file'} · {detail.session_count} meeting
                     {detail.session_count === 1 ? '' : 's'} linked
@@ -773,6 +836,25 @@ export const SpeakerLibrary: React.FC = () => {
                   )}
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
+                  {/* v3.43.0: regenerate the AI summaries of every past
+                      meeting this speaker appears in. Only meaningful once
+                      the speaker has linked sessions; especially useful right
+                      after naming an auto-generated speaker. */}
+                  {detail.session_count > 0 && (
+                    <button
+                      onClick={() => resummarizeHistory(detail.id)}
+                      disabled={resummarizingId === detail.id}
+                      className="text-xs px-2 py-1 rounded border border-fuchsia-800 text-fuchsia-300 hover:bg-fuchsia-950/40 disabled:opacity-50 flex items-center gap-1"
+                      title="Regenerate the AI summary of every past meeting this speaker appears in"
+                    >
+                      {resummarizingId === detail.id ? (
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3" />
+                      )}
+                      Re-summarize past meetings
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setMergeOpen(true);

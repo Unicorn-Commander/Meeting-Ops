@@ -46,6 +46,13 @@ interface SpeakerOption {
   display_name: string;
   has_centroid: boolean;
   sample_count: number;
+  /**
+   * Backend contract (v3.43.0 "persistent speaker identity"): true = an
+   * auto-created profile not yet named by a human (display_name is a stable
+   * machine handle like "Speaker 3F2A"). Flagged in the assign dropdown so
+   * the user can tell it apart from a confirmed person.
+   */
+  auto_generated?: boolean;
 }
 
 interface SpeakerTaggerProps {
@@ -480,6 +487,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
                     {speakers.map(s => (
                       <option key={s.id} value={s.id}>
                         {s.display_name}
+                        {s.auto_generated && ' (unconfirmed)'}
                         {!s.has_centroid && ' (no enrollment)'}
                       </option>
                     ))}
