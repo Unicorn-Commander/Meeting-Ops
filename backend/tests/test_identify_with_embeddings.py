@@ -310,7 +310,10 @@ def test_identify_speakers_skips_when_no_embedding(client, fake_provider):
 
 
 def test_identify_speakers_below_threshold(client, fake_provider):
-    """Embedding present but cosine similarity < 0.55 -> below_threshold, no auto-link."""
+    """Embedding present but cosine < 0.55 vs the enrolled speaker -> NOT matched
+    to that speaker. v3.43: instead of a throwaway unlinked 'Speaker N', the
+    unmatched voice now gets a persistent auto-created profile (stable across
+    meetings); the link points at the NEW profile, never at the enrolled one."""
     (
         _Org,
         _U,
@@ -344,18 +347,22 @@ def test_identify_speakers_below_threshold(client, fake_provider):
         session = db.query(RecordingSession).filter(RecordingSession.id == session_id).first()
         result = identify_speakers(session, db)
 
-        assert result["linked"] == 0
-        assert result["unmatched"] == 1
+        # v3.43: the below-threshold voice is auto-created as a persistent
+        # profile (not left unlinked), and is NEVER matched to the enrolled one.
+        assert result.get("auto_created", 0) >= 1
+        assert result["linked"] == 1
         link = (
             db.query(SpeakerSessionLink)
             .filter(SpeakerSessionLink.session_id == session_id)
             .first()
         )
-        # A link IS created (so the UI can show "unidentified" + offer manual
-        # tagging) but with speaker_id=None and source!='auto+matched'.
         assert link is not None
-        assert link.speaker_id is None
-        assert link.similarity is None
+        assert link.speaker_id is not None
+        assert link.speaker_id != speaker_id  # NOT the enrolled Aaron
+        from database.models import SpeakerProfile
+        from services.speaker_service import is_auto_generated_speaker
+        new_sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
+        assert new_sp is not None and is_auto_generated_speaker(new_sp)
     finally:
         db.close()
 
@@ -424,3 +431,122 @@ def test_build_segments_from_words_handles_diar_without_embeddings(client):
     assert utterances, "expected at least one utterance"
     for u in utterances:
         assert "embedding" not in u, f"utterance {u} should not carry embedding when diar didn't emit one"
+
+
+def test_unmatched_voice_auto_creates_persistent_profile(client, fake_provider):
+    """v3.43 persistent identity (B): an unmatched, long-enough voice auto-creates
+    a stable UNNAMED profile + labels the segment with its handle (not a throwaway
+    'Speaker N'), so future meetings can match the same profile."""
+    import uuid as _uuid
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from database.models import RecordingSession, SpeakerProfile, SpeakerSessionLink
+    from services.speaker_service import identify_speakers, is_auto_generated_speaker
+
+    db = SessionLocal()
+    try:
+        org = Organization(name="ac-org", slug=f"ac-{_uuid.uuid4().hex[:8]}", is_active=True)
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+        org_id = org.id
+    finally:
+        db.close()
+
+    emb = _make_embedding(seed=777)
+    segments = [
+        {"start": 0.0, "end": 8.0, "speaker": "SPEAKER_00", "text": "Hi everyone.", "embedding": emb},
+        {"start": 9.0, "end": 15.0, "speaker": "SPEAKER_00", "text": "A long enough turn.", "embedding": emb},
+    ]
+    session_id = _make_session(org_id, segments)
+
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.id == session_id).first()
+        result = identify_speakers(session, db)
+        assert result.get("auto_created", 0) >= 1, result
+        profs = db.query(SpeakerProfile).filter(SpeakerProfile.organization_id == org_id).all()
+        assert len(profs) == 1
+        sp = profs[0]
+        assert is_auto_generated_speaker(sp)
+        assert sp.display_name.startswith("Speaker ")
+        assert sp.sample_count == 1 and sp.centroid_embedding is not None
+        db.refresh(session)
+        segs = session.transcript_diarized["segments"]
+        assert segs and all(s["speaker"] == sp.display_name for s in segs)
+        link = (
+            db.query(SpeakerSessionLink)
+            .filter(
+                SpeakerSessionLink.session_id == session_id,
+                SpeakerSessionLink.speaker_id == sp.id,
+            )
+            .first()
+        )
+        assert link is not None
+    finally:
+        db.close()
+
+
+def test_rename_propagates_to_history(client):
+    """v3.43 (A): naming an auto-created profile re-labels its PAST meetings —
+    both the diarized transcript and the summary text."""
+    import json
+    import uuid as _uuid
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from database.models import RecordingSession, SpeakerProfile, SpeakerSessionLink
+    from api.speakers import apply_rename_to_history
+
+    db = SessionLocal()
+    try:
+        org = Organization(name="rh-org", slug=f"rh-{_uuid.uuid4().hex[:8]}", is_active=True)
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+        org_id = org.id
+
+        sp = SpeakerProfile(
+            organization_id=org_id,
+            display_name="Speaker AB12",
+            external_refs={"auto_generated": True},
+            sample_count=1,
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+
+        sess = RecordingSession(
+            session_id=f"rh-{_uuid.uuid4().hex[:12]}",
+            name="History Test",
+            organization_id=org_id,
+            status="completed",
+            transcript_diarized={
+                "segments": [
+                    {"start": 0.0, "end": 5.0, "speaker": "Speaker AB12",
+                     "raw_label": "SPEAKER_00", "text": "hi"},
+                ],
+                "speakers": ["Speaker AB12"],
+            },
+            summary=json.dumps({"text": "Speaker AB12 discussed the roadmap."}),
+        )
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        db.add(SpeakerSessionLink(
+            session_id=sess.id, organization_id=org_id,
+            raw_label="SPEAKER_00", speaker_id=sp.id, confirmed=True,
+        ))
+        db.commit()
+        sess_id = sess.id
+
+        # Rename, then propagate to history.
+        sp.display_name = "Jordan Stransky"
+        db.commit()
+        affected = apply_rename_to_history(db, sp, "Speaker AB12")
+        assert affected == 1
+
+        db.refresh(sess)
+        assert sess.transcript_diarized["segments"][0]["speaker"] == "Jordan Stransky"
+        assert "Jordan Stransky" in sess.summary and "Speaker AB12" not in sess.summary
+    finally:
+        db.close()

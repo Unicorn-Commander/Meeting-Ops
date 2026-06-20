@@ -46,6 +46,14 @@ DEFAULT_IDENTIFY_THRESHOLD = float(os.getenv("SPEAKER_IDENTIFY_THRESHOLD", "0.55
 SPEAKER_ENROLL_CONSISTENCY_FLOOR = float(
     os.getenv("SPEAKER_ENROLL_CONSISTENCY_FLOOR", str(DEFAULT_IDENTIFY_THRESHOLD))
 )
+# Persistent speaker identity (v3.43): when a diarized voice matches NO enrolled
+# speaker, auto-create a stable UNNAMED profile + enroll its voiceprint instead of
+# emitting a throwaway per-session "Speaker N". The same voice then matches the
+# same profile in future meetings (same handle), and naming it once propagates
+# everywhere. Guarded by a minimum clean-speech duration so noise/crosstalk
+# clusters don't spawn junk profiles.
+SPEAKER_AUTOCREATE_ENABLED = os.getenv("SPEAKER_AUTOCREATE_ENABLED", "true").lower() in ("1", "true", "yes")
+SPEAKER_AUTOCREATE_MIN_SECONDS = float(os.getenv("SPEAKER_AUTOCREATE_MIN_SECONDS", "4.0"))
 STORE_SPEAKER_AUDIO = os.getenv("STORE_SPEAKER_AUDIO", "false").lower() in ("1", "true", "yes")
 SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD = float(os.getenv("SPEAKER_CONTACT_AUTOSTAMP_THRESHOLD", "0.80"))
 
@@ -558,6 +566,71 @@ def add_voice_sample(
     return sample
 
 
+def is_auto_generated_speaker(speaker: SpeakerProfile) -> bool:
+    """True for an UNNAMED, auto-created persistent profile (handle like
+    'Speaker 3F2A'), flagged in external_refs so the UI can prompt naming and
+    so a rename knows to propagate to history."""
+    return bool((getattr(speaker, "external_refs", None) or {}).get("auto_generated"))
+
+
+def _generate_speaker_handle(db: Session, org_id: int) -> str:
+    """A stable, human-readable handle for an auto-created profile, e.g.
+    'Speaker 3F2A'. Stored as the (org-unique) display_name, so the same voice
+    keeps the same handle across meetings until a human names it."""
+    import uuid
+    for _ in range(6):
+        code = uuid.uuid4().hex[:4].upper()
+        name = f"Speaker {code}"
+        exists = (
+            db.query(SpeakerProfile)
+            .filter(
+                SpeakerProfile.organization_id == org_id,
+                SpeakerProfile.display_name == name,
+            )
+            .first()
+        )
+        if not exists:
+            return name
+    return f"Speaker {uuid.uuid4().hex[:8].upper()}"
+
+
+def auto_create_speaker(
+    db: Session,
+    org_id: int,
+    embedding: list[float],
+    *,
+    source_session_id: Optional[int] = None,
+) -> Optional[SpeakerProfile]:
+    """Create a persistent UNNAMED profile for an unmatched voice and enroll its
+    voiceprint, so the same voice gets a stable identity across meetings. Returns
+    the new profile, or None on failure (best-effort — never blocks identify)."""
+    try:
+        handle = _generate_speaker_handle(db, org_id)
+        sp = SpeakerProfile(
+            organization_id=org_id,
+            display_name=handle,
+            embedding_model=DEFAULT_EMBEDDING_MODEL,
+            sample_count=0,
+            external_refs={"auto_generated": True},
+        )
+        db.add(sp)
+        db.flush()
+        add_voice_sample(
+            db, sp, embedding,
+            source="auto_identify",
+            embedding_model=DEFAULT_EMBEDDING_MODEL,
+            source_session_id=source_session_id,
+        )
+        logger.info(
+            "auto-created persistent speaker id=%s (%r) org=%s from an unmatched voice",
+            sp.id, handle, org_id,
+        )
+        return sp
+    except Exception:  # noqa: BLE001
+        logger.exception("auto_create_speaker failed org=%s", org_id)
+        return None
+
+
 # ---------- the lifecycle hook ----------
 
 
@@ -855,6 +928,32 @@ def identify_speakers(
     my_voice_candidates = my_voice_candidates_for_org(db, session.organization_id)
     label_to_speaker: dict[str, dict] = {}
 
+    def _autocreate_if_eligible(label: str, item: dict, emb) -> Optional[SpeakerProfile]:
+        """Persistent identity (v3.43): turn an unmatched voice into a stable
+        UNNAMED profile (handle), unless it's too short or the label is already
+        user-confirmed. Covers both the no-enrolled-speakers bootstrap case and
+        the enrolled-but-no-match case."""
+        if not (
+            SPEAKER_AUTOCREATE_ENABLED
+            and emb
+            and float(item.get("duration", 0.0)) >= SPEAKER_AUTOCREATE_MIN_SECONDS
+        ):
+            return None
+        already = (
+            db.query(SpeakerSessionLink)
+            .filter(
+                SpeakerSessionLink.session_id == session.id,
+                SpeakerSessionLink.raw_label == label,
+                SpeakerSessionLink.confirmed.is_(True),
+            )
+            .first()
+        )
+        if already is not None:
+            return None
+        return auto_create_speaker(
+            db, session.organization_id, emb, source_session_id=session.id
+        )
+
     for label, item in by_label.items():
         emb = item.get("embedding")
         if not emb:
@@ -866,7 +965,17 @@ def identify_speakers(
             continue
 
         if not candidates and not my_voice_candidates:
-            label_to_speaker[label] = {"matched": False, "reason": "no_enrolled_speakers"}
+            # No enrolled speakers yet — bootstrap the org's library by
+            # auto-creating a persistent profile for this voice.
+            auto_sp = _autocreate_if_eligible(label, item, emb)
+            if auto_sp is not None:
+                label_to_speaker[label] = {
+                    "matched": True, "speaker_id": auto_sp.id,
+                    "similarity": 1.0, "auto_created": True,
+                }
+                summary["auto_created"] = summary.get("auto_created", 0) + 1
+            else:
+                label_to_speaker[label] = {"matched": False, "reason": "no_enrolled_speakers"}
             continue
 
         # Org-library match via the provider (unchanged path).
@@ -955,7 +1064,21 @@ def identify_speakers(
                     "reason": "my_voice_bootstrap_failed",
                 }
         else:
-            label_to_speaker[label] = {"matched": False, "reason": org_miss_reason}
+            # Persistent identity (v3.43): no enrolled speaker matched — auto-
+            # create a stable UNNAMED profile for this voice (closure above), so
+            # the SAME voice matches it (same handle) in future meetings and
+            # naming it later propagates everywhere.
+            auto_sp = _autocreate_if_eligible(label, item, emb)
+            if auto_sp is not None:
+                label_to_speaker[label] = {
+                    "matched": True,
+                    "speaker_id": auto_sp.id,
+                    "similarity": 1.0,
+                    "auto_created": True,
+                }
+                summary["auto_created"] = summary.get("auto_created", 0) + 1
+            else:
+                label_to_speaker[label] = {"matched": False, "reason": org_miss_reason}
 
     # Persist links + rewrite diarized segments
     links_by_label: dict[str, SpeakerSessionLink] = {}

@@ -87,6 +87,10 @@ class SpeakerResponse(BaseModel):
     embedding_model: Optional[str] = None
     sample_count: int = 0
     has_centroid: bool = False
+    # v3.43: True for an auto-created, not-yet-named persistent profile
+    # (display_name is a stable handle like "Speaker 3F2A"); the UI surfaces
+    # these for one-click naming, which then propagates to all past meetings.
+    auto_generated: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -255,6 +259,7 @@ def _to_response(speaker: SpeakerProfile) -> SpeakerResponse:
         embedding_model=speaker.embedding_model,
         sample_count=speaker.sample_count or 0,
         has_centroid=speaker.centroid_embedding is not None,
+        auto_generated=bool((speaker.external_refs or {}).get("auto_generated")),
         created_at=speaker.created_at.isoformat() if speaker.created_at else None,
         updated_at=speaker.updated_at.isoformat() if speaker.updated_at else None,
     )
@@ -744,8 +749,18 @@ async def update_speaker(
     gate_feature_for_caller(current_user, "speaker_library", active_org)
     _require_admin(active_org, current_user)
     speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
-    if payload.display_name is not None:
+    old_display_name = speaker.display_name
+    renamed = False
+    if payload.display_name is not None and payload.display_name != old_display_name:
         speaker.display_name = payload.display_name
+        renamed = True
+        # Naming an auto-created profile makes it user-owned — clear the flag so
+        # the UI stops flagging it as unconfirmed.
+        refs = dict(speaker.external_refs or {})
+        if refs.pop("auto_generated", None) is not None:
+            from sqlalchemy.orm.attributes import flag_modified
+            speaker.external_refs = refs or None
+            flag_modified(speaker, "external_refs")
     if payload.email is not None:
         speaker.email = payload.email or None
     if payload.notes is not None:
@@ -768,7 +783,62 @@ async def update_speaker(
         speaker.contact_link_confirmed_at = datetime.now(timezone.utc) if speaker.contact_link_confirmed else None
     db.commit()
     db.refresh(speaker)
+    # A (v3.43): a rename propagates to every past meeting this speaker appears
+    # in (transcript labels + summary text), so naming a once-anonymous voice
+    # retroactively corrects history. Cheap + best-effort — never fails the rename.
+    if renamed:
+        try:
+            apply_rename_to_history(db, speaker, old_display_name)
+        except Exception:  # noqa: BLE001
+            logger.exception("apply_rename_to_history failed for speaker=%s", speaker.id)
     return _to_response(speaker)
+
+
+@router.post("/api/speakers/{speaker_id}/resummarize-history")
+async def resummarize_speaker_history(
+    speaker_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Re-generate the AI summary of every PAST completed meeting this speaker
+    appears in, so summaries reflect the (now-named) speaker. Enqueues a
+    lightweight finalize (identify -> summarize, NO re-STT/re-diarize, ~40-60s)
+    per linked session. The transcript labels are already corrected on rename
+    (apply_rename_to_history); this is the optional 'regenerate the summary too'
+    button. Returns how many were enqueued."""
+    gate_feature_for_caller(current_user, "speaker_library", active_org)
+    _require_admin(active_org, current_user)
+    speaker = _get_speaker_or_404(db, active_org.organization.id, speaker_id)
+    session_ids = [
+        row[0]
+        for row in db.query(SpeakerSessionLink.session_id)
+        .filter(SpeakerSessionLink.speaker_id == speaker.id)
+        .distinct()
+        .all()
+    ]
+    enqueued = 0
+    for sid in session_ids:
+        session = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.id == sid,
+                RecordingSession.organization_id == active_org.organization.id,
+            )
+            .first()
+        )
+        if session is None or (session.status or "") != "completed":
+            continue
+        await _enqueue_summary_refresh(session, db)
+        enqueued += 1
+    logger.info("resummarize_speaker_history: speaker=%s enqueued=%d/%d",
+                speaker.id, enqueued, len(session_ids))
+    return {
+        "speaker_id": speaker.id,
+        "display_name": speaker.display_name,
+        "sessions_total": len(session_ids),
+        "resummaries_enqueued": enqueued,
+    }
 
 
 @router.patch("/api/speakers/{speaker_id}/contact-link", response_model=SpeakerResponse)
@@ -1709,6 +1779,70 @@ def _propagate_speaker_rename(
             changed = True
 
     return changed
+
+
+def apply_rename_to_history(db: Session, speaker: SpeakerProfile, old_name: str) -> int:
+    """Persistent-identity (v3.43): after a profile is renamed, re-label EVERY
+    past meeting it appears in — rewrite the diarized transcript labels + the
+    summary/insights text from the old handle/name to the new display_name.
+    Cheap (string ops, no LLM, no re-STT). Returns the number of sessions
+    changed. The heavier LLM re-summary is the separate /resummarize-history."""
+    from sqlalchemy.orm.attributes import flag_modified
+    new_name = speaker.display_name
+    if not new_name or new_name == old_name:
+        return 0
+    links = (
+        db.query(SpeakerSessionLink)
+        .filter(SpeakerSessionLink.speaker_id == speaker.id)
+        .all()
+    )
+    labels_by_session: dict[int, set] = {}
+    for link in links:
+        labels_by_session.setdefault(link.session_id, set()).add((link.raw_label or "").strip())
+
+    affected = 0
+    for session_id, raw_labels in labels_by_session.items():
+        session = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.id == session_id,
+                RecordingSession.organization_id == speaker.organization_id,
+            )
+            .first()
+        )
+        if session is None:
+            continue
+        changed = False
+        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else None
+        if diarized:
+            for seg in diarized.get("segments", []):
+                key = ((seg.get("raw_label") or seg.get("speaker")) or "").strip()
+                if key in raw_labels and seg.get("speaker") != new_name:
+                    seg["speaker"] = new_name
+                    seg["raw_label"] = key
+                    changed = True
+            if changed and "speakers" in diarized:
+                seen, ordered = set(), []
+                for seg in diarized.get("segments", []):
+                    s = seg.get("speaker", "Unknown")
+                    if s not in seen:
+                        seen.add(s)
+                        ordered.append(s)
+                diarized["speakers"] = ordered
+            if changed:
+                session.transcript_diarized = diarized
+                flag_modified(session, "transcript_diarized")
+        # Summary/insights string-replace: old handle/name + raw labels -> new name.
+        old_labels = [lbl for lbl in raw_labels if lbl] + ([old_name] if old_name else [])
+        if _propagate_speaker_rename(session, old_labels, new_name):
+            changed = True
+        if changed:
+            affected += 1
+    if affected:
+        db.commit()
+    logger.info("apply_rename_to_history: speaker=%s %r->%r relabeled %d past meeting(s)",
+                speaker.id, old_name, new_name, affected)
+    return affected
 
 
 @router.post(

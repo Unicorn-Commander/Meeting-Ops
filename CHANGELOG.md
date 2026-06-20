@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+## [3.43.0] - 2026-06-20
+
+Persistent speaker identity — give every voice a stable identity and let naming
+fix the past. (Backend; the naming-prompt UI follows.)
+
+### Added
+- **Auto-create stable profiles for unmatched voices.** A diarized voice that
+  matches no enrolled speaker now auto-creates a stable, UNNAMED `SpeakerProfile`
+  with a handle like `Speaker 3F2A` and enrolls its voiceprint — instead of a
+  throwaway per-session "Speaker 1/2". The same voice matches the same profile in
+  later meetings, so it keeps one consistent handle until a human names it. Covers
+  both the first-meeting bootstrap (no enrolled speakers) and the no-match case.
+  Guarded by a minimum clean-speech duration (`SPEAKER_AUTOCREATE_MIN_SECONDS`,
+  default 4s) + the consistency floor; never overrides a confirmed label; toggle
+  with `SPEAKER_AUTOCREATE_ENABLED`. `SpeakerResponse.auto_generated` flags these
+  for the UI to surface for one-click naming.
+- **Naming propagates to history.** Renaming a profile (e.g. the auto-handle → a
+  real name) now re-labels every PAST meeting that speaker appears in — both the
+  diarized transcript and the summary/insights text (cheap string ops, no re-STT)
+  via `apply_rename_to_history`, and clears the auto-generated flag. New
+  `POST /api/speakers/{id}/resummarize-history` regenerates the AI summaries of
+  those meetings (the optional "re-summarize too" button; lightweight finalize,
+  no re-transcribe).
+
 ## [3.42.0] - 2026-06-20
 
 Speaker-identification quality: stop fingerprint poisoning + bring browser

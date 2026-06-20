@@ -290,22 +290,29 @@ def test_non_member_my_voice_is_isolated(client, fake_provider):
     try:
         session = db.query(RecordingSession).filter(RecordingSession.id == session_pk).first()
         result = identify_speakers(session, db)
-        assert result["linked"] == 0, f"cross-tenant my-voice leak: {result}"
-        assert result["unmatched"] == 1
 
+        # v3.43: the unmatched voice auto-creates a FRESH org-A profile (stable
+        # identity for that voice), but the OUTSIDER's my-voice never leaks in —
+        # the new profile is an anonymous handle, not "Otto Outsider", and is not
+        # claimed by that user. Cross-tenant isolation is preserved.
+        from services.speaker_service import is_auto_generated_speaker
+        assert result.get("auto_created", 0) >= 1, f"expected auto-create: {result}"
+        profs = (
+            db.query(SpeakerProfile)
+            .filter(SpeakerProfile.organization_id == org_a.id)
+            .all()
+        )
+        assert len(profs) == 1
+        sp = profs[0]
+        assert is_auto_generated_speaker(sp)
+        assert sp.display_name != "Otto Outsider"  # no cross-tenant identity leak
+        assert sp.linked_user_id is None  # not claimed by the outsider
         link = (
             db.query(SpeakerSessionLink)
             .filter(SpeakerSessionLink.session_id == session_pk)
             .first()
         )
-        assert link is not None and link.speaker_id is None
-        # No speaker was bootstrapped into org A.
-        assert (
-            db.query(SpeakerProfile)
-            .filter(SpeakerProfile.organization_id == org_a.id)
-            .count()
-            == 0
-        )
+        assert link is not None and link.speaker_id == sp.id
     finally:
         db.close()
 
