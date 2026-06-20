@@ -1001,7 +1001,7 @@ async def get_session(
 ) -> dict:
     """Get a specific recording session from database with error handling"""
     try:
-        from services.speaker_service import hydrate_diarized_speaker_names
+        from services.speaker_service import hydrate_diarized_for_session
         # Find by session_id (UUID string), org-scoped first.
         session = _get_session_for_org(db, active_org.organization.id, session_id)
 
@@ -1122,7 +1122,7 @@ async def get_session(
             # New enhanced fields
             "transcript_simple": session.transcript_simple or "",
             "transcript_diarized": (
-                hydrate_diarized_speaker_names(session.transcript_diarized, db, session.id)
+                hydrate_diarized_for_session(session)
                 if session.transcript_diarized else transcription_data
             ),
             "progressive_summaries": session.progressive_summaries or [],

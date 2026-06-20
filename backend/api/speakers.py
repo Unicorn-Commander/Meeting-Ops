@@ -1787,12 +1787,17 @@ def _propagate_speaker_rename(
 
 
 def apply_rename_to_history(db: Session, speaker: SpeakerProfile, old_name: str) -> int:
-    """Persistent-identity (v3.43): after a profile is renamed, re-label EVERY
-    past meeting it appears in — rewrite the diarized transcript labels + the
-    summary/insights text from the old handle/name to the new display_name.
+    """Persistent-identity (v3.43): after a profile is renamed, fix EVERY past
+    meeting it appears in.
+
+    v3.44 fully-dynamic transcripts: the diarized transcript is NO LONGER
+    rewritten here — every display surface renders the speaker NAME live from
+    the current profile (hydrate_diarized_*), so a rename shows everywhere
+    instantly without baking a name into stored segments. This function now
+    only fixes the SUMMARY / insights free text, which is LLM-generated prose
+    that can't be rendered live and so must be string-replaced in place.
     Cheap (string ops, no LLM, no re-STT). Returns the number of sessions
     changed. The heavier LLM re-summary is the separate /resummarize-history."""
-    from sqlalchemy.orm.attributes import flag_modified
     new_name = speaker.display_name
     if not new_name or new_name == old_name:
         return 0
@@ -1817,35 +1822,15 @@ def apply_rename_to_history(db: Session, speaker: SpeakerProfile, old_name: str)
         )
         if session is None:
             continue
-        changed = False
-        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else None
-        if diarized:
-            for seg in diarized.get("segments", []):
-                key = ((seg.get("raw_label") or seg.get("speaker")) or "").strip()
-                if key in raw_labels and seg.get("speaker") != new_name:
-                    seg["speaker"] = new_name
-                    seg["raw_label"] = key
-                    changed = True
-            if changed and "speakers" in diarized:
-                seen, ordered = set(), []
-                for seg in diarized.get("segments", []):
-                    s = seg.get("speaker", "Unknown")
-                    if s not in seen:
-                        seen.add(s)
-                        ordered.append(s)
-                diarized["speakers"] = ordered
-            if changed:
-                session.transcript_diarized = diarized
-                flag_modified(session, "transcript_diarized")
-        # Summary/insights string-replace: old handle/name + raw labels -> new name.
+        # Summary/insights string-replace ONLY: old handle/name + raw labels ->
+        # new name. Transcripts render live (see docstring), so we don't touch
+        # transcript_diarized here anymore.
         old_labels = [lbl for lbl in raw_labels if lbl] + ([old_name] if old_name else [])
         if _propagate_speaker_rename(session, old_labels, new_name):
-            changed = True
-        if changed:
             affected += 1
     if affected:
         db.commit()
-    logger.info("apply_rename_to_history: speaker=%s %r->%r relabeled %d past meeting(s)",
+    logger.info("apply_rename_to_history: speaker=%s %r->%r fixed summaries in %d past meeting(s)",
                 speaker.id, old_name, new_name, affected)
     return affected
 

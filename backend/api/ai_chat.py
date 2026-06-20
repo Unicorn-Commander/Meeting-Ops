@@ -146,7 +146,11 @@ def _get_transcript_text(session: DBRecordingSession) -> str:
     v3.33.0 fixed for summaries.
     """
     if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
-        segments = session.transcript_diarized.get("segments", [])
+        # v3.44: render speaker names LIVE from the current profiles so chat
+        # attribution reflects a rename without a transcript rewrite.
+        from services.speaker_service import hydrate_diarized_for_session
+        hydrated = hydrate_diarized_for_session(session)
+        segments = (hydrated or {}).get("segments", []) if isinstance(hydrated, dict) else []
         if segments:
             from services.speaker_labels import build_attributed_transcript
             text, _speakers = build_attributed_transcript(segments)

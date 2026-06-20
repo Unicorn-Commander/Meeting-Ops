@@ -323,6 +323,9 @@ def _synthetic_org_for_internal_caller(
 
 
 def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) -> dict[str, Any]:
+    # v3.44: render speaker names live from the current profiles so a rename
+    # shows instantly here without rewriting the stored transcript.
+    from services.speaker_service import hydrate_diarized_for_session
     return {
         "id": session.session_id or str(session.id),
         "pk": session.id,
@@ -335,7 +338,7 @@ def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) 
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
         "duration": float(session.duration or 0),
         "transcript_simple": session.transcript_simple or "",
-        "transcript_diarized": session.transcript_diarized or {"segments": []},
+        "transcript_diarized": hydrate_diarized_for_session(session) or {"segments": []},
         "final_summary": session.final_summary,
         "ai_insights": session.ai_insights,
         "summary": session.summary,

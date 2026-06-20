@@ -169,6 +169,23 @@ def hydrate_diarized_speaker_names(diarized, db: Session, session_id: int):
         return diarized
 
 
+def hydrate_diarized_for_session(session):
+    """Convenience wrapper: hydrate a session's diarized doc live from the
+    current SpeakerProfiles, resolving the DB from the ORM object itself.
+
+    v3.44: lets call sites that only have the ORM ``session`` (no ``db``
+    param) render names live without a signature change. Returns the doc
+    unchanged when the session is detached (no bound Session) or
+    ``transcript_diarized`` isn't a dict. Read-only — same guarantees as
+    hydrate_diarized_speaker_names."""
+    from sqlalchemy.orm import object_session
+
+    db = object_session(session)
+    if db is None or not isinstance(getattr(session, "transcript_diarized", None), dict):
+        return session.transcript_diarized
+    return hydrate_diarized_speaker_names(session.transcript_diarized, db, session.id)
+
+
 # ---------- DB helpers ----------
 
 

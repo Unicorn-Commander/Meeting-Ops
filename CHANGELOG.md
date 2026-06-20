@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.45.0] - 2026-06-20
+
+### Changed
+- **Fully dynamic transcript speaker names — single source of truth.** Speaker
+  names now render LIVE from the current `SpeakerProfile` at *every* transcript
+  display surface — session detail (`get_session`), all exports (PDF/DOCX/TXT/SRT/
+  JSON/markdown), AI-chat/RAG LLM context, and the always-on payload — via the
+  session links (`hydrate_diarized_for_session`, which resolves the DB from the ORM
+  object so no signature threading is needed). As a result `apply_rename_to_history`
+  **no longer rewrites stored transcripts at all** — it only fixes the AI summary's
+  free text (which can't be rendered live). A rename is now one profile update +
+  a tiny summary touch, regardless of how many meetings the speaker appears in;
+  the speaker's name lives in exactly one place. Ingest paths (satellite/websocket)
+  and the Qdrant search index (manual reindex) are unchanged by design.
+
 ## [3.44.0] - 2026-06-20
 
 ### Changed

@@ -550,7 +550,12 @@ def _get_transcript_segments(session: RecordingSession) -> list:
     """Extract transcript segments from session data."""
     # Try diarized transcript first
     if session.transcript_diarized and isinstance(session.transcript_diarized, dict):
-        segments = session.transcript_diarized.get("segments", [])
+        # v3.44: hydrate speaker names live from the current profiles so every
+        # export format (PDF/DOCX/TXT/SRT/JSON/markdown) reflects a rename
+        # without rewriting the stored transcript.
+        from services.speaker_service import hydrate_diarized_for_session
+        hydrated = hydrate_diarized_for_session(session)
+        segments = (hydrated or {}).get("segments", []) if isinstance(hydrated, dict) else []
         if segments:
             return segments
 
@@ -1122,7 +1127,11 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
     if options.includeTranscript:
         lines.append("## Transcript")
         lines.append("")
-        diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else None
+        # v3.44: render speaker names live from the current profiles (rename
+        # shows instantly; no stored-transcript rewrite).
+        from services.speaker_service import hydrate_diarized_for_session
+        hydrated = hydrate_diarized_for_session(session)
+        diarized = hydrated if isinstance(hydrated, dict) else None
         segs = diarized.get("segments") if diarized else None
         if segs:
             for seg in segs:
