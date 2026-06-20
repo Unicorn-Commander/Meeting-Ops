@@ -1,5 +1,34 @@
 ## [Unreleased]
 
+## [3.40.1] - 2026-06-19
+
+Follow-ups to the v3.40.0 hardening + the prod (unicorncommander.ai) rollout.
+
+### Added / Changed
+- **Org-aware tier UI.** `/api/auth/me` now returns `active_org_features` (+ the
+  workspace `plan`), and `useTierFeatures` returns the EFFECTIVE capability =
+  AND(user tier, active-org plan) with a `limitedBy: 'tier' | 'workspace'` signal
+  and superuser bypass — so the UI matches the per-workspace backend gate instead
+  of showing enabled controls that then 403. The upgrade banner now shows a
+  workspace-upgrade prompt when a paid user is acting in a Free workspace.
+
+### Fixed
+- **Optional `netifaces` import is guarded** — its absence can no longer drop the
+  whole system-service module (and with it the auth-bearing `websocket_auto_summary`
+  router).
+- **Container healthcheck is liveness, not readiness** — switched to the shallow
+  `/health` so a serving-but-degraded backend (an optional AI dep unreachable) is
+  not marked unhealthy; `/health/ready` stays the deep diagnostic.
+- **Prod deploy fixes (centerdeep):** carry `SECRET_KEY` on the worker anchor (the
+  security-2 guard restart-looped the workers without it); attach the backend to
+  `unicorn-network` so it can reach the shared `unicorn-redis` / `unicorn-qdrant`
+  (they were on a network the compose didn't join); point the AI endpoints at the
+  current mesh hosts (STT/diarization moved to midboy1, LiteLLM gateway to
+  `100.79.41.137:4000`) — the remaining STT/embeddings/TTS reachability is a
+  tailnet-ACL item.
+- Aligned stale test fixtures that seeded free-tier users against paid-tier-gated
+  endpoints.
+
 ## [3.40.0] - 2026-06-19
 
 Enterprise/SaaS production-readiness hardening — a multi-agent audit (59 verified
