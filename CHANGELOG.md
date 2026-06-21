@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Documentation
+- **README body positioning pass.** Reconciled the body with the SaaS-primary +
+  open-source + enterprise reality (the v3.46.1 hero/footer were already done). TL;DR
+  + comparison table now lead with the honest, durable differentiators — *no
+  third-party AI, never trained on your data, runs anywhere (our cloud / your private
+  cloud / air-gapped on-prem), open source* — and dropped the "$0 marginal cost / on
+  GPUs you own" framing that implied self-host-only. "The moat: zero marginal compute"
+  retitled **"Browser-first by design"** and reframed around user benefit; "Privacy &
+  sovereignty" → **"Privacy, ownership & control"** (honest in SaaS: *we* run the
+  models — not a third party — with self-host/on-prem as the full-sovereignty option).
+
 ## [3.46.2] - 2026-06-20
 
 ### Fixed

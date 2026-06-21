@@ -9,12 +9,13 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/release-v3.46.1-8b5cf6)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v3.46.2-8b5cf6)](./CHANGELOG.md)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776ab?logo=python&logoColor=white)](https://python.org)
 [![React 19](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Browser-first](https://img.shields.io/badge/inference-browser--first-ac162c)](./docs/compute-economics.md)
-[![Self-hosted](https://img.shields.io/badge/cloud_AI_APIs-zero-16a34a)](#-the-moat-zero-marginal-compute)
+[![Browser-first](https://img.shields.io/badge/inference-browser--first-ac162c)](#-browser-first-by-design)
+[![No third-party AI](https://img.shields.io/badge/3rd--party_AI-none-16a34a)](#-privacy-ownership--control)
+[![Open source](https://img.shields.io/badge/source-open-3b82f6)](LICENSE)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 *Part of the [Unicorn Commander](https://git.unicorncommander.ai) suite.*
@@ -29,19 +30,20 @@
 
 ## ✨ TL;DR
 
-Most meeting-AI tools (Otter, Granola, Fathom, Fireflies, Read.ai) rent you transcription and summarization that runs on a vendor's GPUs, billed *per audio-minute* and *per token*, *per user*, *continuously*, forever. Your conversations live on their servers.
+Most meeting-AI tools (Otter, Granola, Fathom, Fireflies, Read.ai) run your transcription and summarization on a vendor's GPUs and pipe your audio out to third-party AI — billed *per audio-minute* and *per token*, *per user*, continuously. Your conversations live on their servers and can be used to train their models.
 
-**Meeting-Ops flips that.** The live transcript and live summary run **in your browser** on small on-device models. The high-quality pass runs **once, at meeting end**, on GPUs *you* own. The result: pro-grade meeting intelligence with a marginal cloud-AI cost of **$0** — and a privacy mode where the audio bytes literally never leave the device.
+**Meeting-Ops is built differently.** The live transcript and live summary run **in your browser** on small on-device models. The high-quality pass runs **once, at meeting end**, on GPUs *we* operate — never a third-party AI — or on *your* hardware if you self-host. Either way: **no per-audio-minute meter, no third-party AI, and your data is never harvested or used for training** — plus a privacy mode where the audio bytes never leave the device. It's open source, so you can verify every word of that, or run the whole thing yourself.
 
 | | Meeting-Ops | Typical cloud meeting-AI |
 |---|---|---|
 | Live transcription | 🟣 In your browser (Parakeet) | ☁️ Vendor GPU, per-minute |
 | Live summary | 🟣 In your browser (small LLM) | ☁️ Vendor tokens, per-minute |
-| Final quality pass | 🟣 Once, on your GPU (~30–90s) | ☁️ Continuous |
-| Marginal cloud-AI $/user-hr | **$0** | $0.50–$1.50 |
-| Audio at rest | 🟣 Your storage (or device-only) | ☁️ Their cloud |
+| Final quality pass | 🟣 Once — our GPU, or yours (self-host) | ☁️ Continuous |
+| Your audio sent to third-party AI | 🟣 **Never** (we run our own models) | ☁️ Usually (OpenAI / AssemblyAI / …) |
+| Trained on your data | 🟣 **Never** | ⚠️ Often |
+| Where it runs | 🟣 Our cloud · your private cloud · air-gapped on-prem | ☁️ Their cloud only |
 | Speaker identity across meetings | 🟣 Persistent, self-improving | ⚠️ Usually per-meeting |
-| Run fully air-gapped | 🟣 Yes (privacy mode / on-prem) | ❌ No |
+| Source code | 🟣 **Open source** (auditable) | ❌ Closed |
 
 ---
 
@@ -88,7 +90,7 @@ Full-text + hybrid semantic search across every meeting. Cross-meeting RAG ("sum
 
 ---
 
-## 🛡️ The moat: zero marginal compute
+## 🛡️ Browser-first by design
 
 > The thing that makes Meeting-Ops different isn't the model selection or the UI. **It's that we don't run the per-minute compute. The user's browser does.**
 
@@ -117,9 +119,9 @@ Full-text + hybrid semantic search across every meeting. Cross-meeting RAG ("sum
 
 The browser stack runs in the tab for the entire meeting. The server stack runs **exactly once** when the meeting ends.
 
-**Why it matters:** competitors pay AssemblyAI/Deepgram per audio-minute and OpenAI/Anthropic per token, per user, continuously. That cost scales linearly with concurrent users. Our marginal cost per concurrent user-hour is **zero** — the user's CPU/GPU does it. Our cost per *completed* meeting is ~30–90 GPU-seconds on hardware we already own. At 1,000 concurrent hour-long meetings, the per-minute crowd burns $500–1,500/hr in live compute; we spend roughly $20 once those meetings finish.
+**Why it matters to you:** typical meeting-AI streams your audio to AssemblyAI/Deepgram per minute and OpenAI/Anthropic per token, continuously — your conversation rides along to those third parties the whole time. Browser-first changes the math: the per-minute work happens on the user's own device, so the only server cost is one ~30–90s burst per *finished* meeting. That's what lets us host it **privately and affordably** — no third-party AI, no per-minute meter — and lets you **self-host the whole thing on modest hardware**.
 
-📖 Full strategy: [`docs/compute-economics.md`](./docs/compute-economics.md). *Read it before adding any server-side per-minute service — the architecture is the moat, and we don't give it back by reaching for an external API when the work could go to the browser or fold into the completion pass.*
+📖 Architecture deep-dive: [`docs/compute-economics.md`](./docs/compute-economics.md). *Default new features to browser-side compute; only fold work into the completion pass when quality genuinely requires it, and only reach for an external API as a flagged last resort.*
 
 ---
 
@@ -136,12 +138,14 @@ Meeting-Ops doesn't just split a meeting into "Speaker 1 / Speaker 2." It builds
 
 ---
 
-## 🔒 Privacy & sovereignty
+## 🔒 Privacy, ownership & control
 
-- **Privacy mode** is a per-session toggle: the entire browser stack is self-contained, so turning the server step off means **audio bytes never leave the device**. Orthogonal to pricing — anyone can flip it on; enterprise/HIPAA deployments default it on.
-- **Your storage, your delete.** Canonical audio lives in **Garage** (S3-compatible) on *your* hardware, not a third-party cloud. Deleting a session purges its objects, its vectors (Qdrant), and its chat history — "delete my data" actually deletes.
-- **No third-party AI APIs.** Every model — STT, diarization, LLM, embeddings, TTS — runs on infrastructure you control, fronted by a self-hosted LiteLLM gateway.
-- **SSO-native.** Forward-auth trust boundary, per-workspace billing, WebSocket handshake auth, HTTP security headers, per-room retention opt-in.
+- **No third-party AI — ever.** Every model (STT, diarization, LLM, embeddings, TTS) runs on infrastructure *we* operate — or *yours*, self-hosted — behind a self-hosted LiteLLM gateway. Your conversations are never shipped to OpenAI / Anthropic / AssemblyAI, and **never used to train anyone's model.** It's the one promise the cloud meeting-AI category structurally can't make.
+- **Your data is yours.** You own your meetings and transcripts; retention is configurable; and "delete my data" actually deletes — purging the audio objects (Garage), the search vectors (Qdrant), *and* the chat history.
+- **Privacy mode.** A per-session toggle that keeps the entire pipeline in the browser — **audio bytes never leave the device.** Orthogonal to pricing; enterprise/HIPAA deployments default it on.
+- **Run it your way.** Our hosted cloud (zero setup), your own private cloud, or a fully **air-gapped on-prem** appliance. The strictest buyers get complete data residency; everyone else gets one-click hosting.
+- **Open source.** Auditable end to end — no black box, no lock-in. Verify the privacy claims yourself, or fork it and run the whole stack.
+- **SSO-native + hardened.** Forward-auth trust boundary, per-workspace billing, WebSocket handshake auth, HTTP security headers, per-room retention controls.
 
 ---
 
@@ -247,7 +251,7 @@ GET   /health                                           # health + router status
 
 ## 🗺️ Status & roadmap
 
-**Live on prod (`unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.45.0:**
+**Live on prod (`unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.46.2:**
 
 - ✅ Browser-first capture + server completion pass · privacy mode
 - ✅ Speaker intelligence: persistent identity, anti-poisoning floor, **fully dynamic name rendering** (rename once → fixed everywhere, instantly)
