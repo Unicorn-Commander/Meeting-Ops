@@ -46,6 +46,16 @@ EAGER_LOAD_DIARIZER = os.getenv("SPEAKER_EAGER_LOAD_DIARIZER", "false").lower() 
 TARGET_SR = 16000  # wespeaker + Pyannote both expect 16 kHz mono
 MIN_SECONDS = float(os.getenv("MIN_AUDIO_SECONDS", "0.5"))
 MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "1800"))  # 30 min
+# Long-audio chunked diarization. When a clip exceeds CHUNK_THRESHOLD_SECONDS we
+# split it into CHUNK_WINDOW_SECONDS windows, diarize each window single-pass on
+# the GPU (bounded peak memory + time per window), then STITCH each window's
+# local SPEAKER_xx clusters into one global set by wespeaker-embedding cosine so
+# the same person keeps one label across windows. Mirrors how parakeet-svc
+# chunks long audio for STT. At/under the threshold we stay single-pass (pyannote
+# clusters globally = most accurate). MAX_SECONDS stays the absolute ceiling.
+CHUNK_THRESHOLD_SECONDS = float(os.getenv("CHUNK_THRESHOLD_SECONDS", "14400"))  # 4h
+CHUNK_WINDOW_SECONDS = float(os.getenv("CHUNK_WINDOW_SECONDS", "3600"))         # 60 min
+CHUNK_STITCH_THRESHOLD = float(os.getenv("CHUNK_STITCH_THRESHOLD", "0.62"))     # x-window centroid cosine
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "").strip() or None
 # Task #79 v2: call torch.cuda.empty_cache() after every Nth /diarize. Set to
 # 0 to disable. Default 1 (every request) — measure throughput impact and
@@ -442,6 +452,100 @@ def _run_diarization_on_wav(
     return response
 
 
+def _l2norm(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 0 else v
+
+
+def _run_chunked_diarization(
+    wav: np.ndarray,
+    *,
+    return_embeddings: bool = True,
+    num_speakers: Optional[int] = None,   # ignored in chunked mode (see below)
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> DiarizeResponse:
+    """Diarize a long clip by windowing + cross-window speaker stitch.
+
+    Splits ``wav`` into CHUNK_WINDOW_SECONDS windows, runs the normal single-pass
+    diarizer on each window (bounded peak GPU memory + time per window), then
+    unifies each window's local SPEAKER_xx labels into one global set by matching
+    pooled wespeaker centroids (cosine >= CHUNK_STITCH_THRESHOLD). Same person
+    across windows -> one global label. Same DiarizeResponse shape as single-pass,
+    timestamps offset to absolute position. Speaker-count hints are intentionally
+    ignored — the global count emerges from the stitch. Embeddings are computed
+    internally for stitching regardless of return_embeddings; they're only dropped
+    from the OUTPUT when the caller asked not to receive them.
+    """
+    total = len(wav)
+    win = max(1, int(CHUNK_WINDOW_SECONDS * TARGET_SR))
+    min_samples = int(MIN_SECONDS * TARGET_SR)
+    n_windows = max(1, (total + win - 1) // win)
+    globals_: list[dict] = []  # [{label, centroid: np.ndarray|None, count: int}]
+    out: list[DiarizeSegment] = []
+    logger.info(
+        "chunked diarize: %.1fs -> %d window(s) of %.0fs (stitch>=%.2f)",
+        total / TARGET_SR, n_windows, CHUNK_WINDOW_SECONDS, CHUNK_STITCH_THRESHOLD,
+    )
+    for wi in range(n_windows):
+        s = wi * win
+        e = min(total, s + win)
+        if e - s < min_samples:
+            continue  # skip a tiny trailing sliver
+        offset = s / TARGET_SR
+        sub = _run_diarization_on_wav(wav[s:e], return_embeddings=True)
+        # Pool one centroid per LOCAL speaker label in this window.
+        local_embs: dict[str, list[np.ndarray]] = {}
+        for seg in sub.segments:
+            if seg.embedding:
+                local_embs.setdefault(seg.speaker, []).append(
+                    np.asarray(seg.embedding, dtype="float32")
+                )
+        local_to_global: dict[str, str] = {}
+        for lbl, embs in local_embs.items():
+            cen = _l2norm(np.mean(np.stack(embs), axis=0))
+            best, best_sim = None, -1.0
+            for g in globals_:
+                if g["centroid"] is None:
+                    continue
+                sim = _cos(cen, g["centroid"])
+                if sim > best_sim:
+                    best_sim, best = sim, g
+            if best is not None and best_sim >= CHUNK_STITCH_THRESHOLD:
+                local_to_global[lbl] = best["label"]
+                k = best["count"]
+                best["centroid"] = _l2norm(best["centroid"] * k + cen)
+                best["count"] = k + 1
+            else:
+                new_label = "SPEAKER_%02d" % len(globals_)
+                globals_.append({"label": new_label, "centroid": cen, "count": 1})
+                local_to_global[lbl] = new_label
+        # Emit this window's segments with global labels + absolute timestamps.
+        for seg in sub.segments:
+            g_label = local_to_global.get(seg.speaker)
+            if g_label is None:
+                # local speaker had no usable embedding -> give it its own label
+                g_label = "SPEAKER_%02d" % len(globals_)
+                globals_.append({"label": g_label, "centroid": None, "count": 0})
+                local_to_global[seg.speaker] = g_label
+            out.append(DiarizeSegment(
+                start=seg.start + offset,
+                end=seg.end + offset,
+                speaker=g_label,
+                embedding=seg.embedding if return_embeddings else None,
+            ))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    out.sort(key=lambda x: x.start)
+    logger.info("chunked diarize done: %d segments, %d global speakers", len(out), len(globals_))
+    return DiarizeResponse(
+        segments=out,
+        num_speakers=len(globals_),
+        backend=(_diarizer_backend or "pyannote-3.1") + "-chunked",
+        duration_seconds=total / TARGET_SR,
+    )
+
+
 @app.post("/diarize", response_model=DiarizeResponse)
 async def diarize(
     audio: Optional[UploadFile] = File(default=None),
@@ -485,7 +589,17 @@ async def diarize(
     # uvicorn worker can still service /health (and queue a second request)
     # while a diarization runs — otherwise a long meeting stalls the loop and
     # can trip a false-unhealthy healthcheck. (v3.29.0)
+    duration = len(wav) / TARGET_SR
     async with _gpu_slot():
+        if duration > CHUNK_THRESHOLD_SECONDS:
+            return await asyncio.to_thread(
+                _run_chunked_diarization,
+                wav,
+                return_embeddings=return_embeddings,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
         return await asyncio.to_thread(
             _run_diarization_on_wav,
             wav,
