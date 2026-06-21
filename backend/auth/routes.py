@@ -856,9 +856,12 @@ async def sso_logout(request: Request):
             kc += f"&client_id={quote(client_id, safe='')}"
         target = f"/oauth2/sign_out?rd={quote(kc, safe='')}"
     else:
-        # No ID token (e.g. local/dev without the proxy) — best effort: clear the
-        # proxy session and return home.
-        target = f"/oauth2/sign_out?rd={quote(post_logout, safe='')}"
+        # No ID token => this deploy isn't behind oauth2-proxy/Keycloak (e.g. prod
+        # uses the app's own JWT login, or local dev). The frontend already cleared
+        # the local token before redirecting here, so just send the SPA home — it
+        # routes to /login when unauthenticated. (post_logout intentionally unused
+        # here; there's no proxy /oauth2/sign_out endpoint to bounce through.)
+        target = "/"
 
     return RedirectResponse(url=target, status_code=302)
 
