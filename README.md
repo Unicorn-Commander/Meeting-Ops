@@ -2,14 +2,14 @@
 
 # 🦄 Meeting-Ops
 
-### Meeting intelligence that runs in *your* browser — not on someone else's cloud meter.
+### The open standard for conversation intelligence.
 
 **Record. Transcribe live. Know who said what. Get AI summaries & action items. Search every meeting you've ever had. Export anything.**
-**100% self-hosted. Zero third-party AI APIs. Your audio never has to leave the room.**
+**Open source. No data harvesting. No third-party AI. Host it with us — or run it entirely yourself.**
 
 <br/>
 
-[![Version](https://img.shields.io/badge/release-v3.45.0-8b5cf6)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v3.46.1-8b5cf6)](./CHANGELOG.md)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776ab?logo=python&logoColor=white)](https://python.org)
 [![React 19](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -264,9 +264,9 @@ GET   /health                                           # health + router status
 
 <div align="center">
 
-**Meeting-Ops** — built on the conviction that your meetings are *yours*.
+**Meeting-Ops** — conversation intelligence that earns enterprise trust *and* individual delight.
 
-*Self-hosted meeting intelligence · browser-first · sovereign by design.*
+*Open source · enterprise-ready · host it with us, or run it entirely yourself.*
 
 [Releases](./CHANGELOG.md) · [Docs](./docs/README.md) · [Unicorn Commander](https://git.unicorncommander.ai)
 

@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.46.1] - 2026-06-20
+
+### Changed
+- **Brand voice + positioning (research-backed).** In-app web GUI tagline (browser
+  title + loading splash) → **"Intelligence for your conversations (whether or not
+  they're intelligent)"** — playful, on-brand for Magic Unicorn; replaces "Meeting
+  intelligence you self-host." Public Landing hero + README repositioned to the
+  enterprise / open-source standard: **"The open standard for conversation
+  intelligence"** + an honest SaaS subhead (*understands every meeting — without
+  harvesting your data or sending it to someone else's AI; host it with us, or run
+  it yourself*). Dropped the "100% self-hosted / sovereign by design" hero overclaim
+  since the product is SaaS-primary + open-source (sovereignty is now framed as the
+  self-host/on-prem *option*, not the default). Grounded in audience + tagline-landscape
+  research (enterprise-primary, individual on-ramp; "AI"/"magic" as headline claims
+  test poorly with this audience; "open" is the one claim no competitor can make).
+
 ## [3.46.0] - 2026-06-20
 
 ### Added
