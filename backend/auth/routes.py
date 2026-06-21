@@ -846,12 +846,17 @@ async def sso_logout(request: Request):
             pass
 
     if issuer:
+        # IMPORTANT: do NOT send id_token_hint. oauth2-proxy's stored ID token is
+        # often stale (it refreshes the access token, not reliably the ID token),
+        # and Keycloak then IGNORES the logout and keeps the SSO session alive —
+        # the "authenticating" re-login loop. client_id + the browser's KC session
+        # cookie is sufficient for KC to end the session (verified live) and skips
+        # the confirmation page. The ID token is still decoded above purely to
+        # derive iss + client_id (env-agnostic); its value is never sent onward.
         kc = (
             f"{issuer}/protocol/openid-connect/logout"
             f"?post_logout_redirect_uri={quote(post_logout, safe='')}"
         )
-        if id_token:
-            kc += f"&id_token_hint={quote(id_token, safe='')}"
         if client_id:
             kc += f"&client_id={quote(client_id, safe='')}"
         target = f"/oauth2/sign_out?rd={quote(kc, safe='')}"
