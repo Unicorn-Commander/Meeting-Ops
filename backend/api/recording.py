@@ -1631,45 +1631,55 @@ async def append_audio_chunk(
 async def _reassemble_full_audio(
     chunks_dir: Path, target_wav: Path
 ) -> tuple[float, str]:
-    """Concatenate all chunk files under ``chunks_dir`` into a single WAV.
+    """Reassemble all chunk files under ``chunks_dir`` into a single WAV.
 
-    Uses ffmpeg's concat demuxer for the streams that share a codec
-    (WebM/Opus from the same MediaRecorder instance) and falls back to a
-    decode+re-encode pass when ffmpeg's concat refuses. Returns the
-    output WAV duration in seconds + the source codec name.
+    The browser uploads the meeting as a sequence of ~30s MediaRecorder
+    timeslice chunks (see ``append_audio_chunk``). Those chunks are FRAGMENTS
+    of one continuous stream — chunk 0 carries the container header/init
+    segment and chunks 1+ are headerless clusters — so each chunk after the
+    first is NOT a valid standalone file. We therefore BYTE-concatenate the
+    fragments back into the original stream and decode that once to 16 kHz mono
+    PCM WAV (what every STT provider we ship wants). Returns
+    ``(duration_sec, source_codec)``.
 
-    Why decode-then-mux: WebM containers from MediaRecorder don't always
-    share segment boundaries, so a pure concat can leave un-decodable
-    metadata at chunk boundaries. The decode pass normalizes to
-    16 kHz mono PCM WAV, which is what every downstream STT provider
-    we ship wants anyway.
+    NB: do NOT use ffmpeg's concat *demuxer* (one ``file '<chunk>'`` per line)
+    here — it treats each fragment as its own container and can only decode
+    chunk 0, silently truncating a long meeting to ~one timeslice (~30s). That
+    bug landed multi-minute recordings as 30-second transcripts; a 48-chunk /
+    24-min recording decodes to ~1424s via byte-concat vs 30s via the demuxer.
     """
-    # Sort by filename — naming is zero-padded chunk_index so lexicographic
-    # order matches arrival order.
-    chunks = sorted(p for p in chunks_dir.iterdir() if p.is_file())
+    # Chunk files are zero-padded by index, so lexicographic order == arrival
+    # order. Exclude our own scratch files (the old concat list, a prior WAV,
+    # or the combined-stream temp from a previous run).
+    chunks = sorted(
+        p for p in chunks_dir.iterdir()
+        if p.is_file()
+        and not p.name.startswith("concat")
+        and not p.name.startswith("_combined")
+        and p.suffix != ".wav"
+    )
     if not chunks:
         raise RuntimeError("No audio chunks to reassemble.")
 
-    concat_list = chunks_dir / "concat.txt"
-    # ffmpeg concat demuxer file format: one `file '<path>'` per line.
-    # Paths are quoted; we use absolute paths so the demuxer doesn't need
-    # to resolve relative to the concat.txt directory.
-    concat_list.write_text(
-        "\n".join(f"file '{p.resolve()}'" for p in chunks) + "\n",
-        encoding="utf-8",
-    )
+    # BYTE-concatenate the timeslice fragments back into the original continuous
+    # stream (chunk 0 has the header, chunks 1+ are headerless clusters), then
+    # decode that single stream. This is the ONLY correct reassembly for
+    # MediaRecorder timeslice output — see the function docstring.
+    combined = chunks_dir / "_combined_full.bin"
+    try:
+        with combined.open("wb") as out:
+            for c in chunks:
+                out.write(c.read_bytes())
+    except OSError as exc:
+        raise RuntimeError(f"Audio reassembly failed (byte-concat): {exc}")
 
-    # Single ffmpeg call: concat -> decode -> re-encode as 16 kHz mono PCM.
-    # -safe 0 lets us point at absolute paths in the list file.
+    # Decode the reconstructed stream to 16 kHz mono PCM WAV. ffmpeg sniffs the
+    # container from the bytes, so no -f is needed.
     cmd = [
         "ffmpeg",
         "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
         "-i",
-        str(concat_list),
+        str(combined),
         "-vn",
         "-ar",
         "16000",
@@ -1685,6 +1695,10 @@ async def _reassemble_full_audio(
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
+    try:
+        combined.unlink()
+    except OSError:
+        pass
     if proc.returncode != 0 or not target_wav.exists() or target_wav.stat().st_size == 0:
         detail = stderr.decode(errors="ignore")[-800:] if stderr else ""
         raise RuntimeError(f"Audio reassembly failed. ffmpeg stderr: {detail}")

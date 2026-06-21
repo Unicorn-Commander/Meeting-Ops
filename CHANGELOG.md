@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+## [3.47.0] - 2026-06-21
+
+### Fixed
+- **Critical: meetings were transcribed from only the first ~30 seconds of audio.**
+  Browser / always-on recordings upload the meeting as ~30s MediaRecorder timeslice
+  chunks; `_reassemble_full_audio` stitched them with ffmpeg's concat *demuxer*,
+  which treats each chunk as a standalone container. But timeslice chunks are
+  fragments (only chunk 0 carries a container header), so the demuxer decoded **only
+  the first chunk** — a 24-minute meeting reassembled to a 30-second WAV, and the full
+  pipeline (Parakeet 1.1B STT + pyannote diarization + speaker fingerprinting +
+  summary + title) ran on just those 30 seconds. Now byte-concatenates the fragments
+  back into the original continuous stream before decoding (verified on a real
+  48-chunk / 24-min recording: reassembles to ~1424s vs 30s). Restores true
+  browser↔upload parity. Existing affected sessions can be recovered by re-running
+  reprocess — the per-chunk audio is retained on disk.
+
+### Changed
+- **Sidebar brand line simplified** to "Intelligence for your conversations" — the
+  parenthetical wrapped to ~4 lines in the narrow rail; the wit ("…whether or not
+  they are") stays on the loading splash + browser title.
+
 ### Documentation
 - **README body positioning pass.** Reconciled the body with the SaaS-primary +
   open-source + enterprise reality (the v3.46.1 hero/footer were already done). TL;DR
