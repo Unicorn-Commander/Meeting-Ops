@@ -29,8 +29,28 @@ class TierLimits(TypedDict):
 
 
 # Source of truth for tier defaults. Per-org column overrides win when set.
+#
+# IMPORTANT: every paid tier MUST have an entry here. A missing key falls through
+# to "free" (see get_org_limits), which previously meant a $7.99 Sync/$35 Suite
+# org silently got Free's 10h/500MB/1-concurrent caps — a $35 Suite customer was
+# *more* restricted than a $20 Pro. (Fixed: sync/basic/suite added below.)
 TIER_DEFAULTS: dict[str, TierLimits] = {
     "free": {
+        "max_file_bytes": 500 * 1024 * 1024,           # 500 MB
+        "max_concurrent_uploads": 1,
+        "max_monthly_hours": 10,
+    },
+    # "sync" (formerly "basic", $7.99): server-side TEXT sync / search / chat only
+    # — NO server audio upload (gated off in auth/tier.py: audio_upload=False), so
+    # these upload caps are belt-and-suspenders and never bind in practice. Set to
+    # free-equivalent so a Sync org never silently inherits another tier's caps.
+    "sync": {
+        "max_file_bytes": 500 * 1024 * 1024,           # 500 MB
+        "max_concurrent_uploads": 1,
+        "max_monthly_hours": 10,
+    },
+    # "basic" — permanent alias of "sync" for pre-rename orgs (plan="basic" rows).
+    "basic": {
         "max_file_bytes": 500 * 1024 * 1024,           # 500 MB
         "max_concurrent_uploads": 1,
         "max_monthly_hours": 10,
@@ -39,6 +59,14 @@ TIER_DEFAULTS: dict[str, TierLimits] = {
         "max_file_bytes": 2 * 1024 * 1024 * 1024,      # 2 GB
         "max_concurrent_uploads": 4,
         "max_monthly_hours": 100,
+    },
+    # "suite" ($35): Pro + cross-app (UC) entitlement. MUST be >= Pro (the bug was
+    # Suite falling through to Free). Premium audio budget, below Enterprise's
+    # unlimited. NOTE(Aaron): sensible defaults — confirm/adjust the exact numbers.
+    "suite": {
+        "max_file_bytes": 5 * 1024 * 1024 * 1024,      # 5 GB
+        "max_concurrent_uploads": 8,
+        "max_monthly_hours": 250,
     },
     "enterprise": {
         "max_file_bytes": 10 * 1024 * 1024 * 1024,     # 10 GB

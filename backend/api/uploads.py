@@ -703,8 +703,28 @@ async def reprocess_session(
             )
     if not rec:
         raise HTTPException(status_code=404, detail="Session not found in active organization.")
-    if not rec.audio_file or not Path(rec.audio_file).exists():
-        raise HTTPException(status_code=410, detail="Session audio file is not on disk; cannot reprocess.")
+    # Resolve the source audio. Always-on / browser recordings keep their audio
+    # as ~30s chunks on disk; the reassembled `audio_file` wav may be missing
+    # (evicted to Garage) OR stale (the pre-v3.47 truncated 30s copy). When chunks
+    # exist, reassemble them (byte-concat — the canonical full audio) so the manual
+    # Reprocess button works for those sessions and re-runs over the FULL meeting,
+    # not a stale/truncated wav. Uploaded files (no chunks) use their stored wav.
+    from api.recording import _audio_chunks_dir, _list_chunk_files, _reassemble_full_audio
+    _canonical_sid = rec.session_id or str(rec.id)
+    _chunks_dir = _audio_chunks_dir(active_org.organization.slug, _canonical_sid)
+    if _list_chunk_files(_chunks_dir):
+        _target_wav = _chunks_dir.parent / "session.wav"
+        try:
+            await _reassemble_full_audio(_chunks_dir, _target_wav)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Audio reassembly failed: {exc}")
+        rec.audio_file = str(_target_wav)
+        db.commit()
+    elif not rec.audio_file or not Path(rec.audio_file).exists():
+        raise HTTPException(
+            status_code=410,
+            detail="No recoverable audio for this session (no chunks on disk and no stored audio file).",
+        )
 
     # Invalidate the cached ai_insights so the next /insights GET re-extracts
     # against the new transcript/diarization. The pipeline also overwrites

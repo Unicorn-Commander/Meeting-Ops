@@ -1466,8 +1466,13 @@ export const SessionDetails: React.FC = () => {
       // Pipeline reruns asynchronously; the upload tray will surface progress.
       // Refresh session view so the user sees status flip back to "processing".
       await fetchSession();
+      toast.success('Reprocess queued — the transcript & speakers will update when it finishes.');
     } catch (err: any) {
-      setReprocessError(err?.message || 'Reprocess failed.');
+      const msg = err?.message || 'Reprocess failed.';
+      // Surface it both in the modal AND as a toast — the modal may be closed,
+      // and a silent failure here previously looked like "nothing happened".
+      setReprocessError(msg);
+      toast.error(msg);
     } finally {
       setReprocessing(false);
     }

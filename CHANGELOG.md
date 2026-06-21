@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+## [3.48.0] - 2026-06-21
+
+### Fixed
+- **Paid tiers silently inherited Free upload limits.** `services/quotas.py`
+  `TIER_DEFAULTS` only defined free/pro/enterprise, so `sync`/`basic`/`suite` orgs
+  fell through to Free's 10h / 500 MB / 1-concurrent caps — a $35 Suite org was
+  *more* restricted than a $20 Pro. Added explicit `sync`/`basic`/`suite` entries
+  (sync/basic = free-equivalent, no server audio by design; suite = 5 GB / 8 / 250 h,
+  ≥ Pro). Regression test: `tests/test_quotas.py`. (Suite numbers are sensible
+  defaults — adjust to taste.)
+- **The "Reprocess" button was a silent no-op for always-on / browser sessions.**
+  The endpoint (`api/uploads.py`) required the reassembled wav on *local* disk and
+  returned 410 when it was missing (evicted to Garage) or stale (the pre-v3.47
+  truncated 30 s copy) — and the frontend never surfaced the error. Now: when audio
+  chunks are on disk, reprocess **reassembles them** (byte-concat — the canonical
+  full audio) so the manual button works for always-on/browser recordings and
+  re-runs the full pass over the WHOLE meeting, not a stale wav; and the frontend
+  (`SessionDetails.tsx`) **toasts** success/failure so a 403 (tier) or 410 (no
+  audio) is no longer invisible.
+
 ## [3.47.0] - 2026-06-21
 
 ### Fixed
