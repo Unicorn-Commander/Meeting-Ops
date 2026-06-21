@@ -321,7 +321,7 @@ function SimplifiedNavigation({
           </div>
           <div className={collapsed ? 'md:hidden' : ''}>
             <div className="text-white font-semibold tracking-tight">Meeting-Ops</div>
-            <div className="text-xs text-zinc-400">Meeting intelligence, self-hosted</div>
+            <div className="text-xs text-zinc-400 leading-snug">Intelligence for your conversations <span className="text-zinc-500">(whether or not they are)</span></div>
           </div>
           {/* Collapse chevron — desktop only, shown when expanded. */}
           {!collapsed && (

@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [3.46.2] - 2026-06-20
+
+### Fixed
+- **In-app sidebar tagline.** The left-sidebar brand line
+  (`AppRouterSimplified.tsx`) still read "Meeting intelligence, self-hosted" — the
+  one spot the v3.46.1 tagline change missed (it updated the browser title, loading
+  splash, and Landing hero, but not the sidebar `<div>`). Now shows the brand line:
+  *Intelligence for your conversations (whether or not they are)*.
+- **Tighter punchline.** Shortened the parenthetical from "(whether or not they're
+  intelligent)" to **"(whether or not they are)"** everywhere (sidebar, browser
+  title, loading splash) — lets the reader complete the joke off "Intelligence for
+  your conversations." Rotating taglines deferred to the future roadmap.
+
 ## [3.46.1] - 2026-06-20
 
 ### Changed
