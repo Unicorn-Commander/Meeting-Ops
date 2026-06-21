@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [3.48.1] - 2026-06-21
+
+### Fixed
+- **Speaker-tagging dropdowns disappeared from the session view.** Two causes:
+  - *Frontend:* the session-detail page derived its `speakers`/`segments` from
+    `transcription.*`, but an **empty array is truthy in JS**, so the
+    `|| transcript_diarized` fallback never ran — the page read "0 speakers" and
+    hid the inline speaker-tagging card on every tab except "Speakers". Now prefers
+    the live-hydrated `transcript_diarized.speakers` and skips empty arrays, so the
+    inline dropdowns + correct count come back. (`SessionDetails.tsx`)
+  - *Backend:* the speaker endpoints (`list_speaker_links` + assign / rename /
+    identify / rediarize / enroll / merge) were strictly org-scoped, so opening a
+    session from another org you have access to (e.g. a personal-org recording while
+    active in a different org) loaded the page but 404'd the tagger → "No diarized
+    speakers detected." `_get_session_or_404` now resolves cross-org via
+    `has_session_access`, mirroring `get_session` (same-org behavior unchanged).
+
 ## [3.48.0] - 2026-06-21
 
 ### Fixed

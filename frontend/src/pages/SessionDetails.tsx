@@ -1781,10 +1781,13 @@ export const SessionDetails: React.FC = () => {
     );
   }
 
-  const segments = session.transcription?.segments
-    || session.transcription_segments
-    || session.transcript_diarized?.segments
-    || [];
+  // Prefer the FIRST source that actually has rows. Empty arrays are truthy, so
+  // the old `a || b || c` short-circuited on an EMPTY `transcription.segments`
+  // and never fell through to the (populated, live-hydrated) transcript_diarized —
+  // which made the diarized view + speaker count read as empty ("0 speakers").
+  const segments = (session.transcription?.segments?.length ? session.transcription.segments
+    : session.transcription_segments?.length ? session.transcription_segments
+    : session.transcript_diarized?.segments) || [];
 
   const filteredSegments = segments.filter(seg => {
     const matchesSpeaker = selectedSpeaker === 'all' || seg.speaker === selectedSpeaker;
@@ -1792,8 +1795,16 @@ export const SessionDetails: React.FC = () => {
     return matchesSpeaker && matchesSearch;
   });
 
-  const speakers = session.transcription?.speakers
-    || [...new Set(segments.map(s => s.speaker || 'Speaker'))];
+  // Use the live-hydrated diarized speaker list first (authoritative names/handles
+  // from the profiles), then any non-empty transcription list, then derive from
+  // segments. Skipping empty arrays is what restores the inline speaker card +
+  // the correct count (the old `transcription?.speakers || …` returned an empty
+  // array as-is, hiding the tagger on every tab but "Speakers").
+  const speakers = (session.transcript_diarized?.speakers?.length
+    ? session.transcript_diarized.speakers
+    : session.transcription?.speakers?.length
+    ? session.transcription.speakers
+    : [...new Set(segments.map(s => s.speaker || 'Speaker'))]);
 
   // Speakers still showing a raw diarization label ("SPEAKER_00" / "Speaker 1")
   // rather than a real name. Drives a prominent inline "name them" prompt so the
