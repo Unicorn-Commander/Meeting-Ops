@@ -53,9 +53,14 @@ MAX_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", "1800"))  # 30 min
 # the same person keeps one label across windows. Mirrors how parakeet-svc
 # chunks long audio for STT. At/under the threshold we stay single-pass (pyannote
 # clusters globally = most accurate). MAX_SECONDS stays the absolute ceiling.
-CHUNK_THRESHOLD_SECONDS = float(os.getenv("CHUNK_THRESHOLD_SECONDS", "14400"))  # 4h
+CHUNK_THRESHOLD_SECONDS = float(os.getenv("CHUNK_THRESHOLD_SECONDS", "28800"))  # 8h: below = single-pass
 CHUNK_WINDOW_SECONDS = float(os.getenv("CHUNK_WINDOW_SECONDS", "3600"))         # 60 min
-CHUNK_STITCH_THRESHOLD = float(os.getenv("CHUNK_STITCH_THRESHOLD", "0.62"))     # x-window centroid cosine
+# Cross-window centroid cosine to call two windows the same speaker. Empirically
+# (acbe7b3a, 6 windows) major speakers stitch at 0.73-0.96 and distinct speakers
+# at ~0.0; 0.50 sits cleanly between. NOTE: single-pass (<= threshold) is more
+# accurate for minor/ambiguous speakers — chunking is the >8h safety net, where
+# pyannote's O(n^2) global clustering would otherwise choke.
+CHUNK_STITCH_THRESHOLD = float(os.getenv("CHUNK_STITCH_THRESHOLD", "0.50"))
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "").strip() or None
 # Task #79 v2: call torch.cuda.empty_cache() after every Nth /diarize. Set to
 # 0 to disable. Default 1 (every request) — measure throughput impact and
@@ -511,6 +516,11 @@ def _run_chunked_diarization(
                 sim = _cos(cen, g["centroid"])
                 if sim > best_sim:
                     best_sim, best = sim, g
+            logger.info(
+                "stitch win=%d local=%s best_sim=%.3f thr=%.2f -> %s",
+                wi, lbl, best_sim, CHUNK_STITCH_THRESHOLD,
+                "merge" if (best is not None and best_sim >= CHUNK_STITCH_THRESHOLD) else "NEW",
+            )
             if best is not None and best_sim >= CHUNK_STITCH_THRESHOLD:
                 local_to_global[lbl] = best["label"]
                 k = best["count"]

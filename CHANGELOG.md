@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Added
+- **Chunked long-audio diarization (speaker-svc), on one GPU.** Meetings over
+  `CHUNK_THRESHOLD_SECONDS` (8h) are split into `CHUNK_WINDOW_SECONDS` (60-min)
+  windows, each diarized single-pass on the GPU, then stitched into one global
+  speaker set by wespeaker-embedding cosine (`CHUNK_STITCH_THRESHOLD`). Mirrors how
+  parakeet-svc chunks long audio for STT. Bounds pyannote's O(n^2) clustering for
+  all-day recordings without a second card. At/under the threshold stays
+  single-pass — pyannote's global clustering is most accurate, and the 4070 handles
+  ~8h single-pass at ~6 GB in ~5 min (validated). `MAX_AUDIO_SECONDS` is now a 24h
+  absolute ceiling instead of the long-meeting gate. Same `/diarize` response shape;
+  downstream `identify_speakers` unchanged.
+
+### Fixed
+- **Diarization silently capped meetings at the stale `MAX_AUDIO_SECONDS`.** The
+  running speaker-svc was at 4h while the project intent was 8h, so a 5.8h upload
+  was rejected (`audio too long`) and finished transcribed-but-not-diarized (0
+  speakers). Raised to the 8h single-pass ceiling + 24h hard ceiling; bumped the
+  backend `SPEAKER_SVC_TIMEOUT` 300s->1800s so long single-pass diarizes complete
+  in the normal completion pass instead of timing out at 5 min.
+
 ## [3.48.1] - 2026-06-21
 
 ### Fixed
