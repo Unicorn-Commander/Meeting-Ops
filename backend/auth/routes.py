@@ -806,6 +806,62 @@ async def logout(
     # We just log the action and return success
     return {"message": "Logged out successfully"}
 
+
+@router.get("/sso-logout")
+async def sso_logout(request: Request):
+    """Full SSO logout — actually ends the Keycloak session, not just cookies.
+
+    The frontend redirects here on logout. oauth2-proxy injects the user's
+    Keycloak ID token as the Authorization header (SET_AUTHORIZATION_HEADER=true),
+    so we pass it as ``id_token_hint`` — WITHOUT it Keycloak keeps the SSO session
+    alive and the user is silently re-authenticated ("authenticating…" then right
+    back in). Issuer, client and the post-logout redirect are all derived from the
+    token + the request, so this is environment-agnostic (every deploy domain, no
+    hardcoded host). We bounce through oauth2-proxy's /oauth2/sign_out last so the
+    proxy session cookie is cleared too.
+    """
+    import base64
+    import json as _json
+    from urllib.parse import quote
+
+    auth_header = request.headers.get("authorization", "")
+    id_token = auth_header[7:].strip() if auth_header[:7].lower() == "bearer " else ""
+
+    # Public origin from the fronting proxy headers (env-aware — no hardcoding).
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    post_logout = f"{proto}://{host}/"
+
+    issuer = None
+    client_id = None
+    if id_token.count(".") >= 2:
+        try:
+            payload = id_token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)  # restore base64 padding
+            claims = _json.loads(base64.urlsafe_b64decode(payload))
+            issuer = claims.get("iss")
+            aud = claims.get("aud")
+            client_id = claims.get("azp") or (aud if isinstance(aud, str) else None)
+        except Exception:  # noqa: BLE001 — best-effort decode; fall back below
+            pass
+
+    if issuer:
+        kc = (
+            f"{issuer}/protocol/openid-connect/logout"
+            f"?post_logout_redirect_uri={quote(post_logout, safe='')}"
+        )
+        if id_token:
+            kc += f"&id_token_hint={quote(id_token, safe='')}"
+        if client_id:
+            kc += f"&client_id={quote(client_id, safe='')}"
+        target = f"/oauth2/sign_out?rd={quote(kc, safe='')}"
+    else:
+        # No ID token (e.g. local/dev without the proxy) — best effort: clear the
+        # proxy session and return home.
+        target = f"/oauth2/sign_out?rd={quote(post_logout, safe='')}"
+
+    return RedirectResponse(url=target, status_code=302)
+
 # Admin routes
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(

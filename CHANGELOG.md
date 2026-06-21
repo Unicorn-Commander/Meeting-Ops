@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [3.48.2] - 2026-06-21
+
 ### Added
 - **Chunked long-audio diarization (speaker-svc), on one GPU.** Meetings over
   `CHUNK_THRESHOLD_SECONDS` (8h) are split into `CHUNK_WINDOW_SECONDS` (60-min)
@@ -13,6 +15,17 @@
   downstream `identify_speakers` unchanged.
 
 ### Fixed
+- **"Can't log out" — the Keycloak SSO session survived logout.** Two causes:
+  (1) `meet-oauth2-proxy` was missing `OAUTH2_PROXY_WHITELIST_DOMAINS`, so
+  `/oauth2/sign_out` refused to forward to Keycloak's end-session (deploy-config:
+  added `.magicunicorn.dev`). (2) Even forwarded, KC kept the session alive
+  because the request had no `id_token_hint`, so the user was silently
+  re-authenticated. New backend `GET /api/auth/sso-logout` reads the KC ID token
+  (injected by oauth2-proxy via `SET_AUTHORIZATION_HEADER`), passes it as
+  `id_token_hint` so KC actually terminates the session, and derives the issuer +
+  post-logout redirect from the token + request — **environment-agnostic** (no
+  hardcoded host; works on every deploy domain). The frontend logout now redirects
+  there instead of a hardcoded Keycloak URL (`AuthContext.tsx`).
 - **Diarization silently capped meetings at the stale `MAX_AUDIO_SECONDS`.** The
   running speaker-svc was at 4h while the project intent was 8h, so a 5.8h upload
   was rejected (`audio too long`) and finished transcribed-but-not-diarized (0

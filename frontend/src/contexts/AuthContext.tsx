@@ -480,14 +480,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
     resetIdentity();
 
-    // SSO sign-out: clear oauth2-proxy session, then Keycloak session,
-    // then bounce back to root (which will redirect to fresh SSO login).
-    const rd = encodeURIComponent(
-      'https://auth.magicunicorn.dev/realms/uchub/protocol/openid-connect/logout' +
-      '?post_logout_redirect_uri=' + encodeURIComponent('https://meetingops.magicunicorn.dev/') +
-      '&client_id=meeting-ops'
-    );
-    window.location.href = `/oauth2/sign_out?rd=${rd}`;
+    // SSO sign-out: hand off to the backend, which reads the Keycloak ID token
+    // (injected by oauth2-proxy) and builds the end-session URL with an
+    // id_token_hint so Keycloak ACTUALLY terminates the session, then bounces
+    // through /oauth2/sign_out to clear the proxy cookie. Environment-agnostic:
+    // issuer + redirect are derived server-side from the token + request, so this
+    // works on every deploy domain (no hardcoded host).
+    window.location.href = `${config.apiUrl}/api/auth/sso-logout`;
   };
 
   // Register the JWT 401 refresh+retry handler with the single consolidated
