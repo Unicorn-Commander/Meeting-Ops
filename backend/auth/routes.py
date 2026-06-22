@@ -846,17 +846,21 @@ async def sso_logout(request: Request):
             pass
 
     if issuer:
-        # IMPORTANT: do NOT send id_token_hint. oauth2-proxy's stored ID token is
-        # often stale (it refreshes the access token, not reliably the ID token),
-        # and Keycloak then IGNORES the logout and keeps the SSO session alive —
-        # the "authenticating" re-login loop. client_id + the browser's KC session
-        # cookie is sufficient for KC to end the session (verified live) and skips
-        # the confirmation page. The ID token is still decoded above purely to
-        # derive iss + client_id (env-agnostic); its value is never sent onward.
+        # Send BOTH id_token_hint and client_id. id_token_hint skips Keycloak's
+        # "Do you want to log out?" confirmation page — the automated redirect
+        # can't click it, so without it the logout dead-ends there (oauth2-proxy
+        # keeps the ID token fresh enough that KC accepts it). KC then ends the
+        # uchub session AND — because the "Unicorn Commander" broker IdP is set to
+        # FRONT-CHANNEL logout (backchannelSupported=false) — redirects the browser
+        # through the upstream UC logout too, clearing that session (else the
+        # upstream silently re-brokers you back in). iss + client_id are derived
+        # from the token, so this stays environment-agnostic.
         kc = (
             f"{issuer}/protocol/openid-connect/logout"
             f"?post_logout_redirect_uri={quote(post_logout, safe='')}"
         )
+        if id_token:
+            kc += f"&id_token_hint={quote(id_token, safe='')}"
         if client_id:
             kc += f"&client_id={quote(client_id, safe='')}"
         target = f"/oauth2/sign_out?rd={quote(kc, safe='')}"
