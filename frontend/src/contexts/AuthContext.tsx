@@ -457,17 +457,19 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.removeItem('lastMeetingSummary');
     localStorage.removeItem('lastMeetingTimestamp');
 
-    // Clear auth
-    setUser(null);
-    setToken(null);
-    setRefreshToken(null);
+    // Clear auth. NOTE: we intentionally do NOT call the React state setters
+    // (setUser/setToken/setRefreshToken) here. Clearing them re-renders, and a
+    // route guard reacting to user=null then fires a navigation to "/" that
+    // OVERRIDES the SSO-logout redirect below — so the logout silently no-ops
+    // and the still-live session re-auths (root cause of "logout bounces right
+    // back in"). The hard navigation reloads the whole app, so in-memory auth
+    // state is reset by the reload anyway.
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     clearStoredOrgSlug();
     // Wipe hydrated state caches so the next user (or login bounce)
     // doesn't see this user's data flash on screen first.
     broadcastHydratedCacheClear();
-    setError(null);
 
     // Drop the PostHog identity so the next user on this device starts
     // a fresh anonymous→identified arc instead of inheriting this one.
