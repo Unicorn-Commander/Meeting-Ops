@@ -121,6 +121,18 @@ export const Landing: React.FC = () => {
               <ArrowRight className="h-4 w-4" />
             </a>
           </div>
+
+          {/* Product hero — self-hosted screenshot (no external JS) */}
+          <div className="mt-16 overflow-hidden rounded-xl border border-zinc-800 shadow-2xl shadow-fuchsia-500/10 ring-1 ring-white/5">
+            <img
+              src="/screenshots/dashboard.png"
+              alt="Meeting-Ops dashboard — recent meetings, extracted action items, and on-device AI setup"
+              className="block w-full"
+              width={1986}
+              height={953}
+              loading="lazy"
+            />
+          </div>
         </section>
 
         {/* 3 product points */}
@@ -155,6 +167,53 @@ export const Landing: React.FC = () => {
               and Contact-Ops. Per-workspace toggles, encrypted at rest.
             </p>
           </article>
+        </section>
+
+        {/* See it in action — self-hosted screenshots (no external JS) */}
+        <section className="mt-24">
+          <h2 className="text-2xl font-semibold text-white">See it in action</h2>
+          <p className="mt-3 max-w-2xl text-sm text-zinc-400">
+            A live transcript and rolling summary while you meet — then a
+            polished recap, action items, and speaker identity the moment you
+            stop. Plus AI chat across every conversation you&apos;ve ever had.
+          </p>
+          <div className="mt-8 grid gap-6 md:grid-cols-3">
+            {[
+              {
+                src: '/screenshots/aichat.png',
+                title: 'Ask across every meeting',
+                body: 'Cross-meeting AI chat — “what should I act on this month?” — answered from your own meetings, on our models, never a third party.',
+              },
+              {
+                src: '/screenshots/sessions.png',
+                title: 'Your whole library',
+                body: 'Every conversation, searchable by keyword and meaning, organized by workspace.',
+              },
+              {
+                src: '/screenshots/knowledge-graph.png',
+                title: 'A living knowledge graph',
+                body: 'People, topics, decisions, and action items, linked across all your meetings.',
+              },
+            ].map((f) => (
+              <figure
+                key={f.src}
+                className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40"
+              >
+                <img
+                  src={f.src}
+                  alt={f.title}
+                  className="block w-full border-b border-zinc-800"
+                  loading="lazy"
+                />
+                <figcaption className="p-4">
+                  <h3 className="text-sm font-semibold text-white">{f.title}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+                    {f.body}
+                  </p>
+                </figcaption>
+              </figure>
+            ))}
+          </div>
         </section>
 
         {/* Invite form */}
