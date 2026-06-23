@@ -51,6 +51,13 @@ REDIRECT_URI = f"{APP_PUBLIC_URL}/api/auth/sso/uc/callback"
 SESSION_COOKIE_NAME = os.getenv("UC_SSO_COOKIE_NAME", "mo_uc_session")
 SESSION_DAYS = int(os.getenv("UC_SSO_SESSION_DAYS", "7"))
 
+# Logout needs the Keycloak id_token as id_token_hint to actually END the SSO
+# session. On prod there's no oauth2-proxy to inject it via the Authorization
+# header, so we stash it at login in its own HttpOnly cookie scoped to the auth
+# routes; /api/auth/sso-logout reads it back (see auth/routes.py::sso_logout).
+IDT_COOKIE_NAME = os.getenv("UC_SSO_IDT_COOKIE_NAME", "mo_uc_idt")
+IDT_COOKIE_PATH = "/api/auth"
+
 _STATE_COOKIE = "mo_uc_oidc_state"
 _RT_COOKIE = "mo_uc_oidc_rt"
 _TRANSIENT_PATH = "/api/auth/sso/uc"
@@ -132,7 +139,9 @@ async def uc_sso_callback(
         if tr.status_code != 200:
             logger.error("UC SSO token exchange failed: %s %s", tr.status_code, tr.text[:300])
             return _login_error("token_exchange_failed")
-        claims = jwt.get_unverified_claims(tr.json().get("id_token") or "")
+        token_response = tr.json()
+        id_token = token_response.get("id_token") or ""
+        claims = jwt.get_unverified_claims(id_token)
     except Exception:
         logger.exception("UC SSO token exchange / claim parse failed")
         return _login_error("token_exchange_failed")
@@ -171,6 +180,15 @@ async def uc_sso_callback(
         httponly=True, secure=True, samesite="lax",
         max_age=SESSION_DAYS * 86400, path="/",
     )
+    # Stash the KC id_token so /api/auth/sso-logout can pass it as id_token_hint
+    # and end the Keycloak SSO session (prod has no oauth2-proxy to inject it).
+    # Scoped to the auth routes and the same lifetime as the session cookie.
+    if id_token:
+        resp.set_cookie(
+            IDT_COOKIE_NAME, id_token,
+            httponly=True, secure=True, samesite="lax",
+            max_age=SESSION_DAYS * 86400, path=IDT_COOKIE_PATH,
+        )
     resp.delete_cookie(_STATE_COOKIE, path=_TRANSIENT_PATH)
     resp.delete_cookie(_RT_COOKIE, path=_TRANSIENT_PATH)
     logger.info("UC SSO sign-in complete for %s (user_id=%s)", email, user.id)

@@ -811,14 +811,20 @@ async def logout(
 async def sso_logout(request: Request):
     """Full SSO logout — actually ends the Keycloak session, not just cookies.
 
-    The frontend redirects here on logout. oauth2-proxy injects the user's
-    Keycloak ID token as the Authorization header (SET_AUTHORIZATION_HEADER=true),
-    so we pass it as ``id_token_hint`` — WITHOUT it Keycloak keeps the SSO session
-    alive and the user is silently re-authenticated ("authenticating…" then right
-    back in). Issuer, client and the post-logout redirect are all derived from the
-    token + the request, so this is environment-agnostic (every deploy domain, no
-    hardcoded host). We bounce through oauth2-proxy's /oauth2/sign_out last so the
-    proxy session cookie is cleared too.
+    The frontend (AuthContext) full-page-navigates here on logout. Two deploy
+    shapes are handled, and both must END the KC SSO session — otherwise KC keeps
+    it alive and the SPA's zero-click SSO silently re-authenticates the user
+    straight back in ("authenticating…" then right back in):
+
+    1. oauth2-proxy-fronted (dogfood): the proxy injects the user's Keycloak ID
+       token as the Authorization header (SET_AUTHORIZATION_HEADER=true). We pass
+       it as ``id_token_hint``; issuer/client/redirect are all derived from the
+       token + request, so it's env-agnostic, and we bounce through the proxy's
+       /oauth2/sign_out last so the proxy session cookie is cleared too.
+    2. native-OIDC (prod, auth/oidc_sso.py): no proxy, no Authorization header.
+       The session is the HttpOnly mo_uc_session cookie and the id_token is in
+       mo_uc_idt. We redirect straight to KC's end-session endpoint with the
+       stored id_token_hint + client_id and clear both cookies.
     """
     import base64
     import json as _json
@@ -864,15 +870,36 @@ async def sso_logout(request: Request):
         if client_id:
             kc += f"&client_id={quote(client_id, safe='')}"
         target = f"/oauth2/sign_out?rd={quote(kc, safe='')}"
-    else:
-        # No ID token => this deploy isn't behind oauth2-proxy/Keycloak (e.g. prod
-        # uses the app's own JWT login, or local dev). The frontend already cleared
-        # the local token before redirecting here, so just send the SPA home — it
-        # routes to /login when unauthenticated. (post_logout intentionally unused
-        # here; there's no proxy /oauth2/sign_out endpoint to bounce through.)
-        target = "/"
+        return RedirectResponse(url=target, status_code=302)
 
-    return RedirectResponse(url=target, status_code=302)
+    # No Authorization header => not behind oauth2-proxy. The prod/native-OIDC
+    # path (auth/oidc_sso.py) authenticates via the HttpOnly mo_uc_session cookie
+    # and stashes the KC id_token in mo_uc_idt. If the session cookie is present,
+    # end the Keycloak SSO session directly (no proxy to bounce through) and clear
+    # both cookies. id_token_hint skips KC's "Do you want to log out?" interstitial;
+    # without it (sessions predating the idt cookie) KC shows a one-click confirm.
+    from auth.oidc_sso import (
+        KC_ISSUER, KC_CLIENT_ID, APP_PUBLIC_URL,
+        SESSION_COOKIE_NAME, IDT_COOKIE_NAME, IDT_COOKIE_PATH,
+    )
+    if request.cookies.get(SESSION_COOKIE_NAME):
+        stored_idt = request.cookies.get(IDT_COOKIE_NAME) or ""
+        post_logout_q = quote(f"{APP_PUBLIC_URL}/", safe="")
+        kc = (
+            f"{KC_ISSUER}/protocol/openid-connect/logout"
+            f"?post_logout_redirect_uri={post_logout_q}"
+            f"&client_id={quote(KC_CLIENT_ID, safe='')}"
+        )
+        if stored_idt:
+            kc += f"&id_token_hint={quote(stored_idt, safe='')}"
+        resp = RedirectResponse(url=kc, status_code=302)
+        resp.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="lax")
+        resp.delete_cookie(IDT_COOKIE_NAME, path=IDT_COOKIE_PATH, secure=True, httponly=True, samesite="lax")
+        return resp
+
+    # Truly unauthenticated (local dev, or already logged out): the SPA cleared
+    # its local token before redirecting here, so just send it home → /login.
+    return RedirectResponse(url="/", status_code=302)
 
 # Admin routes
 @router.get("/users", response_model=list[UserResponse])
