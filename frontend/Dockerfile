@@ -36,6 +36,14 @@ ENV VITE_POSTHOG_HOST=$VITE_POSTHOG_HOST
 ARG VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=false
 ENV VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=$VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED
 
+# Rooms nav kill-switch for deploys with no physical mic (VPS). NO default
+# on purpose: unset stays undefined in the bundle, and the runtime check in
+# AppRouterSimplified treats anything but the literal "false" as ON — so
+# the bigboy appliance build (which doesn't pass this arg) is unchanged.
+# Cloud/VPS composes pass =false explicitly.
+ARG VITE_ROOM_MODE_ENABLED
+ENV VITE_ROOM_MODE_ENABLED=$VITE_ROOM_MODE_ENABLED
+
 WORKDIR /app
 
 # Copy package files

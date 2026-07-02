@@ -223,13 +223,27 @@ function SimplifiedNavigation({
   // section heading goes away when isAdmin is false; an empty
   // labeled bucket is noisy and Aaron wants the cleaner non-admin
   // view to land for regular users.
+  //
+  // Self-serve consumers are org-admins BY DESIGN (everyone owns their
+  // private personal workspace), so `isAdmin` alone would show every
+  // fresh signup an "Admin" section with appliance/fleet surfaces
+  // (Rooms, Agents, Bulk Import) that only make sense on enterprise
+  // deployments. Gate those on the active org's plan; consumer
+  // workspaces keep just Speakers under a "Workspace" heading so a new
+  // free-tier user never reads as a system admin.
+  const isEnterpriseWorkspace =
+    activeOrganization?.plan === 'enterprise' || Boolean(user?.is_superuser);
   const adminNavItems: NavItem[] = [
-    ...(roomModeEnabled
+    ...(roomModeEnabled && isEnterpriseWorkspace
       ? [{ path: '/rooms', label: 'Rooms', icon: DoorOpen } as NavItem]
       : []),
     { path: '/speakers', label: 'Speakers', icon: '🗣️' },
-    { path: '/admin/agents', label: 'Agents', icon: '🤖' },
-    { path: '/admin/bulk-import', label: 'Bulk Import', icon: FolderUp },
+    ...(isEnterpriseWorkspace
+      ? [
+          { path: '/admin/agents', label: 'Agents', icon: '🤖' } as NavItem,
+          { path: '/admin/bulk-import', label: 'Bulk Import', icon: FolderUp } as NavItem,
+        ]
+      : []),
   ];
 
   const formatTime = (seconds: number) => {
@@ -385,7 +399,7 @@ function SimplifiedNavigation({
           <div className="mt-2 border-t border-zinc-800/70" />
           <div className={`mt-4 mb-2 flex items-center gap-2 px-3 ${collapsed ? 'md:justify-center md:px-0' : ''}`}>
             <ShieldCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-            <span className={`text-[11px] uppercase tracking-wider text-zinc-500 ${collapsed ? 'md:hidden' : ''}`}>Admin</span>
+            <span className={`text-[11px] uppercase tracking-wider text-zinc-500 ${collapsed ? 'md:hidden' : ''}`}>{isEnterpriseWorkspace ? 'Admin' : 'Workspace'}</span>
           </div>
           <div className="space-y-2">
             {adminNavItems.map(renderNavItem)}
