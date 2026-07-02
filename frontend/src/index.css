@@ -19,6 +19,40 @@
   animation: fadeIn 0.3s ease-out;
 }
 
+/* ---------------------------------------------------------------------------
+ * Landing page (marketing) motifs: scroll-reveal + the audio "waveform"
+ * heartbeat. Both are reduced-motion safe. No JS animation library.
+ * ------------------------------------------------------------------------- */
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.reveal.is-revealed {
+  opacity: 1;
+  transform: none;
+}
+
+@keyframes wave {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+.wave > span {
+  transform-origin: bottom;
+  animation: wave 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+  }
+  .wave > span {
+    animation: none !important;
+  }
+}
+
 /* AI Summary markdown renderer: ReactMarkdown wraps content in <p>/<ul>/etc.
  * Tailwind's prose plugin is not installed, so spell out minimal spacing
  * for the rendered tree inside .session-md. */

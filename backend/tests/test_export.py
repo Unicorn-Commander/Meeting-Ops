@@ -185,6 +185,47 @@ def two_orgs_with_sessions(client):
     }
 
 
+def _seed_null_speaker_transcription(*, session_db_id: int):
+    """Insert a Transcription row whose speaker is NULL — the case that made the
+    legacy txt/json/srt export 500 via the nonexistent ``t.speaker_id``."""
+    from database.database import SessionLocal
+    from database.models import Transcription
+
+    db = SessionLocal()
+    try:
+        db.add(Transcription(
+            session_id=session_db_id, text="unattributed line",
+            speaker=None, start_time=0.0, end_time=1.5, confidence=0.9,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("fmt", ["txt", "json", "srt"])
+def test_export_null_speaker_does_not_500(client, fmt):
+    """A transcript segment with speaker=NULL must export cleanly. Pre-fix the
+    fallback referenced Transcription.speaker_id (no such column) -> 500."""
+    suffix = uuid.uuid4().hex[:6]
+    seeded = _seed_org_and_user(suffix)
+    sess = _seed_session(
+        organization_id=seeded["org_id"], user_id=seeded["user_id"],
+        title="Null Speaker Meeting",
+    )
+    _seed_null_speaker_transcription(session_db_id=sess["db_id"])
+    headers = _login_headers(client, seeded["username"])
+
+    resp = client.get(
+        f"/api/recording-sessions/{sess['public_id']}/export",
+        params={"format": fmt}, headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    if fmt in ("txt", "srt"):
+        assert "Speaker 1" in resp.text  # deterministic fallback label
+    else:  # json
+        assert resp.json()["transcript"][0]["speaker"] == "Speaker 1"
+
+
 @pytest.mark.parametrize("fmt", ["md", "markdown"])
 def test_export_markdown_accepted(client, two_orgs_with_sessions, fmt):
     """GET /api/recording-sessions/{id}/export?format=md|markdown returns 200

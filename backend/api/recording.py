@@ -1888,17 +1888,47 @@ async def _run_session_reprocess(session_pk: int) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Garage persist failed for session=%s: %s", session.id, exc)
 
+        # --- Kick off diarization CONCURRENTLY with transcription. Stage 2
+        # (Parakeet STT) and Stage 3 (pyannote diarization) used to run
+        # serially, but they read the same audio independently on different
+        # GPUs and are only merged after BOTH finish — so serializing them
+        # just wastes wall-clock. We set up the diarization provider (a sync
+        # DB read) and launch diarize() here, then await it in Stage 3.
+        # diarize() is HTTP-only (no DB access), so it cannot race the shared
+        # SQLAlchemy session while _transcribe_audio uses it. Any setup error
+        # degrades cleanly to transcript-only (diarize_task stays None).
+        diarize_task = None
+        try:
+            from services.providers.registry import get_provider_registry as _get_registry
+
+            _diar_provider = _get_registry(db).get_diarization(session.organization_id)
+            diarize_task = asyncio.create_task(_diar_provider.diarize(str(target_wav)))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reprocess session=%s: could not start diarization, transcript-only: %s",
+                session.id, exc,
+            )
+            diarize_task = None
+
         # Stage 2 — Parakeet 1.1B fp16 transcription. Reuses the same
         # helper the upload pipeline uses; the org's STT provider defaults
-        # to Parakeet 1.1B at meet-parakeet-svc:8881.
+        # to Parakeet 1.1B at meet-parakeet-svc:8881. Runs concurrently with
+        # the diarization task launched above.
         from api.uploads import _transcribe_audio
 
-        result = await _transcribe_audio(
-            target_wav,
-            session.organization_id,
-            db,
-            language="en",
-        )
+        try:
+            result = await _transcribe_audio(
+                target_wav,
+                session.organization_id,
+                db,
+                language="en",
+            )
+        except BaseException:
+            # Transcription failed — cancel the concurrent diarize task so it
+            # doesn't outlive the request as an orphaned pending task.
+            if diarize_task is not None:
+                diarize_task.cancel()
+            raise
         # Overwrite transcript_simple + transcript_diarized with the
         # server-quality result. The browser STT path's segments were
         # appended into transcript_diarized.segments as the meeting
@@ -1943,14 +1973,11 @@ async def _run_session_reprocess(session_pk: int) -> None:
             ))
         db.commit()
 
-        # Stage 3 — Diarization with per-segment embeddings. Use the
-        # provider's diarize() (speaker-svc supports return_embeddings=true).
+        # Stage 3 — await the diarization that was launched before Stage 2
+        # (it ran concurrently with transcription on a separate GPU) and
+        # overlay its per-segment labels + embeddings onto the transcript.
         try:
-            from services.providers.registry import get_provider_registry
-
-            registry = get_provider_registry(db)
-            diar_provider = registry.get_diarization(session.organization_id)
-            diar_segments = await diar_provider.diarize(str(target_wav))
+            diar_segments = await diarize_task if diarize_task is not None else None
             if diar_segments:
                 # Overlay diarization labels + embeddings onto the
                 # transcription segments using the same overlap rule as

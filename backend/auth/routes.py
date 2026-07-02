@@ -659,12 +659,21 @@ async def delete_my_account(
         # session_key), so it isn't cascaded — purge the per-meeting AI chat
         # for every deleted session so transcript-derived PII doesn't survive
         # account deletion (mirrors _delete_session_record).
+        #
+        # SECURITY: session_key is NOT globally unique — legacy sessions use the
+        # integer pk as the canonical key, so deleting by session_key alone can
+        # wipe another org's chat history on a key collision (cross-tenant
+        # destructive write). Pair each key with its org and delete per org.
+        from collections import defaultdict
         from database.models import ChatHistory as _ChatHistory
-        db.query(_ChatHistory).filter(
-            _ChatHistory.session_key.in_(
-                [cid for (_org, cid, _node) in session_refs]
-            )
-        ).delete(synchronize_session=False)
+        keys_by_org: dict[int, list[str]] = defaultdict(list)
+        for (org_id, cid, _node) in session_refs:
+            keys_by_org[org_id].append(cid)
+        for org_id, keys in keys_by_org.items():
+            db.query(_ChatHistory).filter(
+                _ChatHistory.organization_id == org_id,
+                _ChatHistory.session_key.in_(keys),
+            ).delete(synchronize_session=False)
         # Deleting the sessions DB-cascades action_items, session_collaborators,
         # session-bound upload/tts jobs, chunk embeddings, attachments, ...
         db.query(RecordingSession).filter(

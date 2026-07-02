@@ -15,10 +15,29 @@
  */
 let inFlight = false;
 
+/**
+ * The two deployments authenticate differently:
+ *   - PRODUCTION (`*.unicorncommander.ai`): native OIDC — the backend owns the
+ *     Keycloak code flow at `/api/auth/sso/uc/start` (no oauth2-proxy here, so
+ *     `/oauth2/start` would just fall through to the SPA and bounce the user
+ *     back to the landing page).
+ *   - dogfood (`*.magicunicorn.dev`) + everything else: oauth2-proxy at
+ *     `/oauth2/start`.
+ * Derive it from the hostname so one bundle is correct on both nodes.
+ */
+export function ssoStartUrl(target: string): string {
+  const nativeOidc =
+    typeof window !== 'undefined' &&
+    /(?:^|\.)unicorncommander\.ai$/i.test(window.location.hostname);
+  return nativeOidc
+    ? `/api/auth/sso/uc/start?returnTo=${encodeURIComponent(target)}`
+    : `/oauth2/start?rd=${encodeURIComponent(target)}`;
+}
+
 export function redirectToLogin(rd?: string): void {
   if (inFlight) return;
   inFlight = true;
   const target =
     rd ?? `${window.location.pathname}${window.location.hash}`;
-  window.location.href = `/oauth2/start?rd=${encodeURIComponent(target)}`;
+  window.location.href = ssoStartUrl(target);
 }

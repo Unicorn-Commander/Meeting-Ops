@@ -466,9 +466,14 @@ class BulkImportPipelineQueue:
 
         db = SessionLocal()
         try:
+            # created_at/started_at = server INGEST time (NOT the historical
+            # recording time): the watchdog + retention/eviction measure age from
+            # created_at, so backdating it to an imported file's original date
+            # would make a fresh import look "stuck" and immediately retention-/
+            # eviction-eligible (silent data loss). The historical timestamp is
+            # preserved in meeting_date/meeting_time + the provenance ledger.
             from services.meeting_provenance import (
                 build_meeting_provenance,
-                parse_iso,
                 recorded_date_time,
             )
             _uploaded_at = datetime.now(timezone.utc)
@@ -481,7 +486,6 @@ class BulkImportPipelineQueue:
                 source_type="bulk_import",
             )
             _recorded = _provenance["when"]["recorded_at"]
-            _created_at = (parse_iso(_recorded["value"]) if _recorded else None) or _uploaded_at
             _meeting_date = parsed.meeting_date
             _meeting_time = parsed.meeting_time
             if _meeting_date is None:
@@ -495,8 +499,8 @@ class BulkImportPipelineQueue:
                 title=title,
                 description=f"Bulk imported from {original_filename}",
                 meeting_type="upload",
-                created_at=_created_at,
-                started_at=_created_at,
+                created_at=_uploaded_at,
+                started_at=_uploaded_at,
                 meeting_date=_meeting_date,
                 meeting_time=_meeting_time,
                 status="processing",

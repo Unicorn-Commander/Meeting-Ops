@@ -5,6 +5,7 @@ import { config } from '../config';
 import { useOrg } from './OrgContext';
 import {
   buildUploadHeaders,
+  creationDateFromFile,
   defaultActionForFile,
   detectFileKind,
   uploadFileInChunks,
@@ -109,6 +110,15 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
   const [uploads, setUploads] = useState<UploadItem[]>(() => loadStoredUploads());
   const aborts = useRef<Map<string, AbortController>>(new Map());
   const sockets = useRef<Map<string, WebSocket>>(new Map());
+  // Polling safety net (keyed by localId): if the status WebSocket never
+  // delivers a terminal update (auth reject, network drop, ...), poll the REST
+  // status so the progress toast still resolves instead of hanging forever.
+  const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  // Silent-socket watchdog (keyed by localId): a status socket can OPEN and then
+  // go quiet (a proxy holds it open, or the server accepts but never emits a
+  // frame). onopen stops polling, so without this the toast would hang. The
+  // watchdog falls back to polling if the socket is silent too long.
+  const watchdogs = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const autoDismiss = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
@@ -134,6 +144,12 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => {
     autoDismiss.current.forEach((timer) => clearTimeout(timer));
     autoDismiss.current.clear();
+    pollers.current.forEach((timer) => clearInterval(timer));
+    pollers.current.clear();
+    watchdogs.current.forEach((timer) => clearTimeout(timer));
+    watchdogs.current.clear();
+    sockets.current.forEach((s) => { try { s.close(); } catch { /* noop */ } });
+    sockets.current.clear();
   }, []);
 
   const updateUpload = useCallback((localId: string, patch: Partial<UploadItem>) => {
@@ -151,19 +167,102 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     });
   }, [updateUpload]);
 
+  const stopPolling = useCallback((localId: string) => {
+    const timer = pollers.current.get(localId);
+    if (timer) {
+      clearInterval(timer);
+      pollers.current.delete(localId);
+    }
+  }, []);
+
+  const clearWatchdog = useCallback((localId: string) => {
+    const timer = watchdogs.current.get(localId);
+    if (timer) {
+      clearTimeout(timer);
+      watchdogs.current.delete(localId);
+    }
+  }, []);
+
+  // REST fallback: poll the upload status until it's terminal. Used when the
+  // status WebSocket can't carry progress (auth reject, dropped connection),
+  // so the toast resolves instead of hanging. Self-stops on done/failed, and is
+  // capped so a wedged job can't poll forever.
+  const startPolling = useCallback((localId: string, uploadId: string) => {
+    if (pollers.current.has(localId)) return;
+    let ticks = 0;
+    const tick = async () => {
+      ticks += 1;
+      if (ticks > 200) {  // ~10 min ceiling
+        // Don't leave the toast hanging in a non-terminal stage forever. Mark
+        // it failed with an honest message — the upload may actually have
+        // finished server-side, and reconcileUpload on next mount will correct
+        // a stale 'failed' from the live status.
+        stopPolling(localId);
+        updateUpload(localId, {
+          stage: 'failed',
+          error: 'Status updates timed out — the upload may still be processing. Reload to refresh.',
+        });
+        return;
+      }
+      try {
+        const res = await fetch(`${config.apiBaseUrl}/api/uploads/${uploadId}/status`, {
+          headers: buildUploadHeaders(activeOrganization?.slug),
+        });
+        if (res.ok) {
+          const status = await res.json();
+          applyStatus(localId, status);
+          if (status.stage === 'done' || status.stage === 'failed') stopPolling(localId);
+        }
+      } catch {
+        // Best effort — keep polling until terminal or the ceiling.
+      }
+    };
+    pollers.current.set(localId, setInterval(tick, 3000));
+    void tick();  // immediate first poll, don't wait 3s
+  }, [activeOrganization?.slug, applyStatus, stopPolling, updateUpload]);
+
   const connectStatusSocket = useCallback((localId: string, jobId: string) => {
     if (sockets.current.has(localId)) return;
     const socket = new WebSocket(uploadWebSocketUrl(jobId, activeOrganization?.slug));
     sockets.current.set(localId, socket);
+
+    // (Re)arm the silent-socket watchdog: if no frame arrives within the window,
+    // fall back to REST polling so the toast still resolves. Generous window so
+    // a long quiet stage (e.g. transcription) doesn't trip it; polling is
+    // idempotent and self-stops on terminal.
+    const armWatchdog = () => {
+      const prev = watchdogs.current.get(localId);
+      if (prev) clearTimeout(prev);
+      watchdogs.current.set(localId, setTimeout(() => {
+        watchdogs.current.delete(localId);
+        startPolling(localId, jobId);
+      }, 45000));
+    };
+
+    socket.onopen = () => { stopPolling(localId); armWatchdog(); };  // open but unproven until first frame
     socket.onmessage = (event) => {
       try {
-        applyStatus(localId, JSON.parse(event.data));
+        const status = JSON.parse(event.data);
+        applyStatus(localId, status);
+        if (status.stage === 'done' || status.stage === 'failed') {
+          clearWatchdog(localId);
+          stopPolling(localId);
+        } else {
+          armWatchdog();  // proven live → reset the silence timer
+        }
       } catch {
         // Ignore malformed status frames.
       }
     };
-    socket.onclose = () => sockets.current.delete(localId);
-  }, [activeOrganization?.slug, applyStatus]);
+    socket.onerror = () => { try { socket.close(); } catch { /* noop */ } };
+    socket.onclose = () => {
+      sockets.current.delete(localId);
+      clearWatchdog(localId);
+      // Socket dropped (incl. an auth close-before-accept). Fall back to REST
+      // polling so the toast still resolves; it self-stops once terminal.
+      startPolling(localId, jobId);
+    };
+  }, [activeOrganization?.slug, applyStatus, startPolling, stopPolling, clearWatchdog]);
 
   const reconcileUpload = useCallback(async (item: UploadItem) => {
     if (!item.uploadId || item.stage === 'done' || item.stage === 'failed') return;
@@ -220,6 +319,13 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           total_size: file.size,
           content_type: file.type || `${detectFileKind(file)}/unknown`,
           action,
+          // Default the meeting date to the file's own date (filename date →
+          // File.lastModified) instead of the upload time. Backend treats it as
+          // a best-effort signal, ranked below embedded audio creation_time.
+          ...((): Record<string, string> => {
+            const d = creationDateFromFile(file);
+            return d ? { client_modified_at: d.toISOString() } : {};
+          })(),
           ...(targetSessionId ? { target_session_id: targetSessionId } : {}),
           ...(transcriptionOptions ? { transcription_options: transcriptionOptions } : {}),
         }),
@@ -363,6 +469,8 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => () => {
     sockets.current.forEach((socket) => socket.close());
+    pollers.current.forEach((timer) => clearInterval(timer));
+    pollers.current.clear();
     aborts.current.forEach((abort) => abort.abort());
   }, []);
 

@@ -39,7 +39,8 @@ Ledger shape (every leaf is ``{value, source, confidence}``):
 Confidence ranking for the recorded-at candidates (highest first):
   0.95  audio container creation_time (the device stamped it)
   0.70  a YYYY-MM-DD in the filename (export tooling / user naming)
-  0.50  filesystem mtime (survives copies poorly, but often right)
+  0.55  browser File.lastModified (client-reported; uploads only)
+  0.50  server filesystem mtime (for an upload this is just the ingest time)
   0.30  server upload time (only a floor — always known)
 
 Everything is best-effort: a probe failure never raises; missing signals are
@@ -61,6 +62,7 @@ PROVENANCE_SCHEMA = 1
 
 CONF_AUDIO_META = 0.95
 CONF_FILENAME = 0.70
+CONF_CLIENT_MTIME = 0.55
 CONF_FILE_MTIME = 0.50
 CONF_UPLOAD_TIME = 0.30
 
@@ -135,6 +137,7 @@ def build_when_candidates(
     filename_date: Optional[date],
     filename_time: Optional[time] = None,
     uploaded_at: datetime,
+    client_modified_at: Optional[datetime] = None,
 ) -> list[dict]:
     """Collect every available timestamp signal, ranked by confidence
     (highest first). Always includes the upload time as a floor."""
@@ -150,6 +153,16 @@ def build_when_candidates(
             filename_date, filename_time or time(0, 0), tzinfo=timezone.utc
         )
         cands.append(_signal(when.isoformat(), "filename", CONF_FILENAME))
+
+    # Browser-reported File.lastModified (uploads only). The server file mtime
+    # below is just the ingest time for an upload, so this client signal — when
+    # the user's own copy was last written — is the real "file date" and ranks
+    # above it. Normalized to tz-aware UTC.
+    if client_modified_at is not None:
+        cm = client_modified_at
+        if cm.tzinfo is None:
+            cm = cm.replace(tzinfo=timezone.utc)
+        cands.append(_signal(cm.astimezone(timezone.utc).isoformat(), "client_file_mtime", CONF_CLIENT_MTIME))
 
     if audio_path:
         mt = _mtime(audio_path)
@@ -196,16 +209,19 @@ def build_meeting_provenance(
     recorder: Optional[dict] = None,
     room_name: Optional[str] = None,
     source_device_id: Optional[str] = None,
+    client_modified_at: Optional[datetime] = None,
     now: Optional[datetime] = None,
 ) -> dict:
     """Assemble the when/where/who provenance ledger. ``recorder`` is an
-    optional ``{name, email, contact_id}`` dict. ``now`` is injectable for
+    optional ``{name, email, contact_id}`` dict. ``client_modified_at`` is the
+    browser-reported File.lastModified (uploads only). ``now`` is injectable for
     deterministic tests."""
     candidates = build_when_candidates(
         audio_path=audio_path,
         filename_date=filename_date,
         filename_time=filename_time,
         uploaded_at=uploaded_at,
+        client_modified_at=client_modified_at,
     )
     chosen = choose_recorded_at(candidates)
 

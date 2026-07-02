@@ -161,7 +161,7 @@ async def export_session(
             content += "-" * 50 + "\n"
 
             for t in transcripts:
-                speaker = t.speaker or f"Speaker {t.speaker_id or 1}"
+                speaker = t.speaker or "Speaker 1"
                 content += f"\n[{speaker}]: {t.text}\n"
 
             return StreamingResponse(
@@ -194,7 +194,7 @@ async def export_session(
                 },
                 "transcript": [
                     {
-                        "speaker": t.speaker or f"Speaker {t.speaker_id or 1}",
+                        "speaker": t.speaker or "Speaker 1",
                         "text": t.text,
                         "start_time": t.start_time,
                         "end_time": t.end_time,
@@ -215,7 +215,7 @@ async def export_session(
             for i, t in enumerate(transcripts, 1):
                 start = format_srt_time(t.start_time)
                 end = format_srt_time(t.end_time)
-                speaker = t.speaker or f"Speaker {t.speaker_id or 1}"
+                speaker = t.speaker or "Speaker 1"
                 content += f"{i}\n"
                 content += f"{start} --> {end}\n"
                 content += f"[{speaker}] {t.text}\n\n"

@@ -54,6 +54,10 @@ export const Signup: React.FC = () => {
   // error toast — the email was already captured by the Landing form
   // posting to /api/landing/invite-request before redirecting.
   const [registrationClosed, setRegistrationClosed] = useState(false);
+  // Legal clickwrap: required before account creation. Enforced client-side
+  // for v1 (backend persistence of `accepted_terms_at` is a follow-up — the
+  // registration path has no column for it yet).
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Pre-fill email from `?email=` query (set by Landing CTA), and the
@@ -98,6 +102,11 @@ export const Signup: React.FC = () => {
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
+
+    if (!termsAccepted) {
+      setError('Please accept the Terms, Privacy Policy, and Acceptable Use Policy to continue.');
+      return;
+    }
 
     if (password !== confirmPassword) {
       setError('Passwords do not match.');
@@ -404,9 +413,25 @@ export const Signup: React.FC = () => {
                     </label>
                   </div>
 
+                  <label className="flex items-start gap-3 text-sm text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={termsAccepted}
+                      onChange={(event) => setTermsAccepted(event.target.checked)}
+                      required
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-white/20 bg-zinc-950 text-fuchsia-500 focus:ring-fuchsia-500"
+                    />
+                    <span>
+                      I agree to the{' '}
+                      <Link to="/terms" className="font-medium text-fuchsia-200 underline-offset-4 hover:underline">Terms</Link>,{' '}
+                      <Link to="/privacy" className="font-medium text-fuchsia-200 underline-offset-4 hover:underline">Privacy Policy</Link>, and{' '}
+                      <Link to="/aup" className="font-medium text-fuchsia-200 underline-offset-4 hover:underline">Acceptable Use Policy</Link>.
+                    </span>
+                  </label>
+
                   <button
                     type="submit"
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || !termsAccepted}
                     className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-500 to-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-fuchsia-500/20 transition hover:from-fuchsia-400 hover:to-violet-400 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <ArrowRight className="h-4 w-4" />

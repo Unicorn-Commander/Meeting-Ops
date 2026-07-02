@@ -62,10 +62,12 @@ async def get_current_user_optional(
     # SECURITY: these headers are only honoured when the request crossed the
     # trusted proxy (forward_auth_trusted checks the X-Proxy-Auth secret). On a
     # shared docker network an untrusted co-tenant could otherwise forge the
-    # identity + groups headers → auth bypass + superuser escalation. When the
-    # gate is unconfigured it fails open (current behaviour); once the secret is
-    # set, forged headers are ignored and the caller falls through to JWT /
-    # cookie / PAT / API-key below.
+    # identity + groups headers → auth bypass + superuser escalation. The gate
+    # is FAIL-CLOSED: forward-auth headers are honoured only when a shared
+    # secret is configured AND the request carries a matching X-Proxy-Auth
+    # (Traefik-injected). Otherwise they're ignored and the caller falls through
+    # to JWT / cookie / PAT / API-key below — so native-OIDC (no secret) is
+    # unaffected and a forged header authenticates no one.
     sso_email = (
         _first_email(
             request.headers.get("X-Auth-Request-Email"),

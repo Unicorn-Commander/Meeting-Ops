@@ -114,7 +114,7 @@ from sqlalchemy.orm.exc import DetachedInstanceError
 
 from auth.models import User
 from auth.service import AuthService
-from auth.tier import get_tier_features, get_user_tier
+from auth.tier import get_tier_features, get_user_tier, org_covers_feature
 from database.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -394,8 +394,20 @@ def _resolve_ws_user(websocket: WebSocket) -> Optional[User]:
         # Lookup is case-insensitive on email; mirror service.get_user_by_email.
         user = AuthService.get_user_by_email(db, email)
         if user and user.is_active:
-            # Detach: we want to read attributes after the session closes.
+            # Materialise org membership before detaching so the cross-tenant
+            # session check (ws_user_can_access_session) and the per-workspace
+            # billing gate work after the session closes — mirrors
+            # auth.ws_auth.authenticate_ws. Without this, _org_ids is empty and
+            # every org-bound session would be wrongly rejected.
+            from auth.models import UserOrganization
+            org_ids = [
+                row[0]
+                for row in db.query(UserOrganization.organization_id)
+                .filter(UserOrganization.user_id == user.id)
+                .all()
+            ]
             db.expunge(user)
+            user._org_ids = org_ids
             return user
         return None
     except Exception:
@@ -403,6 +415,18 @@ def _resolve_ws_user(websocket: WebSocket) -> Optional[User]:
         return None
     finally:
         db.close()
+
+
+def _resolve_ws_session_org(session_id: str):
+    """The Organization that owns this streaming session (the active workspace).
+
+    Thin wrapper over ``auth.ws_auth.resolve_session_org`` so the per-workspace
+    billing gate reads the session-owning org's plan (gate on the active
+    workspace's entitlement, not the user's global tier). None when unresolved
+    -> caller falls back to the user-tier gate alone.
+    """
+    from auth.ws_auth import resolve_session_org
+    return resolve_session_org(session_id)
 
 
 @dataclass
@@ -948,13 +972,21 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
     Upstream forwarding uses a single per-connection httpx.AsyncClient with
     HTTP keep-alive so we're not paying TCP setup on every flush.
     """
-    user = _resolve_ws_user(websocket)
+    # Auth: browser clients send the JWT as ?token= (the WebSocket API can't
+    # set request headers); the oauth2-proxy path forwards identity headers.
+    # Try the token first, then fall back to forward-auth. Both materialise
+    # user._org_ids so the cross-tenant check + per-workspace gate work below.
+    from auth.ws_auth import authenticate_ws
+    user = await authenticate_ws(websocket)
+    if user is None:
+        user = _resolve_ws_user(websocket)
     if user is None:
         logger.warning(
             "[B.2 WS] unauthenticated connection attempt session_id=%s "
-            "headers_present=%s",
+            "headers_present=%s has_token=%s",
             session_id,
             sorted(k for k in websocket.headers.keys() if k.startswith("x-")),
+            bool(websocket.query_params.get("token")),
         )
         # Phase B.5 metric: log the rejection. tier=unknown because we
         # never resolved the user.
@@ -967,12 +999,24 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
     user_tier = get_user_tier(user)
     features = get_tier_features(user)
 
-    # B.4 tier gate. Accept the upgrade so we can send a clean JSON error
-    # frame, then close with the application-specific 4003 code.
-    if not features.get("server_live"):
+    # B.4 tier gate + billing-1 per-workspace gate. server_live must be in the
+    # user's tier AND covered by the ACTIVE workspace's plan (the org that owns
+    # this session). When the org resolves and the caller isn't a superuser the
+    # org plan is authoritative; otherwise we fall back to the user tier alone
+    # (mirrors gate_feature_for_caller with active_org=None). Accept the upgrade
+    # first so we can send a clean JSON error frame, then close with 4003.
+    active_org = _resolve_ws_session_org(session_id)
+    org_allows = (
+        True
+        if active_org is None or getattr(user, "is_superuser", False)
+        else org_covers_feature(active_org, "server_live")
+    )
+    if not (features.get("server_live") and org_allows):
+        workspace_gap = bool(features.get("server_live")) and not org_allows
         logger.info(
-            "[B.4 WS] tier_insufficient session_id=%s user=%s tier=%s",
-            session_id, user_email, user_tier,
+            "[B.4 WS] tier_insufficient session_id=%s user=%s tier=%s "
+            "workspace_gap=%s",
+            session_id, user_email, user_tier, workspace_gap,
         )
         ws_connections_total.labels(tier=user_tier, result="tier_rejected").inc()
         ws_close_codes_total.labels(code="4003").inc()
@@ -983,7 +1027,10 @@ async def session_live(websocket: WebSocket, session_id: str) -> None:
             "current_tier": user_tier,
             "required_feature": "server_live",
             "upgrade_hint": (
-                "Pro or Enterprise tier required for live streaming"
+                "This workspace's plan doesn't include live streaming — "
+                "upgrade the active organization."
+                if workspace_gap
+                else "A paid plan is required for live streaming."
             ),
         })
         await websocket.close(code=4003, reason="tier_insufficient")

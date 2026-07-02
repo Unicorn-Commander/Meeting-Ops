@@ -819,6 +819,9 @@ export const Sessions: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Set when the server sessions fetch fails — drives a "couldn't refresh"
+  // banner (cached list preserved) instead of a misleading empty state.
+  const [serverError, setServerError] = useState<string | null>(null);
   // Auto-refresh: poll the list while it's on (default on) so a new/just-
   // processed meeting appears without a manual reload; the Refresh button
   // forces it immediately.
@@ -1229,14 +1232,19 @@ export const Sessions: React.FC = () => {
       }
 
       let serverSessions: Session[] = [];
+      let serverOk = false;
       if (serverRes.status === 'fulfilled' && serverRes.value.ok) {
+        serverOk = true;
         const data = await serverRes.value.json();
         serverSessions = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
         setNextCursor(Array.isArray(data) ? null : (data?.next_cursor ?? null));
+        setServerError(null);
       } else if (serverRes.status === 'fulfilled') {
         console.error('Failed to fetch sessions:', serverRes.value.status, serverRes.value.statusText);
+        setServerError("Couldn't refresh sessions.");
       } else {
         console.error('Failed to fetch sessions:', serverRes.reason);
+        setServerError("Couldn't refresh sessions.");
       }
 
       const localSessions: Session[] =
@@ -1247,10 +1255,15 @@ export const Sessions: React.FC = () => {
       // Merge: server + local, deduped by id (local ids are
       // `local-` prefixed so a clash is structurally impossible, but
       // we still de-dupe defensively).
+      //
+      // TRUST: on a FAILED server fetch, keep the last good list (current
+      // `sessions`) instead of collapsing to local-only — a transient outage
+      // must not make existing meetings look deleted. On success the server
+      // payload is authoritative (prior only when appending a page).
       const seen = new Set<string>();
       const merged: Session[] = [];
-      const prior = append ? sessions : [];
-      for (const s of [...prior, ...serverSessions, ...localSessions]) {
+      const base = serverOk ? (append ? sessions : []) : sessions;
+      for (const s of [...base, ...serverSessions, ...localSessions]) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         merged.push(s);
@@ -2093,12 +2106,12 @@ export const Sessions: React.FC = () => {
             <div className="flex items-center bg-gray-800 rounded-lg">
               <button
                 onClick={() => fetchSessions({ showSpinner: false })}
-                disabled={refreshing}
+                disabled={refreshing || loading}
                 title="Refresh now"
                 aria-label="Refresh sessions"
                 className="p-2 rounded-l-lg text-gray-300 hover:text-white disabled:opacity-50"
               >
-                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-4 h-4 ${(refreshing || loading) ? 'animate-spin' : ''}`} />
               </button>
               <button
                 onClick={() => setAutoRefresh((v) => !v)}
@@ -2513,10 +2526,11 @@ export const Sessions: React.FC = () => {
 
         {/* Results count + page-size control (caps how many cards render at
             once; 'All' renders everything the server returned). */}
-        {!loading && filteredSessions.length > 0 && (
+        {filteredSessions.length > 0 && (
           <div className="mb-3 flex items-center justify-between text-xs text-gray-400">
             <span>
               Showing {displayedSessions.length} of {filteredSessions.length}
+              {loading && <span className="ml-2 text-gray-500">· Refreshing…</span>}
             </span>
             <label className="flex items-center gap-2">
               <span className="hidden sm:inline">Per page</span>
@@ -2537,10 +2551,43 @@ export const Sessions: React.FC = () => {
           </div>
         )}
 
+        {/* Couldn't-refresh banner: a fetch failed but we kept the cached list. */}
+        {serverError && filteredSessions.length > 0 && (
+          <div className="mb-4 px-4 py-2 rounded-lg bg-amber-900/30 border border-amber-700/50 text-amber-200 text-sm flex items-center justify-between gap-3">
+            <span>{serverError} Showing your last loaded sessions.</span>
+            <button
+              onClick={() => fetchSessions({ showSpinner: false })}
+              className="underline hover:text-amber-100 shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Sessions */}
-        {loading || (!hasFetchedOnce && filteredSessions.length === 0) ? (
+        {/* TRUST: only show the skeleton when there is nothing to display yet.
+            A refresh over a populated list keeps the existing cards visible
+            (the refresh button spins as the loading affordance) so meetings
+            never briefly vanish while `loading` is true. */}
+        {filteredSessions.length === 0 && (loading || !hasFetchedOnce) ? (
           <SkeletonSessionGrid count={6} />
         ) : filteredSessions.length === 0 ? (
+          serverError ? (
+            // TRUST: a failed load must not read as "no meetings" / data loss.
+            <div className="text-center py-12">
+              <FolderOpen className="w-16 h-16 text-amber-500/70 mx-auto mb-4" />
+              <h3 className="text-xl font-semibold text-gray-300 mb-2">Couldn't load sessions</h3>
+              <p className="text-gray-500 mb-6">
+                {serverError} Your meetings aren't gone — we just couldn't reach the server.
+              </p>
+              <button
+                onClick={() => fetchSessions({ showSpinner: true })}
+                className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors mx-auto"
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
           <div className="text-center py-12">
             <FolderOpen className="w-16 h-16 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-300 mb-2">No Sessions Found</h3>
@@ -2560,6 +2607,7 @@ export const Sessions: React.FC = () => {
               </button>
             )}
           </div>
+          )
         ) : (
           viewMode === 'grid' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

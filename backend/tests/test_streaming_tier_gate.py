@@ -105,7 +105,9 @@ def test_free_tier_user_rejected_with_4003(client, patch_resolver):
             assert msg["reason"] == "tier_insufficient", msg
             assert msg["current_tier"] == "free", msg
             assert msg["required_feature"] == "server_live", msg
-            assert "Pro" in msg["upgrade_hint"] or "Enterprise" in msg["upgrade_hint"]
+            # Flat pricing (Free vs paid): the hint no longer names specific
+            # tiers — a free user is simply told a paid plan is required.
+            assert "paid plan" in msg["upgrade_hint"].lower(), msg["upgrade_hint"]
             # Next receive triggers the close.
             ws.receive_json()
 
@@ -115,6 +117,71 @@ def test_free_tier_user_rejected_with_4003(client, patch_resolver):
     reason = getattr(exc_info.value, "reason", None)
     if reason is not None:
         assert reason == "tier_insufficient", reason
+
+
+def _seed_free_org_session():
+    """Create a session owned by a free-plan org; return its session_id.
+
+    Organization.plan defaults to "free", so this is the active-workspace the
+    per-workspace billing gate must reject for a server-live stream.
+    """
+    import uuid as _uuid
+
+    from auth.models import Organization, User, UserOrganization
+    from auth.utils import get_password_hash
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    db = SessionLocal()
+    try:
+        org = Organization(
+            name="Free Workspace", slug=f"free-ws-{_uuid.uuid4().hex[:8]}",
+            is_active=True, plan="free",
+        )
+        db.add(org); db.commit(); db.refresh(org)
+        user = User(
+            email=f"owner-{_uuid.uuid4().hex[:6]}@m.local",
+            username=f"owner_{_uuid.uuid4().hex[:6]}",
+            hashed_password=get_password_hash("admin123"),
+            is_active=True, is_verified=True, tier="free",
+        )
+        db.add(user); db.commit(); db.refresh(user)
+        db.add(UserOrganization(user_id=user.id, organization_id=org.id, role="admin"))
+        sid = str(_uuid.uuid4())
+        db.add(RecordingSession(
+            session_id=sid, name=f"ws-{sid[:8]}", title=f"ws-{sid[:8]}",
+            meeting_type="meeting", mode="upload", status="recording",
+            duration=0.0, user_id=user.id, organization_id=org.id,
+            processing_metadata={},
+        ))
+        db.commit()
+        return sid
+    finally:
+        db.close()
+
+
+def test_paid_user_rejected_when_active_workspace_is_free(client, patch_resolver):
+    """billing-1: a pro USER streaming into a FREE workspace is rejected.
+
+    Even though the user's global tier has server_live, the active workspace
+    (the org that owns the session) is on the free plan, so the per-workspace
+    gate closes 4003 with a workspace-specific hint. This is the core of the
+    UC dev's ruling: gate on the active workspace's entitlement, not the user.
+    """
+    sid = _seed_free_org_session()
+    patch_resolver(_FakeWSUser(email="pro@m.local", tier="pro"))
+
+    url = f"/ws/sessions/{sid}/live"
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(url) as ws:
+            msg = ws.receive_json()
+            assert msg["type"] == "error", msg
+            assert msg["reason"] == "tier_insufficient", msg
+            assert "workspace" in msg["upgrade_hint"].lower(), msg["upgrade_hint"]
+            ws.receive_json()  # triggers the close
+
+    assert exc_info.value.code == 4003, exc_info.value.code
 
 
 def test_pro_tier_user_receives_ready(client, patch_resolver):

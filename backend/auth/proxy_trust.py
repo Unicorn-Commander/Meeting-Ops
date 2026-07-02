@@ -14,23 +14,28 @@ fronting proxy knows and injects (``X-Proxy-Auth``). The backend honours the
 forward-auth identity headers only when the request also carries the matching
 secret.
 
-Rollout is designed so login can never break at any step:
+The trust gate is **FAIL-CLOSED by default**:
 
-  * **FAIL-OPEN until configured.** If ``PROXY_AUTH_SHARED_SECRET`` is
-    unset/empty, the identity headers are trusted exactly as before, with a
-    loud one-time warning. Ship the code first (no behaviour change), wire the
-    Traefik ``X-Proxy-Auth`` injection second, THEN set the secret to switch to
-    fail-closed. No flag-day.
-  * **FAIL-CLOSED once the secret is set.** A request whose ``X-Proxy-Auth``
-    is missing or non-matching has its forward-auth headers ignored entirely.
-    The caller then falls through to JWT / UC-SSO cookie / PAT / API-key auth —
-    all cryptographically authenticated and unaffected by this gate — so a
-    legitimately logged-in user is never locked out.
+  * **No secret configured → headers IGNORED.** If ``PROXY_AUTH_SHARED_SECRET``
+    is unset/empty, the forward-auth identity headers are never honoured. This
+    is correct (and safe) for deployments that don't use oauth2-proxy
+    forward-auth at all — e.g. the native-OIDC prod path, which authenticates
+    via the ``mo_uc_session`` cookie. A forged ``X-Auth-Request-*`` on such a
+    deploy can no longer authenticate anyone.
+  * **Secret configured → headers honoured only with a matching X-Proxy-Auth.**
+    A request whose ``X-Proxy-Auth`` is missing or non-matching has its
+    forward-auth headers ignored entirely. The caller then falls through to
+    JWT / UC-SSO cookie / PAT / API-key auth — all cryptographically
+    authenticated and unaffected by this gate — so a legitimately logged-in
+    user is never locked out.
 
-The secret is compared in constant time (``secrets.compare_digest``), mirroring
-``auth/internal.py``. The Traefik middleware that injects ``X-Proxy-Auth`` must
-also *overwrite* any client-supplied copy (``customRequestHeaders`` does this),
-so a forger cannot smuggle the header through the proxy.
+Trusted ⟺ (secret configured) AND (request carries a matching ``X-Proxy-Auth``).
+An oauth2-proxy / forward-auth deployment therefore MUST set the secret AND wire
+the Traefik ``X-Proxy-Auth`` injection (``customRequestHeaders``, which also
+overwrites any client-supplied copy, so a forger cannot smuggle the header
+through the proxy). As defence-in-depth the edge should also strip inbound
+``X-Auth-Request-*`` headers. The secret is compared in constant time
+(``secrets.compare_digest``), mirroring ``auth/internal.py``.
 
 ``forward_auth_trusted`` accepts any case-insensitive header mapping, so it
 works for both Starlette ``Request.headers`` and ``WebSocket.headers``.
@@ -53,22 +58,30 @@ def _configured_secret() -> str:
 
 
 def proxy_trust_enforced() -> bool:
-    """True when a secret is configured (fail-closed mode is active)."""
+    """True when a shared secret is configured.
+
+    The trust gate is fail-closed regardless of this value; it reports whether
+    the ``X-Proxy-Auth`` handshake is provisioned (i.e. whether this deploy can
+    honour forward-auth identity headers at all). False => forward-auth is
+    effectively disabled and all auth flows through tokens / cookies.
+    """
     return bool(_configured_secret())
 
 
-def _warn_fail_open() -> None:
-    # Log once per process so the insecure-but-intentional staging window is
-    # visible in ops dashboards without flooding them.
-    if not getattr(_warn_fail_open, "_warned", False):
+def _warn_no_secret() -> None:
+    # Log once per process so an unconfigured forward-auth deploy is visible in
+    # ops dashboards without flooding them. For native-OIDC / cookie deploys
+    # (e.g. prod) this is expected and benign.
+    if not getattr(_warn_no_secret, "_warned", False):
         logger.warning(
             "PROXY_AUTH_SHARED_SECRET is unset; SSO forward-auth identity "
-            "headers (X-Auth-Request-*) are trusted WITHOUT a proxy-trust "
-            "boundary. This is FAIL-OPEN for staged rollout only. Set the env "
-            "var (and the matching Traefik %s injection) to enforce.",
+            "headers (X-Auth-Request-*) are IGNORED (fail-closed). This is "
+            "correct for deployments that don't use oauth2-proxy forward-auth "
+            "(e.g. native-OIDC). If this deployment DOES use forward-auth, set "
+            "the env var AND the matching Traefik %s injection.",
             PROXY_AUTH_HEADER,
         )
-        _warn_fail_open._warned = True  # type: ignore[attr-defined]
+        _warn_no_secret._warned = True  # type: ignore[attr-defined]
 
 
 def _warn_rejected() -> None:
@@ -92,8 +105,8 @@ def forward_auth_trusted(headers: Mapping[str, str]) -> bool:
     """
     configured = _configured_secret()
     if not configured:
-        _warn_fail_open()
-        return True  # fail-open until the secret is provisioned
+        _warn_no_secret()
+        return False  # fail-closed: no secret => forward-auth headers ignored
 
     presented = headers.get(PROXY_AUTH_HEADER)
     if not presented:

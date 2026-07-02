@@ -6,13 +6,15 @@ forgeable by any co-tenant container on the shared docker network, so trusting
 them unconditionally is an auth bypass + superuser escalation (the groups
 header drives ``is_superuser`` at auto-provision time).
 
-The gate:
+The gate is FAIL-CLOSED:
 
-  * FAIL-OPEN when ``PROXY_AUTH_SHARED_SECRET`` is unset (staged-rollout
-    window — current behaviour, login can't break).
-  * FAIL-CLOSED once the secret is set: a request must carry a matching
-    ``X-Proxy-Auth`` (injected only by the trusted proxy) or its identity
-    headers are ignored and the caller falls through to token auth.
+  * No secret configured → forward-auth headers are IGNORED (correct for
+    native-OIDC / cookie deploys that don't use forward-auth at all).
+  * Secret set → a request must carry a matching ``X-Proxy-Auth`` (injected
+    only by the trusted proxy) or its identity headers are ignored and the
+    caller falls through to token auth.
+
+Trusted ⟺ (secret configured) AND (matching ``X-Proxy-Auth``).
 
 Comparison is constant-time (``secrets.compare_digest``), mirroring
 ``auth/internal.py``.
@@ -41,7 +43,7 @@ def with_secret():
 
 @pytest.fixture()
 def without_secret():
-    """Secret cleared → fail-open staging window."""
+    """Secret cleared → fail-closed (forward-auth headers ignored)."""
     with patch.dict(os.environ, {"PROXY_AUTH_SHARED_SECRET": ""}):
         yield
 
@@ -49,12 +51,13 @@ def without_secret():
 # ---------------------------------------------------------------------------
 # Unit: the gate function
 # ---------------------------------------------------------------------------
-def test_fail_open_when_secret_unset(without_secret):
-    # No secret configured → headers trusted exactly as before (current behaviour).
+def test_fail_closed_when_secret_unset(without_secret):
+    # No secret configured → forward-auth headers are IGNORED (fail-closed).
+    # proxy_trust_enforced() still reports "no secret provisioned".
     assert proxy_trust_enforced() is False
-    assert forward_auth_trusted(Headers({"X-Auth-Request-Email": "u@x.com"})) is True
-    # Even with no X-Proxy-Auth header at all.
-    assert forward_auth_trusted(Headers({})) is True
+    assert forward_auth_trusted(Headers({"X-Auth-Request-Email": "u@x.com"})) is False
+    # And of course with no X-Proxy-Auth header at all.
+    assert forward_auth_trusted(Headers({})) is False
 
 
 def test_fail_closed_missing_proxy_header(with_secret):

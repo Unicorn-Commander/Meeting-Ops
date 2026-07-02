@@ -40,7 +40,7 @@ import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
 import SessionDetailsTabs, { type SessionDetailsTab } from '../components/SessionDetailsTabs';
 import { UpgradeBanner } from '../components/UpgradeBanner';
-import { config } from '../config';
+import { config, appendWsToken } from '../config';
 import { showConfirm } from '../utils/notifications';
 import { clearAllHydratedCaches } from '../utils/cachedState';
 import {
@@ -510,7 +510,11 @@ export const SessionDetails: React.FC = () => {
   const trackTtsJob = (jobId: string, onProgress?: (pct: number) => void) =>
     new Promise<{ audio_url: string }>((resolve, reject) => {
       const wsScheme = config.apiUrl.startsWith('https') ? 'wss' : 'ws';
-      const wsUrl = config.apiUrl.replace(/^https?/, wsScheme) + `/ws/tts/${jobId}`;
+      // The TTS progress socket is token-authed (backend enforce_ws_auth); the
+      // browser WS API can't set headers, so carry the JWT as ?token=.
+      const wsUrl = appendWsToken(
+        config.apiUrl.replace(/^https?/, wsScheme) + `/ws/tts/${jobId}`,
+      );
       const socket = new WebSocket(wsUrl);
       socket.onmessage = (ev) => {
         try {
@@ -624,16 +628,28 @@ export const SessionDetails: React.FC = () => {
   // live recording UI uses; we stop polling once the status leaves the
   // active states (complete, failed, skipped, or null/missing).
   useEffect(() => {
-    const status = session?.metadata?.reprocess_status;
-    if (status !== 'queued' && status !== 'in_progress') return;
+    const reprocess = session?.metadata?.reprocess_status;
+    const reprocessing = reprocess === 'queued' || reprocess === 'in_progress';
+    // Also poll the ordinary "processing" lifecycle state — a fresh upload whose
+    // transcript/summary haven't landed yet — not just an explicit reprocess, so
+    // a just-finished upload opened from the tray completes IN PLACE instead of
+    // sitting on "Processing…" until a manual reload.
+    const processing = (session?.status || '').toLowerCase() === 'processing';
+    if (!reprocessing && !processing) return;
+    let polls = 0;
     const handle = window.setInterval(() => {
+      polls += 1;
+      if (polls > 120) {  // ~10 min safety ceiling so a stuck session can't poll forever
+        window.clearInterval(handle);
+        return;
+      }
       fetchSession();
     }, 5_000);
     return () => window.clearInterval(handle);
-    // Re-trigger whenever the reprocess_status changes — we want the
-    // interval to spin up only when the pipeline is actually live.
+    // Re-trigger whenever the processing/reprocess status changes — the
+    // interval spins up only while the pipeline is actually live.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.metadata?.reprocess_status]);
+  }, [session?.metadata?.reprocess_status, session?.status]);
 
   // Load persisted chat history from server when chat panel is opened
   useEffect(() => {

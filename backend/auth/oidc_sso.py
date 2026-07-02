@@ -16,6 +16,7 @@ reuses the existing SSO auto-provisioning (personal org, free tier). The
 Unicorn Commander dashboard app-card links straight to /start for zero-click
 SSO (the user already holds a uchub session, so Keycloak completes silently).
 """
+import asyncio
 import logging
 import os
 import secrets
@@ -24,9 +25,10 @@ from datetime import timedelta
 from typing import Optional
 
 import httpx
+import jwt as pyjwt
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
-from jose import jwt
+from jwt import PyJWKClient
 from sqlalchemy.orm import Session
 
 from auth.organization import is_global_admin, parse_group_list
@@ -44,6 +46,11 @@ _KC_REALM = os.getenv("KEYCLOAK_REALM", "uchub")
 KC_ISSUER = f"{_KC_BASE}/realms/{_KC_REALM}"
 KC_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "meeting-ops-prod")
 KC_CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
+# JWKS endpoint for verifying the id_token signature (RS256). Keycloak serves
+# the realm's public signing keys here; PyJWKClient fetches + caches them.
+KC_JWKS_URI = os.getenv(
+    "KEYCLOAK_JWKS_URI", f"{KC_ISSUER}/protocol/openid-connect/certs"
+)
 APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://meeting-ops.unicorncommander.ai").rstrip("/")
 REDIRECT_URI = f"{APP_PUBLIC_URL}/api/auth/sso/uc/callback"
 
@@ -61,6 +68,63 @@ IDT_COOKIE_PATH = "/api/auth"
 _STATE_COOKIE = "mo_uc_oidc_state"
 _RT_COOKIE = "mo_uc_oidc_rt"
 _TRANSIENT_PATH = "/api/auth/sso/uc"
+
+_jwks_client: Optional[PyJWKClient] = None
+
+
+def _get_jwks_client() -> PyJWKClient:
+    """Process-wide PyJWKClient; caches the Keycloak JWKS (refreshes hourly)."""
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = PyJWKClient(
+            KC_JWKS_URI,
+            cache_keys=True,
+            lifespan=3600,
+            timeout=10,
+            # Keycloak's public JWKS is fronted by Cloudflare, which 403s the
+            # default ``Python-urllib/x`` User-Agent as a bot. With no UA on the
+            # JWKS fetch, ``get_signing_key_from_jwt`` raised, so id_token
+            # verification failed ("403 Forbidden") and EVERY SSO login was
+            # rejected. A plain identifying UA passes Cloudflare and loads the
+            # realm signing keys. (PyJWT >= 2.8 supports ``headers``.)
+            headers={"User-Agent": "Meeting-Ops-OIDC/1.0"},
+        )
+    return _jwks_client
+
+
+def _verify_id_token(id_token: str) -> dict:
+    """Verify a Keycloak id_token: RS256 signature (via JWKS) + iss + aud + exp.
+
+    Replaces ``jwt.get_unverified_claims`` so a token that wasn't actually
+    signed by our realm (or is expired / minted for another client) is rejected
+    instead of trusted. The token already arrives over the TLS back-channel from
+    Keycloak, but this closes the gap where any well-formed JWT would have been
+    accepted.
+
+    Raises ``jwt.PyJWTError`` on any verification failure. Does blocking JWKS
+    I/O on cache miss, so call it via ``asyncio.to_thread`` from the async
+    callback.
+    """
+    signing_key = _get_jwks_client().get_signing_key_from_jwt(id_token)
+    claims = pyjwt.decode(
+        id_token,
+        signing_key.key,
+        algorithms=["RS256"],
+        issuer=KC_ISSUER,
+        leeway=30,  # tolerate minor backend<->KC clock skew
+        options={"require": ["exp", "iss"], "verify_aud": False},
+    )
+    # Audience: Keycloak id_tokens carry aud=client_id and/or azp=client_id.
+    # Accept either so verification is robust to the realm's audience-mapper
+    # config (per UC dev: "verify azp (or aud) == client_id").
+    aud = claims.get("aud")
+    aud_list = aud if isinstance(aud, list) else ([aud] if aud else [])
+    if KC_CLIENT_ID not in aud_list and claims.get("azp") != KC_CLIENT_ID:
+        raise pyjwt.InvalidAudienceError(
+            f"id_token audience mismatch (aud={aud_list} azp={claims.get('azp')}; "
+            f"expected {KC_CLIENT_ID})"
+        )
+    return claims
 
 
 def _safe_return_to(rt: Optional[str]) -> str:
@@ -141,10 +205,25 @@ async def uc_sso_callback(
             return _login_error("token_exchange_failed")
         token_response = tr.json()
         id_token = token_response.get("id_token") or ""
-        claims = jwt.get_unverified_claims(id_token)
     except Exception:
-        logger.exception("UC SSO token exchange / claim parse failed")
+        logger.exception("UC SSO token exchange failed")
         return _login_error("token_exchange_failed")
+
+    if not id_token:
+        logger.error("UC SSO token response carried no id_token")
+        return _login_error("token_exchange_failed")
+
+    # Verify the id_token (RS256 sig via JWKS + iss + aud + exp) rather than
+    # trusting unverified claims. Runs off the event loop (blocking JWKS fetch
+    # on cache miss).
+    try:
+        claims = await asyncio.to_thread(_verify_id_token, id_token)
+    except pyjwt.PyJWTError as exc:
+        logger.warning("UC SSO id_token verification failed: %s", exc)
+        return _login_error("token_verification_failed")
+    except Exception:
+        logger.exception("UC SSO id_token verification error")
+        return _login_error("token_verification_failed")
 
     email = claims.get("email") or claims.get("preferred_username")
     if not email or "@" not in str(email):

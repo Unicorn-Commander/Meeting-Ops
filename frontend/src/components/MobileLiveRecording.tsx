@@ -42,6 +42,8 @@ import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useTierFeatures } from '../hooks/useTierFeatures';
 import { Dialog } from './ui/Dialog';
+import RecordingConsentModal from './RecordingConsentModal';
+import { hasRecordingConsent, rememberRecordingConsent } from '../constants/legal';
 import {
   isLikelyTouchDevice,
   tapAudioLevel,
@@ -133,6 +135,9 @@ export default function MobileLiveRecording() {
   // the 403 lands.
   const canUseMobileServer = hasFeature('canonical_reprocess');
   const [freeTierGateOpen, setFreeTierGateOpen] = useState(false);
+  // Legal: pre-record consent gate (AUP §2.3). Shown once per browser session
+  // before the mic opens; confirmation is remembered client-side.
+  const [consentOpen, setConsentOpen] = useState(false);
   const [state, setState] = useState<RecorderState>('idle');
   const [title, setTitle] = useState<string>(() => {
     const stored = localStorage.getItem(TITLE_STORAGE_KEY);
@@ -149,6 +154,9 @@ export default function MobileLiveRecording() {
   const [chunksUploaded, setChunksUploaded] = useState(0);
   const [chunksFailed, setChunksFailed] = useState(0);
   const [chunksProduced, setChunksProduced] = useState(0);
+  // Whether the server reprocess pass was actually accepted — so the "done"
+  // screen doesn't claim "Server is processing" when the kick-off failed.
+  const [reprocessKicked, setReprocessKicked] = useState(false);
   // Surfaced when iOS Safari throws our tab into the background, which
   // can suspend MediaRecorder. We don't try to recover — we just warn.
   const [backgrounded, setBackgrounded] = useState(false);
@@ -280,6 +288,13 @@ export default function MobileLiveRecording() {
     // dialog explaining the constraint + pointing at desktop free mode.
     if (!canUseMobileServer) {
       setFreeTierGateOpen(true);
+      return;
+    }
+
+    // Legal: consent gate (AUP §2.3). Confirm once per session BEFORE the mic
+    // opens. On confirm we re-invoke beginRecording, which now passes here.
+    if (!hasRecordingConsent()) {
+      setConsentOpen(true);
       return;
     }
 
@@ -517,13 +532,16 @@ export default function MobileLiveRecording() {
       return;
     }
 
+    let kicked = false;
     try {
       const reprocResp = await fetch(
         `${config.apiUrl}/api/recordings/sessions/${localSessionId}/finalize-audio`,
         { method: 'POST', headers, credentials: 'include' },
       );
-      if (!reprocResp.ok) {
-        // Non-fatal — the live transcript stays as the canonical record.
+      if (reprocResp.ok) {
+        kicked = true;
+      } else {
+        // Don't claim "Server is processing" — the kick-off was rejected.
         // eslint-disable-next-line no-console
         console.warn('[mobile-rec] /finalize-audio non-ok', reprocResp.status);
       }
@@ -532,6 +550,7 @@ export default function MobileLiveRecording() {
       console.warn('[mobile-rec] /finalize-audio kick-off failed', err);
     }
 
+    setReprocessKicked(kicked);
     setState('reprocess-kicked');
     // Small dwell so the user sees the confirmation, then move to the
     // final "done" state. They can navigate to Sessions whenever.
@@ -703,13 +722,17 @@ export default function MobileLiveRecording() {
         </div>
 
         {state === 'done' ? (
-          <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/30 p-4 text-sm">
+          <div className={`rounded-xl p-4 text-sm border ${reprocessKicked ? 'bg-emerald-500/5 border-emerald-500/30' : 'bg-amber-500/5 border-amber-500/30'}`}>
             <div className="flex items-start gap-3">
-              <CheckCircle2 className="w-5 h-5 text-emerald-300 shrink-0 mt-0.5" />
+              <CheckCircle2 className={`w-5 h-5 shrink-0 mt-0.5 ${reprocessKicked ? 'text-emerald-300' : 'text-amber-300'}`} />
               <div>
-                <div className="font-medium text-emerald-100 mb-1">Done. Server is processing.</div>
+                <div className={`font-medium mb-1 ${reprocessKicked ? 'text-emerald-100' : 'text-amber-100'}`}>
+                  {reprocessKicked ? 'Done. Server is processing.' : 'Audio saved — processing not started.'}
+                </div>
                 <div className="text-zinc-300">
-                  Audio is on the server. The full quality pass (Parakeet 1.1B, speaker diarization, Qwen 3.6 summary) runs now and lands on the session page in about a minute.
+                  {reprocessKicked
+                    ? 'Audio is on the server. The full quality pass (Parakeet 1.1B, speaker diarization, Qwen 3.6 summary) runs now and lands on the session page in about a minute.'
+                    : "Your audio is safely on the server, but the processing pass didn't start. Open the session and tap Reprocess to generate the transcript + summary."}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <a
@@ -913,7 +936,7 @@ export default function MobileLiveRecording() {
           </Dialog.Description>
           <Dialog.Footer className="flex-col-reverse items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
             <a
-              href="#/help/desktop-free-mode"
+              href="#/help"
               onClick={() => setFreeTierGateOpen(false)}
               className="inline-flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:bg-zinc-700"
             >
@@ -929,6 +952,18 @@ export default function MobileLiveRecording() {
           </Dialog.Footer>
         </Dialog.Content>
       </Dialog>
+
+      {/* Legal: pre-record consent gate (AUP §2.3). Confirming records consent
+          for the session (client-side v1) and resumes the recording start. */}
+      <RecordingConsentModal
+        open={consentOpen}
+        onConfirm={() => {
+          rememberRecordingConsent();
+          setConsentOpen(false);
+          void beginRecording();
+        }}
+        onCancel={() => setConsentOpen(false)}
+      />
     </div>
   );
 }

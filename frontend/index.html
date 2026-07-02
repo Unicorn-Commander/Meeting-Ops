@@ -21,6 +21,31 @@
     <meta name="apple-mobile-web-app-title" content="Meet-Ops" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Meeting-Ops · Intelligence for your conversations (whether or not they are)</title>
+    <!-- SEO + social link previews. The on-device / privacy-first moat is the
+         share hook. og:image uses the canonical public host so previews
+         render the product shot regardless of which host embeds the link. -->
+    <meta
+      name="description"
+      content="An AI meeting recorder that processes on your device. Live transcription and summaries run in your browser — in Privacy Mode your audio never leaves your machine. The optional studio-grade pass runs on hardware we operate by default. Open source and self-hostable."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Meeting-Ops" />
+    <meta property="og:title" content="Meeting-Ops — the open standard for conversation intelligence" />
+    <meta
+      property="og:description"
+      content="Live transcription and summaries that run on your device. Optional studio-grade server pass on hardware we operate by default. Open source, self-hostable, free to start."
+    />
+    <meta property="og:url" content="https://meeting-ops.unicorncommander.ai/" />
+    <meta property="og:image" content="https://meeting-ops.unicorncommander.ai/screenshots/dashboard.png" />
+    <meta property="og:image:width" content="1986" />
+    <meta property="og:image:height" content="953" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Meeting-Ops — conversation intelligence, on your own terms" />
+    <meta
+      name="twitter:description"
+      content="An AI meeting recorder that runs on your device. In Privacy Mode your audio never leaves your machine; the optional studio pass runs on hardware we operate by default. Open source."
+    />
+    <meta name="twitter:image" content="https://meeting-ops.unicorncommander.ai/screenshots/dashboard.png" />
     <script>
       // The app is a HashRouter SPA, so it only honors /#/route. Public pages
       // (pricing/signup/login) are meant to be typed and shared as real paths,
@@ -52,10 +77,10 @@
       </div>
     </div>
     <script>
-      console.log('index.html: Script tag executing');
-      console.log('index.html: User Agent:', navigator.userAgent);
-      window.addEventListener('error', function(e) {
-        console.error('index.html: Global error:', e.message, e.filename, e.lineno, e.colno);
+      // Keep a quiet global error hook for real failures; the two boot
+      // console.logs (script-executing / user-agent) were dev noise, removed.
+      window.addEventListener('error', function (e) {
+        console.error('Meeting-Ops error:', e.message, e.filename, e.lineno, e.colno);
       });
     </script>
     <script type="module" src="/src/main.tsx"></script>

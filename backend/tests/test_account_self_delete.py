@@ -19,7 +19,7 @@ from auth.utils import get_password_hash
 def _models():
     from auth.models import Organization, PersonalAccessToken, User, UserOrganization
     from database.database import SessionLocal
-    from database.models import RecordingSession, Transcription, TtsJob, UploadJob
+    from database.models import ChatHistory, RecordingSession, Transcription, TtsJob, UploadJob
 
     return {
         "Organization": Organization,
@@ -27,6 +27,7 @@ def _models():
         "User": User,
         "UserOrganization": UserOrganization,
         "SessionLocal": SessionLocal,
+        "ChatHistory": ChatHistory,
         "RecordingSession": RecordingSession,
         "Transcription": Transcription,
         "TtsJob": TtsJob,
@@ -109,6 +110,22 @@ def _seed_transcription(*, session_pk: int, text: str = "hello world"):
     db = m["SessionLocal"]()
     try:
         row = m["Transcription"](session_id=session_pk, text=text, speaker="S1")
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return row.id
+    finally:
+        db.close()
+
+
+def _seed_chat_history(*, org_id: int, session_key: str, content: str):
+    m = _models()
+    db = m["SessionLocal"]()
+    try:
+        row = m["ChatHistory"](
+            session_key=session_key, role="user", content=content,
+            organization_id=org_id,
+        )
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -383,6 +400,44 @@ def test_delete_does_not_touch_other_users_data(client, monkeypatch):
 
     # B can still authenticate.
     assert _login_headers(client, "selfdel_user_b", org_b.slug)
+
+
+# ---------------------------------------------------------------------------
+# (iv-b) cross-tenant chat-history isolation on account delete: a colliding
+#        session_key in ANOTHER org must survive (session_key is NOT globally
+#        unique — legacy sessions use the integer pk string).
+# ---------------------------------------------------------------------------
+
+def test_account_delete_chat_history_is_org_scoped(client, monkeypatch):
+    m = _models()
+    org_a, user_a = _seed_user_org(slug="chatdel-a", username="chatdel_user_a")
+    org_b, user_b = _seed_user_org(slug="chatdel-b", username="chatdel_user_b")
+    uid_a = user_a.id
+
+    # A owns a session; its canonical key is the session_id. Seed A's chat
+    # history under that key, AND seed B's chat history under the SAME key (the
+    # collision the old session_key-only delete would have wiped cross-tenant).
+    session_a = _seed_session(org_id=org_a.id, user_id=uid_a, title="A chat session")
+    colliding_key = session_a.session_id
+    a_chat = _seed_chat_history(org_id=org_a.id, session_key=colliding_key, content="A secret")
+    b_chat = _seed_chat_history(org_id=org_b.id, session_key=colliding_key, content="B keeps this")
+
+    from services.semantic_search_service import SemanticSearchService
+    monkeypatch.setattr(SemanticSearchService, "delete_session", lambda self, session_id: None)
+
+    headers_a = _login_headers(client, "chatdel_user_a", org_a.slug)
+    resp = client.delete("/api/auth/me", headers=headers_a)
+    assert resp.status_code == 200, resp.text
+
+    db = m["SessionLocal"]()
+    try:
+        # A's chat (org_a, key) is gone; B's chat (org_b, SAME key) SURVIVES.
+        assert db.query(m["ChatHistory"]).filter(m["ChatHistory"].id == a_chat).first() is None
+        surviving = db.query(m["ChatHistory"]).filter(m["ChatHistory"].id == b_chat).first()
+        assert surviving is not None, "cross-tenant: B's chat history was wrongly deleted"
+        assert surviving.organization_id == org_b.id
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

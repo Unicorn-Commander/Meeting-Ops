@@ -58,6 +58,10 @@ class UploadStartRequest(BaseModel):
     # Per-upload pipeline overrides — falls back to org defaults when missing.
     # Schema: services/transcription_options.TranscriptionOptions.
     transcription_options: Optional[dict] = None
+    # Browser File.lastModified as an ISO-8601 string. Best-effort "file date"
+    # used to default meeting_date; silently ignored if unparseable. (Browsers
+    # can't expose an OS creation date, so last-modified is the only signal.)
+    client_modified_at: Optional[str] = None
 
 
 class UploadStartResponse(BaseModel):
@@ -176,6 +180,26 @@ def _created_at_from_filename_or_mtime(path: Path, fallback: datetime) -> dateti
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     except OSError:
         return fallback
+
+
+def _flag_stage_needs_retry(session, stage: str, exc: Exception) -> None:
+    """Record a degraded pipeline stage so the upload COMPLETES with what
+    succeeded, while marking the stage for retry/visibility instead of silently
+    finishing with missing data. Sets ``needs_<stage>`` + ``<stage>_error`` on
+    processing_metadata (reassigned so SQLAlchemy detects the JSON change; the
+    caller also flag_modifies + commits). Mirrors the always-on finalize path's
+    degraded-stage markers, which the watchdog + a manual reprocess honor."""
+    metadata = dict(session.processing_metadata or {})
+    metadata[f"needs_{stage}"] = True
+    metadata[f"{stage}_error"] = str(exc)[:500]
+    session.processing_metadata = metadata
+
+
+def _flag_summary_needs_retry(session, exc: Exception) -> None:
+    """Summary-specific degraded-stage marker (``needs_summary`` /
+    ``summary_error``). The session watchdog + a manual reprocess both honor it
+    to regenerate the summary once the LLM is healthy."""
+    _flag_stage_needs_retry(session, "summary", exc)
 
 
 async def _set_job_state(
@@ -426,6 +450,14 @@ async def start_upload(
         from services.transcription_options import TranscriptionOptions
         options_payload = TranscriptionOptions(**request.transcription_options).to_jsonb()
 
+    # Best-effort parse of the browser's File.lastModified. Never fatal — a bad
+    # or absent value just means we fall back to the other recorded-at signals
+    # (embedded creation_time > filename date > ... > upload time).
+    client_modified_at = None
+    if request.client_modified_at:
+        from services.meeting_provenance import parse_iso
+        client_modified_at = parse_iso(request.client_modified_at)
+
     upload_id = uuid.uuid4()
     total_chunks = max(1, math.ceil(request.total_size / DEFAULT_CHUNK_SIZE))
     job = UploadJob(
@@ -441,6 +473,7 @@ async def start_upload(
         progress_pct=0,
         session_id=target_session.id if target_session else None,
         transcription_options=options_payload,
+        client_modified_at=client_modified_at,
     )
     db.add(job)
     db.commit()
@@ -919,16 +952,61 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 await asyncio.to_thread(normalize_session_speaker_labels, session, db)
             except Exception as exc:
                 logger.warning("Speaker diarization/identification failed for upload %s: %s", upload_id, exc)
+                # Complete with the transcript, but flag the degraded stage so
+                # the meeting doesn't silently finish with generic/no speakers
+                # while the UI reports success — watchdog/manual reprocess retries.
+                _flag_stage_needs_retry(session, "diarization", exc)
+                flag_modified(session, "processing_metadata")
+                db.commit()
             await _set_job_state(db, job, progress_pct=100, last_completed_stage="diarizing")
 
         await _set_job_state(db, job, stage="summarizing", progress_pct=10)
-        await _summarize_session(
-            db,
-            session,
-            template=opts.summary_template or "standard",
-            llm_model=opts.llm_model,
-            llm_thinking=opts.llm_thinking,
-        )
+        # Best-effort summary: a summary-LLM failure (timeout, model unavailable,
+        # ...) must NOT discard a successful transcript + diarization. On failure
+        # complete the upload and flag the session needs_summary so it's retried
+        # automatically (watchdog -> finalize_session_job) or via a manual
+        # reprocess. Mirrors the always-on finalize path + the insights/index
+        # stages below.
+        try:
+            await _summarize_session(
+                db,
+                session,
+                template=opts.summary_template or "standard",
+                llm_model=opts.llm_model,
+                llm_thinking=opts.llm_thinking,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Summary failed for upload %s (session %s) — completing with "
+                "transcript+diarization; flagged needs_summary for retry.",
+                upload_id, session.id,
+            )
+            _flag_summary_needs_retry(session, exc)
+            flag_modified(session, "processing_metadata")
+            db.commit()
+            # Kick the same retry job the watchdog uses so the summary fills in
+            # automatically once the LLM recovers; best-effort, with the
+            # needs_summary flag (watchdog / manual reprocess) as the fallback.
+            try:
+                from services.job_runner import get_arq_pool
+                pool = await get_arq_pool()
+                if pool is not None:
+                    job_obj = await pool.enqueue_job(
+                        "finalize_session_job",
+                        session.id,
+                        user_id=session.user_id,
+                        org_id=session.organization_id,
+                        _queue_name=os.getenv("ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive"),
+                    )
+                    if job_obj is not None:
+                        session.processing_job_id = job_obj.job_id
+                        db.commit()
+            except Exception as enq_exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not enqueue summary retry for session %s: %s — "
+                    "needs_summary flag stands (watchdog / manual reprocess).",
+                    session.id, enq_exc,
+                )
 
         # Pre-warm the AI Insights side-panel so the first view of this
         # session doesn't trigger an LLM call. Without this the
@@ -1017,6 +1095,12 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 session.id,
                 exc,
             )
+            # Flag so the meeting isn't silently absent from cross-meeting
+            # search/RAG while the UI reports a clean completion; a reprocess /
+            # backfill re-indexes it.
+            _flag_stage_needs_retry(session, "index", exc)
+            flag_modified(session, "processing_metadata")
+            db.commit()
 
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
@@ -1103,12 +1187,16 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
 
     # Assemble the when/where/who provenance ledger and pick the best
     # "recorded at" signal (audio container creation_time > filename date >
-    # file mtime > upload time). created_at/started_at follow that estimate;
-    # meeting_date/time prefer the filename parse (user intent) and fall back
-    # to the recorded signal.
+    # file mtime > upload time). meeting_date/time follow that estimate (the
+    # user-facing "when it happened"); created_at/started_at do NOT — they stay
+    # the server INGEST time (server_now). The session watchdog (stuck-processing
+    # age) and retention/media-eviction all measure age from created_at, so
+    # backdating it to an imported recording's original date would make a fresh
+    # import look "stuck" and immediately retention-/eviction-eligible (silent
+    # data loss). The historical timestamp is preserved in meeting_date /
+    # meeting_time + the provenance ledger (when.recorded_at).
     from services.meeting_provenance import (
         build_meeting_provenance,
-        parse_iso,
         recorded_date_time,
     )
     provenance = build_meeting_provenance(
@@ -1118,9 +1206,9 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         filename_time=parsed.meeting_time,
         uploaded_at=server_now,
         source_type="upload",
+        client_modified_at=job.client_modified_at,
     )
     recorded = provenance["when"]["recorded_at"]
-    created_at = (parse_iso(recorded["value"]) if recorded else None) or server_now
     meeting_date = parsed.meeting_date
     meeting_time = parsed.meeting_time
     if meeting_date is None:
@@ -1134,8 +1222,8 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         title=title,
         description=f"Uploaded from {job.filename}",
         meeting_type="upload",
-        created_at=created_at,
-        started_at=created_at,
+        created_at=server_now,
+        started_at=server_now,
         meeting_date=meeting_date,
         meeting_time=meeting_time,
         status="processing",
@@ -2144,10 +2232,12 @@ async def _summarize_mapreduce(
     speaker_context: str,
     chunks: list[dict[str, Any]],
     style_prefix: str = "",
-) -> str:
-    """Run the map (per-chunk) + reduce (synthesis) passes and return the
-    reduce response text — the SAME fenced markdown + JSON a single call
-    returns, so the caller feeds it through the existing parse/write block.
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run the map (per-chunk) + reduce (synthesis) passes. Returns
+    ``(reduce_text, missing)`` where reduce_text is the SAME fenced markdown +
+    JSON a single call returns (so the caller feeds it through the existing
+    parse/write block) and ``missing`` lists the chunks the map step dropped
+    (``[{"index", "range"}]``) so the caller can stamp summary_truncated.
 
     Map chunk-calls are independent and run with bounded concurrency
     (semaphore of 3). Results are reassembled in chunk order before reduce.
@@ -2209,6 +2299,24 @@ async def _summarize_mapreduce(
         raise RuntimeError("map-reduce produced no usable chunk digests")
     digests.sort(key=lambda d: d["index"])
 
+    # Coverage: which chunks the map step dropped (LLM failure / unparseable).
+    # The reduce proceeds with what succeeded, but the caller MUST be able to
+    # stamp summary_truncated + the missing ranges rather than claim full
+    # coverage — a partial outage silently omitting time ranges is the audit's
+    # "long-meeting summary correctness" finding.
+    covered = {d["index"] for d in digests}
+    missing = [
+        {"index": c["index"],
+         "range": f"{_fmt_clock(c['start'])}–{_fmt_clock(c['end'])}"}
+        for c in sorted(chunks, key=lambda c: c["index"])
+        if c["index"] not in covered
+    ]
+    if missing:
+        logger.warning(
+            "map-reduce: %d/%d chunk(s) dropped — summary will be PARTIAL: %s",
+            len(missing), total, ", ".join(m["range"] for m in missing),
+        )
+
     # Serialize the digests compactly for the reduce prompt. They are small
     # (a few hundred tokens each), so the reduce call stays well within one
     # chunk's budget even for very long meetings.
@@ -2245,7 +2353,7 @@ async def _summarize_mapreduce(
     )
     if not (reduce_text or "").strip():
         raise RuntimeError("map-reduce reduce step returned empty output")
-    return reduce_text
+    return reduce_text, missing
 
 
 async def _summarize_session(
@@ -2353,6 +2461,9 @@ async def _summarize_session(
     # comment claimed 60K ≈ "~3 hours"; it's really ~75-90 min).
     cap = 200_000 if direct is not None else 60_000
     truncated = len(transcript) > cap
+    # Map-reduce time-ranges omitted by dropped chunks (audit: long-meeting
+    # summary correctness). Empty on the single-call path.
+    summary_missing_ranges: list[str] = []
     transcript_body = transcript[:cap]
     if truncated:
         pct = int(100 * cap / max(len(transcript), 1))
@@ -2431,7 +2542,7 @@ async def _summarize_session(
                     "Summarizing session=%s via map-reduce: %d chunks (~%d tokens, chunk_tokens=%d)",
                     session.id, len(chunks), _estimate_tokens(transcript), chunk_tokens,
                 )
-                text = await _summarize_mapreduce(
+                text, mr_missing = await _summarize_mapreduce(
                     llm,
                     system_prompt=system_prompt,
                     speaker_context=speaker_context,
@@ -2443,7 +2554,13 @@ async def _summarize_session(
                 )
                 summary_mode = "mapreduce"
                 summary_chunks = len(chunks)
-                truncated = False  # full coverage — every chunk was summarized
+                # Honest coverage: full only when NO chunk was dropped. A partial
+                # outage that omitted time ranges must stamp truncated + ranges.
+                if mr_missing:
+                    truncated = True
+                    summary_missing_ranges = [m["range"] for m in mr_missing]
+                else:
+                    truncated = False  # full coverage — every chunk was summarized
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "map-reduce summarization failed for session=%s (%s) — "
@@ -2537,8 +2654,14 @@ async def _summarize_session(
     summary_md["summary_input_hash"] = summary_input_hash
     # Truncation disclosure (v3.35.0, audit #7): record when the summary saw
     # only part of the transcript so the UI/exports can surface it. Map-reduce
-    # (v3.36.0) covers the whole meeting, so it sets summary_truncated=False.
+    # normally covers the whole meeting (summary_truncated=False), BUT a dropped
+    # chunk makes coverage partial — then truncated=True and the omitted time
+    # ranges are recorded (audit: long-meeting summary correctness).
     summary_md["summary_truncated"] = bool(truncated)
+    if summary_missing_ranges:
+        summary_md["summary_missing_ranges"] = summary_missing_ranges
+    else:
+        summary_md.pop("summary_missing_ranges", None)
     summary_md["summary_prompt_variant"] = "memo" if is_memo else "full"
     summary_md["summary_mode"] = summary_mode
     if summary_mode == "mapreduce":

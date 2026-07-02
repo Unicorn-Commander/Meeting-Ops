@@ -27,6 +27,8 @@ import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
 import AudioMeter from './AudioMeter';
 import SessionMicChip from './SessionMicChip';
 import ConfirmModal from './ConfirmModal';
+import RecordingConsentModal from './RecordingConsentModal';
+import { hasRecordingConsent, rememberRecordingConsent } from '../constants/legal';
 import { showConfirm } from '../utils/notifications';
 import {
   isTabCaptureSupported,
@@ -581,6 +583,9 @@ export default function AlwaysOnControl() {
   // Discard surfaces the consequences before firing.
   const [discardOpen, setDiscardOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  // Legal: pre-record consent gate (AUP §2.3). Shown once per browser session
+  // before the first recording start; confirmation is remembered client-side.
+  const [consentOpen, setConsentOpen] = useState(false);
   // Brief inline "copied" indicator next to the session id chip.
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   // First-time onboarding hint for the audio-source picker. Lazy-init
@@ -783,6 +788,18 @@ export default function AlwaysOnControl() {
         tone="danger"
         onConfirm={alwaysOn.clearStartBlocked}
         onCancel={alwaysOn.clearStartBlocked}
+      />
+
+      {/* Legal: pre-record consent gate (AUP §2.3). Confirming records consent
+          for the session (client-side v1) and then starts recording. */}
+      <RecordingConsentModal
+        open={consentOpen}
+        onConfirm={() => {
+          rememberRecordingConsent();
+          setConsentOpen(false);
+          alwaysOn.start();
+        }}
+        onCancel={() => setConsentOpen(false)}
       />
 
 
@@ -1033,7 +1050,13 @@ export default function AlwaysOnControl() {
         <div className="flex flex-wrap items-center gap-2">
           {alwaysOn.state === 'idle' ? (
             <button
-              onClick={alwaysOn.start}
+              onClick={() => {
+                // Legal consent gate (AUP §2.3) before recording starts. If
+                // consent was already confirmed this session, start directly;
+                // otherwise surface the prompt and start on confirmation.
+                if (hasRecordingConsent()) alwaysOn.start();
+                else setConsentOpen(true);
+              }}
               className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500"
             >
               <Play className="h-4 w-4" />

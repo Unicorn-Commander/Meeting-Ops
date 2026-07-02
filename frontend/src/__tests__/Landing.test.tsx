@@ -18,37 +18,44 @@ describe('Landing', () => {
     window.location.hash = '';
   });
 
-  it('renders hero copy, three product points, and the invite form', () => {
+  it('renders hero copy, the key sections, and the invite form', () => {
     render(
       <MemoryRouter>
         <Landing />
       </MemoryRouter>,
     );
 
-    // Hero — v3.23.0 reposition to "meeting and conversation
-    // intelligence platform" category claim.
+    // Hero — product-page rework (2026-06-22): the category claim is now
+    // "the open standard for conversation intelligence."
     expect(
       screen.getByRole('heading', {
         level: 1,
-        name: /meeting and conversation intelligence that stays private\./i,
+        name: /the open standard for conversation intelligence\./i,
       }),
     ).toBeInTheDocument();
 
-    // Three product points
-    expect(screen.getByText(/browser-only by default/i)).toBeInTheDocument();
-    expect(screen.getByText(/optional pro server pass/i)).toBeInTheDocument();
-    expect(screen.getByText(/bring-your-own ecosystem/i)).toBeInTheDocument();
+    // Section signals from the 2026 product-page rework: how-it-works,
+    // the privacy/moat contrast, and the pricing promise.
+    expect(
+      screen.getByText(/from mic to memory in three steps/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/your audio stays on your device/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/pay only for the heavy lifting/i),
+    ).toBeInTheDocument();
 
-    // Form — v3.21.0: CTA button is now "Continue" (full-path to /signup).
+    // Invite funnel — email capture + the "Continue" full-path CTA to /signup.
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /continue/i }),
     ).toBeInTheDocument();
 
-    // Sign-in escape hatch
+    // Sign-in escape hatch (now surfaced in the nav + footer).
     expect(
-      screen.getByRole('link', { name: /i have an account → sign in/i }),
-    ).toBeInTheDocument();
+      screen.getAllByRole('link', { name: /^sign in$/i }).length,
+    ).toBeGreaterThan(0);
 
     // Footer attribution
     expect(

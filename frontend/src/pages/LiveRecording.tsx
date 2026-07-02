@@ -135,7 +135,6 @@ export default function LiveRecording() {
   
   const [isRecording, setIsRecording] = useState(storedSession?.isRecording || false);
   const [sessionData, setSessionData] = useState<SessionData | null>(storedSession);
-  const [audioLevel, setAudioLevel] = useState(0);
   const [duration, setDuration] = useState(storedSession?.duration || 0);
   const [isProcessing, setIsProcessing] = useState(false);
   // Cross-surface collision modal — set when the user clicks Start
@@ -196,7 +195,6 @@ export default function LiveRecording() {
   const alwaysOnPollRef = useRef<NodeJS.Timeout | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const audioWsRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef<Date | null>(storedSession && storedSession.startTime ? (() => {
     const date = new Date(storedSession.startTime);
@@ -354,60 +352,13 @@ export default function LiveRecording() {
     };
   }, []);
 
-  // Connect to audio levels WebSocket (always on for monitoring)
-  useEffect(() => {
-    let reconnectTimer: NodeJS.Timeout;
-    
-    const connectAudioLevels = () => {
-      try {
-        const audioWs = new WebSocket(appendWsToken(getOrgQueryUrl(`${config.wsEndpoints.base}/ws/audio-levels`)));
-        
-        audioWs.onopen = () => {
-          // Connected
-        };
-        
-        audioWs.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'audio_level' || data.level !== undefined) {
-              setAudioLevel(data.level || data.audio_level || 0);
-            }
-          } catch (e) {
-            // Ignore malformed audio level messages
-          }
-        };
-        
-        audioWs.onerror = () => {
-          // Normal on first load, will reconnect
-        };
+  // (Removed) the legacy `/ws/audio-levels` socket. It drove an on-page level
+  // meter that was retired from the UI, yet it still opened on mount and
+  // reconnect-stormed every 3s — which spammed the console on the native-OIDC
+  // node, where the browser WebSocket carries the session cookie but not the
+  // `?token=` JWT the WS auth expects. The live transcript is computed
+  // in-browser and never needed this socket.
 
-        audioWs.onclose = (event) => {
-          reconnectTimer = setTimeout(() => {
-            if (audioWsRef.current === audioWs) {
-              connectAudioLevels();
-            }
-          }, 3000);
-        };
-        
-        audioWsRef.current = audioWs;
-      } catch (error) {
-        reconnectTimer = setTimeout(connectAudioLevels, 3000);
-      }
-    };
-    
-    // Delay initial connection to let backend fully initialize
-    const initialDelay = setTimeout(connectAudioLevels, 1000);
-    
-    return () => {
-      clearTimeout(initialDelay);
-      clearTimeout(reconnectTimer);
-      if (audioWsRef.current) {
-        audioWsRef.current.close();
-        audioWsRef.current = null;
-      }
-    };
-  }, []); // Connect once on mount
-  
   // Check audio devices
   useEffect(() => {
     const checkDevices = async () => {

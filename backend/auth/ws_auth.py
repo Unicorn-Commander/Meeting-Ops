@@ -43,6 +43,18 @@ async def authenticate_ws(websocket: WebSocket):
     """
     token = websocket.query_params.get("token")
     if not token:
+        # Native-OIDC nodes (prod, no oauth2-proxy) sign users in with the
+        # HttpOnly ``mo_uc_session`` cookie that auth/oidc_sso.py sets — itself a
+        # standard access JWT (sub=user id). The browser can't set WS headers and
+        # native-OIDC keeps no localStorage token, so fall back to that cookie
+        # here. Same source the REST stack reads in auth/dependencies.py, decoded
+        # by the same ``decode_token`` below — so no new trust path is added.
+        import os
+
+        token = websocket.cookies.get(
+            os.getenv("UC_SSO_COOKIE_NAME", "mo_uc_session")
+        )
+    if not token:
         return None
     token = token.strip()
     if not token:
@@ -113,6 +125,35 @@ def _session_org_id(session_id: str) -> Optional[int]:
             db.close()
     except Exception as e:  # noqa: BLE001
         logger.warning("WS session org resolve failed for %s: %s", session_id, e)
+        return None
+
+
+def resolve_session_org(session_id: str):
+    """Load the Organization that owns ``session_id`` (detached) or None.
+
+    The session's owning org IS the active workspace for a session-bound socket:
+    the meeting belongs to it and the per-workspace billing gate must read its
+    plan (gate on the active workspace's entitlement, not the user's global
+    tier). Best-effort; never raises. Returns None when unresolvable, so callers
+    fall back to the user-tier gate (``gate_feature_for_caller`` active_org=None).
+    """
+    org_id = _session_org_id(session_id)
+    if org_id is None:
+        return None
+    try:
+        from auth.organization import load_organization
+        from database.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            org = load_organization(db, org_id)
+            if org is not None:
+                db.expunge(org)
+            return org
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("WS active-org resolve failed for %s: %s", session_id, e)
         return None
 
 

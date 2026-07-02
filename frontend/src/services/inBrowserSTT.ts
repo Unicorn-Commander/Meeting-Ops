@@ -172,6 +172,11 @@ export class InBrowserSTT {
     // wasm settings matter even when we request WebGPU.
     this.ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 4);
     this.ort.env.wasm.simd = true;
+    // Silence ORT's benign "node not assigned to preferred EP" warnings, which
+    // the wasm worker prints to stderr (so they surface as red console errors)
+    // on every model load. The per-session logSeverityLevel doesn't catch the
+    // graph-partition pass; the global env.logLevel does. ('error' = warnings off)
+    try { this.ort.env.logLevel = 'error'; } catch { /* older ORT */ }
 
     // Build mel filterbank + Hann window once. These are pure float math
     // and never change after load.
@@ -219,6 +224,9 @@ export class InBrowserSTT {
       {
         executionProviders,
         graphOptimizationLevel: 'all',
+        // Quiet ORT's benign "node not assigned to preferred EP" Warning
+        // chatter (it spams the console on every model load). 3 = Error.
+        logSeverityLevel: 3,
         externalData: [
           {
             data: new Uint8Array(encDataBytes.blob),
@@ -236,6 +244,9 @@ export class InBrowserSTT {
       {
         executionProviders,
         graphOptimizationLevel: 'all',
+        // Quiet ORT's benign "node not assigned to preferred EP" Warning
+        // chatter (it spams the console on every model load). 3 = Error.
+        logSeverityLevel: 3,
       },
     );
 

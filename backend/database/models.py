@@ -549,6 +549,12 @@ class UploadJob(Base):
     # services/transcription_options.py. Renders as JSONB on Postgres
     # (per 011_upload_transcription_options) and JSON on SQLite test fixtures.
     transcription_options = Column(_JsonB(), nullable=True)
+    # Browser-reported File.lastModified (the only "file date" the web exposes —
+    # there is no OS creation date over HTTP). Fed into the meeting-provenance
+    # "recorded at" estimate so an upload defaults its meeting_date to when the
+    # file was last saved, not the ingest time (see 050_upload_client_modified_at
+    # + services/meeting_provenance.py).
+    client_modified_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

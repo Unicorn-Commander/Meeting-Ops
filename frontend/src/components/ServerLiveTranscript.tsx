@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Users } from 'lucide-react';
+import { appendWsToken } from '../config';
 import { startPcm16Capture, type Pcm16Capture } from '../utils/audioWorkletCapture';
 
 // Mirror the 19-byte BE header layout from StreamingTest.tsx + the
@@ -239,7 +240,13 @@ export default function ServerLiveTranscript({ sessionId, enabled }: ServerLiveT
   // Compose the WS URL. Same pattern StreamingTest.tsx uses.
   const wsUrl = (() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}/ws/sessions/${encodeURIComponent(sessionId)}/live`;
+    // Carry the JWT as ?token= — the browser WS API can't set headers, and the
+    // server-live socket is token-authed (streaming.py authenticate_ws). Without
+    // this the upgrade is rejected 4001 for browser clients / on the native-OIDC
+    // prod path (no oauth2-proxy injecting forward-auth headers).
+    return appendWsToken(
+      `${proto}//${window.location.host}/ws/sessions/${encodeURIComponent(sessionId)}/live`,
+    );
   })();
 
   const teardown = useCallback(() => {

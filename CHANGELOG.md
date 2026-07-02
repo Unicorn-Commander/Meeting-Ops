@@ -1,5 +1,52 @@
 ## [Unreleased]
 
+## [3.49.0] - 2026-07-02
+
+This release **reconciles the integration that had been running in production**
+(meeting-ops.unicorncommander.ai) back onto `main`. Every change below was live
+and verified in prod before this commit; `main` had drifted behind the deployment.
+It integrates the previously-separate branches `feat/landing-product-page`,
+`feat/upload-meeting-date-from-file`, and `feat/concurrent-diarize-and-24k-summary-tuning`,
+plus auth-hardening work that existed on no branch.
+
+### Security
+- **Forward-auth trust is now fail-CLOSED.** `auth/proxy_trust.py` previously
+  **trusted inbound `X-Auth-Request-*` / `X-Forwarded-User` / `Remote-User`
+  headers when `PROXY_AUTH_SHARED_SECRET` was unset** — which is exactly the
+  native-OIDC production case, so a forged header could impersonate a user. Unset
+  secret now means those headers are ignored, not trusted. Paired with a Traefik
+  **`meet-strip-auth` edge middleware** that strips those headers off inbound
+  requests (defence in depth), and **Brigade JWT verification**
+  (`BRIGADE_JWKS_URL` / `TRUSTED_ISSUER` / `EXPECTED_AUDIENCE`).
+
+### Added
+- **Upload date from the file, not ingest time** (migration `050_upload_client_modified_at`,
+  additive nullable `upload_jobs.client_modified_at`). The browser's
+  `File.lastModified` is carried through `/api/uploads/start` into meeting
+  provenance and ranked (`CONF_CLIENT_MTIME=0.55`, above server mtime), so an
+  uploaded meeting dates to when it was recorded, not when it was ingested.
+- **Summary map-reduce tunables** (`MEETING_OPS_SUMMARY_MAPREDUCE`,
+  `MEETING_OPS_SUMMARY_CHUNK_TOKENS`). A 14k chunk keeps both the map path and the
+  single-call path inside a 24k-context summarizer slot, and map-reduce gives long
+  meetings full coverage instead of single-call truncation at the transcript cap.
+- **Native-OIDC WebSocket auth** — `ws_auth.py` adds an `mo_uc_session` cookie
+  fallback + `resolve_session_org` so the per-workspace billing gate works over WS
+  on native-OIDC deploys.
+- **Landing / Pricing marketing redesign** (`Landing.tsx`, `Pricing.tsx`, brand
+  asset, SEO/OpenGraph/Twitter meta in `index.html`).
+
+### Changed
+- **Diarization now runs concurrently with transcription.**
+  `_run_session_reprocess` launched Parakeet STT and pyannote diarization
+  serially even though they read the same audio independently on separate GPUs and
+  merge afterward. Diarization is now an `asyncio` task started before the STT
+  await and awaited after, cutting that stage from `STT + diarize` to
+  ~`max(STT, diarize)`. Concurrency-safe (provider DB setup precedes the parallel
+  section; `diarize()` is HTTP-only; the task is cancelled if STT raises; degrades
+  cleanly to transcript-only). Verified on a 76-min meeting — diarize started ~5s
+  in, overlapping ~43s of STT. See
+  `docs/inference-pipeline-2026-07-02-concurrency-and-24k-tuning.md`.
+
 ## [3.48.2] - 2026-06-21
 
 ### Added

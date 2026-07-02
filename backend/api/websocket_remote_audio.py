@@ -258,9 +258,16 @@ async def websocket_remote_audio(websocket: WebSocket, session_id: str):
     # in the application range), using 4403 to signal "authenticated but
     # forbidden" per this module's existing 44xx convention.
     from auth.tier import gate_feature_for_caller
+    from auth.ws_auth import resolve_session_org
+
+    # billing-1: the canonical reprocess this stream drives must be covered by
+    # the ACTIVE workspace's plan (the org that owns the session), not just the
+    # user's global tier. Resolve the session's org and pass it to the gate;
+    # when unresolved, gate_feature_for_caller falls back to the user tier.
+    active_org = resolve_session_org(session_id)
 
     try:
-        gate_feature_for_caller(user, "canonical_reprocess")
+        gate_feature_for_caller(user, "canonical_reprocess", active_org)
     except HTTPException:
         logger.warning(
             f"Remote-audio: tier_insufficient for user_id={user_id} "

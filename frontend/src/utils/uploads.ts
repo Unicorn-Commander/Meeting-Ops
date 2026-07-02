@@ -203,6 +203,14 @@ export function uploadWebSocketUrl(jobId: string, orgSlug?: string | null): stri
   const apiUrl = config.apiBaseUrl;
   const protocol = apiUrl.startsWith('https') ? 'wss:' : 'ws:';
   const host = apiUrl.replace(/^https?:\/\//, '');
-  const orgQuery = orgSlug ? `?org=${encodeURIComponent(orgSlug)}` : '';
-  return `${protocol}//${host}/ws/uploads/${jobId}${orgQuery}`;
+  // The backend WS handshake auth (auth/ws_auth.py) reads the JWT from the
+  // ?token= query param — the browser WebSocket API can't set an Authorization
+  // header. Without it the upload-status socket is rejected (403/1008 close) and
+  // the progress toast never receives completion → it hangs on "processing".
+  const params = new URLSearchParams();
+  if (orgSlug) params.set('org', orgSlug);
+  const token = localStorage.getItem('access_token');
+  if (token) params.set('token', token);
+  const qs = params.toString();
+  return `${protocol}//${host}/ws/uploads/${jobId}${qs ? `?${qs}` : ''}`;
 }

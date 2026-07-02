@@ -95,6 +95,7 @@ export const AgentDashboard: React.FC = () => {
   const [filterType, setFilterType] = useState<'all' | 'core' | 'custom' | 'templates'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [status, setStatus] = useState<{ type: 'success' | 'error' | null; message: string }>({ type: null, message: '' });
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     loadAgents();
@@ -102,16 +103,21 @@ export const AgentDashboard: React.FC = () => {
   }, []);
 
   const loadAgents = async () => {
+    setLoadError(null);
     try {
       const response = await fetch(`${config.apiUrl}/api/agents/`);
       if (response.ok) {
         const data = await response.json();
         setAgents(data.agents || data || []);
+      } else {
+        // NEVER synthesize operational state — an admin must not mistake
+        // fabricated defaults for the real production config. Surface the
+        // error and keep the last known payload (if any).
+        setLoadError(`Couldn't load agents (${response.status}).`);
       }
     } catch (error) {
       console.error('Error loading agents:', error);
-      // Create default agents if backend is not available
-      setAgents(getDefaultAgents());
+      setLoadError("Couldn't reach the agents service.");
     } finally {
       setLoading(false);
     }
@@ -128,67 +134,6 @@ export const AgentDashboard: React.FC = () => {
       console.error('Error loading templates:', error);
     }
   };
-
-  const getDefaultAgents = (): Agent[] => [
-    {
-      id: 'live-summary',
-      name: 'Live Summary Agent',
-      slug: 'live-summary',
-      description: 'Ultra-fast real-time meeting summaries',
-      icon: '⚡',
-      agent_type: AgentType.CORE_LIVE,
-      purpose: 'Generate real-time summaries during recording',
-      is_core: true,
-      is_active: true,
-      is_default_live: true,
-      is_default_final: false,
-      provider_type: 'llamacpp',
-      model_name: 'qwen-3.6-35b-a3b-vision',
-      model_settings: {
-        temperature: 0.3,
-        max_tokens: 512,
-        top_p: 0.9,
-        context_window: 8192
-      },
-      system_prompt: 'You are a live meeting summarizer...',
-      output_format: 'text',
-      permission_level: 'public',
-      performance_metrics: {
-        avg_tokens_per_sec: 850,
-        model_size: '~1.5GB',
-        context_window: '8K'
-      }
-    },
-    {
-      id: 'final-analysis',
-      name: 'Final Analysis Agent',
-      slug: 'final-analysis',
-      description: 'Comprehensive post-meeting analysis',
-      icon: '🧠',
-      agent_type: AgentType.CORE_FINAL,
-      purpose: 'Create detailed meeting documentation',
-      is_core: true,
-      is_active: true,
-      is_default_live: false,
-      is_default_final: true,
-      provider_type: 'llamacpp',
-      model_name: 'qwen-3.6-35b-a3b-vision',
-      model_settings: {
-        temperature: 0.7,
-        max_tokens: 2048,
-        top_p: 0.95,
-        context_window: 8192
-      },
-      system_prompt: 'You are a comprehensive meeting analyst...',
-      output_format: 'json',
-      permission_level: 'public',
-      performance_metrics: {
-        avg_tokens_per_sec: 850,
-        model_size: '~1.5GB',
-        context_window: '8K'
-      }
-    }
-  ];
 
   const handleCreateAgent = () => {
     const newAgent: Agent = {
@@ -360,9 +305,32 @@ export const AgentDashboard: React.FC = () => {
     );
   }
 
+  if (loadError && agents.length === 0) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-white p-6">
+        <div className="max-w-7xl mx-auto flex flex-col items-center justify-center h-64 gap-4">
+          <div className="text-red-300 text-center">{loadError}</div>
+          <button
+            onClick={loadAgents}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-black text-white p-6">
       <div className="max-w-7xl mx-auto">
+        {/* Stale-data banner: real config is loaded but a refresh failed. */}
+        {loadError && agents.length > 0 && (
+          <div className="mb-4 px-4 py-2 rounded-lg bg-amber-900/40 border border-amber-700/50 text-amber-200 text-sm flex items-center justify-between">
+            <span>{loadError} Showing the last loaded configuration.</span>
+            <button onClick={loadAgents} className="underline hover:text-amber-100">Retry</button>
+          </div>
+        )}
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center justify-between">

@@ -323,7 +323,7 @@ const MobileSessionsList: React.FC<Props> = ({
             {!searchQuery && selectedTags.length === 0 && (
               <button
                 type="button"
-                onClick={() => navigate('/recording')}
+                onClick={() => navigate('/record')}
                 className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white text-sm font-semibold active:from-fuchsia-500 active:to-indigo-500"
               >
                 <Mic className="w-5 h-5" />
