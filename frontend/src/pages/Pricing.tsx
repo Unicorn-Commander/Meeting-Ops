@@ -11,6 +11,8 @@ import {
 import {
   PRO_MONTHLY_PRICE_DISPLAY,
   PRO_MONTHLY_PRICE_WITH_PERIOD,
+  PRO_LIST_PRICE_DISPLAY,
+  PRO_LAUNCH_DISCOUNT_PCT,
 } from '../constants/pricing';
 import LegalFooter from '../components/LegalFooter';
 
@@ -158,12 +160,18 @@ export const Pricing: React.FC = () => {
               <p className="mt-1 text-sm text-zinc-400">
                 Studio-quality output and an AI that knows your whole library.
               </p>
-              <div className="mt-5 flex items-end gap-1">
+              <div className="mt-5 flex items-end gap-2">
+                <span className="pb-1 text-2xl font-medium text-zinc-500 line-through decoration-zinc-600">
+                  {PRO_LIST_PRICE_DISPLAY}
+                </span>
                 <span className="text-5xl font-semibold tabular-nums text-white">
                   {PRO_MONTHLY_PRICE_DISPLAY}
                 </span>
                 <span className="pb-1 text-sm text-zinc-500">/month</span>
               </div>
+              <p className="mt-1 text-xs font-semibold text-fuchsia-300">
+                Launch pricing — {PRO_LAUNCH_DISCOUNT_PCT}% off
+              </p>
               <ul className="mt-6 space-y-3 text-sm text-zinc-200">
                 {PRO_FEATURES.map((f) => (
                   <li key={f} className="flex items-start gap-2.5">
