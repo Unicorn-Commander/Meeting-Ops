@@ -53,6 +53,7 @@ const PrivacySettings = lazy(() => import('../components/settings/PrivacySetting
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
 const InviteCodesCard = lazy(() => import('../components/settings/InviteCodesCard'));
+const BillingSettings = lazy(() => import('../components/settings/BillingSettings'));
 
 /**
  * "My Voice" card — personal voiceprint status + delete-on-demand.
@@ -408,6 +409,8 @@ export default function SettingsEnhanced() {
         );
       case 'invite-codes':
         return <InviteCodesCard />;
+      case 'billing':
+        return <BillingSettings />;
 
       // ── Recording defaults ──
       case 'recording-defaults':
@@ -478,6 +481,9 @@ export default function SettingsEnhanced() {
   const showSave =
     activeSection !== 'personal-access-tokens' &&
     activeSection !== 'theme' &&
+    // Billing has its own Stripe-backed actions (upgrade / manage) — no
+    // generic settings Save row.
+    activeSection !== 'billing' &&
     !PLACEHOLDER_SECTIONS.has(activeSection);
 
   return (

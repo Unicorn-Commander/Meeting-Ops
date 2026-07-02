@@ -34,6 +34,12 @@ function extractApiError(payload: unknown, fallback: string): string {
 
 export const Signup: React.FC = () => {
   const location = useLocation();
+  // Arrived from a "Get Pro" CTA (?intent=pro). Presentational only: sets
+  // expectations that the account starts Free and Pro is one step away after
+  // sign-in. Actually carrying the intent through to auto-open checkout after
+  // email-verify + login is a follow-up (needs auth-flow state), not wired here.
+  const wantsProIntent =
+    new URLSearchParams(location.search || '').get('intent') === 'pro';
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
@@ -304,6 +310,17 @@ export const Signup: React.FC = () => {
               </div>
             ) : (
               <>
+                {wantsProIntent && (
+                  <div className="mb-5 flex items-start gap-3 rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 px-4 py-3 text-sm text-fuchsia-100">
+                    <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
+                    <span>
+                      You're on your way to <strong className="font-semibold text-white">Pro</strong>.
+                      Create your free account first — once you verify your email and sign in,
+                      you can complete the upgrade from{' '}
+                      <span className="font-medium text-white">Settings → Plan &amp; billing</span>.
+                    </span>
+                  </div>
+                )}
                 <div className="mb-6 flex items-center justify-between">
                   <div>
                     <h2 className="text-2xl font-semibold tracking-tight text-white">Create account</h2>

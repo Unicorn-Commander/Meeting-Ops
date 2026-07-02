@@ -1,18 +1,25 @@
 // UpgradeBanner — small dismissible banner for free-tier users.
 //
-// Renders at the top of Sessions / SessionDetails. Single CTA → /pricing.
+// Renders at the top of Sessions / SessionDetails.
+//   - tier gate (the user's account is Free) → the CTA starts Stripe Checkout
+//     directly via beginProCheckout('pro').
+//   - workspace gate (the user is Pro but the ACTIVE workspace is Free) → the
+//     CTA routes to the in-app /pricing page, since a personal Pro checkout
+//     does not change a workspace's plan.
 // Dismiss persists for 7 days in localStorage (so we don't nag), then it
 // comes back on its own.
 //
-// Aaron's locked copy + price ($12/mo, individual, cancel anytime).
-// Browser-first moat language: this is the upsell for SERVER-side
-// features. Free is on-device by design — see compute-economics.md.
+// Price copy is single-sourced from constants/pricing.ts. Browser-first moat
+// language: this is the upsell for SERVER-side features. Free is on-device by
+// design — see compute-economics.md.
 
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Sparkles, X } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTierFeatures } from '../hooks/useTierFeatures';
+import { beginProCheckout } from '../utils/checkout';
+import { PRO_MONTHLY_PRICE_WITH_PERIOD } from '../constants/pricing';
 
 const DISMISS_KEY = 'meet:upgrade-banner:dismissed';
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -87,19 +94,43 @@ export const UpgradeBanner: React.FC = () => {
             (or switch to a paid workspace) to use it here.
           </p>
         ) : (
-          <p className="leading-6">
-            <strong className="font-semibold text-white">Upgrade to Pro — $12/mo.</strong>{' '}
-            Higher-accuracy transcription, speaker diarization, AI chat, cross-device sync. Cancel anytime.
-          </p>
+          <div className="leading-6">
+            <p>
+              <strong className="font-semibold text-white">
+                Upgrade to Pro — {PRO_MONTHLY_PRICE_WITH_PERIOD}.
+              </strong>{' '}
+              Higher-accuracy transcription, speaker diarization, AI chat, cross-device sync. Cancel anytime.
+            </p>
+            <p className="mt-1 text-xs text-zinc-400">
+              By upgrading you agree to the{' '}
+              <Link
+                to="/terms"
+                className="text-fuchsia-200 underline-offset-4 hover:underline"
+              >
+                Terms &amp; refund policy
+              </Link>
+              .
+            </p>
+          </div>
         )}
       </div>
       <div className="flex items-center gap-2">
-        <Link
-          to="/pricing"
-          className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-100"
-        >
-          {isWorkspaceGate ? 'Upgrade workspace' : 'Upgrade to Pro'}
-        </Link>
+        {isWorkspaceGate ? (
+          <Link
+            to="/pricing"
+            className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-100"
+          >
+            Upgrade workspace
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={() => beginProCheckout('upgrade_banner')}
+            className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-100"
+          >
+            Upgrade to Pro
+          </button>
+        )}
         <button
           type="button"
           aria-label="Dismiss upgrade banner"

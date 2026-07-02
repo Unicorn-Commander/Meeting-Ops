@@ -59,6 +59,11 @@ import {
 import { config } from '../config';
 import LegalFooter from '../components/LegalFooter';
 import { track } from '../utils/posthog';
+import { beginProCheckout, hasStoredAuthToken } from '../utils/checkout';
+import {
+  PRO_MONTHLY_PRICE_DISPLAY,
+  PRO_MONTHLY_PRICE_WITH_PERIOD,
+} from '../constants/pricing';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
 
@@ -572,7 +577,7 @@ const FAQS: Array<{ q: string; a: React.ReactNode }> = [
   },
   {
     q: 'What’s free, and what costs money?',
-    a: 'The full live experience is free, forever: on-device transcription, rolling summaries, and your complete session history — no card required. Pro ($15/mo) adds the server pass, polished AI summaries, cross-meeting chat, semantic search, and the knowledge graph.',
+    a: `The full live experience is free, forever: on-device transcription, rolling summaries, and your complete session history — no card required. Pro (${PRO_MONTHLY_PRICE_WITH_PERIOD}) adds the server pass, polished AI summaries, cross-meeting chat, semantic search, and the knowledge graph.`,
   },
   {
     q: 'How accurate is the transcription?',
@@ -727,6 +732,20 @@ export const Landing: React.FC = () => {
       typeof window !== 'undefined' &&
       window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+  }, []);
+
+  // Pro CTA — real checkout. Stripe Checkout needs a JWT, so an anonymous
+  // visitor is routed to /signup?intent=pro (hash router); a signed-in visitor
+  // goes straight to Checkout. Auth is read from the stored token rather than
+  // AuthContext so this page stays decoupled from the provider (it renders for
+  // anonymous marketing visitors and in tests without an AuthProvider).
+  const handleGetPro = useCallback(() => {
+    track('landing_pro_cta', {});
+    if (hasStoredAuthToken()) {
+      void beginProCheckout('landing');
+    } else {
+      window.location.hash = '/signup?intent=pro';
+    }
   }, []);
 
   // ── Invite funnel (UNCHANGED behaviour — covered by Landing.test.tsx) ──
@@ -1207,7 +1226,7 @@ export const Landing: React.FC = () => {
                   </p>
                   <div className="mt-5 flex items-end gap-1">
                     <span className="font-display text-5xl font-semibold tabular-nums text-white">
-                      $15
+                      {PRO_MONTHLY_PRICE_DISPLAY}
                     </span>
                     <span className="pb-1 text-sm text-zinc-500">/month</span>
                   </div>
@@ -1228,13 +1247,20 @@ export const Landing: React.FC = () => {
                   <div className="mt-auto pt-8">
                     <button
                       type="button"
-                      onClick={() => scrollToId('invite')}
+                      onClick={handleGetPro}
                       className={`${btnPrimary} w-full`}
                     >
-                      {BETA ? 'Get early access to Pro' : 'Go Pro'}
+                      Get Pro
+                      <ArrowRight className="h-4 w-4" />
                     </button>
                     <p className="mt-3 text-center text-xs text-zinc-500">
-                      Cancel anytime · We never sell or train on your data.
+                      Cancel anytime · We never sell or train on your data ·{' '}
+                      <a
+                        href="#/terms"
+                        className="text-gold-300 underline-offset-4 hover:underline"
+                      >
+                        Terms
+                      </a>
                     </p>
                   </div>
                 </div>

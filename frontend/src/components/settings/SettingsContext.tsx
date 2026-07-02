@@ -4,6 +4,7 @@ import {
   Brain,
   BookOpen,
   Cpu,
+  CreditCard,
   Download,
   Keyboard,
   KeyRound,
@@ -57,6 +58,13 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     title: 'Theme',
     icon: Palette,
     description: 'Appearance (System / Dark)',
+    category: 'preferences',
+  },
+  {
+    id: 'billing',
+    title: 'Plan & billing',
+    icon: CreditCard,
+    description: 'Your subscription, upgrade to Pro, invoices',
     category: 'preferences',
   },
   {
