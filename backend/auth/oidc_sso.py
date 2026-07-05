@@ -134,6 +134,66 @@ def _safe_return_to(rt: Optional[str]) -> str:
     return "/"
 
 
+# Client ids whose uchub-issued access tokens the API accepts as raw Bearer
+# credentials. Native apps (the iOS client) do standards OIDC straight against
+# Keycloak and present the realm access token — there's no oauth2-proxy header
+# and no app session cookie on that path, so the API must trust the realm
+# token itself. Keep this list tight: it's an auth surface.
+ACCEPTED_BEARER_CLIENT_IDS = frozenset(
+    c.strip()
+    for c in os.getenv(
+        "KEYCLOAK_ACCEPTED_CLIENT_IDS", f"{KC_CLIENT_ID},meeting-ops-ios"
+    ).split(",")
+    if c.strip()
+)
+
+
+def verify_kc_bearer_token(token: str) -> Optional[dict]:
+    """Verify a raw uchub Keycloak *access token* presented as a Bearer.
+
+    Same verification stance as ``_verify_id_token`` (RS256 via realm JWKS,
+    iss + exp enforced, 30s leeway) plus two access-token-specific checks:
+
+    - ``typ`` must be Bearer (when present) so a leaked *id_token* can't be
+      replayed as an API credential;
+    - ``azp``/``aud`` must name one of ``ACCEPTED_BEARER_CLIENT_IDS`` so only
+      tokens minted for our own clients authenticate (per UC dev guidance:
+      "verify azp (or aud) == client_id").
+
+    Returns the verified claims, or None when this bearer simply isn't a
+    valid uchub access token — callers fall through to the other auth
+    methods, preserving optional-auth semantics.
+
+    Does blocking JWKS I/O on cache miss; call via ``asyncio.to_thread``
+    from async request paths.
+    """
+    try:
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+        claims = pyjwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            issuer=KC_ISSUER,
+            leeway=30,
+            options={"require": ["exp", "iss"], "verify_aud": False},
+        )
+    except pyjwt.PyJWTError:
+        return None
+    if claims.get("typ") not in (None, "Bearer"):
+        return None
+    aud = claims.get("aud")
+    aud_list = aud if isinstance(aud, list) else ([aud] if aud else [])
+    if claims.get("azp") not in ACCEPTED_BEARER_CLIENT_IDS and not (
+        ACCEPTED_BEARER_CLIENT_IDS & set(aud_list)
+    ):
+        logger.warning(
+            "uchub bearer rejected: azp=%s aud=%s not in accepted client ids",
+            claims.get("azp"), aud_list,
+        )
+        return None
+    return claims
+
+
 def _login_error(reason: str) -> RedirectResponse:
     return RedirectResponse(
         f"{APP_PUBLIC_URL}/#/login?sso_error={urllib.parse.quote(reason)}",

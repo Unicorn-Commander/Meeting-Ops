@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -8,6 +9,7 @@ from jose import JWTError
 
 from database.database import get_db
 from auth.models import User
+from auth.oidc_sso import verify_kc_bearer_token
 from auth.organization import ActiveOrganization, is_global_admin, parse_group_list, resolve_active_organization
 from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat
 from auth.proxy_trust import forward_auth_trusted
@@ -124,6 +126,49 @@ async def get_current_user_optional(
                     user = AuthService.get_user_by_id(db, int(user_id))
         except (JWTError, ValueError):
             pass
+
+    # Try a raw uchub Keycloak access token. Native clients (the iOS app)
+    # sign in via standards OIDC straight against Keycloak and call the API
+    # with the realm access token — no oauth2-proxy headers, no app session
+    # cookie exist on that path (the App Store build 401'd here on launch
+    # day: iOS shipped SSO in 388bdce but nothing server-side accepted the
+    # token). verify_kc_bearer_token enforces RS256-via-JWKS + iss + exp +
+    # azp/aud ∈ accepted client ids; on success the user is auto-provisioned
+    # through the exact same path as every other SSO login (personal org,
+    # free tier), so web/proxy/native logins all land on one account model.
+    if not user and token and not token.startswith(PAT_PREFIX):
+        try:
+            kc_claims = await asyncio.to_thread(verify_kc_bearer_token, token)
+        except Exception:
+            logger.exception("uchub bearer verification errored")
+            kc_claims = None
+        if kc_claims:
+            kc_email = _first_email(
+                kc_claims.get("email"), kc_claims.get("preferred_username")
+            )
+            if kc_email:
+                kc_groups = parse_group_list(kc_claims.get("groups") or [])
+                request.state.sso_groups = kc_groups
+                try:
+                    user = AuthService.get_or_create_sso_user(
+                        db,
+                        email=kc_email,
+                        username=kc_claims.get("preferred_username"),
+                        full_name=kc_claims.get("name")
+                        or kc_claims.get("preferred_username"),
+                        is_superuser=is_global_admin(kc_groups),
+                        groups=kc_groups,
+                    )
+                except Exception:
+                    logger.exception(
+                        "uchub bearer auto-provision failed for email=%s", kc_email
+                    )
+                    user = None
+            else:
+                logger.warning(
+                    "uchub bearer verified but carried no usable email claim; keys=%s",
+                    list(kc_claims.keys()),
+                )
 
     # Try the app-level UC-SSO session cookie set by auth/oidc_sso.py after a
     # Keycloak login. Same JWT shape as the bearer access token (type=access,
