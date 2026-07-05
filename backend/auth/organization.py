@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -8,6 +9,8 @@ from fastapi import HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from auth.models import Organization, User, UserOrganization
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ORG_SLUG = "magic-unicorn"
 DEFAULT_ORG_NAME = "Magic Unicorn"
@@ -238,19 +241,45 @@ def resolve_active_organization(
 ) -> ActiveOrganization:
     requested_slug = get_requested_org_slug(request)
 
+    # An explicit org selector (X-MeetingOps-Org header / ?org=) is a
+    # CONVENIENCE — "which of my workspaces am I looking at" — never a security
+    # boundary (that's the membership check at the bottom of this function). A
+    # stale or malformed selector must therefore never lock the user out of the
+    # app. The iOS client (build <=7) persisted the numeric org *id* where a
+    # *slug* is expected (OrgSwitcherView stored org.id, APIClient sent it as
+    # X-MeetingOps-Org), so every request carried an unmatchable selector and
+    # this branch used to hard-404 the user off the launch screen. We now
+    # degrade gracefully: an unknown or inaccessible selector is logged and
+    # dropped, and resolution falls through to the user's default workspace
+    # exactly as if no selector had been sent.
+    organization = None
     if requested_slug:
         organization = (
             db.query(Organization)
             .filter(Organization.slug == requested_slug)
             .first()
         )
-        if not organization:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Organization not found",
+        if organization is None:
+            logger.warning(
+                "org selector %r matched no organization for user id=%s; "
+                "falling back to default resolution",
+                requested_slug,
+                current_user.id,
             )
-    elif current_user.organizations:
-        # No explicit org selector sent. Resolve the active org through a
+        elif not current_user.is_superuser and not any(
+            m.organization_id == organization.id
+            for m in current_user.organizations
+        ):
+            logger.warning(
+                "org selector %r not accessible to user id=%s; "
+                "falling back to default resolution",
+                requested_slug,
+                current_user.id,
+            )
+            organization = None
+
+    if organization is None and current_user.organizations:
+        # No usable explicit selector. Resolve the active org through a
         # preference chain (each step only applies if the user is actually a
         # member, so the no-403 behavior is always preserved):
         #
@@ -264,11 +293,7 @@ def resolve_active_organization(
         #      empty/test org that happens to be first.
         #   3. The first membership — for users in neither of the above
         #      (e.g. GFL/shafen-khan), preserving the no-403 behavior.
-        #
-        # The frontend can always override with the X-MeetingOps-Org header
-        # or ?org= selector (handled in the `requested_slug` branch above).
         default_org_id = getattr(current_user, "default_organization_id", None)
-        organization = None
         if default_org_id is not None:
             organization = next(
                 (
@@ -287,7 +312,7 @@ def resolve_active_organization(
                 ),
                 current_user.organizations[0].organization,
             )
-    else:
+    elif organization is None:
         # User has no memberships yet; auto-provision into the platform default.
         organization = ensure_default_organization(db)
 
