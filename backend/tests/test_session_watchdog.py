@@ -202,6 +202,216 @@ def test_watchdog_respects_max_per_pass_cap(org_and_user, monkeypatch):
     assert res2["marked_failed"] <= 2
 
 
+def _make_needs_summary_session(
+    *, db, org_id, user_id, minutes_stale=30, transcript="hello world transcript",
+    redrive_count=None, processing_job_id="dead-job-A", status="processing",
+):
+    """Seed a session in the wedged state a failed finalize leaves behind:
+    status='processing' + needs_summary, a transcript, and processing_job_id
+    still pointing at the dead finalize job. ``updated_at`` is set in the same
+    INSERT (no onupdate on INSERT) so the cooldown gate sees it as stale."""
+    from database.models import RecordingSession
+    when = datetime.now(timezone.utc) - timedelta(minutes=minutes_stale)
+    md = {"needs_summary": True, "summary_error": "gateway unavailable"}
+    if redrive_count is not None:
+        md["summary_redrive_count"] = redrive_count
+    s = RecordingSession(
+        session_id=str(uuid.uuid4()),
+        title="redrive test",
+        name="redrive test",
+        status=status,
+        user_id=user_id,
+        organization_id=org_id,
+        created_at=when,
+        updated_at=when,
+        started_at=when,
+        transcript_simple=transcript,
+        processing_metadata=md,
+        processing_job_id=processing_job_id,
+    )
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+def test_summary_redrive_reenqueues_and_clears_drift(org_and_user, monkeypatch):
+    """The core fix: a wedged needs_summary row gets its drift-guard cleared
+    (processing_job_id -> NULL) and finalize re-enqueued."""
+    org_id, user_id = org_and_user
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry",
+        lambda pk, uid, oid: (calls.append((pk, uid, oid)), "new-job-B")[1],
+    )
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    db = SessionLocal()
+    try:
+        s = _make_needs_summary_session(db=db, org_id=org_id, user_id=user_id)
+        sid = s.id
+    finally:
+        db.close()
+
+    res = sw.redrive_stuck_summary_sessions()
+    assert res["enabled"] is True
+    assert res["redriven"] >= 1
+    assert calls and calls[0][0] == sid
+
+    db = SessionLocal()
+    try:
+        row = db.get(RecordingSession, sid)
+        assert row.processing_job_id is None, "drift-guard must be cleared to NULL"
+        assert row.status == "processing"
+        md = row.processing_metadata or {}
+        assert md.get("summary_redrive_count") == 1
+        assert md.get("summary_redrive_at")
+        assert md.get("summary_redrive_job_id") == "new-job-B"
+        assert md.get("needs_summary") is True
+    finally:
+        db.close()
+
+
+def test_summary_redrive_caps_after_max_attempts(org_and_user, monkeypatch):
+    """A genuinely-broken LLM must NOT re-enqueue forever: once the attempt
+    count hits the cap, the row is given up on and never re-enqueued."""
+    org_id, user_id = org_and_user
+    monkeypatch.setenv("SESSION_WATCHDOG_SUMMARY_REDRIVE_MAX", "5")
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry", lambda pk, uid, oid: calls.append(pk) or "x",
+    )
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    db = SessionLocal()
+    try:
+        s = _make_needs_summary_session(
+            db=db, org_id=org_id, user_id=user_id, redrive_count=5,
+        )
+        sid = s.id
+    finally:
+        db.close()
+
+    res = sw.redrive_stuck_summary_sessions()
+    assert res["given_up"] >= 1
+    assert res["redriven"] == 0
+    assert calls == [], "exhausted sessions must never be re-enqueued"
+
+    db = SessionLocal()
+    try:
+        row = db.get(RecordingSession, sid)
+        assert row.processing_job_id == "dead-job-A", "no re-drive -> untouched"
+        assert (row.processing_metadata or {}).get("summary_redrive_given_up_at")
+    finally:
+        db.close()
+
+
+def test_summary_redrive_respects_cooldown(org_and_user, monkeypatch):
+    """A row touched within the cooldown window is not re-driven."""
+    org_id, user_id = org_and_user
+    monkeypatch.setenv("SESSION_WATCHDOG_SUMMARY_REDRIVE_COOLDOWN_MINUTES", "10")
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry", lambda pk, uid, oid: calls.append(pk) or "x",
+    )
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        # 2 min stale -> inside the 10-min cooldown, so filtered out.
+        _make_needs_summary_session(
+            db=db, org_id=org_id, user_id=user_id, minutes_stale=2,
+        )
+    finally:
+        db.close()
+
+    res = sw.redrive_stuck_summary_sessions()
+    assert res["redriven"] == 0
+    assert calls == []
+
+
+def test_summary_redrive_skips_when_no_transcript(org_and_user, monkeypatch):
+    """No transcript -> nothing to summarize -> must not re-drive."""
+    org_id, user_id = org_and_user
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry", lambda pk, uid, oid: calls.append(pk) or "x",
+    )
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        _make_needs_summary_session(
+            db=db, org_id=org_id, user_id=user_id, transcript="",
+        )
+    finally:
+        db.close()
+
+    res = sw.redrive_stuck_summary_sessions()
+    assert res["redriven"] == 0
+    assert res["skipped_no_transcript"] >= 1
+    assert calls == []
+
+
+def test_summary_redrive_ignores_completed_sessions(org_and_user, monkeypatch):
+    """Already-completed sessions (transcript visible) are out of scope."""
+    org_id, user_id = org_and_user
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry", lambda pk, uid, oid: calls.append(pk) or "x",
+    )
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        _make_needs_summary_session(
+            db=db, org_id=org_id, user_id=user_id, status="completed",
+        )
+    finally:
+        db.close()
+
+    res = sw.redrive_stuck_summary_sessions()
+    assert res["redriven"] == 0
+    assert calls == []
+
+
+def test_summary_redrive_double_run_is_idempotent(org_and_user, monkeypatch):
+    """Re-driving bumps updated_at, so an immediate second pass finds the row
+    inside its cooldown and does not re-enqueue again."""
+    org_id, user_id = org_and_user
+    import services.session_watchdog as sw
+    calls = []
+    monkeypatch.setattr(
+        sw, "_enqueue_finalize_retry", lambda pk, uid, oid: calls.append(pk) or "job-x",
+    )
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        _make_needs_summary_session(db=db, org_id=org_id, user_id=user_id)
+    finally:
+        db.close()
+
+    r1 = sw.redrive_stuck_summary_sessions()
+    r2 = sw.redrive_stuck_summary_sessions()
+    assert r1["redriven"] == 1
+    assert r2["redriven"] == 0, "second pass is inside the cooldown after the bump"
+    assert len(calls) == 1
+
+
+def test_summary_redrive_disabled_flag(monkeypatch):
+    monkeypatch.setenv("SESSION_WATCHDOG_ENABLED", "false")
+    from services.session_watchdog import redrive_stuck_summary_sessions
+    assert redrive_stuck_summary_sessions() == {"enabled": False}
+
+
 def test_watchdog_marks_stalled_upload_failed_and_retryable(org_and_user, monkeypatch):
     org_id, user_id = org_and_user
     monkeypatch.setenv("UPLOAD_WATCHDOG_MINUTES", "30")

@@ -115,6 +115,38 @@ def _upload_threshold_minutes() -> int:
         return DEFAULT_UPLOAD_WATCHDOG_MINUTES
 
 
+# --- needs_summary re-drive ------------------------------------------------
+# A *transient* summarizer/gateway failure leaves a finalized meeting at
+# status='processing' + processing_metadata['needs_summary']=True with a
+# transcript but no summary (see workers/finalize_workers.finalize_session_job
+# step 1). ``redrive_stuck_summary_sessions`` re-kicks finalize for those rows.
+# Bounded so a genuinely-broken LLM can't loop forever: at most
+# DEFAULT_SUMMARY_REDRIVE_MAX attempts per session, spaced no closer than
+# DEFAULT_SUMMARY_REDRIVE_COOLDOWN_MINUTES apart.
+DEFAULT_SUMMARY_REDRIVE_COOLDOWN_MINUTES = 10
+DEFAULT_SUMMARY_REDRIVE_MAX = 5
+
+
+def _summary_redrive_cooldown_minutes() -> int:
+    raw = os.getenv("SESSION_WATCHDOG_SUMMARY_REDRIVE_COOLDOWN_MINUTES")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_SUMMARY_REDRIVE_COOLDOWN_MINUTES
+
+
+def _summary_redrive_max_attempts() -> int:
+    raw = os.getenv("SESSION_WATCHDOG_SUMMARY_REDRIVE_MAX")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_SUMMARY_REDRIVE_MAX
+
+
 def mark_abandoned_uploads(*, dry_run: bool = False) -> dict[str, Any]:
     """Mark stale upload pipeline rows failed so they become retryable."""
     if not _enabled():
@@ -530,7 +562,6 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
         "threshold_minutes": threshold_minutes,
         "candidates": 0,
         "promoted_completed": 0,
-        "summary_retries_enqueued": 0,
         "marked_failed": 0,
         "skipped_cap": 0,
         "errors": 0,
@@ -557,49 +588,18 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
         now = datetime.now(timezone.utc)
         for sess in candidates:
             try:
-                metadata = dict(sess.processing_metadata or {})
-                if metadata.get("needs_summary"):
-                    if dry_run:
-                        summary["summary_retries_enqueued"] += 1
-                        continue
-                    import asyncio
-                    from arq import create_pool
-                    from arq.connections import RedisSettings
-
-                    # Enqueue on a FRESH short-lived pool bound to THIS asyncio.run()
-                    # loop. job_runner's module-global pool is bound to whatever loop
-                    # first created it; reusing it here (the watchdog runs sync, via
-                    # asyncio.to_thread, so asyncio.run spins a brand-new loop) raises
-                    # "got Future attached to a different loop" — which the per-session
-                    # try/except swallowed, so this retry silently never fired.
-                    async def _enqueue_summary_retry(session_id: int):
-                        pool = await create_pool(RedisSettings.from_dsn(
-                            os.getenv("ARQ_REDIS_URL")
-                            or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
-                        ))
-                        try:
-                            job = await pool.enqueue_job(
-                                "finalize_session_job",
-                                session_id,
-                                user_id=sess.user_id,
-                                org_id=sess.organization_id,
-                                _queue_name=os.getenv(
-                                    "ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive"
-                                ),
-                            )
-                            return job.job_id if job else None
-                        finally:
-                            await pool.close()
-
-                    job_id = asyncio.run(_enqueue_summary_retry(sess.id))
-                    sess.processing_job_id = job_id
-                    metadata["summary_retry_enqueued_at"] = now.isoformat()
-                    metadata["summary_retry_job_id"] = job_id
-                    sess.processing_metadata = metadata
-                    summary["summary_retries_enqueued"] += 1
-                    continue
-                has_text = bool((sess.transcript or "").strip()) or bool(
-                    getattr(sess, "transcript_diarized", None)
+                # needs_summary re-drive is owned by
+                # redrive_stuck_summary_sessions (bounded + drift-cleared). Here
+                # we only resolve the TERMINAL state of a genuinely stuck
+                # (older than the processing threshold) row by content: promote
+                # if there's a transcript to show, else fail. A row still
+                # carrying needs_summary that reaches this age has already
+                # exhausted its re-drive budget, so promoting it (transcript
+                # visible, summary absent) beats an eternal processing spinner.
+                has_text = (
+                    bool((sess.transcript or "").strip())
+                    or bool((sess.transcript_simple or "").strip())
+                    or bool(getattr(sess, "transcript_diarized", None))
                 )
                 if dry_run:
                     if has_text:
@@ -647,6 +647,241 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "session_watchdog.processing: top-level error: %s", exc
+        )
+        summary["errors"] += 1
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return summary
+    finally:
+        db.close()
+
+
+def _enqueue_finalize_retry(
+    session_pk: int, user_id: int | None, org_id: int | None
+) -> str | None:
+    """Enqueue ``finalize_session_job`` on the interactive lane via a FRESH,
+    short-lived Arq pool bound to THIS call's event loop.
+
+    The watchdog runs sync (the cron calls it through ``asyncio.to_thread`` and
+    we spin a brand-new loop here with ``asyncio.run``), so it must NOT reuse
+    ``services.job_runner``'s module-global pool — that pool is bound to the arq
+    worker's own loop, and driving it from a different loop raises "got Future
+    attached to a different loop" (which a per-session try/except would silently
+    swallow, so the retry would never fire). A per-call pool sidesteps it.
+
+    Returns the arq job_id, or ``None`` if enqueue produced no job. Isolated as
+    a module-level function so it can be monkeypatched in tests without Redis.
+    """
+    import asyncio
+
+    from arq import create_pool
+    from arq.connections import RedisSettings
+
+    async def _run() -> str | None:
+        pool = await create_pool(
+            RedisSettings.from_dsn(
+                os.getenv("ARQ_REDIS_URL")
+                or os.getenv("REDIS_URL", "redis://unicorn-redis:6379/4")
+            )
+        )
+        try:
+            job = await pool.enqueue_job(
+                "finalize_session_job",
+                session_pk,
+                user_id=user_id,
+                org_id=org_id,
+                _queue_name=os.getenv(
+                    "ARQ_INTERACTIVE_QUEUE", "meeting-ops:interactive"
+                ),
+            )
+            return job.job_id if job else None
+        finally:
+            await pool.close()
+
+    return asyncio.run(_run())
+
+
+def redrive_stuck_summary_sessions(*, dry_run: bool = False) -> dict[str, Any]:
+    """Re-drive meetings whose summary was silently dropped by a *transient*
+    summarizer/gateway failure.
+
+    ``finalize_session_job`` (workers/finalize_workers.py, step 1) marks a
+    session ``status='processing'`` + ``processing_metadata['needs_summary']``
+    when the summary stage fails, retries in-band up to 5x, then gives up
+    best-effort. The row is left with a transcript but NO summary — and its
+    ``processing_job_id`` still points at the now-dead finalize job, so the
+    worker's drift-guard ("drift on session=N … skipping") turns any naive
+    re-enqueue into a no-op. Net effect before this pass: the meeting is wedged
+    in ``processing`` forever.
+
+    This pass closes that gap, safely:
+      - Selects ``status='processing'`` rows whose ``updated_at`` (the last
+        finalize attempt / last re-drive) is older than the cooldown — so a
+        just-failed row gets a moment to recover, and a re-driven row is not
+        immediately re-driven again.
+      - Only touches rows that actually carry ``needs_summary`` AND have a
+        transcript worth summarizing (empty transcript → nothing to do).
+      - Clears the drift-guard: ``processing_job_id = NULL``, COMMITTED BEFORE
+        the enqueue, so the fresh ``finalize_session_job`` (whenever a worker
+        picks it up) sees no owner and does not drift-skip — no race against
+        this commit landing. Mirrors how a first finalize claims the row from a
+        NULL owner in ``api/recording.py``.
+      - Bounds re-drives: at most ``_summary_redrive_max_attempts`` per session
+        (``processing_metadata['summary_redrive_count']``), spaced by at least
+        ``_summary_redrive_cooldown_minutes``. A genuinely-broken LLM therefore
+        stops after N attempts instead of re-enqueuing forever; the exhausted
+        row is later promoted to ``completed`` (transcript visible) by
+        :func:`mark_abandoned_processing_sessions` at its own threshold.
+
+    Idempotent, bounded, and never raises. Safe to run on the watchdog cron.
+    """
+    if not _enabled():
+        return {"enabled": False}
+
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from sqlalchemy.orm.attributes import flag_modified
+    # Same FK-import gotcha as the sibling passes — the commit fails at flush
+    # time without the referenced models registered on the SQLAlchemy metadata.
+    from auth.models import Organization  # noqa: F401
+    try:
+        from database.models_rooms import RoomAudioSource  # noqa: F401
+    except Exception:
+        pass
+
+    cooldown_minutes = _summary_redrive_cooldown_minutes()
+    max_attempts = _summary_redrive_max_attempts()
+    cap = _max_per_pass()
+    now = datetime.now(timezone.utc)
+    cooldown_cutoff = now - timedelta(minutes=cooldown_minutes)
+
+    summary = {
+        "enabled": True,
+        "kind": "summary_redrive",
+        "cooldown_minutes": cooldown_minutes,
+        "max_attempts": max_attempts,
+        "candidates": 0,
+        "redriven": 0,
+        "given_up": 0,
+        "skipped_no_transcript": 0,
+        "skipped_not_needs_summary": 0,
+        "skipped_cap": 0,
+        "errors": 0,
+        "dry_run": dry_run,
+    }
+
+    db = SessionLocal()
+    try:
+        # `updated_at` is the last finalize attempt (finalize commits on summary
+        # failure) or the last re-drive (this pass commits + bumps it). The
+        # cutoff filter is therefore the per-session cooldown AND keeps hot,
+        # actively-processing rows out of the candidate set.
+        candidates = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.status == "processing",
+                RecordingSession.updated_at < cooldown_cutoff,
+            )
+            .order_by(RecordingSession.id)
+            .limit(cap + 1)
+            .all()
+        )
+        summary["candidates"] = min(len(candidates), cap)
+        if len(candidates) > cap:
+            summary["skipped_cap"] = len(candidates) - cap
+            candidates = candidates[:cap]
+
+        for sess in candidates:
+            try:
+                metadata = dict(sess.processing_metadata or {})
+                if not metadata.get("needs_summary"):
+                    # A legitimately long-running processing row (e.g. a big
+                    # upload/reprocess) — not ours to touch.
+                    summary["skipped_not_needs_summary"] += 1
+                    continue
+
+                transcript = (sess.transcript_simple or sess.transcript or "").strip()
+                if not transcript:
+                    # Nothing to summarize — re-driving would just fail the same
+                    # way; leave it for the processing pass to resolve.
+                    summary["skipped_no_transcript"] += 1
+                    continue
+
+                attempts = int(metadata.get("summary_redrive_count") or 0)
+                if attempts >= max_attempts:
+                    summary["given_up"] += 1
+                    # Stamp + log the give-up exactly once so a broken LLM
+                    # doesn't spam the logs every pass.
+                    if not metadata.get("summary_redrive_given_up_at") and not dry_run:
+                        metadata["summary_redrive_given_up_at"] = now.isoformat()
+                        sess.processing_metadata = metadata
+                        flag_modified(sess, "processing_metadata")
+                        db.commit()
+                        logger.warning(
+                            "session_watchdog.summary_redrive.give_up session_id=%s "
+                            "db_id=%s user_id=%s org_id=%s attempts=%d max=%d",
+                            getattr(sess, "session_id", None),
+                            getattr(sess, "id", None),
+                            getattr(sess, "user_id", None),
+                            getattr(sess, "organization_id", None),
+                            attempts, max_attempts,
+                        )
+                    continue
+
+                if dry_run:
+                    summary["redriven"] += 1
+                    continue
+
+                # 1) Clear the drift-guard + record the attempt, and COMMIT
+                #    before enqueue. finalize_session_job's drift check skips
+                #    only when processing_job_id is set AND != its own job_id;
+                #    NULL means "no owner" so the fresh job always proceeds.
+                metadata["summary_redrive_count"] = attempts + 1
+                metadata["summary_redrive_at"] = now.isoformat()
+                sess.processing_metadata = metadata
+                sess.processing_job_id = None
+                flag_modified(sess, "processing_metadata")
+                sess.updated_at = now
+                db.commit()
+
+                # 2) Enqueue the fresh finalize on the interactive lane.
+                job_id = _enqueue_finalize_retry(
+                    sess.id, sess.user_id, sess.organization_id
+                )
+                if job_id:
+                    metadata["summary_redrive_job_id"] = job_id
+                    sess.processing_metadata = metadata
+                    flag_modified(sess, "processing_metadata")
+                    db.commit()
+
+                summary["redriven"] += 1
+                logger.warning(
+                    "session_watchdog.summary_redrive session_id=%s db_id=%s "
+                    "user_id=%s org_id=%s attempt=%d/%d job_id=%s",
+                    getattr(sess, "session_id", None),
+                    getattr(sess, "id", None),
+                    getattr(sess, "user_id", None),
+                    getattr(sess, "organization_id", None),
+                    attempts + 1, max_attempts, job_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                logger.warning(
+                    "session_watchdog.summary_redrive: failed to re-drive "
+                    "session=%s — %s",
+                    getattr(sess, "id", None), exc,
+                )
+        logger.info("session_watchdog summary_redrive pass: %s", summary)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "session_watchdog.summary_redrive: top-level error: %s", exc
         )
         summary["errors"] += 1
         try:

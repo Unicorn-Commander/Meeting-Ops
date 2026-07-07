@@ -81,14 +81,21 @@ async def data_retention_purge_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Every-30-min cron: clear two classes of zombies.
+    """Every-30-min cron: clear stuck sessions in three passes.
 
     1. status='recording' with no chunk update past SESSION_WATCHDOG_MINUTES
        (default 30 min) — phone tab evicted, dev tab crashed, etc. Flipped
        to ``failed`` so endpoints iterating active recordings stay fast and
        Cloudflare's 120 s edge timeout doesn't trip (see the 2026-05-29
        524 incident).
-    2. status='processing' with no resolution past
+    2. status='processing' + needs_summary (a *transient* summary/gateway
+       failure left a transcript but no summary, drift-guard wedging any
+       retry) — re-driven by ``redrive_stuck_summary_sessions``: drift-guard
+       cleared and finalize re-enqueued, bounded to
+       SESSION_WATCHDOG_SUMMARY_REDRIVE_MAX attempts (default 5) spaced
+       SESSION_WATCHDOG_SUMMARY_REDRIVE_COOLDOWN_MINUTES apart (default 10)
+       so a genuinely-broken LLM can't loop forever.
+    3. status='processing' with no resolution past
        SESSION_WATCHDOG_PROCESSING_MINUTES (default 360 min = 6 h) — worker
        OOM, host restart mid-pass, Stage 7 exception that didn't bubble up.
        Triaged by content: rows with transcript text → 'completed'
@@ -103,12 +110,17 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
         mark_abandoned_uploads,
         mark_abandoned_recording_sessions,
         mark_abandoned_processing_sessions,
+        redrive_stuck_summary_sessions,
     )
     recording_result = await asyncio.to_thread(mark_abandoned_recording_sessions)
+    # Re-drive needs_summary rows BEFORE the processing triage so a transient
+    # summary failure is retried (bounded) rather than terminally promoted/failed.
+    summary_redrive_result = await asyncio.to_thread(redrive_stuck_summary_sessions)
     processing_result = await asyncio.to_thread(mark_abandoned_processing_sessions)
     upload_result = await asyncio.to_thread(mark_abandoned_uploads)
     combined = {
         "recording": recording_result,
+        "summary_redrive": summary_redrive_result,
         "processing": processing_result,
         "uploads": upload_result,
     }
