@@ -1,5 +1,56 @@
 ## [Unreleased]
 
+## [3.50.0] - 2026-07-07
+
+### Added
+- **In-app "Upgrade to Pro" checkout.** The Stripe checkout backend + billingApi
+  client existed but nothing in the UI called them. Wired the full path: a shared
+  `utils/checkout.ts` (`beginProCheckout` / `manageSubscription`), a single
+  Pro-price source of truth (`constants/pricing.ts`), a Settings → "Plan & billing"
+  panel (`BillingSettings.tsx`) with upgrade + Stripe-portal "Manage subscription",
+  and real in-app CTAs on `Pricing.tsx`, `Landing.tsx`, and `UpgradeBanner.tsx`
+  (anon → `/signup?intent=pro`, signed-in → checkout). Terms + refund policy linked
+  at every point of sale. Frontend-only; no backend/Stripe/env change.
+- **Launch-pricing anchor on the Pro cards.** Struck-through $20 next to $15 with a
+  "Launch pricing — 25% off" note on both Landing + Pricing Pro cards
+  (`PRO_LIST_PRICE_USD` + `PRO_LAUNCH_DISCOUNT_PCT`, display-only; the charged
+  amount stays the server-side Stripe price).
+
+### Changed
+- **Upload completion pass runs STT and diarization concurrently.**
+  `run_upload_pipeline` (`backend/api/uploads.py`) now launches `diarize()` as an
+  asyncio task before awaiting Parakeet STT and awaits it in the diarization stage
+  (they read the same audio independently on separate GPUs, merged by timestamp) —
+  mirroring `_run_session_reprocess`. Falls back to a synchronous call on launch
+  failure; STT failure cancels the task. Saves ~the diarization duration per
+  uploaded meeting.
+
+### Fixed
+- **Summaries silently failed with a 401 after the summarizer was repointed at the
+  LiteLLM gateway.** `_direct_summarizer_provider()` only read
+  `MEETING_OPS_LLM_API_KEY` / `MEETING_OPS_SUMMARIZER_API_KEY` (unset in deploy);
+  the authenticated gateway (`unicorn-litellm:4000`) then returned 401 "No api key
+  passed in", `finalize_session_job` burned its 5 retries, and the summary was
+  permanently dropped best-effort — so new meetings got no summary and renaming a
+  speaker never refreshed it. Now falls back to the suite-standard
+  `OPENAI_API_KEY` / `LITELLM_API_KEY` (MO-specific vars still take precedence).
+  No env/compose change.
+- **Sessions could wedge in "processing" forever after a transient summarizer
+  blip.** A summary-stage failure left `status=processing` + `needs_summary` with a
+  dead `processing_job_id`, and the worker drift-guard turned any re-enqueue into a
+  no-op. New `session_watchdog.redrive_stuck_summary_sessions()` (wired into the
+  30-min cron) clears the drift-guard and re-enqueues finalize on the interactive
+  lane, bounded by `SESSION_WATCHDOG_SUMMARY_REDRIVE_MAX` (5) /
+  `..._COOLDOWN_MINUTES` (10) so a genuinely-broken LLM stops instead of looping.
+  Exhausted rows are later promoted to `completed` (transcript visible).
+- **Fresh consumer signups saw the full appliance "Admin" nav.** Self-serve users
+  are org-admins of their own personal org, which exposed Rooms / Speakers /
+  Agents / Bulk Import as if they were appliance admins. Gate the appliance/fleet
+  surfaces (Rooms, Agents, Bulk Import) on the active org's enterprise plan or
+  superuser; consumer org-admins keep Speakers under a "Workspace" heading. Also
+  pipe `VITE_ROOM_MODE_ENABLED` through the Dockerfile/VPS compose (VITE_* vars
+  only reach the bundle as build args).
+
 ## [3.49.0] - 2026-07-02
 
 This release **reconciles the integration that had been running in production**

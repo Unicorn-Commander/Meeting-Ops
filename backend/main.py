@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Meeting-Ops API",
     description="AI-powered meeting recording and transcription system",
-    version="0.6.0",
+    version="3.50.0",
     lifespan=lifespan
 )
 
@@ -523,7 +523,7 @@ async def root():
     """Root endpoint"""
     return {
         "message": "Meeting-Ops API",
-        "version": "0.5.0",
+        "version": "3.50.0",
         "status": "running",
         "docs": "/docs"
     }
@@ -608,7 +608,7 @@ async def get_status():
             "transcription": {
                 "ready": transcription_ready,
                 "model": model_loaded,
-                "engine": "whisperx-npu" if transcription_ready else "none"
+                "engine": model_loaded if transcription_ready else "none"
             },
             "npu": {
                 "available": npu_available,
@@ -690,10 +690,10 @@ async def get_system_info(current_user=Depends(get_current_user)):
             "transcription": {
                 "service_ready": transcription_ready,
                 "current_model": model_loaded,
-                "engine_type": "whisperx-npu" if transcription_ready else "none",
-                "performance_factor": "220x speedup" if npu_available else "CPU-only"
+                "engine_type": (model_loaded if transcription_ready else "none"),
+                "compute": "npu" if npu_available else "server-gpu"
             },
-            "version": "0.5.0",
+            "version": "3.50.0",
             "build": "production"
         }
     except Exception as e:
