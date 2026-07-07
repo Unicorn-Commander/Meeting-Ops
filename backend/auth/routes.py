@@ -251,14 +251,21 @@ async def register(
     # admin-created users keep the legacy behavior.
     is_self_serve = current_user is None
 
-    # Phase-1 beta gate (SELF-SERVE ONLY). When REQUIRE_INVITE_CODE is on, a
-    # valid single-use code is required to self-register; redeeming it comps
-    # the new user's personal org to Pro. Validate BEFORE create_user so a
-    # bad code never creates a user; the admin-create path (current_user set)
-    # is intentionally exempt, and when the flag is OFF this whole block is
-    # skipped so /register behaves exactly as before.
+    # Phase-1 beta gate (SELF-SERVE ONLY). A valid single-use code, when
+    # redeemed, comps the new user to a TIME-LIMITED Pro tier on BOTH gated
+    # surfaces (user.tier + personal-org plan) via comp_personal_org_to_pro.
+    # Two self-serve shapes:
+    #   - REQUIRE_INVITE_CODE on  -> a code is REQUIRED. Validate always; an
+    #     empty/absent code 403s (validate_invite_code raises on blank).
+    #   - REQUIRE_INVITE_CODE off -> a code is OPTIONAL. If the user supplies
+    #     one we validate + honor it (optional code -> Pro comp); a blank/absent
+    #     code stays a free public signup (no validation, no comp).
+    # Validate BEFORE create_user so a bad code never creates a user. The
+    # admin-create path (current_user set) is always exempt.
     invite_row = None
-    if is_self_serve and auth_config.REQUIRE_INVITE_CODE:
+    supplied_code = (user_data.invite_code or "").strip()
+    code_required = is_self_serve and auth_config.REQUIRE_INVITE_CODE
+    if is_self_serve and (code_required or supplied_code):
         try:
             invite_row = validate_invite_code(db, user_data.invite_code)
         except ValueError as exc:
@@ -298,9 +305,14 @@ async def register(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="A valid invite code is required.",
                 )
-            # Comp the new user's personal org to Pro (mirrors the Stripe
-            # webhook's _apply_org_plan_from_sub: plan='pro' + clear the
-            # per-org hours override). Best-effort: a missing org is logged.
+            # Comp the new user to a TIME-LIMITED Pro tier on BOTH gated
+            # surfaces: user.tier='pro' + tier_expires_at=now+N days AND the
+            # personal org plan='pro' (mirrors the Stripe webhook). Setting
+            # only ONE still 403'd paid server-compute (billing-1); the expiry
+            # lets session_watchdog auto-revert an unpaid comp so a "free
+            # month" can't become permanent. `days` defaults to
+            # auth.invite_codes.DEFAULT_COMP_DAYS (BetaInviteCode carries no
+            # per-code duration column). Best-effort on the org side.
             comp_personal_org_to_pro(db, user)
         if is_self_serve and not user.is_verified:
             # Best-effort: a mail failure must not fail signup (the user can

@@ -4,14 +4,16 @@ Mirrors the fixture style of test_stripe_webhook.py: SessionLocal helpers,
 the `client` fixture, monkeypatch of env / auth_config.
 
 Covers (per the build spec):
-  - REQUIRE_INVITE_CODE on + valid code -> 200, the new user's PERSONAL org
-    is comped (plan=='pro', max_monthly_hours is None), and the code is
-    consumed (is_active False, redemption_count 1, redeemed_by/at stamped).
+  - REQUIRE_INVITE_CODE on + valid code -> 200, the new user is comped on BOTH
+    surfaces: user.tier=='pro' (time-limited) AND their PERSONAL org
+    (plan=='pro', max_monthly_hours is None); the code is consumed (is_active
+    False, redemption_count 1, redeemed_by/at stamped).
   - No code when required -> 403.
   - Unknown code -> 403; exhausted code -> 403.
   - Double-redeem of a single-use code -> 2nd registration 403.
-  - REQUIRE_INVITE_CODE OFF -> register works with no code (existing
-    behavior intact) and does NOT comp the org to pro.
+  - REQUIRE_INVITE_CODE OFF + NO code -> free public signup (no comp).
+  - REQUIRE_INVITE_CODE OFF + a valid OPTIONAL code -> still comped (user tier +
+    org plan) and the code is consumed.
   - Admin mint -> N codes; non-admin mint -> 403.
   - /mine lists the caller's codes (and only the caller's).
   - /config reflects REQUIRE_INVITE_CODE.
@@ -218,9 +220,12 @@ def test_register_off_path_works_without_code_and_does_not_comp(client, monkeypa
     assert (org.plan or "free") == "free"  # NOT comped when the gate is off
 
 
-def test_register_off_path_ignores_supplied_code(client, monkeypatch):
-    """A code passed while the gate is OFF is simply ignored (not consumed,
-    not comped) — the off-path must behave as today."""
+def test_register_off_path_with_valid_code_still_comps(client, monkeypatch):
+    """REQUIRE_INVITE_CODE OFF: an OPTIONAL code is still honored. A user who
+    signs up WITH a valid code gets the time-limited Pro comp on BOTH surfaces
+    (user.tier + personal-org plan) and the code is consumed. (A no-code signup
+    stays free — see test_register_off_path_works_without_code_and_does_not_comp.)
+    """
     from auth.config import auth_config
 
     monkeypatch.setattr(auth_config, "REQUIRE_INVITE_CODE", False)
@@ -228,12 +233,30 @@ def test_register_off_path_ignores_supplied_code(client, monkeypatch):
     uname = _uname()
     r = _register(client, username=uname, invite_code=code)
     assert r.status_code == 200, r.text
+    # USER side: optional code -> time-limited Pro tier.
+    assert r.json()["tier"] == "pro"
 
+    # Code consumed (single-use) even though the gate is off.
     row = _get_code_row(code)
-    assert row.redemption_count == 0  # untouched
-    assert row.is_active is True
+    assert row.redemption_count == 1
+    assert row.is_active is False
+    assert row.redeemed_by_user_id == r.json()["id"]
+
+    # ORG side: personal org comped.
     org = _personal_org_for(uname)
-    assert (org.plan or "free") == "free"
+    assert org.plan == "pro"
+    assert org.max_monthly_hours is None
+
+
+def test_register_off_path_invalid_code_is_403(client, monkeypatch):
+    """REQUIRE_INVITE_CODE OFF but a NON-EMPTY code is supplied: it's validated
+    like the on-path, so a bad optional code 403s (the user learns their promo
+    code didn't work rather than silently landing on free)."""
+    from auth.config import auth_config
+
+    monkeypatch.setattr(auth_config, "REQUIRE_INVITE_CODE", False)
+    r = _register(client, username=_uname(), invite_code="NOPE-DOES-NOT-EXIST")
+    assert r.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +274,9 @@ def test_valid_code_registers_comps_pro_and_consumes(client, monkeypatch):
     r = _register(client, username=uname, invite_code=code)
     assert r.status_code == 200, r.text
 
+    # USER side: comped to a TIME-LIMITED Pro tier (both surfaces, not just org).
+    assert r.json()["tier"] == "pro"
+
     # New user's PERSONAL org comped to Pro with the hours override cleared.
     org = _personal_org_for(uname)
     assert org is not None
@@ -263,6 +289,16 @@ def test_valid_code_registers_comps_pro_and_consumes(client, monkeypatch):
     assert row.is_active is False
     assert row.redeemed_at is not None
     assert row.redeemed_by_user_id == r.json()["id"]
+
+    # The comp is bounded (time-limited), so the auto-revert can expire it.
+    _C, _O, User, _UO, SessionLocal = _models()
+    db = SessionLocal()
+    try:
+        urow = db.query(User).filter(User.id == r.json()["id"]).first()
+        assert urow.tier == "pro"
+        assert urow.tier_expires_at is not None
+    finally:
+        db.close()
 
 
 def test_no_code_when_required_is_403_and_creates_no_user(client, monkeypatch):

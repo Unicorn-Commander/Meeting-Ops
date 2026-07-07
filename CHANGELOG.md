@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+## [3.52.0] - 2026-07-07
+
+### Fixed
+- **Comps now unlock Pro compute (they gated on only one of two surfaces).**
+  `require_feature` checks BOTH the user's tier AND the active org's plan, but
+  `grant_pro` set only `user.tier` and the invite-code path set only `org.plan`
+  — so a comped user still 403'd on server-compute Pro features. Both comp paths
+  now set `user.tier` + the personal `org.plan` together (mirroring a real Stripe
+  subscription), time-limited via `tier_expires_at`, and `revert_expired_comps`
+  reverts both surfaces on expiry.
+
+### Added
+- **Invite-code comps are now time-limited Pro.** `comp_personal_org_to_pro`
+  sets tier + expiry (default 30 days) + org plan; an OPTIONAL invite code at
+  signup (when `REQUIRE_INVITE_CODE` is off) grants a time-limited Pro comp while
+  a no-code signup stays free (a non-empty but invalid code 403s).
+- **`scripts/gen_invite_codes.py`** — mint N single-use beta invite codes for a
+  cohort: `python -m scripts.gen_invite_codes --count 100 --days 30 --cohort meeting_ops_v1`.
+
 ## [3.51.0] - 2026-07-07
 
 ### Added

@@ -689,3 +689,203 @@ def test_grant_pro_founding_flag(app):
         assert row.founding_cohort == "meeting_ops_v1"
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Pro-comp "sets/reverts BOTH surfaces" — the billing-1 fix. A comp must move
+# the USER tier AND the user's personal org plan; the auto-revert must undo
+# both. These seed a user WITH a personal org (admin membership) so
+# auth.invite_codes._resolve_personal_org can find it.
+# ---------------------------------------------------------------------------
+
+
+def _make_user_with_personal_org(
+    *, db, tier="free", org_plan="free", expires_delta_days=None,
+    max_monthly_hours=None, is_superuser=False,
+):
+    """Seed a User + their ``{username}-personal`` Organization with an admin
+    membership, so ``_resolve_personal_org`` resolves it (via the admin
+    membership, matching a real self-serve signup)."""
+    from auth.models import Organization, User, UserOrganization
+    from auth.utils import get_password_hash
+
+    tag = uuid.uuid4().hex[:10]
+    expires_at = None
+    if expires_delta_days is not None:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_delta_days)
+    u = User(
+        email=f"comp-{tag}@example.com",
+        username=f"comp{tag}",
+        hashed_password=get_password_hash("x"),
+        is_active=True,
+        is_verified=True,
+        is_superuser=is_superuser,
+        tier=tier,
+        tier_expires_at=expires_at,
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    org = Organization(
+        name=f"comp {tag} (personal)",
+        slug=f"{u.username}-personal",
+        is_active=True,
+        plan=org_plan,
+        max_monthly_hours=max_monthly_hours,
+    )
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+    db.add(UserOrganization(user_id=u.id, organization_id=org.id, role="admin"))
+    db.commit()
+    return u, org
+
+
+def test_comp_revert_also_reverts_personal_org_plan(app):
+    """An expired comp reverts BOTH surfaces: user.tier->free AND the user's
+    personal org plan->free (else the per-workspace gate would still pass)."""
+    from database.database import SessionLocal
+    from auth.models import Organization, User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u, org = _make_user_with_personal_org(
+            db=db, tier="pro", org_plan="pro", expires_delta_days=-1,
+        )
+        uid, oid = u.id, org.id
+    finally:
+        db.close()
+
+    res = revert_expired_comps()
+    assert res["enabled"] is True
+    assert res["reverted"] >= 1
+    assert res["orgs_reverted"] >= 1
+
+    db = SessionLocal()
+    try:
+        urow = db.get(User, uid)
+        orow = db.get(Organization, oid)
+        assert urow.tier == "free", "expired comp must revert the user to free"
+        assert urow.tier_expires_at is None
+        assert (orow.plan or "free") == "free", "personal org plan must revert too"
+    finally:
+        db.close()
+
+
+def test_comp_revert_org_revert_is_idempotent(app):
+    """A second pass finds the user already free (nothing to do) and does not
+    re-count the org — confirms the org revert rides the same idempotency."""
+    from database.database import SessionLocal
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        _make_user_with_personal_org(
+            db=db, tier="pro", org_plan="pro", expires_delta_days=-3,
+        )
+    finally:
+        db.close()
+
+    r1 = revert_expired_comps()
+    assert r1["reverted"] >= 1 and r1["orgs_reverted"] >= 1
+    r2 = revert_expired_comps()
+    assert r2["reverted"] == 0, "reverted user is free with NULL expiry — nothing left"
+    assert r2["orgs_reverted"] == 0
+
+
+def test_grant_pro_sets_both_user_tier_and_org_plan(app):
+    """grant_pro grant comps BOTH: user.tier + expiry AND the personal org
+    plan + cleared max_monthly_hours."""
+    from database.database import SessionLocal
+    from auth.models import Organization, User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u, org = _make_user_with_personal_org(
+            db=db, tier="free", org_plan="free", max_monthly_hours=10,
+        )
+        before, after = apply_comp(db, u, revoke=False, tier="pro", days=30)
+        assert before["tier"] == "free"
+        assert before["personal_org_plan"] == "free"
+        assert after["tier"] == "pro"
+        assert after["tier_expires_at"] is not None
+        assert after["personal_org_plan"] == "pro"
+
+        urow = db.get(User, u.id)
+        orow = db.get(Organization, org.id)
+        assert urow.tier == "pro" and urow.tier_expires_at is not None
+        assert orow.plan == "pro"
+        assert orow.max_monthly_hours is None, "per-org hours override must be cleared"
+    finally:
+        db.close()
+
+
+def test_grant_pro_revoke_reverts_both_user_and_org(app):
+    """grant_pro --revoke undoes BOTH: user.tier->free + expiry cleared AND the
+    personal org plan->free."""
+    from database.database import SessionLocal
+    from auth.models import Organization, User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u, org = _make_user_with_personal_org(
+            db=db, tier="pro", org_plan="pro", expires_delta_days=30,
+        )
+        _before, after = apply_comp(db, u, revoke=True)
+        assert after["tier"] == "free"
+        assert after["tier_expires_at"] is None
+        assert after["personal_org_plan"] == "free"
+
+        urow = db.get(User, u.id)
+        orow = db.get(Organization, org.id)
+        assert urow.tier == "free" and urow.tier_expires_at is None
+        assert (orow.plan or "free") == "free"
+    finally:
+        db.close()
+
+
+def test_grant_pro_no_personal_org_still_comps_user(app):
+    """A user with no personal org still gets the user-side comp (org side is a
+    logged no-op) — the grant must not fail on a missing workspace."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="free", expires_delta_days=None)
+        _before, after = apply_comp(db, u, revoke=False, tier="pro", days=30)
+        assert after["tier"] == "pro"
+        assert after["tier_expires_at"] is not None
+        assert after["personal_org_plan"] is None  # no org resolved
+        assert db.get(User, u.id).tier == "pro"
+    finally:
+        db.close()
+
+
+def test_invite_comp_sets_user_tier_expiry_and_org_plan(app):
+    """The shared invite-code comp helper sets BOTH the user (tier + expiry)
+    and the personal org (plan='pro' + cleared hours)."""
+    from database.database import SessionLocal
+    from auth.models import Organization, User
+    from auth.invite_codes import comp_personal_org_to_pro
+
+    db = SessionLocal()
+    try:
+        u, org = _make_user_with_personal_org(
+            db=db, tier="free", org_plan="free", max_monthly_hours=10,
+        )
+        comped = comp_personal_org_to_pro(db, u, days=30)
+        assert comped is True
+
+        urow = db.get(User, u.id)
+        orow = db.get(Organization, org.id)
+        assert urow.tier == "pro", "invite comp must set the USER tier too"
+        assert urow.tier_expires_at is not None, "invite comp must be time-limited"
+        assert orow.plan == "pro"
+        assert orow.max_monthly_hours is None
+    finally:
+        db.close()

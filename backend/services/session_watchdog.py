@@ -894,15 +894,21 @@ def redrive_stuck_summary_sessions(*, dry_run: bool = False) -> dict[str, Any]:
 
 
 # --- time-limited Pro/paid comp auto-revert --------------------------------
-# An admin can comp a user a bounded Pro/paid tier via scripts/grant_pro.py
-# (tier='pro' + User.tier_expires_at = now + N days). This pass is what makes
-# that grant SELF-EXPIRING: once tier_expires_at is in the past it flips the
-# user back to 'free' and clears the column, so a "free month" comp for an
-# invited cohort can't silently become a permanent freebie. A real Stripe
-# subscription clears tier_expires_at (api.stripe_webhook), so paying customers
-# and permanent (NULL-expiry) grants are never touched. Superusers (support/dev,
-# who resolve to enterprise via auth.tier.get_user_tier) are excluded so a
-# stray comp on an admin account is a no-op.
+# An admin can comp a user a bounded Pro/paid tier via scripts/grant_pro.py, and
+# an invite-code redemption does the same at signup (auth.invite_codes.
+# comp_personal_org_to_pro). BOTH set the comp on TWO surfaces require_feature()
+# gates paid server-compute on (billing-1): the USER (tier='pro' +
+# User.tier_expires_at = now + N days) AND the user's PERSONAL org (plan='pro').
+# This pass is what makes the grant SELF-EXPIRING: once tier_expires_at is in the
+# past it flips the user back to 'free', clears the expiry, AND drops the personal
+# org plan back to 'free' — so reverting the user doesn't leave the workspace on
+# 'pro' (which would still let the reverted user run paid compute in their own
+# org). A "free month" comp for an invited cohort therefore can't silently become
+# a permanent freebie on either surface. A real Stripe subscription clears
+# tier_expires_at (api.stripe_webhook), so paying customers and permanent
+# (NULL-expiry) grants are never touched. Superusers (support/dev, who resolve to
+# enterprise via auth.tier.get_user_tier) are excluded so a stray comp on an admin
+# account is a no-op.
 
 
 def revert_expired_comps(*, dry_run: bool = False) -> dict[str, Any]:
@@ -914,18 +920,32 @@ def revert_expired_comps(*, dry_run: bool = False) -> dict[str, Any]:
     tier and is NEVER touched — so real subscriptions (which clear the column;
     see api.stripe_webhook) and manually-set permanent tiers are safe.
 
+    billing-1: because a comp set BOTH the user tier AND the user's personal org
+    plan (scripts/grant_pro.py + auth.invite_codes.comp_personal_org_to_pro),
+    this ALSO drops that personal org's plan back to 'free' on revert. Reverting
+    only the user would leave the workspace on 'pro', so the per-workspace gate
+    (require_feature) would still let the reverted user run paid compute in their
+    own org. The org is resolved with auth.invite_codes._resolve_personal_org
+    (the same helper the grant + comp use, so grant/revert target the same org),
+    and the org revert is best-effort + idempotent (skipped when already 'free')
+    and wrapped so it can never break the user revert.
+
     Founding flags are intentionally left untouched: cohort membership is a
     separate lifecycle from the current paid grant, and the auto-revert's remit
-    is only the tier/expiry pair (grant_pro.py owns founding).
+    is only the tier/expiry pair + the paired org plan (grant_pro.py owns founding).
 
     Bounded by ``SESSION_WATCHDOG_MAX_PER_PASS``, idempotent (a reverted user is
-    'free' with a NULL expiry, so a second pass finds nothing), and never
-    raises. Safe on the watchdog cron."""
+    'free' with a NULL expiry + a 'free' personal org, so a second pass finds
+    nothing), and never raises. Safe on the watchdog cron."""
     if not _enabled():
         return {"enabled": False}
 
     from database.database import SessionLocal
     from auth.models import User
+    # Same resolver the grant + invite comp use, so the org that got comped is
+    # the org that gets reverted (symmetric). Import-on-use to keep the cold path
+    # light + avoid any import-order coupling.
+    from auth.invite_codes import _resolve_personal_org
 
     cap = _max_per_pass()
     now = datetime.now(timezone.utc)
@@ -935,6 +955,7 @@ def revert_expired_comps(*, dry_run: bool = False) -> dict[str, Any]:
         "kind": "comp_revert",
         "candidates": 0,
         "reverted": 0,
+        "orgs_reverted": 0,
         "skipped_cap": 0,
         "errors": 0,
         "dry_run": dry_run,
@@ -972,16 +993,36 @@ def revert_expired_comps(*, dry_run: bool = False) -> dict[str, Any]:
                 user.tier = "free"
                 user.tier_expires_at = None
                 summary["reverted"] += 1
+                # billing-1: also drop the user's personal org back to 'free' so
+                # the per-workspace gate matches the user revert. Best-effort +
+                # idempotent (skip when already free); a failure here must never
+                # abort the user revert, so it's wrapped independently. Staged on
+                # the same session and flushed by the single commit at pass end.
+                org_reverted = False
+                try:
+                    org = _resolve_personal_org(db, user)
+                    if org is not None and (org.plan or "free") != "free":
+                        org.plan = "free"
+                        db.add(org)
+                        summary["orgs_reverted"] += 1
+                        org_reverted = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "session_watchdog.comp_revert: personal-org revert "
+                        "failed for user=%s — %s (user tier still reverted)",
+                        getattr(user, "id", None), exc,
+                    )
                 # Structured, loki-greppable prefix so the centerdeep dashboard
                 # can chart comp-expiry rate alongside the other watchdog passes.
                 logger.warning(
                     "session_watchdog.comp_revert user_id=%s email=%s "
-                    "tier=%s->free expired_at=%s founding=%s",
+                    "tier=%s->free expired_at=%s founding=%s org_reverted=%s",
                     getattr(user, "id", None),
                     getattr(user, "email", None),
                     prev_tier,
                     expired_at.isoformat() if expired_at else None,
                     getattr(user, "is_founding_member", None),
+                    org_reverted,
                 )
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
