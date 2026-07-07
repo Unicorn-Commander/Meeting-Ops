@@ -900,21 +900,63 @@ async def run_upload_pipeline(upload_id: str) -> None:
         opts = coerce_options(job.transcription_options)
 
         session = await _resolve_session_for_job(db, job, audio_path)
+
+        # --- Kick off diarization CONCURRENTLY with transcription. STT
+        # (Parakeet) and diarization (pyannote) read the same audio
+        # independently on different GPUs and are only merged after BOTH
+        # finish, so running them serially just wastes wall-clock. Set up the
+        # provider (a sync DB read) and launch diarize() here, then await it in
+        # the diarization stage below. diarize() is HTTP-only (no DB access) so
+        # it can't race the shared SQLAlchemy session that _transcribe_audio /
+        # _set_job_state use. Any setup error degrades cleanly to a fresh
+        # synchronous call in the stage below (diarize_task stays None). Mirrors
+        # the always-on reprocess path (_run_session_reprocess).
+        diarize_task = None
+        diarization_off = (opts.diarization_mode or "auto") == "off"
+        if not diarization_off:
+            launch_num_speakers = (
+                opts.diarization_num_speakers
+                if opts.diarization_mode == "manual"
+                else None
+            )
+            try:
+                from services.providers.registry import get_provider_registry
+                _diar_provider = get_provider_registry(db).get_diarization(session.organization_id)
+                diarize_task = asyncio.create_task(_diar_provider.diarize(
+                    str(audio_path),
+                    num_speakers=launch_num_speakers,
+                    clustering_threshold=opts.diarization_clustering_threshold,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "upload %s: could not start concurrent diarization, "
+                    "will run it synchronously after STT: %s",
+                    upload_id, exc,
+                )
+                diarize_task = None
+
         await _set_job_state(db, job, stage="transcribing", progress_pct=5, session_id=session.id)
-        transcription_result = await _transcribe_audio(
-            audio_path,
-            session.organization_id,
-            db,
-            provider_override=opts.stt_provider,
-            model_override=opts.stt_model,
-            language=opts.language or "en",
-        )
+        try:
+            transcription_result = await _transcribe_audio(
+                audio_path,
+                session.organization_id,
+                db,
+                provider_override=opts.stt_provider,
+                model_override=opts.stt_model,
+                language=opts.language or "en",
+            )
+        except BaseException:
+            # STT failed — cancel the concurrent diarize task so it doesn't
+            # outlive the request as an orphaned pending task.
+            if diarize_task is not None:
+                diarize_task.cancel()
+            raise
         await _persist_transcription(db, session, transcription_result)
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="transcribing")
 
         # Diarization. Honor explicit off / manual count overrides; auto is
         # the default when the option is missing.
-        if (opts.diarization_mode or "auto") != "off":
+        if not diarization_off:
             await _set_job_state(db, job, stage="diarizing", progress_pct=10)
             num_speakers = (
                 opts.diarization_num_speakers
@@ -922,15 +964,18 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 else None
             )
             try:
-                # 1) Run speaker-svc diarization to get speaker segments
-                from services.providers.registry import get_provider_registry
-                diar_registry = get_provider_registry(db)
-                diar_provider = diar_registry.get_diarization(session.organization_id)
-                diar_segments = await diar_provider.diarize(
-                    str(audio_path),
-                    num_speakers=num_speakers,
-                    clustering_threshold=opts.diarization_clustering_threshold,
-                )
+                # 1) Await the diarization launched concurrently with STT
+                # above; if that launch never started, run it now (fallback).
+                if diarize_task is not None:
+                    diar_segments = await diarize_task
+                else:
+                    from services.providers.registry import get_provider_registry
+                    diar_provider = get_provider_registry(db).get_diarization(session.organization_id)
+                    diar_segments = await diar_provider.diarize(
+                        str(audio_path),
+                        num_speakers=num_speakers,
+                        clustering_threshold=opts.diarization_clustering_threshold,
+                    )
                 # 2) Merge labels onto the transcription segments + persist
                 if diar_segments:
                     _assign_speakers_from_diarization(session, diar_segments)
@@ -1912,8 +1957,21 @@ def _direct_summarizer_provider():
     if not base or not model:
         return None
     from services.providers.impl_llm import LiteLLMProvider
+    # Fall back to the suite-standard gateway key (OPENAI_API_KEY / LITELLM_API_KEY)
+    # when the MO-specific override vars are unset. The summarizer originally hit
+    # a keyless local llama.cpp box directly, so an empty api_key was fine; once
+    # the endpoint was repointed at the LiteLLM gateway (unicorn-litellm:4000),
+    # which requires auth, an empty key made every summary/insight call 401
+    # ("No api key passed in") and finalize_session_job silently failed. Every
+    # container already injects OPENAI_API_KEY=${LITELLM_API_KEY}, so this makes
+    # the summarizer honor the standard convention without any env/compose change.
     return LiteLLMProvider(
-        api_key=os.getenv("MEETING_OPS_LLM_API_KEY", "") or os.getenv("MEETING_OPS_SUMMARIZER_API_KEY", ""),
+        api_key=(
+            os.getenv("MEETING_OPS_LLM_API_KEY", "")
+            or os.getenv("MEETING_OPS_SUMMARIZER_API_KEY", "")
+            or os.getenv("OPENAI_API_KEY", "")
+            or os.getenv("LITELLM_API_KEY", "")
+        ),
         endpoint=base,
         model=model,
         thinking=False,  # Qwen 3.6 emits <think> by default; suppress.
