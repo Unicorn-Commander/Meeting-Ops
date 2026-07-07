@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [3.51.0] - 2026-07-07
+
+### Added
+- **Time-limited Pro comps (no Stripe, no card).** An admin can grant an invited
+  user Pro for a bounded period that auto-reverts to free — for a "free month"
+  cohort without payment details or a cancel-trap. New `users.tier_expires_at`
+  (migration 051, additive nullable timestamptz; NULL = permanent). New
+  `scripts/grant_pro.py` CLI: `python -m scripts.grant_pro <email> [--days 30]
+  [--tier pro] [--founding] [--cohort meeting_ops_v1] [--revoke]`. A new
+  `session_watchdog.revert_expired_comps()` pass (wired into the 30-min cron)
+  reverts `tier→free` + clears the column once `tier_expires_at < now()`
+  (bounded, idempotent, superusers exempt). The Stripe webhook clears
+  `tier_expires_at` on a paying subscription — so a comped user who later
+  subscribes (even at the same tier) is never auto-reverted.
+
 ## [3.50.0] - 2026-07-07
 
 ### Added

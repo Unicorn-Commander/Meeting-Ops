@@ -891,3 +891,115 @@ def redrive_stuck_summary_sessions(*, dry_run: bool = False) -> dict[str, Any]:
         return summary
     finally:
         db.close()
+
+
+# --- time-limited Pro/paid comp auto-revert --------------------------------
+# An admin can comp a user a bounded Pro/paid tier via scripts/grant_pro.py
+# (tier='pro' + User.tier_expires_at = now + N days). This pass is what makes
+# that grant SELF-EXPIRING: once tier_expires_at is in the past it flips the
+# user back to 'free' and clears the column, so a "free month" comp for an
+# invited cohort can't silently become a permanent freebie. A real Stripe
+# subscription clears tier_expires_at (api.stripe_webhook), so paying customers
+# and permanent (NULL-expiry) grants are never touched. Superusers (support/dev,
+# who resolve to enterprise via auth.tier.get_user_tier) are excluded so a
+# stray comp on an admin account is a no-op.
+
+
+def revert_expired_comps(*, dry_run: bool = False) -> dict[str, Any]:
+    """Revert users whose time-limited tier comp has expired back to 'free'.
+
+    Selects users where ``tier != 'free'`` AND ``tier_expires_at IS NOT NULL``
+    AND ``tier_expires_at < now()`` (excluding superusers), sets ``tier='free'``
+    and clears ``tier_expires_at``. A NULL ``tier_expires_at`` means a permanent
+    tier and is NEVER touched — so real subscriptions (which clear the column;
+    see api.stripe_webhook) and manually-set permanent tiers are safe.
+
+    Founding flags are intentionally left untouched: cohort membership is a
+    separate lifecycle from the current paid grant, and the auto-revert's remit
+    is only the tier/expiry pair (grant_pro.py owns founding).
+
+    Bounded by ``SESSION_WATCHDOG_MAX_PER_PASS``, idempotent (a reverted user is
+    'free' with a NULL expiry, so a second pass finds nothing), and never
+    raises. Safe on the watchdog cron."""
+    if not _enabled():
+        return {"enabled": False}
+
+    from database.database import SessionLocal
+    from auth.models import User
+
+    cap = _max_per_pass()
+    now = datetime.now(timezone.utc)
+
+    summary = {
+        "enabled": True,
+        "kind": "comp_revert",
+        "candidates": 0,
+        "reverted": 0,
+        "skipped_cap": 0,
+        "errors": 0,
+        "dry_run": dry_run,
+    }
+
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(User)
+            .filter(
+                User.tier != "free",
+                User.tier_expires_at.isnot(None),
+                User.tier_expires_at < now,
+                # A superuser resolves to enterprise regardless of the tier
+                # column (auth.tier.get_user_tier), so never revert one — a comp
+                # on an admin is meaningless and reverting it is pointless churn.
+                User.is_superuser.isnot(True),
+            )
+            .order_by(User.id)
+            .limit(cap + 1)
+            .all()
+        )
+        summary["candidates"] = min(len(candidates), cap)
+        if len(candidates) > cap:
+            summary["skipped_cap"] = len(candidates) - cap
+            candidates = candidates[:cap]
+
+        for user in candidates:
+            try:
+                prev_tier = user.tier
+                expired_at = user.tier_expires_at
+                if dry_run:
+                    summary["reverted"] += 1
+                    continue
+                user.tier = "free"
+                user.tier_expires_at = None
+                summary["reverted"] += 1
+                # Structured, loki-greppable prefix so the centerdeep dashboard
+                # can chart comp-expiry rate alongside the other watchdog passes.
+                logger.warning(
+                    "session_watchdog.comp_revert user_id=%s email=%s "
+                    "tier=%s->free expired_at=%s founding=%s",
+                    getattr(user, "id", None),
+                    getattr(user, "email", None),
+                    prev_tier,
+                    expired_at.isoformat() if expired_at else None,
+                    getattr(user, "is_founding_member", None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                logger.warning(
+                    "session_watchdog.comp_revert: failed for user=%s — %s",
+                    getattr(user, "id", None), exc,
+                )
+        if not dry_run:
+            db.commit()
+        logger.info("session_watchdog comp_revert pass: %s", summary)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("session_watchdog.comp_revert: top-level error: %s", exc)
+        summary["errors"] += 1
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return summary
+    finally:
+        db.close()

@@ -228,6 +228,17 @@ def _handle_subscription_created(db: Session, sub: dict) -> None:
         user.id, user.tier, new_tier, price_id,
     )
     user.tier = new_tier
+    # A real subscription is permanent until Stripe says otherwise: clear any
+    # time-limited comp expiry (scripts/grant_pro.py) so the auto-revert
+    # watchdog (services.session_watchdog.revert_expired_comps) never downgrades
+    # a now-paying customer. This is the comp→subscribe upgrade path — a user
+    # comped to 'pro' who then pays keeps Pro permanently.
+    if new_tier != "free" and getattr(user, "tier_expires_at", None) is not None:
+        logger.info(
+            "subscription.created: user_id=%s clearing comp expiry "
+            "(now a permanent subscription)", user.id,
+        )
+        user.tier_expires_at = None
     db.add(user)
     db.commit()
     # Lift the buying org's quota plan to match the payment.
@@ -273,12 +284,32 @@ def _handle_subscription_updated(db: Session, sub: dict) -> None:
             status_str, user.id, user.tier,
         )
         return
+    # A real subscription in a paying state is permanent until Stripe says
+    # otherwise: clear any time-limited comp expiry (scripts/grant_pro.py) so
+    # the auto-revert watchdog can't downgrade a payer. This MUST run even when
+    # user.tier already equals new_tier — e.g. a user comped to 'pro' (tier
+    # already 'pro', expiry set) who then subscribes to Pro: the tier value
+    # doesn't move, so the tier-change block below is skipped, but the expiry
+    # must still be cleared or the watchdog would revert them mid-subscription.
+    expiry_cleared = (
+        new_tier != "free"
+        and getattr(user, "tier_expires_at", None) is not None
+    )
+    if expiry_cleared:
+        user.tier_expires_at = None
     if user.tier != new_tier:
         logger.info(
             "subscription.updated: user_id=%s tier %s→%s status=%s price=%s",
             user.id, user.tier, new_tier, status_str, price_id,
         )
         user.tier = new_tier
+        db.add(user)
+        db.commit()
+    elif expiry_cleared:
+        logger.info(
+            "subscription.updated: user_id=%s tier=%s comp expiry cleared "
+            "(now a permanent subscription)", user.id, user.tier,
+        )
         db.add(user)
         db.commit()
     # Always reconcile the org plan to the current tier (the org can be out of

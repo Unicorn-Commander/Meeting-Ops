@@ -452,3 +452,240 @@ def test_watchdog_marks_stalled_upload_failed_and_retryable(org_and_user, monkey
         assert job.job_completed_at is not None
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# revert_expired_comps — time-limited Pro/paid comp auto-revert
+# ---------------------------------------------------------------------------
+
+
+def _make_comp_user(
+    *, db, tier="pro", expires_delta_days=None, is_superuser=False,
+    is_founding_member=False, founding_cohort=None,
+):
+    """Seed a User with a given tier + optional tier_expires_at offset.
+
+    ``expires_delta_days``: days from now for tier_expires_at. Negative = an
+    already-expired comp; positive = a still-valid comp; None = a permanent
+    tier (NULL expiry). Email + username are uuid-uniquified so tests can seed
+    freely against the session-scoped SQLite DB without collisions.
+    """
+    from auth.models import User
+    from auth.utils import get_password_hash
+
+    expires_at = None
+    if expires_delta_days is not None:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_delta_days)
+    tag = uuid.uuid4().hex[:10]
+    u = User(
+        email=f"comp-{tag}@example.com",
+        username=f"comp-{tag}",
+        hashed_password=get_password_hash("x"),
+        is_active=True,
+        is_verified=True,
+        is_superuser=is_superuser,
+        tier=tier,
+        tier_expires_at=expires_at,
+        is_founding_member=is_founding_member,
+        founding_cohort=founding_cohort,
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def test_comp_revert_reverts_expired(app):
+    """A Pro comp whose tier_expires_at is in the past flips back to free and
+    the expiry is cleared."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="pro", expires_delta_days=-1)
+        uid = u.id
+    finally:
+        db.close()
+
+    res = revert_expired_comps()
+    assert res["enabled"] is True
+    assert res["reverted"] >= 1
+
+    db = SessionLocal()
+    try:
+        row = db.get(User, uid)
+        assert row.tier == "free", "expired comp must revert to free"
+        assert row.tier_expires_at is None, "expiry must be cleared on revert"
+    finally:
+        db.close()
+
+
+def test_comp_revert_leaves_not_yet_expired(app):
+    """A comp still inside its window is untouched (tier + expiry preserved)."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="pro", expires_delta_days=30)
+        uid = u.id
+    finally:
+        db.close()
+
+    revert_expired_comps()
+    db = SessionLocal()
+    try:
+        row = db.get(User, uid)
+        assert row.tier == "pro", "a not-yet-expired comp must stay pro"
+        assert row.tier_expires_at is not None, "future expiry must be preserved"
+    finally:
+        db.close()
+
+
+def test_comp_revert_never_touches_null_expiry(app):
+    """A permanent tier (NULL tier_expires_at) is NEVER reverted — this is the
+    safety guarantee for real subscribers and manually-set permanent tiers."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="pro", expires_delta_days=None)
+        uid = u.id
+    finally:
+        db.close()
+
+    revert_expired_comps()
+    db = SessionLocal()
+    try:
+        row = db.get(User, uid)
+        assert row.tier == "pro", "permanent (NULL-expiry) Pro must never revert"
+        assert row.tier_expires_at is None
+    finally:
+        db.close()
+
+
+def test_comp_revert_skips_superuser(app):
+    """A superuser (resolves to enterprise regardless of the tier column) is
+    excluded even with an expired expiry — reverting one is meaningless."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(
+            db=db, tier="enterprise", expires_delta_days=-1, is_superuser=True,
+        )
+        uid = u.id
+    finally:
+        db.close()
+
+    revert_expired_comps()
+    db = SessionLocal()
+    try:
+        row = db.get(User, uid)
+        assert row.tier == "enterprise", "superuser tier must be left alone"
+        assert row.tier_expires_at is not None
+    finally:
+        db.close()
+
+
+def test_comp_revert_dry_run_does_not_mutate(app):
+    """dry_run counts what it would revert but writes nothing."""
+    from database.database import SessionLocal
+    from auth.models import User
+    from services.session_watchdog import revert_expired_comps
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="pro", expires_delta_days=-2)
+        uid = u.id
+    finally:
+        db.close()
+
+    res = revert_expired_comps(dry_run=True)
+    assert res["dry_run"] is True
+    assert res["reverted"] >= 1
+    db = SessionLocal()
+    try:
+        row = db.get(User, uid)
+        assert row.tier == "pro", "dry-run must not mutate"
+        assert row.tier_expires_at is not None
+    finally:
+        db.close()
+
+
+def test_comp_revert_disabled_flag(monkeypatch):
+    monkeypatch.setenv("SESSION_WATCHDOG_ENABLED", "false")
+    from services.session_watchdog import revert_expired_comps
+    assert revert_expired_comps() == {"enabled": False}
+
+
+# ---------------------------------------------------------------------------
+# scripts.grant_pro.apply_comp — the manual grant/revoke tool
+# ---------------------------------------------------------------------------
+
+
+def test_grant_pro_sets_tier_and_expiry(app):
+    from database.database import SessionLocal
+    from auth.models import User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="free", expires_delta_days=None)
+        before, after = apply_comp(
+            db, u, revoke=False, tier="pro", days=30, founding=False,
+        )
+        assert before["tier"] == "free"
+        assert after["tier"] == "pro"
+        assert after["tier_expires_at"] is not None
+        row = db.get(User, u.id)
+        assert row.tier == "pro"
+        assert row.tier_expires_at is not None
+    finally:
+        db.close()
+
+
+def test_grant_pro_revoke_clears(app):
+    from database.database import SessionLocal
+    from auth.models import User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="pro", expires_delta_days=30)
+        _before, after = apply_comp(db, u, revoke=True)
+        assert after["tier"] == "free"
+        assert after["tier_expires_at"] is None
+        row = db.get(User, u.id)
+        assert row.tier == "free"
+        assert row.tier_expires_at is None
+    finally:
+        db.close()
+
+
+def test_grant_pro_founding_flag(app):
+    from database.database import SessionLocal
+    from auth.models import User
+    from scripts.grant_pro import apply_comp
+
+    db = SessionLocal()
+    try:
+        u = _make_comp_user(db=db, tier="free", expires_delta_days=None)
+        _before, after = apply_comp(
+            db, u, revoke=False, tier="pro", days=30,
+            founding=True, cohort="meeting_ops_v1",
+        )
+        assert after["is_founding_member"] is True
+        assert after["founding_cohort"] == "meeting_ops_v1"
+        row = db.get(User, u.id)
+        assert row.is_founding_member is True
+        assert row.founding_cohort == "meeting_ops_v1"
+    finally:
+        db.close()

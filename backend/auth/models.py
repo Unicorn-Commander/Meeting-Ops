@@ -113,6 +113,17 @@ class User(Base):
     # 'free' until billing flips them.
     tier = Column(String(32), nullable=False, default="free")
 
+    # Time-limited Pro/paid comp expiry (added in alembic 051). When set, the
+    # user's `tier` above is a *bounded* grant: the session_watchdog cron
+    # (services.session_watchdog.revert_expired_comps) reverts `tier` to 'free'
+    # and clears this column once `tier_expires_at < now()`. This lets an admin
+    # comp an invited cohort a "free month" of Pro (scripts/grant_pro.py) with
+    # no Stripe/card, and guarantees the comp can't silently become permanent.
+    # NULL = permanent tier: a real Stripe subscription CLEARS this column
+    # (api.stripe_webhook._handle_subscription_created/_updated) so a paying
+    # customer — or a comped user who later subscribes — is never auto-reverted.
+    tier_expires_at = Column(DateTime(timezone=True), nullable=True)
+
     # Stripe customer ID (cus_...). NULL until the user first touches
     # Checkout / Billing Portal, or until a `customer.created` webhook
     # event arrives for them. Used by the webhook handler to find the

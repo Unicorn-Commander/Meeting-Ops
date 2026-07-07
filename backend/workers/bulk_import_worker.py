@@ -81,7 +81,7 @@ async def data_retention_purge_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Every-30-min cron: clear stuck sessions in three passes.
+    """Every-30-min cron: clear stuck sessions + expire comps.
 
     1. status='recording' with no chunk update past SESSION_WATCHDOG_MINUTES
        (default 30 min) — phone tab evicted, dev tab crashed, etc. Flipped
@@ -103,14 +103,21 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
        2026-06-03 after bigboy accumulated 101 stuck-processing rows from
        a chain of rapid redeploys earlier the same day.
 
-    Audio + transcripts + graph + Garage all stay intact in both passes —
+    Audio + transcripts + graph + Garage all stay intact in these passes —
     only status (+ ended_at + processing_metadata audit fields) change.
-    Configurable via SESSION_WATCHDOG_* env vars; both default-enabled."""
+
+    A final, independent pass (revert_expired_comps) expires time-limited
+    Pro/paid comps: users whose User.tier_expires_at has passed are flipped
+    back to 'free' with the expiry cleared, so an admin "free month" grant
+    (scripts/grant_pro.py) auto-reverts. Real subscriptions clear
+    tier_expires_at (api.stripe_webhook), so paying customers are never
+    reverted. Configurable via SESSION_WATCHDOG_* env vars; all default-enabled."""
     from services.session_watchdog import (
         mark_abandoned_uploads,
         mark_abandoned_recording_sessions,
         mark_abandoned_processing_sessions,
         redrive_stuck_summary_sessions,
+        revert_expired_comps,
     )
     recording_result = await asyncio.to_thread(mark_abandoned_recording_sessions)
     # Re-drive needs_summary rows BEFORE the processing triage so a transient
@@ -118,11 +125,16 @@ async def session_watchdog_task(ctx: dict[str, Any]) -> dict[str, Any]:
     summary_redrive_result = await asyncio.to_thread(redrive_stuck_summary_sessions)
     processing_result = await asyncio.to_thread(mark_abandoned_processing_sessions)
     upload_result = await asyncio.to_thread(mark_abandoned_uploads)
+    # Expire time-limited Pro/paid comps (scripts/grant_pro.py): flip users whose
+    # tier_expires_at has passed back to 'free'. Independent of the session
+    # passes above; grouped here so one cron owns all watchdog housekeeping.
+    comp_revert_result = await asyncio.to_thread(revert_expired_comps)
     combined = {
         "recording": recording_result,
         "summary_redrive": summary_redrive_result,
         "processing": processing_result,
         "uploads": upload_result,
+        "comp_revert": comp_revert_result,
     }
     logger.info("arq cron: session_watchdog result=%s", combined)
     return combined
