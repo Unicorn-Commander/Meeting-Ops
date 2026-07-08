@@ -16,6 +16,7 @@ import { SpeakerLibrary } from './pages/SpeakerLibrary';
 import SettingsEnhanced from './pages/SettingsEnhanced';
 import { SharedSessionRedirect } from './components/SharedSessionRedirect';
 import { AgentDashboard } from './pages/admin/AgentDashboard';
+import CompsAdmin from './pages/admin/CompsAdmin';
 import Rooms from './pages/Rooms';
 import RoomSetupWizard from './pages/RoomSetupWizard';
 import RoomDetail from './pages/RoomDetail';
@@ -36,7 +37,7 @@ import Privacy from './pages/Privacy';
 import AUP from './pages/AUP';
 import LegalFooter from './components/LegalFooter';
 import { useAlwaysOn } from './contexts/AlwaysOnContext';
-import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut } from 'lucide-react';
+import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut, Rocket } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
@@ -243,6 +244,12 @@ function SimplifiedNavigation({
           { path: '/admin/agents', label: 'Agents', icon: '🤖' } as NavItem,
           { path: '/admin/bulk-import', label: 'Bulk Import', icon: FolderUp } as NavItem,
         ]
+      : []),
+    // Launch console — comps + invite-code oversight. Platform-superuser only
+    // (the backend /api/admin/comps* + /api/admin/invite-codes are superuser
+    // gated), so it never shows for a self-serve org-admin.
+    ...(user?.is_superuser
+      ? [{ path: '/admin/comps', label: 'Launch', icon: Rocket } as NavItem]
       : []),
   ];
 
@@ -653,6 +660,15 @@ export function AppRouterSimplified() {
       <Route path="/admin/bulk-import" element={
         <AdminRoute>
           <AdminBulkImport />
+        </AdminRoute>
+      } />
+
+      {/* Launch console: comps + invite-code oversight. AdminRoute lets an
+          org-admin through, but the page itself + its backend are
+          platform-superuser only, so a non-superuser sees an access notice. */}
+      <Route path="/admin/comps" element={
+        <AdminRoute>
+          <CompsAdmin />
         </AdminRoute>
       } />
 

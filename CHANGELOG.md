@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+## [3.53.0] - 2026-07-08
+
+### Added
+- **Launch Console — in-app comps + invite-code oversight (superuser).** A new
+  `/admin/comps` page ("Launch" in the sidebar, platform-superuser only) to see
+  and organize the launch cohort without shelling into the container: summary
+  cards (active / expired / permanent comps, codes available / redeemed), a
+  table of every non-free user with tier, status, expiry and one-click Revoke,
+  and a table of all invite codes with cohort/status filters, copy-available,
+  and CSV export. Grant or extend a comp by email and mint invite codes inline.
+- **Comp + invite-code admin API (superuser-gated).** New
+  `GET /api/admin/comps` (+ `/api/admin/comps/summary`),
+  `POST /api/admin/comps/grant`, `POST /api/admin/comps/revoke`, and
+  `GET /api/admin/invite-codes` (list, next to the existing mint). Grant reuses
+  the same `comp_personal_org_to_pro` helper the invite-redemption path uses
+  (sets user tier + `tier_expires_at` AND the personal org plan); revoke mirrors
+  `grant_pro --revoke` + `revert_expired_comps` exactly. Every mutation is
+  audit-logged. All routes gate on `is_superuser` (not `require_admin`, which
+  every self-serve user satisfies for their own personal org).
+
 ## [3.52.0] - 2026-07-07
 
 ### Fixed

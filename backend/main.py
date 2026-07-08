@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Meeting-Ops API",
     description="AI-powered meeting recording and transcription system",
-    version="3.50.0",
+    version="3.53.0",
     lifespan=lifespan
 )
 
@@ -457,6 +457,12 @@ _load_router(app, "founding_admin", "api.founding", router_attr="admin_router")
 # /api/invite-codes/{mine,config} + admin /api/admin/invite-codes mint.
 _load_router(app, "invite_codes", "api.invite_codes")
 _load_router(app, "invite_codes_admin", "api.invite_codes", router_attr="admin_router")
+
+# === LAUNCH CONSOLE: COMPS ADMIN (superuser-only) ===
+# See + organize the free / $1 launch cohort from inside Meeting-Ops:
+# GET /api/admin/comps[/summary] + POST /api/admin/comps/{grant,revoke}.
+# The invite-code LIST (GET /api/admin/invite-codes) lives with its minter above.
+_load_router(app, "admin_comps", "api.admin_comps", router_attr="admin_router")
 
 # === PHASE 3 ROUTERS ===
 _load_router(app, "speakers", "api.speakers")

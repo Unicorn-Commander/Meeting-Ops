@@ -23,10 +23,11 @@ self-serve register hook.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -72,6 +73,28 @@ class InviteCodeMineItem(BaseModel):
 
 class InviteConfigResponse(BaseModel):
     require_invite_code: bool
+
+
+class InviteCodeAdminItem(BaseModel):
+    code: str
+    is_active: bool
+    redeemed: bool
+    redeemed_by_email: Optional[str] = None
+    redeemed_at: Optional[datetime] = None
+    created_by_email: Optional[str] = None
+    note: Optional[str] = None
+    cohort: Optional[str] = None  # parsed from note ("cohort=<x> ...")
+    created_at: Optional[datetime] = None
+
+
+_COHORT_RE = re.compile(r"cohort=(\S+)")
+
+
+def _cohort_from_note(note: Optional[str]) -> Optional[str]:
+    if not note:
+        return None
+    m = _COHORT_RE.search(note)
+    return m.group(1) if m else None
 
 
 @admin_router.post("", response_model=list[InviteCodeMinted])
@@ -152,6 +175,67 @@ async def mint_invite_codes(
             created_at=row.created_at,
         )
         for row in minted
+    ]
+
+
+@admin_router.get("", response_model=list[InviteCodeAdminItem])
+async def list_invite_codes(
+    cohort: Optional[str] = Query(default=None, description="match note cohort=<x>"),
+    redeemed: Optional[bool] = Query(default=None),
+    active: Optional[bool] = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[InviteCodeAdminItem]:
+    """ALL invite codes, newest first. PLATFORM-SUPERUSER ONLY (same gate as the
+    minter — the whole point of the invite program is a single operator seeing
+    the full pool). Filters: `cohort` (substring of the note's cohort=<x> tag),
+    `redeemed`, `active`. This is the read side of the launch console's code
+    tracker."""
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a platform admin can list invite codes",
+        )
+    query = db.query(BetaInviteCode)
+    if cohort:
+        query = query.filter(BetaInviteCode.note.ilike(f"%cohort={cohort}%"))
+    if redeemed is True:
+        query = query.filter(BetaInviteCode.redemption_count > 0)
+    elif redeemed is False:
+        query = query.filter(BetaInviteCode.redemption_count == 0)
+    if active is not None:
+        query = query.filter(BetaInviteCode.is_active.is_(active))
+
+    rows = (
+        query.order_by(BetaInviteCode.created_at.desc(), BetaInviteCode.id.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+
+    # Batch-resolve redeemer + creator emails (avoid N+1).
+    ids = {r.redeemed_by_user_id for r in rows if r.redeemed_by_user_id}
+    ids |= {r.created_by_user_id for r in rows if r.created_by_user_id}
+    emails: dict[int, str] = {}
+    if ids:
+        for u in db.query(User).filter(User.id.in_(ids)).all():
+            emails[u.id] = u.email
+
+    return [
+        InviteCodeAdminItem(
+            code=row.code,
+            is_active=row.is_active,
+            redeemed=row.redemption_count > 0,
+            redeemed_by_email=emails.get(row.redeemed_by_user_id),
+            redeemed_at=row.redeemed_at,
+            created_by_email=emails.get(row.created_by_user_id),
+            note=row.note,
+            cohort=_cohort_from_note(row.note),
+            created_at=row.created_at,
+        )
+        for row in rows
     ]
 
 
