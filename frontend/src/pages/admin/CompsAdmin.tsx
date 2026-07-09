@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Rocket, RefreshCw, Ticket, Gift, CircleCheck, XCircle, Clock,
   Copy, Download, Search, ShieldAlert, UserPlus, Ban, Crown, CreditCard,
-  Plus,
+  Plus, Mail, Send, Upload, Loader2, Sparkles,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { config } from '../../config';
@@ -50,6 +50,7 @@ interface InviteCodeAdminItem {
   redeemed: boolean;
   redeemed_by_email?: string | null;
   redeemed_at?: string | null;
+  emailed_at?: string | null;
   created_by_email?: string | null;
   note?: string | null;
   cohort?: string | null;
@@ -66,6 +67,26 @@ interface CompActionResponse {
   action: string;
   before: CompSnapshot;
   after: CompSnapshot;
+}
+
+interface InviteCodeEmailResult {
+  code: string;
+  email: string;
+  status: string;
+  subject?: string | null;
+  text_body?: string | null;
+  html_body?: string | null;
+  error?: string | null;
+  emailed_at?: string | null;
+}
+
+interface InviteCodeEmailResponse {
+  dry_run: boolean;
+  total: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  results: InviteCodeEmailResult[];
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +135,34 @@ async function copy(text: string, label: string): Promise<void> {
   } catch {
     showToast.error('Clipboard blocked by the browser.');
   }
+}
+
+function normalizeEmailList(raw: string): string[] {
+  const seen = new Set<string>();
+  const emails: string[] = [];
+  raw
+    .split(/\r?\n|,/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .forEach((value) => {
+      const firstCell = value.split(';', 1)[0].trim().replace(/^["']|["']$/g, '');
+      if (!firstCell) return;
+      const lowered = firstCell.toLowerCase();
+      if (lowered === 'email' || lowered === 'recipient' || lowered === 'recipients') return;
+      if (seen.has(lowered)) return;
+      seen.add(lowered);
+      emails.push(lowered);
+    });
+  return emails;
+}
+
+function emailPreviewKey(
+  mode: 'single' | 'batch',
+  code: string,
+  cohort: string,
+  recipients: string[],
+): string {
+  return JSON.stringify({ mode, code, cohort: cohort.trim(), recipients });
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +227,13 @@ function CodeStatusBadge({ c }: { c: InviteCodeAdminItem }) {
       </span>
     );
   }
+  if (c.emailed_at) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-300">
+        <Mail className="h-3.5 w-3.5" /> emailed
+      </span>
+    );
+  }
   if (!c.is_active) {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-300">
@@ -198,6 +254,344 @@ const BTN_OUTLINE =
   'inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-50';
 const INPUT =
   'rounded-lg border border-zinc-700 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:border-indigo-500 focus:outline-none';
+
+type InviteEmailMode = 'single' | 'batch';
+
+function StatusPill({ status }: { status: string }) {
+  const tone =
+    status === 'sent'
+      ? 'bg-emerald-500/15 text-emerald-300'
+      : status === 'preview'
+        ? 'bg-sky-500/15 text-sky-300'
+        : status === 'skipped_emailed'
+          ? 'bg-zinc-700/60 text-zinc-300'
+          : 'bg-red-500/15 text-red-300';
+  return (
+    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${tone}`}>
+      {status.replace(/_/g, ' ')}
+    </span>
+  );
+}
+
+function InviteCodeEmailModal({
+  open,
+  mode,
+  initialCode,
+  initialCohort,
+  availableCohorts,
+  onClose,
+  onRefresh,
+}: {
+  open: boolean;
+  mode: InviteEmailMode;
+  initialCode?: string | null;
+  initialCohort?: string | null;
+  availableCohorts: string[];
+  onClose: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [recipientInput, setRecipientInput] = useState('');
+  const [cohort, setCohort] = useState(initialCohort ?? '');
+  const [preview, setPreview] = useState<InviteCodeEmailResponse | null>(null);
+  const [previewKey, setPreviewKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setRecipientInput('');
+    setCohort(initialCohort ?? '');
+    setPreview(null);
+    setPreviewKey('');
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [open, initialCode, initialCohort, mode]);
+
+  const recipients = useMemo(() => {
+    const parsed = normalizeEmailList(recipientInput);
+    return mode === 'single' ? parsed.slice(0, 1) : parsed;
+  }, [mode, recipientInput]);
+
+  const currentKey = useMemo(
+    () => emailPreviewKey(mode, initialCode ?? '', cohort, recipients),
+    [mode, initialCode, cohort, recipients],
+  );
+  const previewMatches = Boolean(preview) && previewKey === currentKey;
+
+  const uploadCsv = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setRecipientInput(text);
+      setPreview(null);
+      setPreviewKey('');
+    } catch (err) {
+      showToast.error(`CSV import failed: ${(err as Error).message}`);
+    }
+  };
+
+  const run = async (dryRun: boolean) => {
+    setError(null);
+    if (!initialCode && mode === 'single') {
+      setError('No invite code selected.');
+      return;
+    }
+    if (!recipients.length) {
+      setError('Enter at least one recipient email.');
+      return;
+    }
+    if (mode === 'batch' && !cohort.trim()) {
+      setError('Choose a cohort.');
+      return;
+    }
+
+    const path = mode === 'single'
+      ? '/api/admin/invite-codes/send'
+      : '/api/admin/invite-codes/send-cohort';
+    const body = mode === 'single'
+      ? {
+          dry_run: dryRun,
+          recipients: [{ email: recipients[0], code: initialCode ?? '' }],
+        }
+      : {
+          dry_run: dryRun,
+          cohort: cohort.trim(),
+          recipients,
+        };
+
+    setBusy(true);
+    try {
+      const res = await apiPost<InviteCodeEmailResponse>(path, body);
+      setPreview(res);
+      setPreviewKey(currentKey);
+      if (dryRun) {
+        showToast.success(`Previewed ${res.total} email${res.total === 1 ? '' : 's'}.`);
+      } else {
+        showToast.success(
+          res.failed
+            ? `Sent ${res.sent}, skipped ${res.skipped}, failed ${res.failed}.`
+            : `Sent ${res.sent} invite email${res.sent === 1 ? '' : 's'}.`,
+        );
+        await onRefresh();
+      }
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      showToast.error(`Email send failed: ${message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmSend = async () => {
+    if (!previewMatches || !preview) {
+      showToast.error('Run a fresh preview before sending.');
+      return;
+    }
+    const ok = await showConfirm(
+      `Send ${preview.total} invite email${preview.total === 1 ? '' : 's'} now?`,
+      { confirmLabel: 'Send', tone: 'danger' },
+    );
+    if (!ok) return;
+    await run(false);
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+      <div className="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60">
+        <div className="flex items-start justify-between border-b border-zinc-800 px-5 py-4">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+              <Mail className="h-4 w-4 text-indigo-300" />
+              {mode === 'single' ? 'Email invite code' : 'Email codes'}
+            </div>
+            <div className="mt-1 text-xs text-zinc-500">
+              {mode === 'single'
+                ? 'Preview first, then confirm before Postmark send.'
+                : 'Select a cohort, preview the code-to-recipient mapping, then confirm.'}
+            </div>
+          </div>
+          <button className={BTN_OUTLINE} onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="grid gap-0 lg:grid-cols-[360px_1fr]">
+          <div className="border-b border-zinc-800 p-5 lg:border-b-0 lg:border-r">
+            <div className="space-y-4">
+              {mode === 'single' ? (
+                <div>
+                  <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">Invite code</label>
+                  <input className={`${INPUT} w-full`} value={initialCode ?? ''} disabled />
+                </div>
+              ) : (
+                <div>
+                  <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">Cohort</label>
+                  <select className={`${INPUT} w-full`} value={cohort} onChange={(e) => { setCohort(e.target.value); setPreview(null); setPreviewKey(''); }}>
+                    <option value="">Select a cohort</option>
+                    {availableCohorts.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">
+                  {mode === 'single' ? 'Recipient email' : 'Recipient emails'}
+                </label>
+                {mode === 'single' ? (
+                  <input
+                    type="email"
+                    className={`${INPUT} w-full`}
+                    placeholder="recipient@example.com"
+                    value={recipientInput}
+                    onChange={(e) => { setRecipientInput(e.target.value); setPreview(null); setPreviewKey(''); }}
+                  />
+                ) : (
+                  <textarea
+                    className={`${INPUT} min-h-40 w-full resize-y`}
+                    placeholder="Paste emails here, one per line or CSV first column"
+                    value={recipientInput}
+                    onChange={(e) => { setRecipientInput(e.target.value); setPreview(null); setPreviewKey(''); }}
+                  />
+                )}
+              </div>
+
+              {mode === 'batch' && (
+                <div>
+                  <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">Upload CSV</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".csv,text/csv"
+                      className="hidden"
+                      onChange={(e) => { void uploadCsv(e.target.files?.[0] ?? null); }}
+                    />
+                    <button
+                      type="button"
+                      className={BTN_OUTLINE}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Upload className="h-4 w-4" /> Choose CSV
+                    </button>
+                    <span className="text-xs text-zinc-500">First column or `email` header.</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-xs text-zinc-400">
+                <div className="flex items-center gap-2 text-zinc-200">
+                  <Sparkles className="h-4 w-4 text-fuchsia-300" />
+                  Flow
+                </div>
+                <ol className="mt-2 space-y-1.5">
+                  <li>1. Preview with dry-run.</li>
+                  <li>2. Review the rendered email and mapping.</li>
+                  <li>3. Confirm the real send.</li>
+                </ol>
+              </div>
+
+              {error && (
+                <div className="rounded-xl border border-red-900/70 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {error}
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={BTN_PRIMARY}
+                  onClick={() => run(true)}
+                  disabled={busy}
+                >
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  className={BTN_OUTLINE}
+                  onClick={confirmSend}
+                  disabled={busy || !previewMatches || !preview}
+                >
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Send
+                </button>
+              </div>
+
+              {preview && !previewMatches && (
+                <div className="rounded-xl border border-amber-900/70 bg-amber-950/40 px-3 py-2 text-sm text-amber-300">
+                  Preview is stale. Re-run Preview before sending.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="max-h-[80vh] overflow-y-auto p-5">
+            {!preview ? (
+              <div className="rounded-2xl border border-dashed border-zinc-800 p-6 text-sm text-zinc-500">
+                Dry-run output will show here.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                  <span className="rounded-full bg-zinc-800 px-2.5 py-1">{preview.total} total</span>
+                  <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-emerald-300">{preview.sent} sent</span>
+                  <span className="rounded-full bg-zinc-700/60 px-2.5 py-1 text-zinc-300">{preview.skipped} skipped</span>
+                  <span className="rounded-full bg-red-500/15 px-2.5 py-1 text-red-300">{preview.failed} failed</span>
+                </div>
+                {preview.results.map((result) => (
+                  <div key={`${result.code}:${result.email}`} className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate font-mono text-sm text-zinc-100">{result.code} → {result.email}</div>
+                        <div className="text-xs text-zinc-500">
+                          {result.emailed_at ? `emailed ${relative(result.emailed_at)}` : result.status}
+                        </div>
+                      </div>
+                      <StatusPill status={result.status} />
+                    </div>
+                    {result.subject && (
+                      <div className="mt-3 text-sm text-zinc-200">
+                        <span className="text-xs uppercase tracking-wide text-zinc-500">Subject</span>
+                        <div className="mt-1">{result.subject}</div>
+                      </div>
+                    )}
+                    {result.text_body && (
+                      <div className="mt-3">
+                        <div className="text-xs uppercase tracking-wide text-zinc-500">Plain text</div>
+                        <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 text-xs leading-6 text-zinc-300">
+                          {result.text_body}
+                        </pre>
+                      </div>
+                    )}
+                    {result.html_body && (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs uppercase tracking-wide text-zinc-500">HTML source</summary>
+                        <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 text-xs leading-6 text-zinc-400">
+                          {result.html_body}
+                        </pre>
+                      </details>
+                    )}
+                    {result.error && (
+                      <div className="mt-3 rounded-xl border border-red-900/70 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                        {result.error}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -228,6 +622,10 @@ export default function CompsAdmin() {
   const [mintCount, setMintCount] = useState(25);
   const [mintNote, setMintNote] = useState('');
   const [mintBusy, setMintBusy] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [emailMode, setEmailMode] = useState<InviteEmailMode>('single');
+  const [emailCode, setEmailCode] = useState<string | null>(null);
+  const [emailCohort, setEmailCohort] = useState<string | null>(null);
 
   const isSuper = Boolean(user?.is_superuser);
 
@@ -365,6 +763,20 @@ export default function CompsAdmin() {
     a.download = `invite-codes-${cohortFilter || 'all'}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const openSingleEmail = (code: string, cohort?: string | null) => {
+    setEmailMode('single');
+    setEmailCode(code);
+    setEmailCohort(cohort ?? null);
+    setEmailModalOpen(true);
+  };
+
+  const openBatchEmail = () => {
+    setEmailMode('batch');
+    setEmailCode(null);
+    setEmailCohort(cohortFilter || cohorts[0] || null);
+    setEmailModalOpen(true);
   };
 
   // --- Non-superuser: access notice (AdminRoute lets org-admins reach here) ---
@@ -599,6 +1011,9 @@ export default function CompsAdmin() {
               <button className={BTN_OUTLINE} onClick={copyAvailable} title="Copy available codes">
                 <Copy className="h-4 w-4" /> Copy available
               </button>
+              <button className={BTN_OUTLINE} onClick={openBatchEmail} title="Preview and email codes from a cohort">
+                <Mail className="h-4 w-4" /> Email codes…
+              </button>
               <button className={BTN_OUTLINE} onClick={exportCsv} title="Export filtered as CSV">
                 <Download className="h-4 w-4" /> CSV
               </button>
@@ -611,7 +1026,7 @@ export default function CompsAdmin() {
               <div className="col-span-2">Status</div>
               <div className="col-span-2">Cohort</div>
               <div className="col-span-3">Redeemed by</div>
-              <div className="col-span-2 text-right">Copy</div>
+              <div className="col-span-2 text-right">Actions</div>
             </div>
             {loading ? (
               <div className="flex items-center gap-2 px-4 py-6 text-sm text-zinc-400">
@@ -636,13 +1051,23 @@ export default function CompsAdmin() {
                     )}
                   </div>
                   <div className="col-span-2 flex justify-end">
-                    <button
-                      className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-                      onClick={() => copy(c.code, `Copied ${c.code}.`)}
-                      title="Copy code"
-                    >
-                      <Copy className="h-4 w-4" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                        onClick={() => openSingleEmail(c.code, c.cohort)}
+                        title={c.emailed_at ? 'Already emailed' : 'Email this code'}
+                        disabled={Boolean(c.emailed_at) || c.redeemed}
+                      >
+                        <Mail className="h-4 w-4" />
+                      </button>
+                      <button
+                        className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                        onClick={() => copy(c.code, `Copied ${c.code}.`)}
+                        title="Copy code"
+                      >
+                        <Copy className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))
@@ -655,6 +1080,16 @@ export default function CompsAdmin() {
           )}
         </div>
       </div>
+
+      <InviteCodeEmailModal
+        open={emailModalOpen}
+        mode={emailMode}
+        initialCode={emailCode}
+        initialCohort={emailCohort}
+        availableCohorts={cohorts}
+        onClose={() => setEmailModalOpen(false)}
+        onRefresh={loadAll}
+      />
     </div>
   );
 }

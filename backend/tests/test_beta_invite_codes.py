@@ -75,6 +75,7 @@ def _seed_code(
     max_redemptions: int = 1,
     redemption_count: int = 0,
     is_active: bool = True,
+    note: str | None = None,
 ) -> str:
     """Insert a code row directly and return its `code`."""
     BetaInviteCode, _O, _U, _UO, SessionLocal = _models()
@@ -87,6 +88,7 @@ def _seed_code(
             max_redemptions=max_redemptions,
             redemption_count=redemption_count,
             is_active=is_active,
+            note=note,
         )
         db.add(row)
         db.commit()
@@ -586,3 +588,112 @@ def test_mine_lists_only_callers_codes_with_redemption_state(client, monkeypatch
 def test_mine_requires_auth(client):
     r = client.get("/api/invite-codes/mine")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 4. Invite-code emailing
+# ---------------------------------------------------------------------------
+
+
+def test_admin_send_invite_code_dry_run_returns_preview_and_sends_nothing(
+    client, monkeypatch
+):
+    headers = _admin_headers(client)
+    code = _seed_code(note="cohort=meeting_ops_v1 comp_days=30")
+    calls: list[tuple[str, str, str, str]] = []
+
+    def fake_send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+        calls.append((to_email, subject, html_body, text_body))
+        return True
+
+    monkeypatch.setattr("api.invite_codes.send_transactional_email", fake_send)
+
+    resp = client.post(
+        "/api/admin/invite-codes/send",
+        json={
+            "dry_run": True,
+            "recipients": [{"email": "preview@example.com", "code": code}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["dry_run"] is True
+    assert payload["total"] == 1
+    assert payload["sent"] == 0
+    assert payload["failed"] == 0
+    item = payload["results"][0]
+    assert item["status"] == "preview"
+    assert item["subject"] == "30 days of Meeting-Ops Pro, on us"
+    assert code in item["text_body"]
+    assert calls == []
+
+    row = _get_code_row(code)
+    assert row.emailed_at is None
+
+
+def test_admin_send_invite_code_marks_emailed_and_audits(client, monkeypatch):
+    headers = _admin_headers(client)
+    code = _seed_code(note="cohort=meeting_ops_v1 comp_days=30")
+    calls: list[tuple[str, str, str, str]] = []
+    audits: list[tuple[int, str, str, str | None, dict | None]] = []
+
+    def fake_send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+        calls.append((to_email, subject, html_body, text_body))
+        return True
+
+    def fake_log_action(db, user_id, action, resource_type=None, resource_id=None, ip_address=None, user_agent=None, details=None, organization_id=None):
+        audits.append((user_id, action, resource_type, resource_id, details))
+
+    monkeypatch.setattr("api.invite_codes.send_transactional_email", fake_send)
+    monkeypatch.setattr("api.invite_codes.AuthService.log_action", fake_log_action)
+
+    resp = client.post(
+        "/api/admin/invite-codes/send",
+        json={
+            "dry_run": False,
+            "recipients": [{"email": "sent@example.com", "code": code}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["dry_run"] is False
+    assert payload["sent"] == 1
+    assert payload["failed"] == 0
+    assert payload["results"][0]["status"] == "sent"
+    assert payload["results"][0]["emailed_at"] is not None
+
+    row = _get_code_row(code)
+    assert row.emailed_at is not None
+    assert len(calls) == 1
+    assert calls[0][0] == "sent@example.com"
+    assert len(audits) == 1
+    assert audits[0][1] == "invite_code_emailed"
+    assert audits[0][2] == "invite_code"
+    assert audits[0][3] == code
+    assert audits[0][4] == {"to": "sent@example.com"}
+
+
+def test_admin_send_cohort_rejects_overflow(client):
+    headers = _admin_headers(client)
+    cohort = f"overflow_{uuid.uuid4().hex[:8]}"
+    _seed_code(note=f"cohort={cohort} comp_days=30")
+    resp = client.post(
+        "/api/admin/invite-codes/send-cohort",
+        json={
+            "dry_run": True,
+            "cohort": cohort,
+            "recipients": ["one@example.com", "two@example.com"],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_admin_send_requires_auth(client):
+    resp = client.post(
+        "/api/admin/invite-codes/send",
+        json={"dry_run": True, "recipients": []},
+    )
+    assert resp.status_code in (401, 403)

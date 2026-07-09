@@ -269,6 +269,10 @@ class BetaInviteCode(Base):
         nullable=True,
     )
     redeemed_at = Column(DateTime, nullable=True)
+    # Invite-distribution idempotency stamp. Set once a code's invite email
+    # has been successfully handed to Postmark; dry-runs and failed sends
+    # leave it NULL so the operator can retry.
+    emailed_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

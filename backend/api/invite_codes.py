@@ -22,20 +22,24 @@ self-serve register hook.
 """
 from __future__ import annotations
 
+import html
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import quote
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from auth.config import auth_config
 from auth.dependencies import get_current_user
+from auth.email import _send as send_transactional_email
 from auth.invite_codes import generate_code
 from auth.models import BetaInviteCode, User
 from auth.service import AuthService
+from api.admin_comps import require_superuser
 from database.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -81,10 +85,47 @@ class InviteCodeAdminItem(BaseModel):
     redeemed: bool
     redeemed_by_email: Optional[str] = None
     redeemed_at: Optional[datetime] = None
+    emailed_at: Optional[datetime] = None
     created_by_email: Optional[str] = None
     note: Optional[str] = None
     cohort: Optional[str] = None  # parsed from note ("cohort=<x> ...")
     created_at: Optional[datetime] = None
+
+
+class InviteCodeEmailRecipient(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class InviteCodeEmailDryRun(BaseModel):
+    code: str
+    email: EmailStr
+    status: str
+    subject: Optional[str] = None
+    text_body: Optional[str] = None
+    html_body: Optional[str] = None
+    error: Optional[str] = None
+    emailed_at: Optional[datetime] = None
+
+
+class InviteCodeEmailResponse(BaseModel):
+    dry_run: bool
+    total: int
+    sent: int
+    skipped: int
+    failed: int
+    results: list[InviteCodeEmailDryRun]
+
+
+class SendInviteCodesRequest(BaseModel):
+    recipients: list[InviteCodeEmailRecipient] = Field(default_factory=list)
+    dry_run: bool = False
+
+
+class SendInviteCodesCohortRequest(BaseModel):
+    cohort: str
+    recipients: list[EmailStr] = Field(default_factory=list)
+    dry_run: bool = False
 
 
 _COHORT_RE = re.compile(r"cohort=(\S+)")
@@ -97,10 +138,212 @@ def _cohort_from_note(note: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _invite_redeem_url(code: str) -> str:
+    base = auth_config.APP_BASE_URL.rstrip("/")
+    return f"{base}/#/signup?code={quote(code)}"
+
+
+def _template_name_for_cohort(cohort: Optional[str]) -> str:
+    if (cohort or "").strip() == "meeting_ops_v1":
+        return "free"
+    return "one_dollar"
+
+
+def _render_invite_email(
+    *,
+    code: str,
+    cohort: Optional[str],
+    to_email: str,
+) -> tuple[str, str, str]:
+    """Render the cohort-specific invite email."""
+    link = _invite_redeem_url(code)
+    template = _template_name_for_cohort(cohort)
+    safe_code = html.escape(code)
+    safe_link = html.escape(link)
+    safe_to = html.escape(to_email)
+
+    if template == "free":
+        subject = "30 days of Meeting-Ops Pro, on us"
+        text_body = (
+            f"Hi {to_email},\n\n"
+            "You've got 30 days of Meeting-Ops Pro, on us.\n"
+            f"Your invite code: {code}\n"
+            f"Redeem it here: {link}\n\n"
+            "If the link does not open, paste the code into the signup page.\n"
+        )
+        html_body = f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;background:#0a0a0a;padding:24px;font-family:Arial,sans-serif;color:#e4e4e7;">
+    <div style="max-width:640px;margin:0 auto;border:1px solid #27272a;border-radius:16px;overflow:hidden;background:#111827;">
+      <div style="padding:28px 32px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;">
+        <div style="font-size:14px;letter-spacing:.12em;text-transform:uppercase;opacity:.8;">Meeting-Ops</div>
+        <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;">30 days of Meeting-Ops Pro, on us</h1>
+      </div>
+      <div style="padding:32px;background:#18181b;">
+        <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#e4e4e7;">Hi {safe_to},</p>
+        <p style="margin:0 0 20px;font-size:16px;line-height:1.6;color:#d4d4d8;">
+          Use the invite code below to create your account and unlock 30 days of Pro.
+        </p>
+        <div style="margin:20px 0;padding:18px 20px;border:1px solid #3f3f46;border-radius:12px;background:#09090b;">
+          <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#a1a1aa;margin-bottom:8px;">Invite code</div>
+          <div style="font-size:24px;font-weight:700;letter-spacing:.12em;color:#fff;font-family:Courier New,monospace;">{safe_code}</div>
+        </div>
+        <p style="margin:0 0 24px;">
+          <a href="{safe_link}" style="display:inline-block;background:#7c3aed;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;">Redeem invite</a>
+        </p>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#a1a1aa;word-break:break-all;">{safe_link}</p>
+      </div>
+    </div>
+  </body>
+</html>"""
+        return subject, text_body, html_body
+
+    subject = "Your first month of Meeting-Ops Pro is $1"
+    text_body = (
+        f"Hi {to_email},\n\n"
+        "You've got a first month of Meeting-Ops Pro for $1.\n"
+        f"Your invite code: {code}\n"
+        f"Redeem it here: {link}\n\n"
+        "TODO($1 cohort link): if this cohort should use a Stripe coupon checkout instead of invite-code redemption, wire that flow here.\n"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;background:#0a0a0a;padding:24px;font-family:Arial,sans-serif;color:#e4e4e7;">
+    <div style="max-width:640px;margin:0 auto;border:1px solid #27272a;border-radius:16px;overflow:hidden;background:#111827;">
+      <div style="padding:28px 32px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;">
+        <div style="font-size:14px;letter-spacing:.12em;text-transform:uppercase;opacity:.8;">Meeting-Ops</div>
+        <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;">Your first month of Meeting-Ops Pro is $1</h1>
+      </div>
+      <div style="padding:32px;background:#18181b;">
+        <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#e4e4e7;">Hi {safe_to},</p>
+        <p style="margin:0 0 20px;font-size:16px;line-height:1.6;color:#d4d4d8;">
+          Use the invite code below to get started.
+        </p>
+        <div style="margin:20px 0;padding:18px 20px;border:1px solid #3f3f46;border-radius:12px;background:#09090b;">
+          <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#a1a1aa;margin-bottom:8px;">Invite code</div>
+          <div style="font-size:24px;font-weight:700;letter-spacing:.12em;color:#fff;font-family:Courier New,monospace;">{safe_code}</div>
+        </div>
+        <p style="margin:0 0 12px;color:#d4d4d8;">TODO($1 cohort link): wire the Stripe coupon checkout link here if this cohort does not redeem via invite-code signup.</p>
+        <p style="margin:0 0 24px;">
+          <a href="{safe_link}" style="display:inline-block;background:#7c3aed;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;">Redeem invite</a>
+        </p>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#a1a1aa;word-break:break-all;">{safe_link}</p>
+      </div>
+    </div>
+  </body>
+</html>"""
+    return subject, text_body, html_body
+
+
+def _email_result(
+    *,
+    code: str,
+    email: str,
+    status: str,
+    subject: Optional[str] = None,
+    text_body: Optional[str] = None,
+    html_body: Optional[str] = None,
+    error: Optional[str] = None,
+    emailed_at: Optional[datetime] = None,
+) -> InviteCodeEmailDryRun:
+    return InviteCodeEmailDryRun(
+        code=code,
+        email=email,
+        status=status,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        error=error,
+        emailed_at=emailed_at,
+    )
+
+
+def _send_one_invite(
+    *,
+    db: Session,
+    row: BetaInviteCode,
+    to_email: str,
+    actor_id: int,
+    dry_run: bool,
+) -> InviteCodeEmailDryRun:
+    if getattr(row, "emailed_at", None) is not None:
+        return _email_result(
+            code=row.code,
+            email=to_email,
+            status="skipped_emailed",
+            emailed_at=row.emailed_at,
+        )
+    if row.redemption_count > 0 or not row.is_active:
+        return _email_result(
+            code=row.code,
+            email=to_email,
+            status="error",
+            error="Invite code is already redeemed or inactive.",
+        )
+
+    subject, text_body, html_body = _render_invite_email(
+        code=row.code,
+        cohort=_cohort_from_note(row.note),
+        to_email=to_email,
+    )
+    if dry_run:
+        return _email_result(
+            code=row.code,
+            email=to_email,
+            status="preview",
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+        )
+
+    sent = send_transactional_email(to_email, subject, html_body, text_body)
+    if not sent:
+        return _email_result(
+            code=row.code,
+            email=to_email,
+            status="error",
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            error="Postmark rejected the send.",
+        )
+
+    row.emailed_at = datetime.now(timezone.utc)
+    db.add(row)
+    db.commit()
+    try:
+        AuthService.log_action(
+            db,
+            actor_id,
+            "invite_code_emailed",
+            resource_type="invite_code",
+            resource_id=row.code,
+            details={"to": to_email},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invite code audit log failed for %s -> %s: %s", row.code, to_email, exc)
+    return _email_result(
+        code=row.code,
+        email=to_email,
+        status="sent",
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        emailed_at=row.emailed_at,
+    )
+
+
+def _summarize_results(results: list[InviteCodeEmailDryRun]) -> tuple[int, int, int]:
+    sent = sum(1 for result in results if result.status == "sent")
+    skipped = sum(1 for result in results if result.status.startswith("skipped"))
+    failed = sum(1 for result in results if result.status == "error")
+    return sent, skipped, failed
+
+
 @admin_router.post("", response_model=list[InviteCodeMinted])
 async def mint_invite_codes(
     payload: MintInviteCodesRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_superuser),
     db: Session = Depends(get_db),
 ) -> list[InviteCodeMinted]:
     """Mint `count` single-use invite codes. PLATFORM-SUPERUSER ONLY.
@@ -118,11 +361,6 @@ async def mint_invite_codes(
     them), else to the calling superuser. `count` is bounded 1..50 by the schema.
     A `for_user_id` that doesn't resolve to a real user is rejected (400) so
     codes aren't minted into the void."""
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only a platform admin can mint invite codes",
-        )
     owner_id = payload.for_user_id or current_user.id
     if payload.for_user_id is not None:
         target = db.query(User).filter(User.id == payload.for_user_id).first()
@@ -185,7 +423,7 @@ async def list_invite_codes(
     active: Optional[bool] = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_superuser),
     db: Session = Depends(get_db),
 ) -> list[InviteCodeAdminItem]:
     """ALL invite codes, newest first. PLATFORM-SUPERUSER ONLY (same gate as the
@@ -193,11 +431,6 @@ async def list_invite_codes(
     the full pool). Filters: `cohort` (substring of the note's cohort=<x> tag),
     `redeemed`, `active`. This is the read side of the launch console's code
     tracker."""
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only a platform admin can list invite codes",
-        )
     query = db.query(BetaInviteCode)
     if cohort:
         query = query.filter(BetaInviteCode.note.ilike(f"%cohort={cohort}%"))
@@ -230,6 +463,7 @@ async def list_invite_codes(
             redeemed=row.redemption_count > 0,
             redeemed_by_email=emails.get(row.redeemed_by_user_id),
             redeemed_at=row.redeemed_at,
+            emailed_at=getattr(row, "emailed_at", None),
             created_by_email=emails.get(row.created_by_user_id),
             note=row.note,
             cohort=_cohort_from_note(row.note),
@@ -280,4 +514,115 @@ async def invite_codes_config() -> InviteConfigResponse:
     """Anonymous: tells the signup page whether an invite code is required."""
     return InviteConfigResponse(
         require_invite_code=auth_config.REQUIRE_INVITE_CODE
+    )
+
+
+@admin_router.post("/send", response_model=InviteCodeEmailResponse)
+async def send_invite_codes(
+    payload: SendInviteCodesRequest,
+    current_user: User = Depends(require_superuser),
+    db: Session = Depends(get_db),
+) -> InviteCodeEmailResponse:
+    if not payload.recipients:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one recipient is required",
+        )
+
+    results: list[InviteCodeEmailDryRun] = []
+    for recipient in payload.recipients:
+        row = (
+            db.query(BetaInviteCode)
+            .filter(BetaInviteCode.code == recipient.code)
+            .first()
+        )
+        if row is None:
+            results.append(
+                _email_result(
+                    code=recipient.code,
+                    email=str(recipient.email),
+                    status="error",
+                    error="Invite code not found.",
+                )
+            )
+            continue
+        results.append(
+            _send_one_invite(
+                db=db,
+                row=row,
+                to_email=str(recipient.email),
+                actor_id=current_user.id,
+                dry_run=payload.dry_run,
+            )
+        )
+
+    sent, skipped, failed = _summarize_results(results)
+    if payload.dry_run:
+        sent = 0
+        failed = 0
+    return InviteCodeEmailResponse(
+        dry_run=payload.dry_run,
+        total=len(results),
+        sent=sent,
+        skipped=skipped,
+        failed=failed,
+        results=results,
+    )
+
+
+@admin_router.post("/send-cohort", response_model=InviteCodeEmailResponse)
+async def send_invite_codes_for_cohort(
+    payload: SendInviteCodesCohortRequest,
+    current_user: User = Depends(require_superuser),
+    db: Session = Depends(get_db),
+) -> InviteCodeEmailResponse:
+    if not payload.recipients:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one recipient is required",
+        )
+    if not payload.cohort.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A cohort is required",
+        )
+
+    query = (
+        db.query(BetaInviteCode)
+        .filter(BetaInviteCode.note.ilike(f"%cohort={payload.cohort}%"))
+        .filter(BetaInviteCode.redemption_count == 0)
+        .filter(BetaInviteCode.is_active.is_(True))
+        .filter(BetaInviteCode.emailed_at.is_(None))
+        .order_by(BetaInviteCode.created_at.asc(), BetaInviteCode.id.asc())
+    )
+    rows = query.limit(len(payload.recipients)).all()
+    if len(rows) < len(payload.recipients):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Not enough available invite codes in that cohort",
+        )
+
+    results: list[InviteCodeEmailDryRun] = []
+    for row, recipient in zip(rows, payload.recipients):
+        results.append(
+            _send_one_invite(
+                db=db,
+                row=row,
+                to_email=str(recipient),
+                actor_id=current_user.id,
+                dry_run=payload.dry_run,
+            )
+        )
+
+    sent, skipped, failed = _summarize_results(results)
+    if payload.dry_run:
+        sent = 0
+        failed = 0
+    return InviteCodeEmailResponse(
+        dry_run=payload.dry_run,
+        total=len(results),
+        sent=sent,
+        skipped=skipped,
+        failed=failed,
+        results=results,
     )

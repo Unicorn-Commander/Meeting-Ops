@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.54.0] - 2026-07-08
+- Launch Console invite-code emailing: new superuser-only `/api/admin/invite-codes/send` and `/api/admin/invite-codes/send-cohort` routes render cohort-specific invite emails, support dry-run preview, skip already-emailed codes via new `beta_invite_codes.emailed_at`, and audit-log successful sends.
+- Launch Console UI: `frontend/src/pages/admin/CompsAdmin.tsx` now has per-row `Email…` and batch `Email codes…` actions with preview-first CSV/paste flow and explicit send confirmation.
+- Version bump to `3.54.0` across the app shell and release metadata.
+
 ## [3.53.0] - 2026-07-08
 
 ### Added
