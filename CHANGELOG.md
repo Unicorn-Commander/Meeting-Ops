@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [3.55.0] - 2026-07-08
+- **Ops-Center entitlement sync at SSO login.** Meeting-Ops now opportunistically checks the central Ops-Center entitlement service during Unicorn Commander SSO callback and upgrades the local user/org comp to Pro only when OC returns `meeting_ops_access` plus a paid tier. The sync is dormant unless `MEETING_OPS_ENTITLEMENT_URL` is set, uses `MEETING_OPS_ENTITLEMENT_HTTP_TIMEOUT` (default `3.0`) and `MEETING_OPS_ENTITLEMENT_COMP_DAYS` (default `32`), and fails open on any HTTP, parse, or entitlement error so login is never blocked.
+- **Internal routing note.** Point `MEETING_OPS_ENTITLEMENT_URL` directly at the internal Ops-Center `/api/v1/entitlements` endpoint over Tailscale. Do not route this through Cloudflare; leaving the env unset keeps the feature dormant and byte-identical to prior releases.
+- Version bump to `3.55.0` across the app shell and release metadata.
+
 ## [3.54.0] - 2026-07-08
 - Launch Console invite-code emailing: new superuser-only `/api/admin/invite-codes/send` and `/api/admin/invite-codes/send-cohort` routes render cohort-specific invite emails, support dry-run preview, skip already-emailed codes via new `beta_invite_codes.emailed_at`, and audit-log successful sends.
 - Launch Console UI: `frontend/src/pages/admin/CompsAdmin.tsx` now has per-row `Email…` and batch `Email codes…` actions with preview-first CSV/paste flow and explicit send confirmation.

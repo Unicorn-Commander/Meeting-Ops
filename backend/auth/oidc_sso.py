@@ -32,6 +32,7 @@ from jwt import PyJWKClient
 from sqlalchemy.orm import Session
 
 from auth.organization import is_global_admin, parse_group_list
+from auth.oc_entitlements import sync_oc_entitlement_grant
 from auth.service import AuthService
 from auth.utils import create_access_token
 from database.database import get_db
@@ -265,6 +266,7 @@ async def uc_sso_callback(
             return _login_error("token_exchange_failed")
         token_response = tr.json()
         id_token = token_response.get("id_token") or ""
+        access_token = token_response.get("access_token")
     except Exception:
         logger.exception("UC SSO token exchange failed")
         return _login_error("token_exchange_failed")
@@ -309,6 +311,7 @@ async def uc_sso_callback(
     # cookie. probeSso() in the SPA reads /api/auth/me, which the auth
     # dependency now satisfies from this cookie.
     org_id = user.organizations[0].organization_id if user.organizations else None
+    await sync_oc_entitlement_grant(db, user, access_token)
     session_token = create_access_token(
         {"sub": str(user.id), "username": user.username, "email": user.email, "org_id": org_id},
         expires_delta=timedelta(days=SESSION_DAYS),
