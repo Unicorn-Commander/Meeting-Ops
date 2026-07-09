@@ -119,13 +119,13 @@ class InviteCodeEmailResponse(BaseModel):
 
 class SendInviteCodesRequest(BaseModel):
     recipients: list[InviteCodeEmailRecipient] = Field(default_factory=list)
-    dry_run: bool = False
+    dry_run: bool = True
 
 
 class SendInviteCodesCohortRequest(BaseModel):
     cohort: str
     recipients: list[EmailStr] = Field(default_factory=list)
-    dry_run: bool = False
+    dry_run: bool = True
 
 
 _COHORT_RE = re.compile(r"cohort=(\S+)")
