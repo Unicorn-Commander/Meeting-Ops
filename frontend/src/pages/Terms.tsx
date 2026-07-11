@@ -57,7 +57,7 @@ export const Terms: React.FC = () => {
         States or other applicable jurisdiction. You represent that you are
         not on any U.S. or other government sanctions list, and that your use
         of the Service does not violate U.S. export controls or applicable
-        sanctions regimes.
+        sanctions regimes. If you are under 18, you may use the free on-device features of Meeting-Ops only with the consent and supervision of a parent or legal guardian who agrees to these Terms on your behalf. Meeting-Ops is not directed to children under 13, and we do not knowingly collect personal information from children under 13. In the European Economic Area, the United Kingdom, and Switzerland, you must be at least the age of digital consent in your country, which ranges from 13 to 16, and paid subscriptions still require you to be at least 18.
       </p>
 
       <h2>3. Account</h2>

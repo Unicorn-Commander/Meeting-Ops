@@ -264,14 +264,11 @@ export const Privacy: React.FC = () => {
 
       <h2>11. Children</h2>
       <p>
-        The Service is not directed to children under 18 years of age and
-        we do not knowingly collect personal information from anyone
-        under 18. If you believe a child has provided us personal
-        information, contact{' '}
+        Meeting-Ops is not directed to children under 13, and we do not knowingly collect personal information from children under 13. In the European Economic Area, the United Kingdom, and Switzerland, we do not knowingly collect personal information from children below the applicable age of digital consent, which ranges from 13 to 16 depending on the country. Creating an account and purchasing a paid subscription require you to be at least 18. If you believe a child has provided us personal information, contact{' '}
         <a href="mailto:privacy@unicorncommander.ai">
           privacy@unicorncommander.ai
         </a>{' '}
-        and we will take appropriate action.
+        and we will delete it.
       </p>
 
       <h2>12. Security</h2>
