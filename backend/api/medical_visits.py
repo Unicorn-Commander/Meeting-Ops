@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
 from jose import jwk, jwt
 from jose.exceptions import ExpiredSignatureError, JWKError, JWTClaimsError, JWTError
 from pydantic import BaseModel, Field
@@ -425,6 +425,80 @@ async def get_medical_visit(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     row = _session_lookup(db, caller.active_org, session_id)
+    return _shape_session(row)
+
+
+@router.post("/{session_id}/audio")
+async def upload_medical_visit_audio(
+    session_id: str,
+    file: UploadFile = File(...),
+    caller: MedicalVisitCaller = Depends(require_medical_visit_caller),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Attach a recorded visit's audio and run Meeting-Ops' completion pipeline
+    (Parakeet STT + pyannote diarization) against this transient session. The
+    diarized transcript lands on the session; Glitter Mane polls, scribes the
+    clinical note, then purges. Reuses the same UploadJob/upload_pipeline_queue
+    machinery as reprocess (action="attach" reuses the target session)."""
+    # Lazy imports so the medical-visit router has no import-time coupling to the
+    # (heavier) uploads module.
+    from api.uploads import _job_dir, upload_pipeline_queue
+    from database.models import UploadJob
+
+    row = _session_lookup(db, caller.active_org, session_id)
+    meta = _medical_visit_metadata(row)
+    if meta["medical_visit"].get("purged_at"):
+        raise HTTPException(status_code=409, detail="medical visit already purged")
+
+    org_slug = caller.active_org.organization.slug
+    job_id = uuid.uuid4()
+    job_dir = _job_dir(org_slug, str(job_id))
+    job_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".wav", ".mp3", ".m4a", ".mp4", ".webm", ".ogg", ".flac", ".aac"}:
+        ext = ".wav"
+    dest = job_dir / f"visit{ext}"
+    size = 0
+    with dest.open("wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            size += len(chunk)
+    if size == 0:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="empty audio upload")
+
+    row.audio_file = str(dest)
+    row.status = "processing"
+    meta["medical_visit"]["audio_received_at"] = datetime.now(timezone.utc).isoformat()
+    row.processing_metadata = meta
+    flag_modified(row, "processing_metadata")
+
+    job = UploadJob(
+        organization_id=caller.active_org.organization.id,
+        user_id=caller.user.id,
+        upload_id=job_id,
+        filename=dest.name,
+        content_type=file.content_type or "application/octet-stream",
+        action="attach",
+        total_size=size,
+        bytes_received=size,
+        chunks_received=1,
+        total_chunks=1,
+        stage="queued",
+        progress_pct=0,
+        session_id=row.id,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(row)
+    await upload_pipeline_queue.enqueue(str(job_id))
+    logger.info(
+        "medical_visits: audio attached session=%s job=%s bytes=%s org=%s",
+        row.session_id, job_id, size, org_slug,
+    )
     return _shape_session(row)
 
 
