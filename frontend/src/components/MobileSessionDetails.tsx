@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MoreVertical, X, Check, Edit2, RefreshCw, Mail, Share2,
-  FileText, Brain, Users, Sparkles, Calendar, Clock, Zap, Loader2,
+  FileText, FileAudio, Brain, Users, Sparkles, Calendar, Clock, Zap, Loader2,
   Trash2, Tag as TagIcon, Search, ChevronDown, Mic,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -495,6 +495,7 @@ export default function MobileSessionDetails(props: Props) {
             transcriptText={transcriptText}
             hasTranscript={hasTranscript}
             status={session?.status}
+            reprocessStatus={session?.metadata?.reprocess_status}
             activeSegmentIndex={activeSegmentIndex}
             segmentRefs={segmentRefs}
             seekTo={seekTo}
@@ -882,7 +883,7 @@ function SummaryTab({
 
 function TranscriptTab({
   segments, filteredSegments, speakers, selectedSpeaker, setSelectedSpeaker, searchTerm, setSearchTerm,
-  transcriptText, hasTranscript, status, activeSegmentIndex, segmentRefs, seekTo,
+  transcriptText, hasTranscript, status, reprocessStatus, activeSegmentIndex, segmentRefs, seekTo,
   speakerLinks, orgSpeakers, onSpeakerChanged, sessionIdStr, formatTime,
 }: {
   segments: TranscriptionSegment[];
@@ -895,6 +896,7 @@ function TranscriptTab({
   transcriptText: string;
   hasTranscript: boolean;
   status?: string;
+  reprocessStatus?: string | null;
   activeSegmentIndex: number;
   segmentRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
   seekTo: (t: number) => void;
@@ -904,6 +906,21 @@ function TranscriptTab({
   sessionIdStr: string;
   formatTime: (s: number) => string;
 }) {
+  // v3.55 honest empty-states — mobile parity with pages/SessionDetails.tsx.
+  // A browser always-on session that never finalized (no audio ever reached
+  // the server) stays at recording/active/failed with no segments, transcript,
+  // or speakers — this tab used to show a bare "No transcript yet.", i.e. a
+  // silent blank. reprocess_status is the server full-audio pipeline
+  // (queued/in_progress while it runs; null for privacy-mode / never-uploaded).
+  const isReprocessing =
+    reprocessStatus === 'queued' || reprocessStatus === 'in_progress';
+  const isProcessing = status === 'processing' || isReprocessing;
+  const isEmptyRecord =
+    speakers.length === 0 && segments.length === 0 && !transcriptText;
+  // Never finalized: not completed, not processing, and nothing captured.
+  const showUnfinalizedEmpty =
+    isEmptyRecord && !isProcessing && status !== 'completed';
+
   return (
     <div className="space-y-3">
       <div className="relative">
@@ -958,10 +975,22 @@ function TranscriptTab({
         <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-4 text-sm text-zinc-200 whitespace-pre-wrap leading-relaxed">
           {transcriptText}
         </div>
-      ) : filteredSegments.length === 0 && status === 'processing' ? (
+      ) : filteredSegments.length === 0 && isProcessing ? (
         <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-8 flex flex-col items-center gap-3">
           <Loader2 className="w-5 h-5 text-fuchsia-400 animate-spin" />
-          <p className="text-sm text-zinc-400">Transcription in progress…</p>
+          <p className="text-sm text-zinc-400 text-center">Processing… transcript and speakers will appear when it finishes.</p>
+        </div>
+      ) : filteredSegments.length === 0 && !searchTerm && showUnfinalizedEmpty ? (
+        <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 flex items-start gap-3">
+          <FileAudio className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-200">This recording wasn&apos;t finalized</p>
+            <p className="text-sm text-amber-200/80 mt-1">
+              No audio reached the server, so there&apos;s no transcript or speakers to show.
+              If you recorded on a phone, re-open the app on that device to check for a
+              recovery prompt.
+            </p>
+          </div>
         </div>
       ) : filteredSegments.length === 0 ? (
         <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400 text-center">
