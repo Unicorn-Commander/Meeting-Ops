@@ -1837,6 +1837,26 @@ export const SessionDetails: React.FC = () => {
 
   const hasTranscript = Boolean(transcriptText || segments.length > 0);
 
+  // v3.55 honest empty-states. A browser always-on session that never
+  // finalized (no audio ever reached the server) stays at status
+  // recording/active/failed with no segments, transcript, or speakers — the
+  // old UI hid the roster (speakers.length === 0) and showed a bare
+  // "Transcription pending", i.e. a silent blank. These read-only flags let
+  // the detail view say WHY it's empty instead of showing nothing.
+  // reprocess_status is the server full-audio pipeline: queued/in_progress
+  // while it runs, null for privacy-mode or never-uploaded sessions.
+  const isReprocessing =
+    session.metadata?.reprocess_status === 'queued' ||
+    session.metadata?.reprocess_status === 'in_progress';
+  const isProcessing = session.status === 'processing' || isReprocessing;
+  const isEmptyRecord =
+    speakers.length === 0 && segments.length === 0 && !transcriptText;
+  // Still working: live processing (or server reprocess) with nothing yet.
+  const showProcessingEmpty = isEmptyRecord && session.status === 'processing';
+  // Never finalized: not completed, not processing, and nothing captured.
+  const showUnfinalizedEmpty =
+    isEmptyRecord && !isProcessing && session.status !== 'completed';
+
   const audioSrc = session.audio_file
     ? getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)
     : null;
@@ -2690,6 +2710,43 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
+            {/* v3.55 honest empty-state. When a session has no speakers,
+                segments, or transcript and is not completed, the roster is
+                hidden and the summary/action panels are empty — previously a
+                silent blank. Say why: still processing, or never finalized
+                (no audio reached the server). Read-only display; does not
+                change status. The Transcript tab renders its own in-panel
+                version, so skip it here to avoid duplication, and the
+                Speakers tab hosts the tagger. */}
+            {activeTab !== 'transcript' && activeTab !== 'speakers' && showProcessingEmpty && (
+              <div className="bg-white border border-gray-200 rounded-lg p-4 flex items-start gap-3">
+                <div className="flex-shrink-0 mt-0.5">
+                  <div className="h-5 w-5 rounded-full border-2 border-purple-500 border-t-transparent animate-spin" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-gray-900">Processing…</h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Transcript and speakers will appear when it finishes.
+                  </p>
+                </div>
+              </div>
+            )}
+            {activeTab !== 'transcript' && activeTab !== 'speakers' && showUnfinalizedEmpty && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+                <FileAudio className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-amber-900">
+                    This recording wasn&apos;t finalized
+                  </h3>
+                  <p className="text-sm text-amber-800 mt-1">
+                    No audio reached the server, so there&apos;s no transcript or speakers
+                    to show. If you recorded on a phone, re-open the app on that device to
+                    check for a recovery prompt.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Brigade integration Phase 1: when the post-reprocess
                 writer has pushed this session's :Meeting + speakers +
                 action items + topics + decisions into Brigade's
@@ -3467,17 +3524,26 @@ export const SessionDetails: React.FC = () => {
                       {transcriptText}
                     </p>
                   </div>
-                ) : filteredSegments.length === 0 && session.status === 'processing' ? (
+                ) : filteredSegments.length === 0 && isProcessing ? (
                   <div className="text-center py-8">
                     <div className="flex items-center justify-center mb-4">
                       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
                     </div>
-                    <p className="text-gray-500">Transcription in progress...</p>
+                    <p className="text-gray-500">Processing… transcript and speakers will appear when it finishes.</p>
+                  </div>
+                ) : filteredSegments.length === 0 && !searchTerm && showUnfinalizedEmpty ? (
+                  <div className="text-center py-8 px-4 max-w-md mx-auto">
+                    <FileAudio className="w-6 h-6 text-amber-500 mx-auto mb-2" />
+                    <p className="text-sm font-semibold text-gray-900">This recording wasn&apos;t finalized</p>
+                    <p className="text-sm text-gray-600 mt-1">
+                      No audio reached the server, so there&apos;s no transcript to show. If you
+                      recorded on a phone, re-open the app on that device to check for a
+                      recovery prompt.
+                    </p>
                   </div>
                 ) : filteredSegments.length === 0 ? (
                   <p className="text-gray-500 text-center py-8">
-                    {searchTerm ? 'No matching segments found' :
-                     session.status === 'completed' ? 'No transcript available' : 'Transcription pending'}
+                    {searchTerm ? 'No matching segments found' : 'No transcript available'}
                   </p>
                 ) : (
                   filteredSegments.map((segment, index) => (

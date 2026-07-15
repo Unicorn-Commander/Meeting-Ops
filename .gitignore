@@ -161,3 +161,10 @@ deploy/bigboy/*.bak
 !deploy/bigboy/STATUS.md
 deploy/bigboy/docker-compose.bigboy.yml.bak.*
 .claude/
+
+# Deployment env files + timestamped backups (never commit secrets)
+deploy/*/.env.unicorncommander
+deploy/*/.env.bigboy
+deploy/*/*.bak-*
+deploy/*/*.bak.*
+deploy/*/_env-archive-*/

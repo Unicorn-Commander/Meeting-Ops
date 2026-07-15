@@ -39,6 +39,15 @@ interface MobileSession {
   speakers?: Array<{ name: string; photo_url?: string | null; raw_label?: string | null }>;
   project_app?: string | null;
   project_slug?: string | null;
+  /** Processing metadata. `reprocess_status` tracks the server full-audio
+   *  pipeline when an already-completed session is re-reprocessed: it flips
+   *  to queued/in_progress while the top-level `status` stays 'completed',
+   *  so the row needs this to show any indicator. null/undefined for
+   *  privacy-mode or never-uploaded sessions. */
+  metadata?: {
+    reprocess_status?: 'queued' | 'in_progress' | 'complete' | 'failed' | 'skipped' | null;
+    [key: string]: unknown;
+  };
 }
 
 interface Props {
@@ -109,6 +118,28 @@ function statusPill(status: string): { label: string; cls: string } {
     default:
       return { label: status.charAt(0).toUpperCase() + status.slice(1), cls: 'bg-gray-700/40 text-gray-300 border-gray-600/40' };
   }
+}
+
+/**
+ * Read-only "Reprocessing…" pill for list cards — mobile parity with the
+ * desktop pages/Sessions.tsx ReprocessingBadge. When an already-completed
+ * session is re-reprocessed, the server full-audio pipeline flips
+ * `metadata.reprocess_status` to queued/in_progress while the top-level
+ * `status` stays 'completed' — so the status pill alone shows no change.
+ * This surfaces that in-flight state. Display only; renders nothing otherwise.
+ */
+function ReprocessingBadge({ session }: { session: MobileSession }) {
+  const rs = session.metadata?.reprocess_status;
+  if (rs !== 'queued' && rs !== 'in_progress') return null;
+  return (
+    <span
+      title="Server is reprocessing this session from full audio"
+      className="shrink-0 inline-flex items-center gap-1 rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-300 text-[10px] px-2 py-0.5"
+    >
+      <span className="h-2 w-2 rounded-full border border-blue-300 border-t-transparent animate-spin" />
+      Reprocessing…
+    </span>
+  );
 }
 
 const MobileSessionsList: React.FC<Props> = ({
@@ -357,6 +388,7 @@ const MobileSessionsList: React.FC<Props> = ({
                       >
                         {pill.label}
                       </span>
+                      <ReprocessingBadge session={session} />
                     </div>
 
                     {session.project_app && session.project_slug && (

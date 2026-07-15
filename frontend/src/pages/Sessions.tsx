@@ -84,6 +84,15 @@ interface Session {
   session_type?: 'live' | 'upload';
   /** True for local-only (privacy-mode) sessions read from IndexedDB. */
   is_local?: boolean;
+  /** Processing metadata. `reprocess_status` tracks the server full-audio
+   *  pipeline when an already-completed session is re-reprocessed: it flips
+   *  to queued/in_progress while the top-level `status` stays 'completed',
+   *  so the list row needs this to show any indicator. null/undefined for
+   *  privacy-mode or never-uploaded sessions. */
+  metadata?: {
+    reprocess_status?: 'queued' | 'in_progress' | 'complete' | 'failed' | 'skipped' | null;
+    [key: string]: unknown;
+  };
 }
 
 interface OrgTagSummary {
@@ -116,6 +125,34 @@ function localSessionToSession(local: LocalSession): Session {
     session_type: 'live',
     is_local: true,
   };
+}
+
+/**
+ * Read-only "Reprocessing…" pill for list rows / cards. When an already
+ * completed session is re-reprocessed, the server full-audio pipeline flips
+ * `metadata.reprocess_status` to queued/in_progress while the top-level
+ * `status` stays 'completed' — so the status badge alone shows no change
+ * (task 56f62de3). This surfaces that in-flight state. Display only; it does
+ * not affect how status is computed. Renders nothing otherwise.
+ */
+function ReprocessingBadge({
+  session,
+  className = '',
+}: {
+  session: Session;
+  className?: string;
+}) {
+  const rs = session.metadata?.reprocess_status;
+  if (rs !== 'queued' && rs !== 'in_progress') return null;
+  return (
+    <span
+      title="Server is reprocessing this session from full audio"
+      className={`inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/20 text-blue-300 text-xs ${className}`}
+    >
+      <span className="h-2 w-2 rounded-full border border-blue-300 border-t-transparent animate-spin" />
+      Reprocessing…
+    </span>
+  );
 }
 
 interface RagMessage {
@@ -635,6 +672,7 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs border ${getStatusColor(session.status)}`}>
                         {getStatusLabel(session.status)}
                       </span>
+                      <ReprocessingBadge session={session} className="ml-1 px-2 py-0.5" />
                     </td>
                     <td className="px-4 py-3 align-middle text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
@@ -2732,6 +2770,7 @@ export const Sessions: React.FC = () => {
                       <span className={`px-2 py-1 rounded-full text-xs border ${getStatusColor(session.status)}`}>
                         {getStatusLabel(session.status)}
                       </span>
+                      <ReprocessingBadge session={session} className="px-2 py-1" />
                       {session.summary && (
                         <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
                           AI Summary
