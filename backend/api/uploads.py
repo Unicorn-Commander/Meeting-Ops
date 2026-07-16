@@ -1617,7 +1617,13 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
 
     # --- Path 2: under-segmentation fallback --------------------------------
     segments = transcript.get("segments") or []
-    if len(segments) <= max(1, len(diar_segments) // 10):
+    # If the stored segments are themselves a PREVIOUS diarizer's turns
+    # (used_pyannote_segmentation — text is empty, nothing to preserve),
+    # replace them with the fresh turns instead of relabeling in place.
+    # Relabel-in-place kept stale raw_labels and let non-overlapping turns
+    # keep their old speaker, so a re-detect with num_speakers=2 over an
+    # earlier 4-cluster result still surfaced 4 speakers.
+    if transcript.get("used_pyannote_segmentation") or len(segments) <= max(1, len(diar_segments) // 10):
         new_segments = []
         for d in diar_segments:
             seg_dict = {
@@ -1724,6 +1730,10 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
         label, embedding = _label_and_embedding_for(start, end)
         if label:
             seg["speaker"] = label
+            # The old raw_label belongs to the PREVIOUS diarization run —
+            # keeping it makes identify/re-link (and the rediarize unique
+            # count) resurrect speakers the new run no longer has.
+            seg.pop("raw_label", None)
             # Preserve per-segment embeddings so identify_speakers can
             # match enrolled voices. Without this the by-label embedding
             # lookup falls through with reason=no_embedding and no
@@ -1732,6 +1742,16 @@ def _assign_speakers_from_diarization(session: RecordingSession, diar_segments: 
                 seg["embedding"] = embedding
 
     transcript["segments"] = segments
+    # Rebuild the roster from the final labels — the pre-existing list can
+    # still name speakers from an older run.
+    speakers_ordered = []
+    _seen: set[str] = set()
+    for seg in segments:
+        spk = seg.get("speaker")
+        if spk and spk not in _seen:
+            _seen.add(spk)
+            speakers_ordered.append(spk)
+    transcript["speakers"] = speakers_ordered
     transcript["diarization_backend"] = (
         diar_sorted[0].get("backend") if diar_sorted else None
     )
