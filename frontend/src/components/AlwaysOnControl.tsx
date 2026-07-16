@@ -745,9 +745,13 @@ export default function AlwaysOnControl() {
 
           {orderedSlices.length === 0 && !alwaysOn.summary.currentDraft && (
             <div className="rounded-lg border border-dashed border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
-              {alwaysOn.autoConfig.enabled
-                ? 'Your full summary, transcript, and speakers are generated when you stop recording.'
-                : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
+              {alwaysOn.state === 'idle'
+                ? 'Start a recording to see live summary slices here.'
+                : alwaysOn.autoConfig.enabled
+                  ? isWordsBased && thresholdSpec
+                    ? `Listening — the first summary slice arrives after ~${thresholdSpec.value} words of transcript. Your full summary, transcript, and speakers are generated when you stop.`
+                    : 'Listening — summary slices will appear here as the meeting progresses. Your full summary, transcript, and speakers are generated when you stop.'
+                  : 'Auto-summarize is off. Use “Summarize now” to capture a slice.'}
             </div>
           )}
 

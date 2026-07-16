@@ -290,21 +290,46 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
           <Users className="w-4 h-4" />
           No diarized speakers detected for this session.
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs text-gray-600">Re-detect with</label>
-          <input
-            type="number"
-            min={1}
-            max={24}
-            value={redetectCount}
-            onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
-            className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-          <label className="text-xs text-gray-600">speakers</label>
+          <label className="flex items-center gap-1 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={redetectAuto}
+              onChange={(e) => setRedetectAuto(e.target.checked)}
+              className="h-3 w-3"
+            />
+            Auto
+          </label>
+          {redetectAuto ? (
+            <select
+              value={redetectThreshold}
+              onChange={(e) => setRedetectThreshold(Number(e.target.value))}
+              className="text-xs rounded border border-gray-300 px-1 py-1"
+              title="Speaker sensitivity"
+            >
+              <option value={0.78}>Strict</option>
+              <option value={0.72}>Balanced</option>
+              <option value={0.66}>Loose</option>
+            </select>
+          ) : (
+            <>
+              <input
+                type="number"
+                min={1}
+                max={24}
+                value={redetectCount}
+                onChange={(e) => setRedetectCount(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+                className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
+              />
+              <label className="text-xs text-gray-600">speakers</label>
+            </>
+          )}
           <button
             onClick={redetectSpeakers}
             disabled={redetecting}
             className="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
+            title={redetectAuto ? 'Re-run with auto-detect at this sensitivity' : 'Re-run diarization with this speaker count'}
           >
             {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
             Run
