@@ -77,7 +77,6 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
   const [redetectCount, setRedetectCount] = useState<number>(2);
   // null = auto-detect speaker count (no num_speakers hint); use threshold instead.
   const [redetectAuto, setRedetectAuto] = useState<boolean>(false);
-  const [redetectThreshold, setRedetectThreshold] = useState<number>(0.72);
   // Per-link "Enroll new speaker" inline form state. When set, the
   // matching link row swaps its dropdown for a name input + Save button
   // that calls the enroll-from-session endpoint to create a
@@ -180,9 +179,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
     setRedetecting(true);
     setError(null);
     try {
-      const body: any = redetectAuto
-        ? { clustering_threshold: redetectThreshold }
-        : { num_speakers: redetectCount };
+      // Auto = plain auto-detect ({}). The speaker-svc rejects per-request
+      // clustering_threshold overrides (VRAM churn — env-var-only now), so
+      // sending one 400s the whole re-detect.
+      const body: any = redetectAuto ? {} : { num_speakers: redetectCount };
       const res = await fetch(
         `${config.apiBaseUrl}/api/sessions/${sessionId}/rediarize`,
         {
@@ -301,18 +301,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
             />
             Auto
           </label>
-          {redetectAuto ? (
-            <select
-              value={redetectThreshold}
-              onChange={(e) => setRedetectThreshold(Number(e.target.value))}
-              className="text-xs rounded border border-gray-300 px-1 py-1"
-              title="Speaker sensitivity"
-            >
-              <option value={0.78}>Strict</option>
-              <option value={0.72}>Balanced</option>
-              <option value={0.66}>Loose</option>
-            </select>
-          ) : (
+          {!redetectAuto && (
             <>
               <input
                 type="number"
@@ -329,7 +318,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
             onClick={redetectSpeakers}
             disabled={redetecting}
             className="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
-            title={redetectAuto ? 'Re-run with auto-detect at this sensitivity' : 'Re-run diarization with this speaker count'}
+            title={redetectAuto ? 'Re-run diarization with auto speaker detection' : 'Re-run diarization with this speaker count'}
           >
             {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
             Run
@@ -363,18 +352,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
             />
             Auto
           </label>
-          {redetectAuto ? (
-            <select
-              value={redetectThreshold}
-              onChange={(e) => setRedetectThreshold(Number(e.target.value))}
-              className="text-xs rounded border border-gray-300 px-1 py-0.5"
-              title="Speaker sensitivity"
-            >
-              <option value={0.78}>Strict</option>
-              <option value={0.72}>Balanced</option>
-              <option value={0.66}>Loose</option>
-            </select>
-          ) : (
+          {!redetectAuto && (
             <input
               type="number"
               min={1}
@@ -389,7 +367,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
             onClick={redetectSpeakers}
             disabled={redetecting}
             className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
-            title={redetectAuto ? "Re-run with auto-detect at this sensitivity" : "Re-run diarization with this speaker count"}
+            title={redetectAuto ? "Re-run diarization with auto speaker detection" : "Re-run diarization with this speaker count"}
           >
             {redetecting ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
             Re-detect
