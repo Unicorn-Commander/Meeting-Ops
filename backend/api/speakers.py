@@ -1581,6 +1581,16 @@ async def _run_rediarize_task(
 
         registry = get_provider_registry(db)
         diar_provider = registry.get_diarization(session.organization_id)
+        if request.clustering_threshold is not None:
+            # speaker-svc rejects per-request clustering_threshold overrides
+            # (env-var-only since its task #79 v2 — pyannote VRAM churn).
+            # Drop it instead of letting the whole re-detect 400; stale
+            # cached frontends still send it in Auto mode.
+            logger.info(
+                "rediarize_task: dropping unsupported clustering_threshold override for session %s",
+                session_pk,
+            )
+            request.clustering_threshold = None
         diar_segments = await diar_provider.diarize(
             session.audio_file,
             num_speakers=request.num_speakers,
