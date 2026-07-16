@@ -296,6 +296,15 @@ export const SessionDetails: React.FC = () => {
   useEffect(() => {
     setRelatedBannerDismissed(false);
   }, [sessionId]);
+  // Open each session at the top of the page. The authed shell scrolls
+  // inside <main> (flex-1 overflow-y-auto), not the window, so scroll
+  // position carried over from the Sessions list would otherwise land
+  // the reader mid-page. Scoped here (not a global route listener) so
+  // going BACK to the Sessions list keeps your place in the list.
+  useEffect(() => {
+    document.querySelector('main')?.scrollTo({ top: 0 });
+    window.scrollTo(0, 0);
+  }, [sessionId]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -2833,7 +2842,7 @@ export const SessionDetails: React.FC = () => {
             {/* AI Summary Section — Summary tab */}
             {activeTab === 'summary' && (session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
                   AI Summary
                   {session.metadata?.total_progressive_summaries && (
@@ -3060,7 +3069,7 @@ export const SessionDetails: React.FC = () => {
                 <div className="flex items-start gap-3">
                   <Network className="w-5 h-5 text-indigo-600 mt-0.5 flex-shrink-0" />
                   <div>
-                    <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                       Knowledge graph
                     </h2>
                     <p className="text-sm text-gray-600 mt-1">
@@ -3095,7 +3104,7 @@ export const SessionDetails: React.FC = () => {
             {/* Listen-to-summary + podcast recap (Phase 4c-2 — VibeVoice TTS) */}
             {(session.final_summary || session.summary || session.transcript_simple || session.transcript) && (
               <div className="bg-white rounded-lg shadow-sm p-6 space-y-4">
-                <h2 className="text-lg font-semibold flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <Volume2 className="w-5 h-5 text-purple-600" />
                   Vocal summary
                   {ttsProvider && (
@@ -3246,7 +3255,7 @@ export const SessionDetails: React.FC = () => {
             {/* Progressive Summaries Timeline */}
             {session.progressive_summaries && session.progressive_summaries.length > 0 && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Zap className="w-5 h-5 text-yellow-500" />
                   Progressive Summary Timeline
                   <span className="text-xs px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full">
@@ -3305,7 +3314,7 @@ export const SessionDetails: React.FC = () => {
             {/* Generated Emails Section */}
             {(generatedEmails.length > 0 || (session?.generated_emails?.length ?? 0) > 0) && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Mail className="w-5 h-5 text-green-600" />
                   Generated Emails
                   <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full">
@@ -3374,7 +3383,7 @@ export const SessionDetails: React.FC = () => {
             <>
             <div className="bg-white rounded-lg shadow-sm p-6 flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: '480px' }}>
               <div className="flex items-center justify-between mb-4 flex-shrink-0">
-                <h2 className="text-lg font-semibold flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <FileText className="w-5 h-5 text-purple-600" />
                   Transcript
                   {speakers.length > 0 && (
@@ -3687,7 +3696,7 @@ export const SessionDetails: React.FC = () => {
           <div className="space-y-6">
             {/* Participants */}
             <div className="bg-white rounded-lg shadow-sm p-6">
-              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                 <Users className="w-5 h-5 text-purple-600" />
                 Participants
                 {participants.length > 0 && (
@@ -3899,7 +3908,7 @@ export const SessionDetails: React.FC = () => {
                 IA panel; on Summary it's a sidebar overview. */}
             {(activeTab === 'summary' || activeTab === 'action_items') && (
             <div className="bg-white rounded-lg shadow-sm p-6">
-              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                 <Zap className="w-5 h-5 text-amber-500" />
                 Action items
                 {actionItems.length > 0 && (
@@ -4023,7 +4032,7 @@ export const SessionDetails: React.FC = () => {
             {/* Processing Metadata */}
             {session.metadata && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Zap className="w-5 h-5 text-yellow-500" />
                   Processing Stats
                 </h3>
@@ -4090,7 +4099,7 @@ export const SessionDetails: React.FC = () => {
             {/* AI Insights */}
             {insightsLoading && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
                   AI Insights
                 </h3>
@@ -4102,7 +4111,7 @@ export const SessionDetails: React.FC = () => {
             )}
             {!insightsLoading && insights && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
                   AI Insights
                 </h3>
@@ -4233,7 +4242,7 @@ export const SessionDetails: React.FC = () => {
             {/* Processing Info */}
             {session.transcription && (
               <div className="bg-white rounded-lg shadow-sm p-6">
-                <h3 className="text-lg font-semibold mb-4">Processing Details</h3>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Processing Details</h3>
                 
                 <div className="space-y-3 text-sm">
                   <div className="flex items-center justify-between">

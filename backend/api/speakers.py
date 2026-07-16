@@ -1556,9 +1556,13 @@ async def _run_rediarize_task(
     db = SessionLocal()
     session = None
     try:
+        # Look up by pk only: the endpoint already resolved the session
+        # (including the cross-org collaborator/personal-org fallback) and
+        # authorized the caller. Re-filtering by the caller's ACTIVE org id
+        # here used to lose cross-org sessions — the task bailed "not
+        # found" and the UI polled a permanently-"queued" job.
         session = db.query(RecordingSession).filter(
             RecordingSession.id == session_pk,
-            RecordingSession.organization_id == org_id,
         ).first()
         if not session:
             logger.warning("rediarize_task: session %s not found", session_pk)
@@ -1674,7 +1678,10 @@ async def rediarize_session_endpoint(
     db.commit()
 
     asyncio.create_task(
-        _run_rediarize_task(session.id, active_org.organization.id, request)
+        # Pass the SESSION's org, not the caller's active org — they differ
+        # for cross-org sessions (per-meeting collaborators, personal-org
+        # recordings viewed from another workspace).
+        _run_rediarize_task(session.id, session.organization_id, request)
     )
 
     return RediarizeAcceptedResponse(status="queued", session_id=str(session.session_id or session.id))
