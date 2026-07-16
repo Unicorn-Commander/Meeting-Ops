@@ -1938,7 +1938,9 @@ export const Sessions: React.FC = () => {
   const formatDuration = (seconds?: number) => {
     if (!seconds) return '--:--';
     const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    // Durations arrive as fractional seconds — floor before formatting or
+    // the card renders "93:7.69320499999958".
+    const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
