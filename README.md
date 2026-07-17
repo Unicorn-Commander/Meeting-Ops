@@ -9,7 +9,8 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/release-v3.46.2-8b5cf6)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v3.57.3-8b5cf6)](./CHANGELOG.md)
+[![App Store](https://img.shields.io/badge/App_Store-iPhone_·_iPad_·_Mac-0d84ff?logo=apple&logoColor=white)](https://apps.apple.com/us/app/meeting-ops/id6780018348)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776ab?logo=python&logoColor=white)](https://python.org)
 [![React 19](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -251,16 +252,20 @@ GET   /health                                           # health + router status
 
 ## 🗺️ Status & roadmap
 
-**Live on prod (`unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.46.2:**
+**Live on prod (`meeting-ops.unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.57.x:**
 
 - ✅ Browser-first capture + server completion pass · privacy mode
+- ✅ **Chunked local-only full pass** — in privacy mode, stopping runs a full Parakeet re-transcription *in the browser* in ~5-minute silence-aligned windows with live progress; the page stays responsive, and every window sits inside the model's long-form envelope (long meetings get *more* accurate, not less)
 - ✅ Speaker intelligence: persistent identity, anti-poisoning floor, **fully dynamic name rendering** (rename once → fixed everywhere, instantly)
-- ✅ Person-centric Knowledge Graph (GA) · cross-meeting search + RAG
+- ✅ Person-centric Knowledge Graph (GA) · cross-meeting search + RAG · shared sessions open every tab (canonical cross-org session resolver)
 - ✅ Phase B server-live streaming (Sortformer/Parakeet realtime) · tier gating
 - ✅ Garage audio object storage (durable, self-hosted) · session-delete erasure
 - ✅ Enterprise/SaaS hardening: SSO forward-auth boundary, per-workspace billing, deep readiness probes, Arq retries, Sentry + metrics
+- ✅ **Session self-heal** — if SSO silently expires, the app detects the dead session on the next API call and reconnects (deferred while a recording is live so a capture is never killed)
+- ✅ **Native iOS app shipped** — [Meeting-Ops on the App Store](https://apps.apple.com/us/app/meeting-ops/id6780018348) (iPhone · iPad · Mac · Apple Vision)
+- ✅ Consumer launch surface: public landing at `meeting-ops.unicorncommander.ai`, Stripe checkout ($15/mo Pro launch pricing), branded no-JS/pre-JS static shell
 
-**In flight:** native iOS (Phase C-1, builds sim-green) → on-device summary → watchOS · `unicorncommander.ai` consumer launch + checkout · appliance extraction for on-prem.
+**In flight:** watchOS + Android (Phase C-2/C-3) · appliance extraction for on-prem · bulk multi-session reprocess.
 
 📚 Full design library: [`docs/README.md`](./docs/README.md) · Per-release history: [`CHANGELOG.md`](./CHANGELOG.md) · Contributor guide: [`CLAUDE.md`](./CLAUDE.md)
 

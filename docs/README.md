@@ -2,7 +2,7 @@
 
 Design and architecture documents for UC-Meeting-Ops.
 
-Last updated: 2026-07-07.
+Last updated: 2026-07-17.
 
 This directory contains design notes, architecture decisions, operational
 references, and roadmap documents. Status labels describe the document's
@@ -12,6 +12,11 @@ relationship to the product as of the last updated date.
 
 - [`compute-economics.md`](compute-economics.md) (294 lines). Status: live. Browser-first compute model, unit-economics moat at 10-100x vs Otter, Granola, Fathom, and Fireflies, proposed Free, Pro, and Enterprise tiers, and deployment topology from `magicunicorn.dev` to `unicorncommander.ai` to enterprise. Reflects shipped v0.7.4, v0.8.0, and v0.8.1 architecture.
 - [`browser-models.md`](browser-models.md) (163 lines). Status: live. Operational companion to `compute-economics.md`: what the browser actually downloads for live capture (Parakeet-TDT 0.6B INT8 STT, Qwen 3 0.6B / Gemma 4 E2B rolling summary), how each is cached (CacheStorage / IndexedDB), the device gating that drops weak devices to capture-only mode, and how to recover a failed first-run download. Reflects the shipped `inBrowserSTT.ts` / `inBrowserLLM.ts` / `deviceDetection.ts` stack.
+- [`local-only-mode.md`](local-only-mode.md) (66 lines). Status: live (v3.57.x). The privacy-mode pipeline: the two-stage stop flow (live-slice roll-up floor + the chunked full-quality Parakeet pass via `transcribeLong()` — ~5-min silence-aligned windows, yielding mel loop, live progress), the `shouldRunFullLocalPass` device gates and what they actually protect (decode memory, not compute), and the IndexedDB storage model.
+
+## Testing and QA
+
+- [`manual-test-plan.md`](manual-test-plan.md) (160 lines). Status: live (v3.57.x). Human walkthrough covering the ten customer-visible surfaces: landing page (rotation, watermark, lightbox), Google signup (the CSRF-window fix), server-mode recording E2E, the session record (audio playback, exports, quick actions, TTS label check), speakers (re-detect + naming), local-only mode incl. the chunked pass staying responsive, cross-org sharing incl. the Knowledge Graph tab, session self-heal, iPhone Safari + native app (incl. the lock-screen suspend check), and the Aaron-only $1 real-card billing gate. Includes a results table and a known-fine list.
 
 ## Inference gateway, metering, and pipeline
 

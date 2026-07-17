@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [3.57.3] - 2026-07-17
+
+### Changed
+- Docs/README refresh: README badge + status brought to v3.57.x reality (chunked local pass,
+  session self-heal, canonical landing, **native iOS app shipped on the App Store** — was
+  still listed as in-flight), new `docs/local-only-mode.md` (privacy-mode pipeline + device
+  gates), new `docs/manual-test-plan.md` (human QA walkthrough of the ten customer-visible
+  surfaces), docs index updated.
+- Removed the retired generic-mic `frontend/public/brand/meeting-ops.png` (unreferenced;
+  the officer-unicorn `meeting-ops-mark.png` is the only mark) so it can never ship again.
+
 ## [3.57.2] - 2026-07-17
 
 ### Changed
