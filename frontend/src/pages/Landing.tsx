@@ -396,7 +396,7 @@ const Nav: React.FC<{ onAnchor: (id: string) => void }> = ({ onAnchor }) => {
 // ---------------------------------------------------------------------------
 
 const TRUST_CHIPS: Array<{ icon: React.ReactNode; label: string }> = [
-  { icon: <ShieldCheck className="h-4 w-4 text-gold-400/80" />, label: 'On-device by default' },
+  { icon: <ShieldCheck className="h-4 w-4 text-gold-400/80" />, label: 'Live transcription on-device' },
   { icon: <Lock className="h-4 w-4 text-gold-400/80" />, label: 'Privacy Mode: 0 uploads' },
   { icon: <Server className="h-4 w-4 text-gold-400/80" />, label: 'We don’t train on your data' },
   { icon: <Building2 className="h-4 w-4 text-gold-400/80" />, label: 'Open source · self-host' },
@@ -814,23 +814,24 @@ export const Landing: React.FC = () => {
               <span className="font-mono text-xs uppercase tracking-[0.18em] text-gold-300">
                 {BETA
                   ? 'Private beta · request an invite'
-                  : 'Free · on-device · private by default'}
+                  : 'Meeting intelligence · free to start · open source'}
               </span>
             </div>
 
             <h1 className="mt-7 font-display text-5xl font-semibold leading-[1.05] tracking-[-0.02em] text-white sm:text-6xl lg:text-7xl">
-              The open standard for{' '}
+              Your meetings become{' '}
               <span className="bg-gradient-to-r from-gold-200 via-gold-400 to-gold-300 bg-clip-text text-transparent">
-                conversation intelligence.
+                memory, decisions, and work.
               </span>
             </h1>
 
             <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400 sm:text-xl">
-              An AI meeting recorder built privacy-first. Live transcription
-              and summaries run on your device — in Privacy Mode your audio
-              never leaves your machine. The optional studio-grade pass runs on
-              hardware we operate by default, not piped out to someone else’s
-              cloud.
+              The AI meeting recorder that transcribes live in your browser,
+              then delivers a studio-grade record — who said what, the
+              decisions, the action items — searchable across every meeting
+              you’ve ever had. Open source if you’d rather self-host, and
+              Privacy Mode keeps a conversation entirely on your device when
+              it can’t leave the room.
             </p>
 
             <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
@@ -843,7 +844,7 @@ export const Landing: React.FC = () => {
               </button>
             </div>
             <p className="mt-5 font-mono text-[11px] tracking-wide text-zinc-500">
-              Free tier, forever · No credit card · On-device by default
+              Free tier, forever · No credit card · Open source · Privacy Mode built in
             </p>
           </div>
 
@@ -863,7 +864,7 @@ export const Landing: React.FC = () => {
         <section className="border-y border-white/5 bg-white/[0.015] py-8">
           <div className="mx-auto max-w-5xl px-6">
             <p className="text-center font-mono text-[11px] uppercase tracking-[0.2em] text-zinc-500">
-              Built for teams that can’t send their audio to the cloud
+              Built for teams that care where their audio goes
             </p>
             <div className="mt-5 flex flex-wrap items-center justify-center gap-x-4 gap-y-3">
               {TRUST_CHIPS.map((c) => (
@@ -926,11 +927,11 @@ export const Landing: React.FC = () => {
                 eyebrow="The difference"
                 title={
                   <>
-                    Other recorders run on someone else’s cloud.{' '}
-                    <span className="text-gold-300">We run on yours.</span>
+                    Other recorders resell someone else’s AI.{' '}
+                    <span className="text-gold-300">We run our own — or yours.</span>
                   </>
                 }
-                sub="Most meeting AI streams your audio to a third-party service and pipes your words into OpenAI — every minute, all meeting long. Meeting-Ops does the live work right on the device you already own, and by default the optional pass runs on hardware we operate — not someone else’s AI."
+                sub="Most meeting AI streams your audio to a third-party service and pipes your words into OpenAI — every minute, all meeting long. Meeting-Ops does the live work right in your browser, runs the studio pass on hardware we operate, and the whole stack is open source if you’d rather run it yourself."
               />
             </Reveal>
 
