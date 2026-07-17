@@ -395,6 +395,30 @@ const Nav: React.FC<{ onAnchor: (id: string) => void }> = ({ onAnchor }) => {
 // Static content
 // ---------------------------------------------------------------------------
 
+// Hero headlines — one is drawn at random per page load (Aaron: rotate on
+// refresh, never live-cycle). The gold-gradient span is the `wink` segment.
+// SEO/social stay anchored: <title>, OG tags, JSON-LD, and the noscript block
+// all carry the canonical "memory, decisions, and work" line regardless of
+// which headline a given visit draws.
+const HERO_HEADLINES: Array<{ pre: string; wink: string; post: string }> = [
+  { pre: 'Your meetings become ', wink: 'memory, decisions, and work.', post: '' },
+  { pre: 'The only attendee with a ', wink: 'perfect memory.', post: '' },
+  { pre: 'Never ask ', wink: '“wait, who said that?”', post: ' again.' },
+  { pre: 'Meetings end. ', wink: 'Decisions shouldn’t.', post: '' },
+  { pre: 'Minutes, ', wink: 'without anyone taking them.', post: '' },
+  { pre: 'Talk is cheap. ', wink: 'Your transcript is free.', post: '' },
+  { pre: 'You run the meeting. ', wink: 'It runs the follow-up.', post: '' },
+  { pre: '“Didn’t we decide this already?” ', wink: 'It has receipts.', post: '' },
+  { pre: '“As discussed.” ', wink: 'Now with proof.', post: '' },
+  { pre: 'Remembers every word. ', wink: 'Judges no one.', post: '' },
+  { pre: 'Speak. ', wink: 'It does the paperwork.', post: '' },
+  { pre: 'Your meetings, ', wink: 'with a search bar.', post: '' },
+];
+
+// Module scope = evaluated exactly once per page load.
+const HERO_HEADLINE =
+  HERO_HEADLINES[Math.floor(Math.random() * HERO_HEADLINES.length)];
+
 const TRUST_CHIPS: Array<{ icon: React.ReactNode; label: string }> = [
   { icon: <ShieldCheck className="h-4 w-4 text-gold-400/80" />, label: 'Live transcription on-device' },
   { icon: <Lock className="h-4 w-4 text-gold-400/80" />, label: 'Privacy Mode: 0 uploads' },
@@ -868,10 +892,11 @@ export const Landing: React.FC = () => {
             </div>
 
             <h1 className="mt-7 font-display text-5xl font-semibold leading-[1.05] tracking-[-0.02em] text-white sm:text-6xl lg:text-7xl">
-              Your meetings become{' '}
+              {HERO_HEADLINE.pre}
               <span className="bg-gradient-to-r from-gold-200 via-gold-400 to-gold-300 bg-clip-text text-transparent">
-                memory, decisions, and work.
+                {HERO_HEADLINE.wink}
               </span>
+              {HERO_HEADLINE.post}
             </h1>
 
             <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400 sm:text-xl">
