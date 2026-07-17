@@ -454,6 +454,7 @@ type Feature = {
   icon: React.ReactNode;
   imageRight: boolean;
   gold?: boolean;
+  tier?: 'free' | 'pro';
 };
 
 // The headline capability — speaker diarization + voice fingerprinting,
@@ -474,6 +475,7 @@ const SPEAKER_FEATURES: Feature[] = [
     alt: 'Meeting-Ops transcript with every line labeled by the person who said it',
     icon: <Users className="h-5 w-5" />,
     imageRight: true,
+    tier: 'pro',
   },
   {
     eyebrow: 'It remembers voices',
@@ -484,12 +486,13 @@ const SPEAKER_FEATURES: Feature[] = [
       'Auto-labels everyone across all your meetings',
       'Confirm a name once — it remembers from then on',
     ],
-    src: 'knowledge-graph',
+    src: 'speakers',
     slug: '/speakers',
-    alt: 'Meeting-Ops recognizing recurring speakers by voice and linking each person across meetings',
+    alt: 'Meeting-Ops speaker library — voice profiles recognized across meetings with match confidence',
     icon: <Fingerprint className="h-5 w-5" />,
     imageRight: false,
     gold: true,
+    tier: 'pro',
   },
 ];
 
@@ -508,6 +511,24 @@ const FEATURES: Feature[] = [
     alt: 'Meeting-Ops live recording screen — a transcript forming next to a live AI summary',
     icon: <Mic className="h-5 w-5" />,
     imageRight: true,
+    tier: 'free',
+  },
+  {
+    eyebrow: 'The record',
+    title: 'The meeting, understood',
+    body: 'When you stop, Meeting-Ops delivers the finished record: an executive summary, the key decisions, action items with owners and due dates, and who spoke how much. The follow-up email writes itself — because it already did.',
+    bullets: [
+      'Executive summary, decisions, and topics',
+      'Action items with owners and due dates',
+      'Speaking-time and participation breakdown',
+    ],
+    src: 'session-summary',
+    slug: '/sessions',
+    alt: 'Meeting-Ops session summary — executive summary, key decisions, and action items with owners',
+    icon: <FileDown className="h-5 w-5" />,
+    imageRight: false,
+    gold: true,
+    tier: 'pro',
   },
   {
     eyebrow: 'Ask your meetings',
@@ -522,7 +543,24 @@ const FEATURES: Feature[] = [
     slug: '/chat',
     alt: 'Meeting-Ops AI chat answering a question across multiple past meetings',
     icon: <MessageSquare className="h-5 w-5" />,
+    imageRight: true,
+    tier: 'pro',
+  },
+  {
+    eyebrow: 'Institutional memory',
+    title: 'Your meetings become a knowledge graph',
+    body: 'Every meeting feeds a person-centric graph that connects people, topics, decisions, and follow-ups across time. Six months from now, "why did we choose this pricing?" is one question away — with the meetings to back it up.',
+    bullets: [
+      'People, topics, and decisions, connected across meetings',
+      'See how a decision evolved conversation by conversation',
+      'AI agents can query it over MCP, with permission',
+    ],
+    src: 'knowledge-graph',
+    slug: '/knowledge',
+    alt: 'Meeting-Ops knowledge graph connecting people, topics, and decisions across meetings',
+    icon: <Fingerprint className="h-5 w-5" />,
     imageRight: false,
+    tier: 'pro',
   },
 ];
 
@@ -682,6 +720,17 @@ const FeatureRow: React.FC<{
           <p className="font-mono text-xs uppercase tracking-[0.2em] text-gold-400">
             {f.eyebrow}
           </p>
+          {f.tier && (
+            <span
+              className={`ml-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider ${
+                f.tier === 'free'
+                  ? 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30'
+                  : 'bg-gold-500/15 text-gold-300 ring-1 ring-gold-500/30'
+              }`}
+            >
+              {f.tier}
+            </span>
+          )}
         </div>
         <h3 className="mt-4 font-display text-3xl font-semibold tracking-[-0.01em] text-white sm:text-4xl">
           {f.title}
@@ -840,7 +889,7 @@ export const Landing: React.FC = () => {
                 <ArrowRight className="h-4 w-4" />
               </button>
               <button type="button" onClick={() => scrollToId('how')} className={btnSecondary}>
-                See how it works
+                See a meeting become work
               </button>
             </div>
             <p className="mt-5 font-mono text-[11px] tracking-wide text-zinc-500">
@@ -857,6 +906,28 @@ export const Landing: React.FC = () => {
               priority
               onEnlarge={openLightbox}
             />
+          </div>
+
+          {/* Compact pricing teaser — the full cards live in #pricing */}
+          <div className="mx-auto mt-10 max-w-3xl text-center">
+            <button
+              type="button"
+              onClick={() => scrollToId('pricing')}
+              className="group inline-flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-full bg-white/[0.04] px-5 py-2.5 ring-1 ring-white/10 transition hover:ring-gold-500/40"
+            >
+              <span className="text-sm text-zinc-300">
+                Start locally for <span className="font-semibold text-emerald-300">free</span>
+              </span>
+              <span className="text-zinc-600">·</span>
+              <span className="text-sm text-zinc-300">
+                Add server intelligence for{' '}
+                <span className="font-mono text-zinc-500 line-through">$20</span>{' '}
+                <span className="font-semibold text-gold-300">$15/mo</span>
+              </span>
+              <span className="text-sm text-zinc-500 transition group-hover:text-gold-300">
+                See pricing →
+              </span>
+            </button>
           </div>
         </section>
 
@@ -1036,6 +1107,51 @@ export const Landing: React.FC = () => {
                 <FeatureRow key={f.src} f={f} onEnlarge={openLightbox} />
               ))}
             </div>
+
+            {/* The work keeps moving — Project-Ops handoff, human-approved */}
+            <Reveal className="mt-24">
+              <div className="rounded-3xl bg-gradient-to-b from-navy-900 to-navy-950 p-8 ring-1 ring-gold-500/20 sm:p-10">
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full bg-gold-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-gold-300 ring-1 ring-gold-500/30">
+                    Pro
+                  </span>
+                  <p className="font-mono text-xs uppercase tracking-[0.2em] text-gold-400">
+                    The work keeps moving
+                  </p>
+                </div>
+                <h3 className="mt-3 font-display text-2xl font-medium text-white sm:text-3xl">
+                  A commitment made out loud becomes a task on a board.
+                </h3>
+                <p className="mt-3 max-w-2xl leading-relaxed text-zinc-400">
+                  Meeting-Ops extracts action items and proposes them to
+                  Project-Ops — nothing is assigned until a human reviews and
+                  approves it. The loop closes when the decision becomes
+                  tracked work.
+                </p>
+                <div className="mt-7 flex flex-wrap items-center gap-2 font-mono text-xs sm:text-sm">
+                  {['“I’ll own the draft by Friday”', 'Extracted', 'Proposed', 'Human-approved', 'Project-Ops task'].map(
+                    (step, i, arr) => (
+                      <React.Fragment key={step}>
+                        <span
+                          className={`rounded-lg px-3 py-2 ring-1 ${
+                            i === 0
+                              ? 'bg-white/[0.04] italic text-zinc-300 ring-white/10'
+                              : i === arr.length - 1
+                                ? 'bg-gold-500/15 font-semibold text-gold-300 ring-gold-500/30'
+                                : 'bg-white/[0.04] text-zinc-300 ring-white/10'
+                          }`}
+                        >
+                          {step}
+                        </span>
+                        {i < arr.length - 1 && (
+                          <ArrowRight className="h-4 w-4 shrink-0 text-zinc-600" />
+                        )}
+                      </React.Fragment>
+                    ),
+                  )}
+                </div>
+              </div>
+            </Reveal>
 
             {/* Bento: settings shot + deploy-anywhere card */}
             <Reveal className="mt-24">
@@ -1327,7 +1443,10 @@ export const Landing: React.FC = () => {
               />
             </span>
             <h2 className="mx-auto mt-6 max-w-2xl font-display text-4xl font-semibold tracking-[-0.02em] text-white sm:text-5xl">
-              Your meetings deserve to stay yours.
+              It doesn’t just remember what was said.{' '}
+              <span className="bg-gradient-to-r from-gold-200 via-gold-400 to-gold-300 bg-clip-text text-transparent">
+                It makes sure something happens because of it.
+              </span>
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-lg leading-relaxed text-zinc-400">
               {BETA

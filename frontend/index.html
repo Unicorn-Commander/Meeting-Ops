@@ -24,28 +24,74 @@
     <!-- SEO + social link previews. The on-device / privacy-first moat is the
          share hook. og:image uses the canonical public host so previews
          render the product shot regardless of which host embeds the link. -->
+    <link rel="canonical" href="https://meeting-ops.unicorncommander.ai/" />
     <meta
       name="description"
-      content="An AI meeting recorder that processes on your device. Live transcription and summaries run in your browser — in Privacy Mode your audio never leaves your machine. The optional studio-grade pass runs on hardware we operate by default. Open source and self-hostable."
+      content="Meeting-Ops turns every conversation into decisions, action items, and searchable memory. Live transcription in your browser, studio-grade records with speaker recognition, cross-meeting AI chat, and a knowledge graph. Free to start; open source if you'd rather self-host."
     />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Meeting-Ops" />
-    <meta property="og:title" content="Meeting-Ops — the open standard for conversation intelligence" />
+    <meta property="og:title" content="Meeting-Ops — your meetings become memory, decisions, and work" />
     <meta
       property="og:description"
-      content="Live transcription and summaries that run on your device. Optional studio-grade server pass on hardware we operate by default. Open source, self-hostable, free to start."
+      content="Records and transcribes meetings, identifies who said what, captures decisions and action items, and turns approved commitments into tracked work. Free tier runs in your browser; open source for self-hosting."
     />
     <meta property="og:url" content="https://meeting-ops.unicorncommander.ai/" />
     <meta property="og:image" content="https://meeting-ops.unicorncommander.ai/screenshots/dashboard.png" />
     <meta property="og:image:width" content="1986" />
     <meta property="og:image:height" content="953" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Meeting-Ops — conversation intelligence, on your own terms" />
+    <meta name="twitter:title" content="Meeting-Ops — your meetings become memory, decisions, and work" />
     <meta
       name="twitter:description"
-      content="An AI meeting recorder that runs on your device. In Privacy Mode your audio never leaves your machine; the optional studio pass runs on hardware we operate by default. Open source."
+      content="AI meeting intelligence: live browser transcription, speaker recognition, decisions and action items, cross-meeting search. Free to start · open source · Privacy Mode built in."
     />
     <meta name="twitter:image" content="https://meeting-ops.unicorncommander.ai/screenshots/dashboard.png" />
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Meeting-Ops",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Web, iOS 17.0+, macOS (Apple Silicon)",
+      "url": "https://meeting-ops.unicorncommander.ai/",
+      "description": "AI meeting intelligence that turns conversations into decisions, action items, and searchable organizational memory. Live transcription runs in the browser; a studio-grade server pass adds speaker recognition, summaries, and cross-meeting search.",
+      "offers": [
+        { "@type": "Offer", "name": "Free", "price": "0", "priceCurrency": "USD" },
+        { "@type": "Offer", "name": "Pro", "price": "15", "priceCurrency": "USD", "description": "Monthly subscription — launch pricing ($20 list). Server pass: studio transcripts, speaker diarization and voice recognition, AI summaries with action items, cross-meeting chat and search, knowledge graph." }
+      ],
+      "publisher": { "@type": "Organization", "name": "Magic Unicorn Unconventional Technology & Stuff Inc.", "url": "https://magicunicorn.tech" },
+      "sameAs": ["https://apps.apple.com/us/app/meeting-ops/id6780018348"]
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Where does the processing actually happen?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Live transcription and rolling summaries run on your device, in your browser. The optional studio-grade pass (speaker recognition, polished summaries, cross-meeting search) runs on hardware we operate — not piped to a third-party AI cloud. Privacy Mode keeps everything on-device." }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Meeting-Ops free?",
+          "acceptedAnswer": { "@type": "Answer", "text": "The live, on-device experience is free forever — no credit card. Pro ($15/month launch pricing, $20 list) adds the server pass: studio transcripts, speaker identification, deeper summaries with action items, cross-meeting AI chat, and the knowledge graph." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I self-host Meeting-Ops?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Meeting-Ops is offered open source, and the full stack can run on infrastructure you control — cloud, on-prem, or an appliance. Most customers use the managed SaaS; self-hosting is there when data residency demands it." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does Meeting-Ops identify who said what?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. It separates speakers turn by turn and learns voices over time, so recurring people are recognized automatically across meetings — name someone once and they stay named." }
+        }
+      ]
+    }
+    </script>
     <script>
       // The app is a HashRouter SPA, so it only honors /#/route. Public pages
       // (pricing/signup/login) are meant to be typed and shared as real paths,
@@ -72,7 +118,26 @@
         <p style="color: #d4af37; font-size: 13px; margin-bottom: 14px;">Intelligence for your conversations<br/><span style="opacity: 0.72;">(whether or not they are)</span></p>
         <p style="color: #8895b3; font-size: 12px;">Loading… if this persists, the app failed to mount.</p>
         <noscript>
-          <p style="color: #f87171; margin-top: 20px;">JavaScript is required to run this application.</p>
+          <!-- Crawlable product summary for no-JS agents (search engines, link
+               unfurlers). The React landing replaces all of this on mount. -->
+          <section style="max-width: 640px; margin: 24px auto 0; text-align: left; color: #c8d6ed; font-size: 14px; line-height: 1.6;">
+            <h2>Your meetings become memory, decisions, and work.</h2>
+            <p>
+              Meeting-Ops records and transcribes meetings live in your browser,
+              identifies who said what, captures decisions and action items, and
+              turns approved commitments into tracked work in Project-Ops. Every
+              meeting feeds a searchable library and a knowledge graph you can
+              ask questions across.
+            </p>
+            <ul>
+              <li>Free forever tier: live on-device transcription and rolling summaries — no credit card.</li>
+              <li>Pro ($15/month launch pricing): studio-grade transcripts, speaker recognition that learns voices across meetings, summaries with action items, cross-meeting AI chat, knowledge graph.</li>
+              <li>Open source — self-host the full stack, or use the managed cloud.</li>
+              <li>Privacy Mode keeps a conversation entirely on your device.</li>
+              <li>Also on the App Store for iPhone, iPad, Mac, and Apple Vision.</li>
+            </ul>
+            <p style="color: #f87171;">JavaScript is required to run the application itself.</p>
+          </section>
         </noscript>
       </div>
     </div>
