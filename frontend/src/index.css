@@ -53,6 +53,16 @@
   }
 }
 
+/* Print (and PDF-save): scroll-reveal must never leave sections blank on
+ * paper — there is no scrolling to trigger the IntersectionObserver. */
+@media print {
+  .reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
 /* AI Summary markdown renderer: ReactMarkdown wraps content in <p>/<ul>/etc.
  * Tailwind's prose plugin is not installed, so spell out minimal spacing
  * for the rendered tree inside .session-md. */

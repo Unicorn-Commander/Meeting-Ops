@@ -134,13 +134,27 @@ const Aurora: React.FC<{ className?: string; gold?: boolean }> = ({
 );
 
 /** Scroll-reveal wrapper (reduced-motion safe via the `.reveal` CSS rule). */
+/**
+ * `?static=1` renders every Reveal pre-shown (no scroll animation).
+ * Screenshot/capture tooling uses it — headless full-page captures have
+ * no real scrolling, so IntersectionObserver may never fire and the page
+ * below the fold captures as a void. Real visitors never hit this.
+ */
+const STATIC_CAPTURE = (() => {
+  try {
+    return new URLSearchParams(window.location.search).has('static');
+  } catch {
+    return false;
+  }
+})();
+
 const Reveal: React.FC<{
   children: React.ReactNode;
   className?: string;
   delay?: number;
 }> = ({ children, className = '', delay = 0 }) => {
   const ref = useRef<HTMLDivElement>(null);
-  const [shown, setShown] = useState(false);
+  const [shown, setShown] = useState(STATIC_CAPTURE);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
