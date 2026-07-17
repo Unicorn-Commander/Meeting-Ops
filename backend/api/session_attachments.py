@@ -91,21 +91,20 @@ class AttachmentPatch(BaseModel):
 
 
 def _resolve_session(
-    db: Session, organization_id: int, session_id: str
+    db: Session,
+    organization_id: int,
+    session_id: str,
+    user: User,
+    min_level: str = "view",
 ) -> RecordingSession:
-    """UUID-or-integer-pk lookup scoped to the active org. Mirrors
-    api.sessions_participants:_resolve_session so callers can pass
-    whichever id they have on hand."""
-    rec = (
-        db.query(RecordingSession)
-        .filter(
-            RecordingSession.session_id == session_id,
-            RecordingSession.organization_id == organization_id,
-        )
-        .first()
-    )
-    if rec:
-        return rec
+    """UUID-or-integer-pk lookup in the active org, with the canonical
+    cross-org has_session_access fallback (see session_permissions)."""
+    from api.session_permissions import resolve_session_for_user
+
+    rec = resolve_session_for_user(db, organization_id, session_id, user, min_level)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return rec
     try:
         pk = int(session_id)
     except (TypeError, ValueError):
@@ -214,12 +213,12 @@ async def list_attachments(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user)
     rows = (
         db.query(SessionAttachment)
         .filter(
             SessionAttachment.session_id == session.id,
-            SessionAttachment.organization_id == active_org.organization.id,
+            SessionAttachment.organization_id == session.organization_id,
         )
         .order_by(SessionAttachment.created_at.desc())
         .all()
@@ -247,7 +246,7 @@ async def create_attachment(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user, min_level="edit")
     if not _can_edit(session, current_user, active_org):
         raise HTTPException(
             status_code=403, detail="Not permitted to attach files to this session"
@@ -299,9 +298,11 @@ async def create_attachment(
         if bytes_written == 0:
             raise HTTPException(status_code=400, detail="Empty upload rejected")
 
-        # Build storage key and persist.
+        # Build storage key and persist. Keyed by the SESSION's org so the
+        # object lands (and is later found) next to its session regardless
+        # of which org the uploader was active in.
         storage_key, _attach_uuid = attachment_storage.build_storage_key(
-            org_id=active_org.organization.id,
+            org_id=session.organization_id,
             session_pk=session.id,
             filename=filename,
         )
@@ -317,7 +318,9 @@ async def create_attachment(
         row = SessionAttachment(
             id=str(_uuid.uuid4()),
             session_id=session.id,
-            organization_id=active_org.organization.id,
+            # Stamp the SESSION's org, not the uploader's active org — a
+            # cross-org upload must stay queryable next to its session.
+            organization_id=session.organization_id,
             uploaded_by_user_id=current_user.id,
             filename=filename,
             mime_type=mime,
@@ -357,13 +360,13 @@ async def download_attachment(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user)
     row = (
         db.query(SessionAttachment)
         .filter(
             SessionAttachment.id == attachment_id,
             SessionAttachment.session_id == session.id,
-            SessionAttachment.organization_id == active_org.organization.id,
+            SessionAttachment.organization_id == session.organization_id,
         )
         .first()
     )
@@ -444,7 +447,7 @@ async def update_attachment_metadata(
 ):
     """Edit only the human metadata — type/label/notes. File content
     itself is immutable (a re-upload creates a new attachment row)."""
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user, min_level="edit")
     if not _can_edit(session, current_user, active_org):
         raise HTTPException(
             status_code=403, detail="Not permitted to edit attachments"
@@ -455,7 +458,7 @@ async def update_attachment_metadata(
         .filter(
             SessionAttachment.id == attachment_id,
             SessionAttachment.session_id == session.id,
-            SessionAttachment.organization_id == active_org.organization.id,
+            SessionAttachment.organization_id == session.organization_id,
         )
         .first()
     )
@@ -488,13 +491,13 @@ async def delete_attachment(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user, min_level="edit")
     row = (
         db.query(SessionAttachment)
         .filter(
             SessionAttachment.id == attachment_id,
             SessionAttachment.session_id == session.id,
-            SessionAttachment.organization_id == active_org.organization.id,
+            SessionAttachment.organization_id == session.organization_id,
         )
         .first()
     )
@@ -554,7 +557,7 @@ async def attachment_counts(
             sa_func.count(SessionAttachment.id).label("n"),
         )
         .filter(
-            SessionAttachment.organization_id == active_org.organization.id
+            SessionAttachment.organization_id == session.organization_id
         )
         .group_by(SessionAttachment.session_id)
         .all()

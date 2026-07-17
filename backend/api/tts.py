@@ -142,25 +142,14 @@ def _resolve_session(
     session_id: "int | str",
     db: Session,
     org_id: int,
+    user: "User",
+    min_level: str = "view",
 ) -> RecordingSession:
-    """Look up a session by numeric id OR UUID session_id. The frontend
-    sometimes passes the UUID (router param) and sometimes the integer
-    (older flows); either should resolve to the same row when the caller
-    has access."""
-    query = db.query(RecordingSession).filter(
-        RecordingSession.organization_id == org_id,
-    )
-    session = None
-    if isinstance(session_id, int):
-        session = query.filter(RecordingSession.id == session_id).first()
-    else:
-        # str — try UUID column first, then fall back to numeric cast.
-        session = query.filter(RecordingSession.session_id == session_id).first()
-        if not session:
-            try:
-                session = query.filter(RecordingSession.id == int(session_id)).first()
-            except (TypeError, ValueError):
-                session = None
+    """Numeric-or-UUID lookup in the active org, with the canonical cross-org
+    has_session_access fallback (see session_permissions)."""
+    from api.session_permissions import resolve_session_for_user
+
+    session = resolve_session_for_user(db, org_id, session_id, user, min_level)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -232,7 +221,7 @@ async def synthesize_summary(
     completion and then GETs `tts/summary.<ext>` for the bytes.
     """
     gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: vocal summary runs the server LLM + TTS
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user, min_level="edit")
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
     if not text:
@@ -316,7 +305,7 @@ async def get_summary_audio(
 ):
     if ext not in ("mp3", "wav"):
         raise HTTPException(status_code=400, detail="Unsupported format")
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     out_path = _output_path(active_org.organization.slug, session_id, "summary", ext)
     if not out_path.exists():
@@ -518,7 +507,7 @@ async def synthesize_podcast(
     the script as soon as the worker finishes).
     """
     gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: podcast TTS runs the server LLM + TTS
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user, min_level="edit")
     session_id = session.id  # normalize to numeric ID for downstream helpers
     text = _summary_text(session)
     if not text:
@@ -625,7 +614,7 @@ async def get_podcast_audio(
 ):
     if ext not in ("mp3", "wav"):
         raise HTTPException(status_code=400, detail="Unsupported format")
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     out_path = _output_path(active_org.organization.slug, session_id, "podcast", ext)
     if not out_path.exists():
@@ -650,7 +639,7 @@ async def get_podcast_script(
     affordance) without re-running TTS or LLM. Returns 404 when no podcast has
     been generated yet for this session in this org.
     """
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user)
     session_id = session.id  # normalize to numeric ID for downstream helpers
     script_path = _output_dir(active_org.organization.slug, session_id) / "podcast_script.json"
     if not script_path.exists():
@@ -712,7 +701,7 @@ async def start_summary_job(
     from services.tts_jobs import tts_queue, ws_manager
     import uuid as _uuid
 
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user, min_level="edit")
     session_id = session.id  # normalize to numeric ID for downstream helpers
     if not _summary_text(session):
         raise HTTPException(status_code=400, detail="Session has no summary or transcript to read aloud.")
@@ -753,7 +742,7 @@ async def start_podcast_job(
     from services.tts_jobs import tts_queue
     import uuid as _uuid
 
-    session = _resolve_session(session_id, db, active_org.organization.id)
+    session = _resolve_session(session_id, db, active_org.organization.id, current_user, min_level="edit")
     session_id = session.id  # normalize to numeric ID for downstream helpers
     if not _summary_text(session):
         raise HTTPException(status_code=400, detail="Session has no summary or transcript to convert.")

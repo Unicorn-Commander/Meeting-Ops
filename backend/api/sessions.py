@@ -49,10 +49,11 @@ async def get_session(
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
     """Get a specific recording session"""
-    session = db.query(RecordingSession).filter(
-        RecordingSession.organization_id == active_org.organization.id,
-        RecordingSession.id == session_id,
-    ).first()
+    from api.session_permissions import resolve_session_for_user
+
+    session = resolve_session_for_user(
+        db, active_org.organization.id, session_id, current_user
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     

@@ -506,7 +506,19 @@ def _get_session_for_org(
     db: Session,
     organization_id: int,
     session_id: str,
+    user: Optional[User] = None,
+    min_level: str = "view",
 ) -> Optional[DBRecordingSession]:
+    """Resolve a session in the caller's ACTIVE org; when that misses and a
+    `user` is given, fall back to cross-org resolution gated by
+    has_session_access (the same pattern as speakers._get_session_or_404 —
+    a personal-org session viewed while active in another org, or a shared
+    session, is still usable by someone who can see it).
+
+    `min_level` is the minimum access level the fallback accepts:
+    "view" for read endpoints, "edit" for mutations. The strict same-org
+    path is unaffected — org members keep exactly the access they had.
+    """
     session = _scoped_session_query(db, organization_id).filter(
         DBRecordingSession.session_id == session_id
     ).first()
@@ -516,11 +528,28 @@ def _get_session_for_org(
     try:
         int_id = int(session_id)
     except (TypeError, ValueError):
+        int_id = None
+
+    if int_id is not None:
+        session = _scoped_session_query(db, organization_id).filter(
+            DBRecordingSession.id == int_id
+        ).first()
+        if session:
+            return session
+
+    if user is None:
         return None
 
-    return _scoped_session_query(db, organization_id).filter(
-        DBRecordingSession.id == int_id
-    ).first()
+    from api.session_permissions import _get_session_by_str_id, has_session_access
+
+    candidate = _get_session_by_str_id(db, str(session_id))
+    if not candidate:
+        return None
+    level = has_session_access(candidate.id, user, db)
+    _RANK = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
+    if _RANK.get(level, 0) >= _RANK.get(min_level, 1):
+        return candidate
+    return None
     
 @router.post("/recording-sessions")
 async def create_session(
@@ -1003,7 +1032,7 @@ async def get_session(
     try:
         from services.speaker_service import hydrate_diarized_for_session
         # Find by session_id (UUID string), org-scoped first.
-        session = _get_session_for_org(db, active_org.organization.id, session_id)
+        session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
 
         # Fallback: if the session isn't in the active org, the caller
         # might still be a per-meeting collaborator (or hold access via
@@ -1332,7 +1361,7 @@ async def start_recording(
     gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     # Get session from database - handle both session_id and integer id
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1416,7 +1445,7 @@ async def stop_recording(
     gate_feature_for_caller(current_user, "canonical_reprocess", active_org)
 
     # Get session from database - handle both session_id and integer id
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2126,7 +2155,7 @@ async def rename_session(
     on the next reprocess. Setting meeting_date / meeting_time to "" or
     null clears the column back to NULL.
     """
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2177,7 +2206,7 @@ async def update_session_project_link(
 
     Pass project_app=None (or empty string) to clear the link.
     """
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2299,7 +2328,7 @@ async def delete_session(
 ):
     """Delete a recording session"""
 
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2356,7 +2385,7 @@ async def bulk_delete_sessions(
             continue
         seen.add(session_id)
 
-        session = _get_session_for_org(db, active_org.organization.id, session_id)
+        session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user, min_level="edit")
         if not session:
             failed.append({"id": session_id, "reason": "not_found"})
             continue
@@ -2534,7 +2563,7 @@ async def bulk_export_sessions(
         if not session_id or session_id in seen_ids:
             continue
         seen_ids.add(session_id)
-        session = _get_session_for_org(db, org_id, session_id)
+        session = _get_session_for_org(db, org_id, session_id, user=current_user)
         if session is None:
             # Silently skip ids outside the caller's active org.
             continue
@@ -2609,7 +2638,7 @@ async def download_audio(
     """Download audio file for a session"""
     from fastapi.responses import FileResponse, JSONResponse
     
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2663,7 +2692,7 @@ async def download_transcript(
     """Download transcript with speakers for a session"""
     from fastapi.responses import Response
     
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2733,7 +2762,7 @@ async def download_summary_pdf(
     """Download meeting summary as PDF"""
     from fastapi.responses import Response
 
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2769,7 +2798,7 @@ async def download_summary_md(
     """
     from fastapi.responses import Response
 
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2798,7 +2827,7 @@ async def download_summary_docx(
     """Download meeting summary as DOCX"""
     from fastapi.responses import Response
 
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2829,7 +2858,7 @@ async def download_transcript_simple(
     """Download simple transcript without speakers"""
     from fastapi.responses import Response
     
-    session = _get_session_for_org(db, active_org.organization.id, session_id)
+    session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")

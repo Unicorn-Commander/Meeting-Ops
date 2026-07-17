@@ -254,22 +254,13 @@ async def send_chat_message(
     # so Basic users (text tier) can ask questions about their meetings.
     gate_feature_for_caller(current_user, "ai_chat_over_corpus", active_org)
 
-    # Look up the recording session
-    session = db.query(DBRecordingSession).filter(
-        DBRecordingSession.organization_id == active_org.organization.id,
-        DBRecordingSession.session_id == session_id
-    ).first()
+    # Look up the recording session (canonical resolver: active-org first,
+    # then the cross-org has_session_access fallback).
+    from api.session_permissions import resolve_session_for_user
 
-    if not session:
-        # Try by integer id
-        try:
-            session = db.query(DBRecordingSession).filter(
-                DBRecordingSession.organization_id == active_org.organization.id,
-                DBRecordingSession.id == int(session_id)
-            ).first()
-        except (ValueError, TypeError):
-            pass
-
+    session = resolve_session_for_user(
+        db, active_org.organization.id, session_id, current_user
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Recording session not found")
 
