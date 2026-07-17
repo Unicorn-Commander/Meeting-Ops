@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [3.57.2] - 2026-07-17
+
+### Changed
+- Scroll-reveal safety: sections render pre-shown under `?static=1` (capture/audit tooling —
+  headless full-page shots have no scroll, so IntersectionObserver never fired and everything
+  below the fold captured as a void) and under `@media print` (PDF-save of the page was blank
+  below the fold). Real visitors keep the animation; reduced-motion was already handled.
+
 ## [3.57.1] - 2026-07-17
 
 ### Changed
