@@ -43,31 +43,15 @@ class TagListOut(BaseModel):
 
 
 def _resolve_session(
-    db: Session, organization_id: int, session_id: str
+    db: Session,
+    organization_id: int,
+    session_id: str,
+    user: User,
+    min_level: str = "view",
 ) -> RecordingSession:
-    rec = (
-        db.query(RecordingSession)
-        .filter(
-            RecordingSession.session_id == session_id,
-            RecordingSession.organization_id == organization_id,
-        )
-        .first()
-    )
-    if rec:
-        return rec
-    try:
-        pk = int(session_id)
-    except (TypeError, ValueError):
-        pk = None
-    if pk is not None:
-        rec = (
-            db.query(RecordingSession)
-            .filter(
-                RecordingSession.id == pk,
-                RecordingSession.organization_id == organization_id,
-            )
-            .first()
-        )
+    from api.session_permissions import resolve_session_for_user
+
+    rec = resolve_session_for_user(db, organization_id, session_id, user, min_level)
     if not rec:
         raise HTTPException(status_code=404, detail="Session not found")
     return rec
@@ -147,7 +131,7 @@ async def list_session_tags(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user)
     return TagListOut(tags=_normalize(session.tags))
 
 
@@ -159,7 +143,7 @@ async def add_session_tag(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user, min_level="edit")
     if not _can_edit(session, current_user, active_org):
         raise HTTPException(status_code=403, detail="Not permitted to edit tags")
 
@@ -183,7 +167,7 @@ async def delete_session_tag(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    session = _resolve_session(db, active_org.organization.id, session_id)
+    session = _resolve_session(db, active_org.organization.id, session_id, current_user, min_level="edit")
     if not _can_edit(session, current_user, active_org):
         raise HTTPException(status_code=403, detail="Not permitted to edit tags")
 

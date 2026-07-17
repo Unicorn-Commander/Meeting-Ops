@@ -271,6 +271,54 @@ def has_session_access(
     return "denied"
 
 
+_ACCESS_RANK = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
+
+
+def resolve_session_for_user(
+    db: Session,
+    active_org_id: int,
+    session_id: str | int,
+    user: User,
+    min_level: str = "view",
+) -> Optional[DBRecordingSession]:
+    """Canonical session resolver for session-scoped endpoints.
+
+    1. Strict lookup inside the caller's ACTIVE org (uuid session_id column,
+       then integer pk) — org members keep exactly the access they had.
+    2. Cross-org fallback: resolve by id alone, then gate on
+       has_session_access >= min_level ("view" for reads, "edit" for
+       mutations). Covers personal-org sessions viewed while active in
+       another org, and shared/collaborator sessions.
+
+    Returns None when nothing accessible matches — callers raise their own
+    404 so response shapes stay unchanged. This exists because the strict
+    filter was copy-pasted into half a dozen files (audio download, tags,
+    attachments, TTS, insights, chat, reprocess, rediarize…) and each copy
+    404'd cross-org sessions the main session GET happily serves.
+    """
+    q = db.query(DBRecordingSession).filter(
+        DBRecordingSession.organization_id == active_org_id
+    )
+    session = q.filter(DBRecordingSession.session_id == str(session_id)).first()
+    if not session:
+        try:
+            pk = int(session_id)
+        except (TypeError, ValueError):
+            pk = None
+        if pk is not None:
+            session = q.filter(DBRecordingSession.id == pk).first()
+    if session:
+        return session
+
+    candidate = _get_session_by_str_id(db, str(session_id))
+    if not candidate:
+        return None
+    level = has_session_access(candidate.id, user, db)
+    if _ACCESS_RANK.get(level, 0) >= _ACCESS_RANK.get(min_level, 1):
+        return candidate
+    return None
+
+
 def _is_collaborator_active(row: SessionCollaborator) -> bool:
     if row.revoked_at is not None:
         return False

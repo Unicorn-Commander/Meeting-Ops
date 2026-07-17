@@ -96,23 +96,13 @@ async def get_meeting_insights(
     Requires authentication.
     """
     try:
-        # Find by session_id (UUID) first
-        session = db.query(DBRecordingSession).filter(
-            DBRecordingSession.organization_id == active_org.organization.id,
-            DBRecordingSession.session_id == session_id
-        ).first()
+        # Canonical resolver: active-org first, then the cross-org
+        # has_session_access fallback.
+        from api.session_permissions import resolve_session_for_user
 
-        # Fallback: try integer id
-        if not session:
-            try:
-                int_id = int(session_id)
-                session = db.query(DBRecordingSession).filter(
-                    DBRecordingSession.organization_id == active_org.organization.id,
-                    DBRecordingSession.id == int_id
-                ).first()
-            except (ValueError, TypeError):
-                pass
-
+        session = resolve_session_for_user(
+            db, active_org.organization.id, session_id, current_user
+        )
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
