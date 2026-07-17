@@ -1125,37 +1125,42 @@ export const Landing: React.FC = () => {
                       Record anywhere
                     </p>
                     <h3 className="mt-2 font-display text-2xl font-medium text-white sm:text-3xl">
-                      In your browser, installed as an app — and soon, on iPhone
+                      In your browser, installed as an app — and on iPhone
                     </h3>
                     <p className="mt-3 leading-relaxed text-zinc-400">
                       Capture from any modern browser or install Meeting-Ops to
-                      your home screen today. A native iOS app with on-device
-                      transcription is coming soon to the App Store.
+                      your home screen today. The native app with on-device
+                      transcription is free on the App Store — iPhone, iPad,
+                      Mac, and Apple Vision.
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-center gap-3">
                     {[
-                      { icon: <Globe className="h-4 w-4 text-gold-400" />, label: 'Web', soon: false },
-                      { icon: <Smartphone className="h-4 w-4 text-gold-400" />, label: 'Installable app', soon: false },
-                      { icon: <Apple className="h-4 w-4 text-gold-400" />, label: 'iOS', soon: true },
-                    ].map((p) => (
-                      <span
-                        key={p.label}
-                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium ring-1 ${
-                          p.soon
-                            ? 'border border-dashed border-white/15 bg-transparent text-zinc-400 ring-transparent'
-                            : 'bg-white/[0.04] text-zinc-200 ring-white/10'
-                        }`}
-                      >
-                        {p.icon}
-                        {p.label}
-                        {p.soon && (
-                          <span className="rounded-full bg-gold-500/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-gold-300">
-                            Soon
-                          </span>
-                        )}
-                      </span>
-                    ))}
+                      { icon: <Globe className="h-4 w-4 text-gold-400" />, label: 'Web', href: undefined as string | undefined },
+                      { icon: <Smartphone className="h-4 w-4 text-gold-400" />, label: 'Installable app', href: undefined as string | undefined },
+                      { icon: <Apple className="h-4 w-4 text-gold-400" />, label: 'iOS · App Store', href: 'https://apps.apple.com/us/app/meeting-ops/id6780018348' },
+                    ].map((p) =>
+                      p.href ? (
+                        <a
+                          key={p.label}
+                          href={p.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 rounded-full bg-gold-500/15 px-4 py-2 text-sm font-medium text-gold-300 ring-1 ring-gold-500/30 transition hover:bg-gold-500/25"
+                        >
+                          {p.icon}
+                          {p.label}
+                        </a>
+                      ) : (
+                        <span
+                          key={p.label}
+                          className="inline-flex items-center gap-2 rounded-full bg-white/[0.04] px-4 py-2 text-sm font-medium text-zinc-200 ring-1 ring-white/10"
+                        >
+                          {p.icon}
+                          {p.label}
+                        </span>
+                      )
+                    )}
                   </div>
                 </div>
               </div>
