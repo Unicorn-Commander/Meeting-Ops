@@ -735,7 +735,31 @@ async def reprocess_session(
                 .first()
             )
     if not rec:
+        # Fallback: the session may live in a DIFFERENT org while the caller
+        # still has access (e.g. a personal-org recording viewed while active
+        # in another org, or a per-meeting collaborator). Same resolution the
+        # rediarize/speakers endpoints use — resolve cross-org, then delegate
+        # the permission decision to has_session_access.
+        from api.session_permissions import _get_session_by_str_id, has_session_access
+
+        candidate = _get_session_by_str_id(db, str(session_id))
+        if candidate and has_session_access(candidate.id, current_user, db) != "denied":
+            rec = candidate
+    if not rec:
         raise HTTPException(status_code=404, detail="Session not found in active organization.")
+    # Everything session-scoped below (chunk dirs, the synthetic UploadJob, and
+    # the worker's own org-strict session lookup) must use the SESSION'S org —
+    # which for cross-org sessions is not the caller's active org. Billing/gating
+    # above stays on the caller's active org by design.
+    from auth.models import Organization
+
+    sess_org = (
+        active_org.organization
+        if rec.organization_id == active_org.organization.id
+        else db.query(Organization).filter(Organization.id == rec.organization_id).first()
+    )
+    if not sess_org:
+        raise HTTPException(status_code=404, detail="Session's organization not found.")
     # Resolve the source audio. Always-on / browser recordings keep their audio
     # as ~30s chunks on disk; the reassembled `audio_file` wav may be missing
     # (evicted to Garage) OR stale (the pre-v3.47 truncated 30s copy). When chunks
@@ -744,7 +768,7 @@ async def reprocess_session(
     # not a stale/truncated wav. Uploaded files (no chunks) use their stored wav.
     from api.recording import _audio_chunks_dir, _list_chunk_files, _reassemble_full_audio
     _canonical_sid = rec.session_id or str(rec.id)
-    _chunks_dir = _audio_chunks_dir(active_org.organization.slug, _canonical_sid)
+    _chunks_dir = _audio_chunks_dir(sess_org.slug, _canonical_sid)
     if _list_chunk_files(_chunks_dir):
         _target_wav = _chunks_dir.parent / "session.wav"
         try:
@@ -774,7 +798,7 @@ async def reprocess_session(
     # Park the existing audio under a fresh upload_id directory so the
     # pipeline's source-of-truth path matches the chunked flow's layout.
     job_id = uuid.uuid4()
-    job_dir = _job_dir(active_org.organization.slug, str(job_id))
+    job_dir = _job_dir(sess_org.slug, str(job_id))
     job_dir.mkdir(parents=True, exist_ok=True)
     src_audio = Path(rec.audio_file)
     parked = job_dir / src_audio.name
@@ -785,7 +809,7 @@ async def reprocess_session(
             shutil.copy2(src_audio, parked)
 
     job = UploadJob(
-        organization_id=active_org.organization.id,
+        organization_id=rec.organization_id,
         user_id=current_user.id,
         upload_id=job_id,
         filename=src_audio.name,
@@ -808,7 +832,8 @@ async def reprocess_session(
     await upload_pipeline_queue.enqueue(str(job_id))
     logger.info(
         f"Reprocess enqueued for session {session_id} (job {job_id}) by user {current_user.id} "
-        f"(org {active_org.organization.slug}) with options={options_payload}"
+        f"(session org {sess_org.slug}, active org {active_org.organization.slug}) "
+        f"with options={options_payload}"
     )
     return UploadStatusResponse(**_status_payload(job))
 
