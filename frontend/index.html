@@ -109,38 +109,75 @@
       })();
     </script>
   </head>
-  <body class="bg-gray-900">
+  <body class="bg-gray-900" style="background:#0a1226;">
     <div id="root">
-      <!-- Fallback content - if you see this, React failed to mount -->
-      <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #f0f3fa; font-family: 'Space Grotesk', Arial, sans-serif;">
-        <img src="/brand/meeting-ops-mark.png?v=3" alt="Meeting-Ops" width="88" height="88" style="display:block; margin:0 auto 16px;" />
-        <h1 style="font-size: 22px; margin-bottom: 6px; letter-spacing: 0.3px;">Meeting-Ops</h1>
-        <p style="color: #d4af37; font-size: 13px; margin-bottom: 14px;">Intelligence for your conversations<br/><span style="opacity: 0.72;">(whether or not they are)</span></p>
-        <p style="color: #8895b3; font-size: 12px;">Loading… if this persists, the app failed to mount.</p>
-        <noscript>
-          <!-- Crawlable product summary for no-JS agents (search engines, link
-               unfurlers). The React landing replaces all of this on mount. -->
-          <section style="max-width: 640px; margin: 24px auto 0; text-align: left; color: #c8d6ed; font-size: 14px; line-height: 1.6;">
-            <h2>Your meetings become memory, decisions, and work.</h2>
-            <p>
-              Meeting-Ops records and transcribes meetings live in your browser,
-              identifies who said what, captures decisions and action items, and
-              turns approved commitments into tracked work in Project-Ops. Every
-              meeting feeds a searchable library and a knowledge graph you can
-              ask questions across.
+      <!-- Branded static shell. Three jobs: (1) what a no-JS / pre-JS agent
+           (crawler, link unfurler, auditor) reads instead of a bare
+           "Loading…" line; (2) the splash users see for the moment before
+           React mounts (React replaces all of it); (3) the graceful
+           fallback if the bundle genuinely fails. Inline styles only — the
+           Tailwind CSS bundle hasn't loaded yet when this renders. -->
+      <div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:32px 20px; text-align:center; color:#f0f3fa; font-family:'Space Grotesk','Inter',Arial,sans-serif; background:radial-gradient(ellipse 70% 50% at 50% 0%, rgba(212,175,55,0.10), transparent 70%);">
+        <div style="max-width:680px;">
+          <img src="/brand/meeting-ops-mark.png?v=3" alt="Meeting-Ops — the officer unicorn" width="96" height="96" style="display:block; margin:0 auto 18px;" />
+          <h1 style="font-size:26px; margin:0 0 8px; letter-spacing:0.3px;">Meeting-Ops</h1>
+          <p style="color:#d4af37; font-size:15px; margin:0 0 14px;">Your meetings become memory, decisions, and work.</p>
+          <div id="mo-static-pitch">
+            <p style="color:#aab8d4; font-size:13.5px; line-height:1.6; margin:0 auto 20px; max-width:560px;">
+              Live transcription in your browser, studio-grade records with
+              speaker recognition, and decisions that become tracked work.
+              Free to start — open source if you&rsquo;d rather self-host.
             </p>
-            <ul>
-              <li>Free forever tier: live on-device transcription and rolling summaries — no credit card.</li>
-              <li>Pro ($15/month launch pricing): studio-grade transcripts, speaker recognition that learns voices across meetings, summaries with action items, cross-meeting AI chat, knowledge graph.</li>
-              <li>Open source — self-host the full stack, or use the managed cloud.</li>
-              <li>Privacy Mode keeps a conversation entirely on your device.</li>
-              <li>Also on the App Store for iPhone, iPad, Mac, and Apple Vision.</li>
-            </ul>
-            <p style="color: #f87171;">JavaScript is required to run the application itself.</p>
-          </section>
-        </noscript>
+            <p style="margin:0 0 22px;">
+              <a href="/#/signup" style="display:inline-block; background:#d4af37; color:#101a30; font-weight:600; font-size:13.5px; padding:10px 18px; border-radius:9px; text-decoration:none; margin:4px 6px;">Start free</a>
+              <a href="https://apps.apple.com/us/app/meeting-ops/id6780018348" style="display:inline-block; color:#e8ecf5; font-size:13.5px; padding:10px 18px; border-radius:9px; text-decoration:none; border:1px solid rgba(255,255,255,0.22); margin:4px 6px;">iPhone &amp; Mac app</a>
+            </p>
+          </div>
+          <p id="mo-boot-hint" style="color:#8895b3; font-size:12px; margin:0;">Loading the app&hellip;</p>
+          <noscript>
+            <!-- Crawlable product summary for no-JS agents (search engines,
+                 link unfurlers). The React landing replaces all of this on
+                 mount. -->
+            <section style="max-width:640px; margin:24px auto 0; text-align:left; color:#c8d6ed; font-size:14px; line-height:1.6;">
+              <h2>Your meetings become memory, decisions, and work.</h2>
+              <p>
+                Meeting-Ops records and transcribes meetings live in your browser,
+                identifies who said what, captures decisions and action items, and
+                turns approved commitments into tracked work in Project-Ops. Every
+                meeting feeds a searchable library and a knowledge graph you can
+                ask questions across.
+              </p>
+              <ul>
+                <li>Free forever tier: live on-device transcription and rolling summaries — no credit card.</li>
+                <li>Pro ($15/month launch pricing): studio-grade transcripts, speaker recognition that learns voices across meetings, summaries with action items, cross-meeting AI chat, knowledge graph.</li>
+                <li>Open source — self-host the full stack, or use the managed cloud.</li>
+                <li>Privacy Mode keeps a conversation entirely on your device.</li>
+                <li>Also on the App Store for iPhone, iPad, Mac, and Apple Vision.</li>
+              </ul>
+              <p style="color:#f87171;">JavaScript is required to run the application itself.</p>
+            </section>
+          </noscript>
+        </div>
       </div>
     </div>
+    <script>
+      // Returning signed-in users deep-linking into the app shouldn't get a
+      // marketing flash: hide the pitch/CTA block when there's evidence of a
+      // session (org sticky or app JWT). The logo + tagline splash stays.
+      // If the bundle never mounts, upgrade the hint after 8s.
+      (function () {
+        try {
+          if (localStorage.getItem('meetingops.activeOrg') || localStorage.getItem('access_token')) {
+            var pitch = document.getElementById('mo-static-pitch');
+            if (pitch) pitch.style.display = 'none';
+          }
+        } catch (e) { /* storage blocked — keep the pitch */ }
+        setTimeout(function () {
+          var hint = document.getElementById('mo-boot-hint');
+          if (hint) hint.textContent = 'Still loading — a slow connection or an extension may be blocking the app. Reloading usually fixes it.';
+        }, 8000);
+      })();
+    </script>
     <script>
       // Keep a quiet global error hook for real failures; the two boot
       // console.logs (script-executing / user-agent) were dev noise, removed.
