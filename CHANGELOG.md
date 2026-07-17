@@ -1,5 +1,37 @@
 ## [Unreleased]
 
+## [3.56.0] - 2026-07-16
+
+### Fixed
+- **Re-detect can now reduce the speaker count.** `_assign_speakers_from_diarization` took the
+  relabel-in-place path over a prior pyannote-segmented result (segments with no text to
+  preserve), which kept stale `raw_label`s, let no-overlap segments keep their old speaker, and
+  never rebuilt the `speakers` roster — so re-detecting with fewer speakers (e.g. 4 → 2) was a
+  no-op. Stored pyannote turns are now replaced outright with the fresh diarization, superseded
+  raw labels are dropped on relabel, and the roster is rebuilt from final segment labels.
+- **Rediarize background task no longer loses cross-org sessions.** The endpoint resolved a
+  session via the cross-org access fallback but passed the caller's active org into the
+  background task, whose strict org filter then found nothing ("session not found", status stuck
+  at `queued` forever). The task now looks up by pk (endpoint already did authz) and receives the
+  session's own org id.
+- **Auto re-detect works again.** The frontend sent `clustering_threshold` with Auto mode, which
+  the speaker-svc now rejects with HTTP 400 (env-var-only since its VRAM-churn fix) — failing the
+  whole re-detect. Auto sends a plain `{}`; the Strict/Balanced/Loose selector is gone; the
+  backend also defensively strips a stray threshold from stale cached frontends.
+- **Duration formatters floor fractional seconds** — no more `93:7.69320499999958` on the
+  Sessions list and recording surfaces (6 formatters).
+
+### Changed
+- **Session page polish.** All 12 card headers (AI Summary, Transcript, Participants, Action
+  items, …) got explicit `text-gray-900` — they rendered white-on-white inside the light cards.
+  Opening a session now scrolls the app shell to the top of the page (scoped per session, so
+  going back keeps your place in the Sessions list).
+- **Speaker panel parity + honest live-summary copy.** The empty speaker state gained the same
+  Auto checkbox / speaker-count control as the populated header, and the live-summary panel
+  explains what actually happens (idle vs listening states, slice threshold, and that the full
+  summary/transcript/speakers come when you stop) instead of the confusing recovery-banner text.
+- Version bump to `3.56.0` across the app shell and release metadata.
+
 ## [3.55.0] - 2026-07-08
 - **Ops-Center entitlement sync at SSO login.** Meeting-Ops now opportunistically checks the central Ops-Center entitlement service during Unicorn Commander SSO callback and upgrades the local user/org comp to Pro only when OC returns `meeting_ops_access` plus a paid tier. The sync is dormant unless `MEETING_OPS_ENTITLEMENT_URL` is set, uses `MEETING_OPS_ENTITLEMENT_HTTP_TIMEOUT` (default `3.0`) and `MEETING_OPS_ENTITLEMENT_COMP_DAYS` (default `32`), and fails open on any HTTP, parse, or entitlement error so login is never blocked.
 - **Internal routing note.** Point `MEETING_OPS_ENTITLEMENT_URL` directly at the internal Ops-Center `/api/v1/entitlements` endpoint over Tailscale. Do not route this through Cloudflare; leaving the env unset keeps the feature dormant and byte-identical to prior releases.
