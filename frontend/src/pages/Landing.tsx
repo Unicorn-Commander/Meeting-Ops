@@ -881,6 +881,17 @@ export const Landing: React.FC = () => {
         {/* ───────────────────────── Hero ───────────────────────── */}
         <section className="relative isolate px-6 pb-24 pt-32 sm:pt-36 md:pb-28 md:pt-40 lg:px-8">
           <Aurora className="left-1/2 top-0 h-[520px] w-[820px] max-w-[95vw] -translate-x-1/2" gold />
+          {/* Officer-unicorn watermark ghosted behind the headline. Low
+              opacity + desaturation keep the rainbow mane from fighting the
+              headline contrast; the radial mask fades it out before it
+              reaches the subhead. Decorative only. */}
+          <img
+            src="/brand/meeting-ops-mark.png?v=3"
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            className="pointer-events-none absolute left-1/2 top-14 -z-10 w-[20rem] -translate-x-1/2 select-none opacity-[0.10] saturate-[0.7] sm:top-10 sm:w-[26rem] lg:w-[30rem] [mask-image:radial-gradient(ellipse_62%_62%_at_50%_40%,#000_30%,transparent_76%)]"
+          />
           <div className="mx-auto max-w-3xl text-center">
             <div className="inline-flex items-center gap-2 rounded-full bg-white/5 px-3 py-1 ring-1 ring-white/10">
               <Waveform className="h-3.5" />

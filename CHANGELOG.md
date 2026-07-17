@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+## [3.57.1] - 2026-07-17
+
+### Changed
+- **Officer-unicorn watermark behind the hero headline** (Aaron's ask): the mark ghosted at
+  ~10% opacity, desaturated, radial-masked so it fades before the subhead — brand presence
+  without costing headline contrast.
+- **Branded static pre-mount shell** replaces the bare "Loading… if this persists, the app
+  failed to mount." (+ its stale tagline — the source of an external reviewer's outdated
+  quote). The served HTML now carries the unicorn mark, the settled tagline, a one-paragraph
+  pitch, Start-free + App-Store CTAs, and a navy inline background (the page is branded even
+  before the CSS bundle arrives). Signed-in users deep-linking into the app don't get the
+  marketing flash (pitch hides on evidence of a session); if the bundle genuinely fails, the
+  hint upgrades to actionable copy after 8 s. Crawlable noscript summary retained.
+
 ## [3.57.0] - 2026-07-17
 
 ### Changed

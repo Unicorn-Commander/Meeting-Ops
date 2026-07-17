@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Meeting-Ops API",
     description="AI-powered meeting recording and transcription system",
-    version="3.57.0",
+    version="3.57.1",
     lifespan=lifespan
 )
 
