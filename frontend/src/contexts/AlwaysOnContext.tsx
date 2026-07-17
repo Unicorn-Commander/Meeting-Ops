@@ -77,6 +77,7 @@ import {
 import {
   detectDevice,
   shouldRunBrowserInference,
+  shouldRunFullLocalPass,
   shouldShowCaptureOnlyBanner,
   supportsLocalPersistence,
   type DeviceCapability,
@@ -543,6 +544,11 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   // the current session (warm-up window).
   const lastChunkAtRef = useRef<number | null>(null);
   const [isStuck, setIsStuck] = useState<boolean>(false);
+  // Latest live transcript text, readable inside the stop-time closure
+  // without dep churn. Used by the no-slices summary fallback so short
+  // local-only meetings (under the first slice threshold) still end with
+  // a real summary instead of nothing (Ceejay, 2026-07-16 user testing).
+  const transcriptTextRef = useRef<string>('');
   const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
   const splitInFlightRef = useRef(false);
   const summarizeAbortRef = useRef<AbortController | null>(null);
@@ -1918,17 +1924,59 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               console.warn('[always-on] Local live-slice final summary failed:', err);
               setError('Local live summary failed; slices are still saved.');
             }
+          } else {
+            // No slices — the meeting ended before the first slice
+            // threshold (~500 words). Summarize the raw live transcript
+            // directly so a short local-only meeting still gets a real
+            // summary instead of silently ending with none.
+            const rawTranscript = transcriptTextRef.current.trim();
+            if (rawTranscript && countWords(rawTranscript) >= 30) {
+              const modelId = getStoredModelId();
+              try {
+                const finalController = new AbortController();
+                let buffer = '';
+                for await (const token of inBrowserLLM.summarizeFinal(rawTranscript, modelId, {
+                  signal: finalController.signal,
+                  sessionId,
+                })) {
+                  buffer += token;
+                }
+                liveFinalText = buffer.trim() || null;
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn('[always-on] Short-meeting transcript summary failed:', err);
+              }
+            }
           }
           await endLocalSession(sessionId, liveFinalText);
 
           // Stage 2 — full-quality Parakeet pass + LLM re-summary. Only
           // attempted when we actually have an assembled blob AND the
-          // browser can run inference (desktop-capable, which is the
-          // same gate that allowed privacy-mode in the first place).
+          // device can take the load: the whole-meeting pass is far heavier
+          // than live inference and hard-froze a tester's MacBook
+          // (2026-07-16). When the gate declines, the live summary is kept
+          // as the final record and the session row says why.
+          const fullPassGate = shouldRunFullLocalPass(
+            deviceCapability,
+            assembledForPass?.bytes ?? 0,
+          );
           if (
             assembledForPass
             && assembledForPass.bytes > 0
             && shouldRunBrowserInference(deviceCapability)
+            && !fullPassGate.ok
+          ) {
+            await markParakeetPassFailed(
+              sessionId,
+              `Full-quality local pass skipped: ${fullPassGate.reason}. The live summary is the final record for this session.`,
+            ).catch(() => undefined);
+            setStatusText('Saved with the live summary (full-quality pass skipped on this device).');
+          }
+          if (
+            assembledForPass
+            && assembledForPass.bytes > 0
+            && shouldRunBrowserInference(deviceCapability)
+            && fullPassGate.ok
           ) {
             const assembled = assembledForPass;
             await markParakeetPassRunning(sessionId).catch(() => undefined);
@@ -1951,7 +1999,12 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
                 },
               });
               const sttStarted = performance.now();
-              setStatusText('Running local STT on full audio');
+              // Rough minutes-of-audio from bytes (~0.75 MB/min opus) so the
+              // user knows this is a heavier, minutes-long step — not a hang.
+              const estMinutes = Math.max(1, Math.round(assembled.bytes / (0.75 * 1024 * 1024)));
+              setStatusText(
+                `Running full-quality pass on ~${estMinutes} min of audio — this takes a few minutes and works the machine hard`,
+              );
               const fullTranscriptRaw = await inBrowserSTT.transcribe(assembled.blob);
               const fullTranscript = (fullTranscriptRaw || '').trim();
               const sttElapsedSec = Math.max(
@@ -2019,7 +2072,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               // Friendly toast — the live-slice summary is still
               // saved, the user isn't left with nothing.
               setError(
-                "Couldn't run full-quality local pass — saved live-quality summary instead.",
+                "Couldn't finish the full-quality local pass, so your live summary was kept as the final record. "
+                + 'This usually means the browser ran out of memory on a long recording — shorter sessions, or the '
+                + 'server pass (Pro, non-privacy mode), avoid it.',
               );
             }
           }
@@ -2259,6 +2314,10 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
   );
 
   const transcriptWordCount = useMemo(() => countWords(transcriptText), [transcriptText]);
+
+  useEffect(() => {
+    transcriptTextRef.current = transcriptText;
+  }, [transcriptText]);
 
   // Mirror into a ref so stop() (defined above, memoized) reads the
   // live word count at stop-time rather than a stale closure value.

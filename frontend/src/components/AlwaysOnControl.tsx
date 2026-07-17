@@ -945,7 +945,7 @@ export default function AlwaysOnControl() {
               lenient (v3.30.x — was 60s, which false-positived on ordinary
               meeting silence); a destructive "reset" prompt must not flicker
               during a healthy, quiet recording. */}
-          {alwaysOn.isStuck && (
+          {alwaysOn.isStuck && alwaysOn.state !== 'stopping' && (
             <div
               role="alert"
               className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
@@ -955,10 +955,12 @@ export default function AlwaysOnControl() {
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">Recording appears stuck</div>
                   <p className="mt-0.5 text-xs leading-5 text-amber-200/90">
-                    The recorder is claiming to be active but no audio has
-                    been captured for a while. This usually means the browser
-                    tab was suspended (common on phones). Reset to free up
-                    Record for a fresh session.
+                    The recorder looks active, but no audio has been captured
+                    for a while. Common causes: the browser suspended this tab
+                    (laptops on battery, locked phones) or the on-device
+                    engine stopped. If the meeting is just quiet, you can
+                    ignore this. Otherwise reset to free up Record — sessions
+                    already saved are not affected.
                   </p>
                   <button
                     type="button"
@@ -1281,32 +1283,32 @@ export default function AlwaysOnControl() {
 
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">VAD</div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 cursor-help" title="Voice Activity Detection — lights up green while speech is being heard. Quiet stretches are normal and are not recorded as speech.">VAD</div>
           <div className="mt-2 flex items-center gap-2 text-sm text-zinc-100">
             <span className={`h-2.5 w-2.5 rounded-full ${alwaysOn.vadActive ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.7)]' : 'bg-zinc-700'}`} />
             {alwaysOn.vadActive ? 'Speech' : 'Quiet'}
           </div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">Elapsed</div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 cursor-help" title="How long this recording session has been running.">Elapsed</div>
           <div className="mt-2 flex items-center gap-2 text-sm font-mono text-zinc-100">
             <Clock className="h-4 w-4 text-zinc-500" />
             {formatDuration(alwaysOn.elapsedSeconds)}
           </div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">Chunks</div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 cursor-help" title="Audio is captured in ~30-second chunks. This counts chunks safely stored so far — if it keeps climbing, your audio is being saved.">Chunks</div>
           <div className="mt-2 flex items-center gap-2 text-sm text-zinc-100">
             <UploadCloud className="h-4 w-4 text-zinc-500" />
             {alwaysOn.chunksUploaded}
           </div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">Sessions</div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 cursor-help" title="Recordings completed on this device since the page loaded.">Sessions</div>
           <div className="mt-2 text-sm text-zinc-100">{alwaysOn.sessionsCompleted}</div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-3">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">Current</div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 cursor-help" title="The ID of the session being recorded right now.">Current</div>
           <div className="mt-2 truncate text-sm text-zinc-100">{alwaysOn.currentSessionId || 'None'}</div>
         </div>
       </div>

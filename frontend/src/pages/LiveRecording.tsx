@@ -33,6 +33,33 @@ import {
   isAlwaysOnActive,
   setRecordActive,
 } from '../utils/recordingPresence';
+import { useAlwaysOn } from '../contexts/AlwaysOnContext';
+
+// Pull the action-items section out of a summary (slices join headers like
+// "**Action Items**" / "## Next steps"); empty string when no such section.
+function extractActionItems(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  let inSection = false;
+  for (const ln of lines) {
+    const isActionHeader = /^\s*(\*\*|##+|#)?\s*(key\s+)?(action\s*items?|next\s*steps)\b/i.test(ln);
+    const isOtherHeader = /^\s*(\*\*|##+)\s*\S/.test(ln) && !isActionHeader;
+    if (isActionHeader) { inSection = true; continue; }
+    if (inSection && isOtherHeader) break;
+    if (inSection && ln.trim()) out.push(ln.trim());
+  }
+  return out.join('\n');
+}
+
+function downloadTextFile(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 interface SummaryFormats {
   executive: boolean;
@@ -151,6 +178,23 @@ export default function LiveRecording() {
   });
   const [liveTranscript, setLiveTranscript] = useState<string[]>([]);
   const [autoSummary, setAutoSummary] = useState<any>(getStoredSummary());
+  // Always-on state — Quick Actions must work for the always-on flow too,
+  // where the legacy sessionData/autoSummary stay null (Ceejay 2026-07-16:
+  // "Export Summary / Copy Action Items do not work").
+  const alwaysOn = useAlwaysOn();
+  const quickActionSummaryText: string = (() => {
+    if (alwaysOn.summary.slices.length > 0) {
+      return alwaysOn.summary.slices.map((s) => s.text).join('\n\n').trim();
+    }
+    if (autoSummary) {
+      return (typeof autoSummary === 'string'
+        ? autoSummary
+        : autoSummary.executive || JSON.stringify(autoSummary, null, 2)
+      ).trim();
+    }
+    if (sessionData?.summary) return String(sessionData.summary).trim();
+    return '';
+  })();
   const [wordCount, setWordCount] = useState(0);
   const [nextUpdateWords, setNextUpdateWords] = useState(500);
   const [activeAgent, setActiveAgent] = useState<UnifiedAgent | null>(null);
@@ -1425,42 +1469,64 @@ export default function LiveRecording() {
             <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
             <div className="space-y-2">
               <button
-                className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
-                disabled={!sessionData || isRecording}
+                className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isRecording || (!sessionData?.id && !alwaysOnSessionId && !quickActionSummaryText)}
+                title={
+                  isRecording
+                    ? 'Stop the recording first'
+                    : (!sessionData?.id && !alwaysOnSessionId && !quickActionSummaryText)
+                      ? 'Record a session first — the summary appears here when one exists'
+                      : 'Download the summary (PDF when the server record exists, text otherwise)'
+                }
                 onClick={async () => {
-                  if (!sessionData?.id) return;
-                  try {
-                    const response = await fetch(
-                      `${config.apiBaseUrl}/api/simple/recording-sessions/${sessionData.id}/download/summary/pdf`,
-                      { headers: { 'Authorization': `Bearer ${token}` } }
+                  const sid = sessionData?.id ?? alwaysOnSessionId;
+                  if (sid) {
+                    try {
+                      const response = await fetch(
+                        `${config.apiBaseUrl}/api/simple/recording-sessions/${sid}/download/summary/pdf`,
+                        { headers: { 'Authorization': `Bearer ${token}` } }
+                      );
+                      if (!response.ok) throw new Error(`PDF export failed (${response.status})`);
+                      const blob = await response.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `meeting-summary.pdf`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                      showToast.success('Summary PDF downloaded');
+                      return;
+                    } catch (err) {
+                      console.error('PDF export error:', err);
+                      // fall through to the local text export below
+                    }
+                  }
+                  if (quickActionSummaryText) {
+                    downloadTextFile('meeting-summary.md', quickActionSummaryText);
+                    showToast.success(
+                      sid
+                        ? 'PDF unavailable — downloaded the live summary as text instead'
+                        : 'Live summary downloaded as text'
                     );
-                    if (!response.ok) throw new Error('Export failed');
-                    const blob = await response.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `meeting-summary.pdf`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  } catch (err) {
-                    console.error('Export error:', err);
+                  } else {
+                    showToast.error('No summary to export yet');
                   }
                 }}
               >
                 Export Summary
               </button>
               <button
-                className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
-                disabled={!autoSummary}
+                className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!quickActionSummaryText}
+                title={quickActionSummaryText
+                  ? 'Copy the action items from the summary'
+                  : 'Appears once a live summary exists'}
                 onClick={() => {
-                  if (autoSummary) {
-                    const text = typeof autoSummary === 'string'
-                      ? autoSummary
-                      : autoSummary.executive || JSON.stringify(autoSummary, null, 2);
-                    navigator.clipboard.writeText(text)
-                      .then(() => showToast.success('Action items copied'))
-                      .catch(() => showToast.error('Could not copy — clipboard access was blocked'));
-                  }
+                  if (!quickActionSummaryText) return;
+                  const items = extractActionItems(quickActionSummaryText);
+                  navigator.clipboard.writeText(items || quickActionSummaryText)
+                    .then(() => showToast.success(items ? 'Action items copied' : 'No action-items section found — copied the whole summary'))
+                    .catch(() => showToast.error('Could not copy — clipboard access was blocked'));
                 }}
               >
                 Copy Action Items

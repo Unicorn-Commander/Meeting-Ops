@@ -207,8 +207,27 @@ const interceptedFetch: typeof fetch = async (input, init) => {
         headers: retryHeaders,
         redirect: init?.redirect || 'manual',
       };
-      return _originalFetch(input as RequestInfo, retryInit);
+      const retried = await _originalFetch(input as RequestInfo, retryInit);
+      if (retried.status !== 401) return retried;
+      response = retried;
     }
+  }
+
+  // JSON 401 with no recoverable JWT — the SSO-cookie path. oauth2-proxy
+  // answers API routes with a bare 401/{} when its session dies (Keycloak
+  // idle timeout beats the 24h cookie), and the checks above never fire:
+  // no redirect, no HTML, nothing to refresh. Without this branch the app
+  // keeps rendering from cache while every button silently does nothing —
+  // exactly what the 2026-07-16 user test reported ("Export Summary does
+  // not work", "PDF not working"). Gate on evidence a session existed
+  // (stored org slug / token) so anonymous visitors on the public landing
+  // are never bounced to login by a legitimately-401 probe.
+  if (
+    response.status === 401 &&
+    !/\/auth\//.test(urlStr) &&
+    (Boolean(orgSlug) || Boolean(storedToken))
+  ) {
+    triggerReconnect();
   }
 
   return response;
