@@ -164,17 +164,23 @@ export function shouldRunBrowserInference(cap: DeviceCapability): boolean {
 }
 
 /**
- * Gate for the STOP-TIME full-audio local pass. It is far heavier than the
- * live streaming inference `shouldRunBrowserInference` covers: the entire
- * meeting is transcribed in one shot and the LLM then re-summarizes the full
- * transcript — a multi-GB working set for long meetings. A tester's MacBook
- * hard-froze on it (2026-07-16), so this gate is deliberately conservative:
+ * Gate for the STOP-TIME full-audio local pass. It is heavier than the
+ * live streaming inference `shouldRunBrowserInference` covers: the whole
+ * meeting is re-transcribed and the LLM then re-summarizes the full
+ * transcript.
  *
- * - `desktop-fallback` (no WebGPU → WASM/CPU): never. The pass can take
- *   longer than the meeting itself and starves the machine.
- * - Chromium reports deviceMemory quantized to ≤ 8 GB: on machines reporting
- *   under 8 GB, cap the pass at ~30 min of audio; on 8 GB-class (or unknown,
- *   i.e. non-Chromium WebGPU browsers), cap at ~3 h.
+ * Since 2026-07-17 the pass runs CHUNKED (`inBrowserSTT.transcribeLong`):
+ * ~5-minute silence-aligned windows with a yielding mel loop, so compute
+ * per step is bounded and the page stays responsive. What remains
+ * unbounded is the decoded 16 kHz mono PCM held for the whole pass
+ * (~3.8 MB per minute of audio) plus the browser's transient decode
+ * peak — that is what these caps protect:
+ *
+ * - `desktop-fallback` (no WebGPU → WASM/CPU): never. Even chunked, the
+ *   pass can take longer than the meeting itself on CPU.
+ * - Chromium reports deviceMemory quantized to ≤ 8 GB: machines under
+ *   8 GB cap at ~1 h of audio (decoded ~230 MB); 8 GB-class or unknown
+ *   (non-Chromium WebGPU browsers) cap at ~3 h (~690 MB decoded).
  *
  * When the gate says no, the caller keeps the live-quality summary as the
  * final record and says so — a degraded summary beats a dead laptop.
@@ -195,13 +201,13 @@ export function shouldRunFullLocalPass(
   const MB = 1024 * 1024;
   // Opus/WebM meeting audio runs ~0.5-1 MB/min; use bytes as the duration proxy.
   const lowMemory = cap.deviceMemoryGB !== null && cap.deviceMemoryGB < 8;
-  const capBytes = lowMemory ? 30 * MB : 180 * MB;
+  const capBytes = lowMemory ? 60 * MB : 180 * MB;
   if (audioBytes > capBytes) {
     return {
       ok: false,
       reason: lowMemory
-        ? 'the recording is too long for this device’s memory'
-        : 'the recording is too long for an in-browser pass',
+        ? 'the recording is too long to decode in this device’s memory (about an hour is the limit here)'
+        : 'the recording is too long for an in-browser pass (about three hours is the limit)',
     };
   }
   return { ok: true };
