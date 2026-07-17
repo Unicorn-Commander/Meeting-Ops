@@ -2840,30 +2840,30 @@ async def get_brigade_graph(
       * Not yet synced (column NULL): empty arrays + reason='not_synced_yet'.
       * Synced but Brigade down/404:  empty arrays + reason='live_failed'.
 
-    Auth: user-scoped via the same path as the rest of the session
-    detail API. Cross-org returns 404 (no existence leak). The
-    response cache is keyed by (org_id, session_pk, synced_node_id)
-    so a re-sync after a reprocess invalidates implicitly because the
-    cache key includes the stamped node id.
+    Auth: user-scoped via the same canonical resolver as the rest of the
+    session detail API (active-org first, then shared/cross-org sessions
+    the user has at least view access to — so the Knowledge Graph tab
+    works on any session the other tabs can open). Sessions the user has
+    no access to still 404 (no existence leak). The response cache is
+    keyed by (org_id, session_pk, synced_node_id) so a re-sync after a
+    reprocess invalidates implicitly because the cache key includes the
+    stamped node id.
     """
     # Local imports keep cold-start fast — this endpoint isn't on the
     # critical recording path.
     from services.brigade_client import BrigadeClient
+    from api.session_permissions import resolve_session_for_user
 
-    # 1. Resolve session within the active org. Cross-org returns 404.
-    session_query = db.query(RecordingSession).filter(
-        RecordingSession.organization_id == active_org.organization.id
+    # 1. Resolve session: active org first, then has_session_access
+    #    fallback (2026-07-17 — aligned with the cross-org audit; this
+    #    was the last session-detail endpoint still strict-org-only).
+    session = resolve_session_for_user(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="view",
     )
-    session = session_query.filter(
-        RecordingSession.session_id == session_id
-    ).first()
-    if not session:
-        try:
-            session = session_query.filter(
-                RecordingSession.id == int(session_id)
-            ).first()
-        except (TypeError, ValueError):
-            session = None
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 

@@ -266,22 +266,107 @@ export class InBrowserSTT {
    * Transcribe a WAV/PCM/encoded-audio Blob. Resamples to 16k mono if the
    * decoded sample rate disagrees (some browsers ignore the AudioContext
    * sampleRate hint). Empty input returns empty string.
+   *
+   * Single-window path — meant for the live pipeline's short clips. For
+   * whole-meeting audio use `transcribeLong()`, which windows the input:
+   * Parakeet-TDT 0.6B's long-form envelope is ~24 minutes, and beyond a
+   * few minutes the one-shot path's mel loop + encoder working set grow
+   * with the meeting (a 90-min single shot froze a tester's MacBook).
    */
   async transcribe(audioBlob: Blob): Promise<string> {
+    this.assertReady();
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const samples = await decodeAudioToFloat32(arrayBuffer);
+    return this.transcribeSamples(samples, { yieldDuringMel: false });
+  }
+
+  /**
+   * Long-form transcription for whole-meeting audio. Decodes once, then
+   * processes the recording in ~`chunkSeconds` windows, each cut at the
+   * quietest 100 ms frame near the boundary (usually an inter-sentence
+   * pause) so words aren't sliced in half. Between windows we yield a
+   * macrotask, and the mel loop itself yields every ~20 s of audio, so
+   * the page stays responsive for the whole pass. Also keeps every
+   * window inside the model's trained long-form envelope, which makes
+   * long-meeting transcripts *more* accurate than the old one-shot pass,
+   * not just cheaper.
+   *
+   * `onProgress(processedSeconds, totalSeconds)` fires after decode (0,
+   * total) and after each window. Peak memory is the decoded 16 kHz mono
+   * PCM (~3.8 MB/min) plus one window's tensors (~20 MB) — the
+   * whole-meeting mel/encoder tensors of the one-shot path are gone.
+   */
+  async transcribeLong(
+    audioBlob: Blob,
+    opts: {
+      chunkSeconds?: number;
+      onProgress?: (processedSeconds: number, totalSeconds: number) => void;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<string> {
+    this.assertReady();
+    const chunkSeconds = Math.max(60, opts.chunkSeconds ?? 300);
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const samples = await decodeAudioToFloat32(arrayBuffer);
+    const totalSec = samples.length / SAMPLE_RATE;
+    if (samples.length === 0 || totalSec < 0.05) return '';
+
+    // Short enough for one window — same as transcribe(), but with the
+    // yielding mel loop so even a "short" 5-min clip can't stall paints.
+    if (totalSec <= chunkSeconds * 1.25) {
+      opts.onProgress?.(0, totalSec);
+      const text = await this.transcribeSamples(samples, { yieldDuringMel: true });
+      opts.onProgress?.(totalSec, totalSec);
+      return text;
+    }
+
+    const wallStart = performance.now();
+    const parts: string[] = [];
+    let cursor = 0;
+    opts.onProgress?.(0, totalSec);
+    while (cursor < samples.length) {
+      if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      const targetEnd = Math.min(samples.length, cursor + chunkSeconds * SAMPLE_RATE);
+      const end = targetEnd >= samples.length
+        ? samples.length
+        : findQuietSplitPoint(samples, targetEnd);
+      // subarray = view into the decoded buffer, no copy.
+      const window = samples.subarray(cursor, end);
+      const text = await this.transcribeSamples(window, { yieldDuringMel: true });
+      if (text) parts.push(text);
+      cursor = end;
+      opts.onProgress?.(cursor / SAMPLE_RATE, totalSec);
+      // Macrotask gap between windows: lets the browser paint and run
+      // pending handlers so a 2 h pass never reads as a hang.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    // Stamp the whole-pass RTF (transcribeSamples left the last window's).
+    const elapsedSec = (performance.now() - wallStart) / 1000;
+    this.lastRTF = elapsedSec / totalSec;
+    return parts.join(' ');
+  }
+
+  private assertReady(): void {
     if (!this.ready || !this.encoderSession || !this.decoderSession || !this.vocab) {
       throw new Error('InBrowserSTT.transcribe called before load() resolved.');
     }
-    const ort = this.ort!;
+  }
 
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const samples = await decodeAudioToFloat32(arrayBuffer);
+  /** Shared mel→encoder→TDT-decode core over 16 kHz mono PCM. */
+  private async transcribeSamples(
+    samples: Float32Array,
+    opts: { yieldDuringMel: boolean },
+  ): Promise<string> {
+    const ort = this.ort!;
     const audioSec = samples.length / SAMPLE_RATE;
     if (samples.length === 0 || audioSec < 0.05) {
       return '';
     }
 
     const t0 = performance.now();
-    const { mel, nFrames } = computeLogMel(samples, this.melFb!, this.hann!);
+    const { mel, nFrames } = opts.yieldDuringMel
+      ? await computeLogMelAsync(samples, this.melFb!, this.hann!)
+      : computeLogMel(samples, this.melFb!, this.hann!);
     const tMel = performance.now() - t0;
 
     const tEnc0 = performance.now();
@@ -309,7 +394,9 @@ export class InBrowserSTT {
     const rtf = total / 1000 / audioSec;
     this.lastRTF = rtf;
 
-    return detokenize(tokens, this.vocab);
+    // assertReady() guaranteed vocab at every public entry point; the
+    // non-null assertion is safe here (TS can't see through the helper).
+    return detokenize(tokens, this.vocab!);
   }
 
   /**
@@ -796,12 +883,12 @@ function fft(re: Float32Array, im: Float32Array): void {
   }
 }
 
-function computeLogMel(
-  samples: Float32Array,
-  melFb: Float32Array,
-  hann: Float32Array,
-): { mel: Float32Array; nFrames: number } {
-  // librosa-equivalent center=True reflect padding (NeMo default).
+// Mel extraction is split into shared per-frame helpers so the sync path
+// (live short clips) and the yielding path (transcribeLong windows) run
+// byte-identical math and can't drift.
+
+/** librosa-equivalent center=True reflect padding (NeMo default). */
+function melPadReflect(samples: Float32Array): Float32Array {
   const pad = N_FFT / 2;
   const padded = new Float32Array(samples.length + 2 * pad);
   for (let i = 0; i < pad; i++) padded[i] = samples[pad - i] || 0;
@@ -809,37 +896,47 @@ function computeLogMel(
   for (let i = 0; i < pad; i++) {
     padded[pad + samples.length + i] = samples[samples.length - 2 - i] || 0;
   }
+  return padded;
+}
 
-  const nFrames = 1 + Math.floor((padded.length - N_FFT) / HOP_LENGTH);
+/** One STFT frame → mel bins, written into mel[:, f]. re/im are scratch. */
+function melFrameInto(
+  padded: Float32Array,
+  f: number,
+  nFrames: number,
+  re: Float32Array,
+  im: Float32Array,
+  hann: Float32Array,
+  melFb: Float32Array,
+  mel: Float32Array,
+): void {
   const nBins = N_FFT / 2 + 1;
-  const re = new Float32Array(N_FFT);
-  const im = new Float32Array(N_FFT);
-  const mel = new Float32Array(MEL_BINS * nFrames);
-
-  for (let f = 0; f < nFrames; f++) {
-    const start = f * HOP_LENGTH;
-    re.fill(0);
-    im.fill(0);
-    const offset = (N_FFT - WIN_LENGTH) >> 1;
-    for (let i = 0; i < WIN_LENGTH; i++) {
-      re[offset + i] = padded[start + i] * hann[i];
-    }
-    fft(re, im);
-    for (let m = 0; m < MEL_BINS; m++) {
-      let acc = 0;
-      const off = m * nBins;
-      for (let k = 0; k < nBins; k++) {
-        const p = re[k] * re[k] + im[k] * im[k];
-        acc += melFb[off + k] * p;
-      }
-      // NeMo v3 default: log(x + 1e-5).
-      mel[m * nFrames + f] = Math.log(acc + 1e-5);
-    }
+  const start = f * HOP_LENGTH;
+  re.fill(0);
+  im.fill(0);
+  const offset = (N_FFT - WIN_LENGTH) >> 1;
+  for (let i = 0; i < WIN_LENGTH; i++) {
+    re[offset + i] = padded[start + i] * hann[i];
   }
+  fft(re, im);
+  for (let m = 0; m < MEL_BINS; m++) {
+    let acc = 0;
+    const off = m * nBins;
+    for (let k = 0; k < nBins; k++) {
+      const p = re[k] * re[k] + im[k] * im[k];
+      acc += melFb[off + k] * p;
+    }
+    // NeMo v3 default: log(x + 1e-5).
+    mel[m * nFrames + f] = Math.log(acc + 1e-5);
+  }
+}
 
-  // "per_feature" normalization: zero-mean unit-variance per mel bin.
-  // This matches NeMo's audio_to_mel_spectrogram_preprocessor default and
-  // is what the encoder was trained with.
+/**
+ * "per_feature" normalization: zero-mean unit-variance per mel bin.
+ * Matches NeMo's audio_to_mel_spectrogram_preprocessor default — what
+ * the encoder was trained with.
+ */
+function normalizePerFeature(mel: Float32Array, nFrames: number): void {
   for (let m = 0; m < MEL_BINS; m++) {
     let sum = 0;
     for (let f = 0; f < nFrames; f++) sum += mel[m * nFrames + f];
@@ -854,8 +951,75 @@ function computeLogMel(
       mel[m * nFrames + f] = (mel[m * nFrames + f] - mean) / std;
     }
   }
+}
 
+function computeLogMel(
+  samples: Float32Array,
+  melFb: Float32Array,
+  hann: Float32Array,
+): { mel: Float32Array; nFrames: number } {
+  const padded = melPadReflect(samples);
+  const nFrames = 1 + Math.floor((padded.length - N_FFT) / HOP_LENGTH);
+  const re = new Float32Array(N_FFT);
+  const im = new Float32Array(N_FFT);
+  const mel = new Float32Array(MEL_BINS * nFrames);
+  for (let f = 0; f < nFrames; f++) {
+    melFrameInto(padded, f, nFrames, re, im, hann, melFb, mel);
+  }
+  normalizePerFeature(mel, nFrames);
   return { mel, nFrames };
+}
+
+/**
+ * Same math as computeLogMel, but yields a macrotask every ~20 s of audio
+ * (2000 hops) so a multi-minute window never blocks the main thread for
+ * more than a couple hundred ms at a time. The sync mel loop was the
+ * single biggest freeze source in the old whole-meeting pass: 90 min of
+ * audio is ~540k frames of FFT+mel in one uninterruptible loop.
+ */
+async function computeLogMelAsync(
+  samples: Float32Array,
+  melFb: Float32Array,
+  hann: Float32Array,
+): Promise<{ mel: Float32Array; nFrames: number }> {
+  const YIELD_EVERY_FRAMES = 2000;
+  const padded = melPadReflect(samples);
+  const nFrames = 1 + Math.floor((padded.length - N_FFT) / HOP_LENGTH);
+  const re = new Float32Array(N_FFT);
+  const im = new Float32Array(N_FFT);
+  const mel = new Float32Array(MEL_BINS * nFrames);
+  for (let f = 0; f < nFrames; f++) {
+    if (f > 0 && f % YIELD_EVERY_FRAMES === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    melFrameInto(padded, f, nFrames, re, im, hann, melFb, mel);
+  }
+  normalizePerFeature(mel, nFrames);
+  return { mel, nFrames };
+}
+
+/**
+ * Pick a low-energy sample index to cut a long recording at, searching
+ * the 15 s that end at targetEnd. Cutting at the quietest 100 ms frame
+ * (usually an inter-sentence pause) instead of an arbitrary offset
+ * avoids slicing a word in half at every window boundary.
+ */
+function findQuietSplitPoint(samples: Float32Array, targetEnd: number): number {
+  const SEARCH_BACK_SEC = 15;
+  const FRAME = Math.floor(SAMPLE_RATE / 10); // 100 ms energy frames
+  const searchStart = Math.max(0, targetEnd - SEARCH_BACK_SEC * SAMPLE_RATE);
+  if (targetEnd - searchStart < FRAME * 2) return targetEnd;
+  let bestIdx = targetEnd;
+  let bestEnergy = Infinity;
+  for (let start = searchStart; start + FRAME <= targetEnd; start += FRAME) {
+    let acc = 0;
+    for (let i = start; i < start + FRAME; i++) acc += samples[i] * samples[i];
+    if (acc < bestEnergy) {
+      bestEnergy = acc;
+      bestIdx = start + (FRAME >> 1);
+    }
+  }
+  return bestIdx;
 }
 
 // Singleton, mirrors inBrowserLLM export shape.

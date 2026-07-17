@@ -2003,9 +2003,23 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
               // user knows this is a heavier, minutes-long step — not a hang.
               const estMinutes = Math.max(1, Math.round(assembled.bytes / (0.75 * 1024 * 1024)));
               setStatusText(
-                `Running full-quality pass on ~${estMinutes} min of audio — this takes a few minutes and works the machine hard`,
+                `Running full-quality pass on ~${estMinutes} min of audio — processed in short segments, so the page stays usable`,
               );
-              const fullTranscriptRaw = await inBrowserSTT.transcribe(assembled.blob);
+              // Chunked long-form pass: ~5-min silence-aligned windows with
+              // a yielding mel loop. Replaces the one-shot transcribe()
+              // whose whole-meeting working set froze a tester's MacBook
+              // (2026-07-16) and exceeded Parakeet's ~24-min envelope.
+              const fullTranscriptRaw = await inBrowserSTT.transcribeLong(assembled.blob, {
+                onProgress: (doneSec, totalSec) => {
+                  if (totalSec <= 0) return;
+                  const doneMin = Math.floor(doneSec / 60);
+                  const totalMin = Math.max(1, Math.round(totalSec / 60));
+                  const pct = Math.min(100, Math.round((doneSec / totalSec) * 100));
+                  setStatusText(
+                    `Transcribing locally — ${doneMin} of ~${totalMin} min (${pct}%)`,
+                  );
+                },
+              });
               const fullTranscript = (fullTranscriptRaw || '').trim();
               const sttElapsedSec = Math.max(
                 0,

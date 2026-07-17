@@ -1,5 +1,39 @@
 ## [Unreleased]
 
+## [3.57.0] - 2026-07-17
+
+### Changed
+- **Local-only full-quality pass now runs chunked.** New `inBrowserSTT.transcribeLong()` processes
+  whole-meeting audio in ~5-minute windows, each cut at the quietest 100 ms frame near the
+  boundary (an inter-sentence pause) so words aren't sliced in half, with a yielding mel loop
+  (the old whole-meeting sync mel loop was the single biggest freeze source) and a macrotask gap
+  between windows. The page stays responsive for the entire pass and each window stays inside
+  Parakeet-TDT's ~24-minute long-form envelope — long-meeting transcripts get *more* accurate,
+  not just cheaper. Live progress ("Transcribing locally — 34 of ~90 min (38%)") replaces the
+  "works the machine hard" banner. With per-window compute bounded, decode memory is the binding
+  constraint, so the `shouldRunFullLocalPass` cap on sub-8 GB devices doubles to ~1 h of audio
+  (8 GB-class/unknown stays ~3 h; desktop-fallback/WASM still never runs the pass).
+- **Knowledge-graph endpoint honors shared sessions.** `/api/sessions/{id}/brigade-graph` was the
+  last session-detail endpoint still resolving strictly against the caller's active org; it now
+  goes through `resolve_session_for_user` (min view) like the rest of the session-detail API, so
+  the Knowledge Graph tab works on any session the other tabs can open. No-access sessions still
+  404 (no existence leak).
+- App tab/SERP title settled: "Meeting-Ops — Meetings become memory, decisions, and work"
+  (replaces the dangling "Intelligence for your conversations (whether or not they are)"); the
+  magicunicorn.dev preview page's titles aligned to the same line.
+- (deploy, dogfood) oauth2-proxy `OAUTH2_PROXY_COOKIE_EXPIRE` 24h → 168h. The absolute cookie
+  lifetime forced a daily re-auth redirect even with a live Keycloak session. Session authority
+  now lives in the realm policy, set deliberately 2026-07-17 on BOTH uchub realms (bigboy +
+  commander): 3 d idle / 30 d max (remember-me 30 d / 90 d), replacing 12 h / 48 h — the values
+  behind the "every button silently dead" session deaths in the 2026-07-16 user test.
+
+### Fixed
+- (ops, both stacks) `STRIPE_API_KEY` in the deploy envs was an **expired** live key — every
+  direct Stripe call from MO (checkout, portal, subscription lookups) failed. Replaced with the
+  account's current key on centerdeep + bigboy (old envs backed up). While in there, verified the
+  long-suspected annual mapping is actually correct: `STRIPE_PRO_ANNUAL_PRICE_ID` → live
+  "$150/yr Pro Annual launch 150", monthly → "$15/mo Pro Monthly launch 15".
+
 ## [3.56.0] - 2026-07-16
 
 ### Fixed
