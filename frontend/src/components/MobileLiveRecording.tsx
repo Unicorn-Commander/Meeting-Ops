@@ -42,8 +42,6 @@ import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { useTierFeatures } from '../hooks/useTierFeatures';
 import { Dialog } from './ui/Dialog';
-import RecordingConsentModal from './RecordingConsentModal';
-import { hasRecordingConsent, rememberRecordingConsent } from '../constants/legal';
 import {
   isLikelyTouchDevice,
   tapAudioLevel,
@@ -137,7 +135,6 @@ export default function MobileLiveRecording() {
   const [freeTierGateOpen, setFreeTierGateOpen] = useState(false);
   // Legal: pre-record consent gate (AUP §2.3). Shown once per browser session
   // before the mic opens; confirmation is remembered client-side.
-  const [consentOpen, setConsentOpen] = useState(false);
   const [state, setState] = useState<RecorderState>('idle');
   const [title, setTitle] = useState<string>(() => {
     const stored = localStorage.getItem(TITLE_STORAGE_KEY);
@@ -288,13 +285,6 @@ export default function MobileLiveRecording() {
     // dialog explaining the constraint + pointing at desktop free mode.
     if (!canUseMobileServer) {
       setFreeTierGateOpen(true);
-      return;
-    }
-
-    // Legal: consent gate (AUP §2.3). Confirm once per session BEFORE the mic
-    // opens. On confirm we re-invoke beginRecording, which now passes here.
-    if (!hasRecordingConsent()) {
-      setConsentOpen(true);
       return;
     }
 
@@ -955,15 +945,6 @@ export default function MobileLiveRecording() {
 
       {/* Legal: pre-record consent gate (AUP §2.3). Confirming records consent
           for the session (client-side v1) and resumes the recording start. */}
-      <RecordingConsentModal
-        open={consentOpen}
-        onConfirm={() => {
-          rememberRecordingConsent();
-          setConsentOpen(false);
-          void beginRecording();
-        }}
-        onCancel={() => setConsentOpen(false)}
-      />
     </div>
   );
 }

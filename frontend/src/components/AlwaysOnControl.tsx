@@ -27,8 +27,6 @@ import { LIVE_SUMMARY_THRESHOLDS } from '../services/inBrowserLLM';
 import AudioMeter from './AudioMeter';
 import SessionMicChip from './SessionMicChip';
 import ConfirmModal from './ConfirmModal';
-import RecordingConsentModal from './RecordingConsentModal';
-import { hasRecordingConsent, rememberRecordingConsent } from '../constants/legal';
 import { showConfirm } from '../utils/notifications';
 import {
   isTabCaptureSupported,
@@ -583,10 +581,6 @@ export default function AlwaysOnControl() {
   // Discard surfaces the consequences before firing.
   const [discardOpen, setDiscardOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
-  // Legal: pre-record consent gate (AUP §2.3). Shown once per browser session
-  // before the first recording start; confirmation is remembered client-side.
-  const [consentOpen, setConsentOpen] = useState(false);
-  // Brief inline "copied" indicator next to the session id chip.
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   // First-time onboarding hint for the audio-source picker. Lazy-init
   // from localStorage so SSR-style guards still work and we only touch
@@ -794,17 +788,6 @@ export default function AlwaysOnControl() {
         onCancel={alwaysOn.clearStartBlocked}
       />
 
-      {/* Legal: pre-record consent gate (AUP §2.3). Confirming records consent
-          for the session (client-side v1) and then starts recording. */}
-      <RecordingConsentModal
-        open={consentOpen}
-        onConfirm={() => {
-          rememberRecordingConsent();
-          setConsentOpen(false);
-          alwaysOn.start();
-        }}
-        onCancel={() => setConsentOpen(false)}
-      />
 
 
       {/* Privacy-mode banners: live notice when local-only is active for
@@ -1057,11 +1040,16 @@ export default function AlwaysOnControl() {
           {alwaysOn.state === 'idle' ? (
             <button
               onClick={() => {
-                // Legal consent gate (AUP §2.3) before recording starts. If
-                // consent was already confirmed this session, start directly;
-                // otherwise surface the prompt and start on confirmation.
-                if (hasRecordingConsent()) alwaysOn.start();
-                else setConsentOpen(true);
+                // No pre-record consent gate. Meeting-Ops is a tool for
+                // professionals and individuals recording their own meetings;
+                // responsibility for notifying the other parties sits with the
+                // person recording, as it does for every product in this
+                // category. The prompt that used to live here stored its
+                // answer in sessionStorage ONLY -- never server-side -- so it
+                // produced the appearance of a consent record without being
+                // one, while adding friction to every single recording.
+                // Disclosure lives in the AUP and the privacy page instead.
+                alwaysOn.start();
               }}
               className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500"
             >
