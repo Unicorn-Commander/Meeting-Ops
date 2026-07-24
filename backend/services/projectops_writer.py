@@ -21,10 +21,8 @@ What this ISN'T: bidirectional sync. We don't poll PO. We don't roll PO
 tasks back on meeting delete (PO owns its own delete UX). Source of truth
 for the *meeting side* is ``action_items``; for the *task side* it's PO.
 
-Idempotency: the link is stamped onto ``action_items.raw_payload`` (an
-existing nullable JSONB column — no migration). A row that already carries
-``raw_payload.po_task_id`` is never re-created; the writer only (best-effort)
-nudges the PO task's status if the local item has since been marked done.
+Idempotency: legacy direct links remain readable from ``raw_payload``. The
+propose/review lifecycle uses explicit ActionItem linkage columns.
 
 Failure posture: the writer NEVER raises into the recording pipeline.
 Every exception is logged + swallowed (top-level catch). When
@@ -74,17 +72,6 @@ PROJECT_APP_PROJECTOPS = "project-ops"
 # Defaults for created tasks (per spec).
 DEFAULT_TASK_PRIORITY = "MEDIUM"
 DEFAULT_TASK_TYPE = "OTHER"
-
-# Meeting-Ops action-item status -> Project-Ops TaskStatus, for the
-# marked-done propagation path. Only statuses with a sensible PO analog
-# are mapped; anything else leaves the PO task untouched.
-_LOCAL_TO_PO_STATUS = {
-    "done": "COMPLETED",
-    "cancelled": "CANCELLED",
-    "doing": "IN_PROGRESS",
-    "todo": "PENDING",
-}
-
 
 @dataclass(frozen=True)
 class ProjectOpsWriteResult:
@@ -249,17 +236,22 @@ def _stamp_item(item: Any, *, task_id: str, project_number: Optional[str]) -> No
         payload[STAMP_PROJECT_NUMBER] = project_number
     payload[STAMP_SYNCED_AT] = _utcnow_iso()
     item.raw_payload = payload
+    item.project_ops_link_state = "approved_linked"
+    item.project_ops_task_id = task_id
+    item.project_ops_project_number = project_number
+    item.project_ops_last_sync_attempt_at = datetime.now(timezone.utc)
+    item.project_ops_last_synced_at = datetime.now(timezone.utc)
+    item.project_ops_sync_error = None
 
 
-def _stamp_triage(item: Any) -> None:
+def _stamp_triage(item: Any, proposal_id: Optional[str] = None) -> None:
     """Mark an action item as submitted to the Project-Ops triage inbox.
     The idempotency marker for the triage path (mirrors ``_stamp_item`` but
     carries no task id — no task exists until a human approves in PO).
     Reassigns the dict so SQLAlchemy flags the JSONB column dirty."""
-    payload = dict(item.raw_payload or {})
-    payload[STAMP_TRIAGE_SUBMITTED_AT] = _utcnow_iso()
-    payload[STAMP_TRIAGE_SOURCE_TYPE] = TRIAGE_SOURCE_TYPE
-    item.raw_payload = payload
+    from services.projectops_lifecycle import mark_proposed
+
+    mark_proposed(item, proposal_id)
 
 
 # Session-level marker keys (written to RecordingSession.processing_metadata)
@@ -491,10 +483,9 @@ async def write_action_items_to_projectops(
             for item in action_items:
                 existing = (item.raw_payload or {}).get(STAMP_TASK_ID)
                 if existing:
-                    # Already bridged. Don't duplicate; best-effort nudge
-                    # the PO task status if the local item moved on.
+                    # Already bridged. Don't duplicate. Project-Ops owns task
+                    # status; local checkbox changes never update it.
                     skipped += 1
-                    await _maybe_propagate_status(active_client, item, existing)
                     continue
 
                 try:
@@ -597,11 +588,8 @@ async def submit_action_items_to_triage(
     Items already bridged via the direct path (``po_task_id`` set) are left
     alone (not double-filed).
 
-    Note: triage-routed items are NOT linked back with a ``po_task_id`` (no
-    task exists until approval in PO), so the MO->PO marked-done status
-    propagation does not apply to them — PO owns the task lifecycle from
-    approval onward. The direct ``create_task`` path (and its status
-    propagation) remains available for explicit / backfill use.
+    A bounded reconciliation job reads approval/task links back after review.
+    Project-Ops owns task status; Meeting-Ops local completion never updates it.
     """
     from services.projectops_client import ProjectOpsClient, ProjectOpsClientError
 
@@ -695,7 +683,10 @@ async def submit_action_items_to_triage(
             pending = [
                 it
                 for it in action_items
-                if not (it.raw_payload or {}).get(STAMP_TRIAGE_SUBMITTED_AT)
+                if getattr(it, "project_ops_link_state", "local_only")
+                in {"local_only", "sync_failed"}
+                and not getattr(it, "project_ops_task_id", None)
+                and not (it.raw_payload or {}).get(STAMP_TRIAGE_SUBMITTED_AT)
                 and not (it.raw_payload or {}).get(STAMP_TASK_ID)
             ]
             already = len(action_items) - len(pending)
@@ -739,6 +730,11 @@ async def submit_action_items_to_triage(
                 _stamp_session_push_failure(
                     db, session, mode=completion_mode, detail=detail
                 )
+                from services.projectops_lifecycle import mark_sync_failed
+
+                for item in pending:
+                    mark_sync_failed(item, "WORKSPACE_NOT_PROVISIONED")
+                db.commit()
                 return ProjectOpsWriteResult(
                     ok=False,
                     mode="error",
@@ -764,6 +760,11 @@ async def submit_action_items_to_triage(
                 _stamp_session_push_failure(
                     db, session, mode=completion_mode, detail=detail
                 )
+                from services.projectops_lifecycle import mark_sync_failed
+
+                for item in pending:
+                    mark_sync_failed(item, "FEDERATION_TOKEN_UNAVAILABLE")
+                db.commit()
                 return ProjectOpsWriteResult(
                     ok=False,
                     mode="error",
@@ -792,6 +793,11 @@ async def submit_action_items_to_triage(
                 _stamp_session_push_failure(
                     db, session, mode=completion_mode, detail=str(exc)
                 )
+                from services.projectops_lifecycle import mark_sync_failed
+
+                for item in pending:
+                    mark_sync_failed(item, "PROJECT_OPS_UNAVAILABLE")
+                db.commit()
                 return ProjectOpsWriteResult(
                     ok=False,
                     mode="error",
@@ -799,8 +805,18 @@ async def submit_action_items_to_triage(
                     detail=str(exc)[:200],
                 )
 
+            proposals_by_source = {
+                str(proposal.get("sourceActionItemId")): proposal
+                for proposal in result.get("proposals", [])
+                if isinstance(proposal, dict)
+                and proposal.get("sourceActionItemId") is not None
+            }
             for it in pending:
-                _stamp_triage(it)
+                proposal = proposals_by_source.get(str(it.id))
+                _stamp_triage(
+                    it,
+                    proposal.get("id") if proposal else None,
+                )
             db.commit()
             _clear_session_push_failure(db, session)
 
@@ -853,63 +869,19 @@ def _ref_as_number(project_ref: str) -> Optional[str]:
 async def _maybe_propagate_status(
     client: Any, item: Any, task_id: str
 ) -> None:
-    """Best-effort: if the local action item has a PO-mappable status,
-    nudge the linked PO task. Swallows everything — this runs inside the
-    skip path and must not break idempotent re-runs."""
-    po_status = _LOCAL_TO_PO_STATUS.get((item.status or "").strip().lower())
-    # Only propagate terminal/meaningful transitions on re-run; "todo" ->
-    # PENDING is the PO default and not worth a round-trip.
-    if not po_status or po_status == "PENDING":
-        return
-    try:
-        await client.update_task_status(task_id=task_id, status=po_status)
-        logger.info(
-            "projectops_writer propagated status item=%s task=%s -> %s",
-            item.id,
-            task_id,
-            po_status,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "projectops_writer status propagation swallowed item=%s: %s",
-            item.id,
-            exc,
-        )
+    """Compatibility no-op: Project-Ops owns Task status."""
+    return None
 
 
 async def propagate_action_item_status(
     item: Any, *, client: Optional[Any] = None
 ) -> ProjectOpsWriteResult:
-    """Best-effort entry point for the action-items PATCH endpoint. When a
-    user marks an item done (etc.) in the Meeting-Ops UI and the row was
-    bridged to PO (``raw_payload.po_task_id`` set), nudge the PO task's
-    status. Never raises.
-    """
-    from services.projectops_client import ProjectOpsClient
-
-    try:
-        task_id = (item.raw_payload or {}).get(STAMP_TASK_ID)
-        if not task_id:
-            return ProjectOpsWriteResult(ok=True, mode="no-target")
-
-        owned_client = client is None
-        active_client = client or ProjectOpsClient()
-        try:
-            if not active_client.is_live:
-                return ProjectOpsWriteResult(ok=True, mode="no-op")
-            await _maybe_propagate_status(active_client, item, task_id)
-            return ProjectOpsWriteResult(ok=True, mode="live")
-        finally:
-            if owned_client:
-                await active_client.aclose()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "projectops_writer propagate_action_item_status swallowed "
-            "item=%s: %s",
-            getattr(item, "id", "?"),
-            exc,
-        )
-        return ProjectOpsWriteResult(ok=False, mode="error", detail=str(exc)[:200])
+    """Compatibility no-op preserving the explicit ownership boundary."""
+    return ProjectOpsWriteResult(
+        ok=True,
+        mode="ownership-boundary",
+        detail="Meeting-Ops local completion does not update Project-Ops",
+    )
 
 
 __all__ = [

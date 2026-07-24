@@ -13,6 +13,7 @@ import { SpeakerTimeline } from './SpeakerTimeline';
 import { TagChip } from './TagChip';
 import { Briefcase, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
+import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
 
 type TabKey = 'summary' | 'transcript' | 'speakers' | 'insights' | 'people';
 
@@ -39,6 +40,14 @@ interface ActionItem {
   status: string;
   sort_order: number;
   source: string;
+  project_ops_link_state: 'local_only' | 'proposed' | 'approved_linked' | 'rejected' | 'sync_failed';
+  project_ops_task_url?: string | null;
+  project_ops_project_number?: string | null;
+  project_ops_task_status?: string | null;
+  project_ops_submitted_at?: string | null;
+  project_ops_last_synced_at?: string | null;
+  project_ops_sync_error?: string | null;
+  project_ops_retry_count?: number;
 }
 
 interface SpeakerLinkRow {
@@ -136,6 +145,7 @@ interface Props {
   actionBusy: boolean;
   actionError: string | null;
   setActionStatus: (id: number, status: string) => Promise<void> | void;
+  requeueProjectOpsAction: (id: number) => Promise<void> | void;
   addActionItem: () => void;
   deleteActionItem: (id: number) => void;
 
@@ -201,6 +211,7 @@ export default function MobileSessionDetails(props: Props) {
     newActionOwner, setNewActionOwner,
     actionBusy, actionError,
     setActionStatus,
+    requeueProjectOpsAction,
     addActionItem,
     deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
@@ -478,6 +489,7 @@ export default function MobileSessionDetails(props: Props) {
             actionBusy={actionBusy}
             actionError={actionError}
             setActionStatus={setActionStatus}
+            requeueProjectOpsAction={requeueProjectOpsAction}
             addActionItem={addActionItem}
             deleteActionItem={deleteActionItem}
           />
@@ -676,6 +688,7 @@ function SummaryTab({
   newActionOwner, setNewActionOwner,
   actionBusy, actionError,
   setActionStatus,
+  requeueProjectOpsAction,
   addActionItem,
   deleteActionItem,
 }: {
@@ -695,9 +708,11 @@ function SummaryTab({
   actionBusy: boolean;
   actionError: string | null;
   setActionStatus: (id: number, status: string) => Promise<void> | void;
+  requeueProjectOpsAction: (id: number) => Promise<void> | void;
   addActionItem: () => void;
   deleteActionItem: (id: number) => void;
 }) {
+  const [expandedActionId, setExpandedActionId] = useState<number | null>(null);
   const hasPersistedActions = Array.isArray(actionItems) && actionItems.length > 0;
   // hasAnySummary includes the empty-state case for the LLM summary
   // sections. Action items live in their own table so we want to show
@@ -758,6 +773,12 @@ function SummaryTab({
                 const busy = actionUpdatingIds.has(item.id);
                 const done = item.status === 'done';
                 const cancelled = item.status === 'cancelled';
+                const poState = item.project_ops_link_state || 'local_only';
+                const hasProjectOpsHistory =
+                  poState === 'proposed' ||
+                  poState === 'approved_linked' ||
+                  (poState === 'sync_failed' &&
+                    Boolean(item.project_ops_submitted_at));
                 return (
                   <div
                     key={item.id}
@@ -778,27 +799,105 @@ function SummaryTab({
                         )}
                       </button>
                       <div className="min-w-0 flex-1">
-                        <p
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedActionId((current) =>
+                              current === item.id ? null : item.id
+                            )
+                          }
                           className={`text-sm font-medium ${done ? 'line-through text-zinc-400' : cancelled ? 'text-zinc-400' : 'text-zinc-100'}`}
+                          aria-expanded={expandedActionId === item.id}
                         >
                           {item.text}
-                        </p>
+                        </button>
                         {(item.owner || item.due_date || item.source === 'manual') && (
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
                             {item.owner && <span>Owner: {item.owner}</span>}
-                            {item.due_date && (
-                              <span>Due {new Date(item.due_date).toLocaleDateString()}</span>
+                            {formatLifecycleDate(item.due_date) && (
+                              <span>Due {formatLifecycleDate(item.due_date)}</span>
                             )}
                             {item.source === 'manual' && (
                               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300">manual</span>
                             )}
                           </div>
                         )}
+                        <div className="mt-1 text-[11px]">
+                          {poState === 'proposed' && (
+                            <span className="text-fuchsia-300">Project-Ops proposed</span>
+                          )}
+                          {poState === 'approved_linked' && (
+                            <span className="text-indigo-300">Project-Ops linked</span>
+                          )}
+                          {poState === 'rejected' && (
+                            <span className="text-zinc-400">Project-Ops rejected</span>
+                          )}
+                          {poState === 'sync_failed' && (
+                            <span className="text-red-300">Project-Ops sync failed</span>
+                          )}
+                        </div>
+                        {expandedActionId === item.id && (
+                          <div className="mt-2 rounded border border-zinc-700 bg-zinc-950/50 p-2 text-xs text-zinc-300">
+                            <p>
+                              {poState === 'approved_linked'
+                                ? `Project-Ops task status (read-only): ${
+                                    item.project_ops_task_status || 'unknown'
+                                  }.`
+                                : poState === 'proposed'
+                                  ? 'Awaiting human review in Project-Ops.'
+                                  : poState === 'rejected'
+                                    ? 'Rejected in Project-Ops; no task was created.'
+                                    : poState === 'sync_failed'
+                                      ? `Sync failed${
+                                          item.project_ops_sync_error
+                                            ? ` (${item.project_ops_sync_error})`
+                                            : ''
+                                        }.`
+                                      : 'Local to Meeting-Ops. The checkbox changes only the local status.'}
+                            </p>
+                            {formatLifecycleTimestamp(item.project_ops_last_synced_at) && (
+                              <p className="mt-1 text-[11px] text-zinc-500">
+                                Last successful sync{' '}
+                                {formatLifecycleTimestamp(item.project_ops_last_synced_at)}
+                                {item.project_ops_retry_count
+                                  ? ` · ${item.project_ops_retry_count} failed attempt${
+                                      item.project_ops_retry_count === 1 ? '' : 's'
+                                    }`
+                                  : ''}
+                              </p>
+                            )}
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {item.project_ops_task_url && (
+                                <a
+                                  href={item.project_ops_task_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="rounded bg-indigo-500 px-2 py-1 text-[11px] font-medium text-white"
+                                >
+                                  Open in Project-Ops
+                                </a>
+                              )}
+                              {(poState === 'sync_failed' ||
+                                poState === 'proposed' ||
+                                poState === 'approved_linked') && (
+                                <button
+                                  type="button"
+                                  onClick={() => requeueProjectOpsAction(item.id)}
+                                  disabled={busy}
+                                  className="inline-flex items-center gap-1 rounded border border-zinc-600 px-2 py-1 text-[11px]"
+                                >
+                                  <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
+                                  {poState === 'sync_failed' ? 'Retry sync' : 'Refresh status'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <button
                         type="button"
                         onClick={() => deleteActionItem(item.id)}
-                        disabled={busy}
+                        disabled={busy || hasProjectOpsHistory}
                         className="shrink-0 rounded p-1 text-zinc-400 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
                         aria-label="Remove action item"
                       >

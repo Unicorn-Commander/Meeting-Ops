@@ -267,3 +267,104 @@ def test_env_resolution_paths(monkeypatch):
     monkeypatch.setenv("PROJECTOPS_KC_CLIENT_SECRET", "secret")
     c2 = ProjectOpsClient()
     assert c2.auth_mode == "auto-refresh"  # auto wins even with API_KEY set
+
+
+@pytest.mark.asyncio
+async def test_source_lifecycle_requires_workspace_bearer_and_sends_bounded_ids():
+    from services.projectops_client import (
+        ProjectOpsClient,
+        ProjectOpsClientError,
+    )
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "version": "meeting-ops.action-lifecycle.v1",
+                "correlationId": "corr-client",
+                "items": [],
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ProjectOpsClient(
+        base_url="https://projectops.example.test/api/v1",
+        _client=http,
+    )
+
+    with pytest.raises(ProjectOpsClientError):
+        await client.get_source_lifecycle(["41"], bearer_override="")
+
+    result = await client.get_source_lifecycle(
+        ["41", "41", "42"],
+        bearer_override="workspace-bound-token",
+    )
+    assert result["items"] == []
+    assert len(requests) == 1
+    assert requests[0].headers["authorization"] == "Bearer workspace-bound-token"
+    assert json.loads(requests[0].content) == {
+        "sourceActionItemIds": ["41", "42"]
+    }
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_projectops_error_logs_do_not_include_remote_body_or_bearer(caplog):
+    import logging
+
+    from services.projectops_client import (
+        ProjectOpsClient,
+        ProjectOpsClientError,
+    )
+
+    secret_body = "meeting-content-that-must-not-be-logged"
+    secret_token = "workspace-bound-secret-token"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text=secret_body)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ProjectOpsClient(
+        base_url="https://projectops.example.test/api/v1",
+        _client=http,
+    )
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ProjectOpsClientError) as exc:
+            await client.get_source_lifecycle(
+                ["41"],
+                bearer_override=secret_token,
+            )
+
+    combined = " ".join(record.getMessage() for record in caplog.records)
+    assert secret_body not in combined
+    assert secret_token not in combined
+    assert secret_body not in str(exc.value)
+    assert secret_token not in str(exc.value)
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_source_lifecycle_rejects_an_unsupported_contract_version():
+    from services.projectops_client import ProjectOpsClient, ProjectOpsClientError
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"version": "wrong-contract", "items": []},
+            )
+        )
+    )
+    client = ProjectOpsClient(
+        base_url="https://projectops.example.test/api/v1",
+        _client=http,
+    )
+
+    with pytest.raises(ProjectOpsClientError, match="unsupported contract version"):
+        await client.get_source_lifecycle(
+            ["41"], bearer_override="workspace-bound-token"
+        )
+    await http.aclose()

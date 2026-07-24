@@ -322,6 +322,11 @@ class ActionItem(Base):
         Index("ix_action_items_session", "session_id"),
         Index("ix_action_items_organization", "organization_id"),
         Index("ix_action_items_org_status", "organization_id", "status"),
+        Index(
+            "ix_action_items_org_project_ops_state",
+            "organization_id",
+            "project_ops_link_state",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -367,6 +372,30 @@ class ActionItem(Base):
         server_default="final_summary",
     )
     raw_payload = Column(JSONB, nullable=True)
+    # Project-Ops federation lifecycle. This is deliberately separate from the
+    # local `status`: Meeting-Ops owns the checkbox above; Project-Ops owns its
+    # Task status. Reconciliation updates only these linkage fields.
+    project_ops_link_state = Column(
+        String(32),
+        nullable=False,
+        default="local_only",
+        server_default="local_only",
+    )
+    project_ops_proposal_id = Column(String(64), nullable=True)
+    project_ops_task_id = Column(String(64), nullable=True)
+    project_ops_task_url = Column(Text, nullable=True)
+    project_ops_project_number = Column(String(32), nullable=True)
+    project_ops_task_status = Column(String(32), nullable=True)
+    project_ops_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    project_ops_last_sync_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    project_ops_last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    # The upstream proposal timestamp is kept separately from the local
+    # reconciliation timestamp so stale responses cannot regress a link.
+    project_ops_remote_updated_at = Column(DateTime(timezone=True), nullable=True)
+    project_ops_sync_error = Column(String(200), nullable=True)
+    project_ops_retry_count = Column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
 
 class Transcription(Base):

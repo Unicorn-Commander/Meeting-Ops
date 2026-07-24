@@ -39,6 +39,31 @@ _ALLOWED_STATUSES = ("todo", "doing", "done", "cancelled")
 _ALLOWED_SOURCES = ("final_summary", "ai_insights", "manual")
 
 
+def _iso_or_none(value: object) -> Optional[str]:
+    """Serialize only real, valid datetimes from the persistence boundary.
+
+    A legacy or manually-repaired row must not turn an action-items response
+    into a 500 merely because one timestamp is malformed.
+    """
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return value.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _legacy_iso_or_none(value: object) -> Optional[str]:
+    """Return a legacy JSON timestamp only when it is valid ISO-8601."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value.strip()
+
+
 class ActionItemOut(BaseModel):
     id: int
     session_id: int
@@ -54,8 +79,17 @@ class ActionItemOut(BaseModel):
     source: str
     created_at: str
     completed_at: Optional[str] = None
+    project_ops_link_state: str
+    project_ops_proposal_id: Optional[str] = None
     project_ops_task_id: Optional[str] = None
+    project_ops_task_url: Optional[str] = None
     project_ops_project_number: Optional[str] = None
+    project_ops_task_status: Optional[str] = None
+    project_ops_submitted_at: Optional[str] = None
+    project_ops_last_sync_attempt_at: Optional[str] = None
+    project_ops_last_synced_at: Optional[str] = None
+    project_ops_sync_error: Optional[str] = None
+    project_ops_retry_count: int
     project_ops_triage_submitted_at: Optional[str] = None
 
 
@@ -139,22 +173,37 @@ def _to_out(item: ActionItem, session: Optional[RecordingSession]) -> ActionItem
             (session.title or session.name) if session is not None else None
         ),
         session_created_at=(
-            session.created_at.isoformat()
-            if session is not None and session.created_at
-            else None
+            _iso_or_none(session.created_at) if session is not None else None
         ),
         organization_id=item.organization_id,
         text=item.text,
         owner=item.owner,
-        due_date=item.due_date.isoformat() if item.due_date else None,
+        due_date=_iso_or_none(item.due_date),
         status=item.status,
         sort_order=item.sort_order,
         source=item.source,
-        created_at=item.created_at.isoformat() if item.created_at else "",
-        completed_at=item.completed_at.isoformat() if item.completed_at else None,
-        project_ops_task_id=raw_payload.get("po_task_id"),
-        project_ops_project_number=raw_payload.get("po_project_number"),
-        project_ops_triage_submitted_at=raw_payload.get("po_triage_submitted_at"),
+        created_at=_iso_or_none(item.created_at) or "",
+        completed_at=_iso_or_none(item.completed_at),
+        project_ops_link_state=item.project_ops_link_state or "local_only",
+        project_ops_proposal_id=item.project_ops_proposal_id,
+        project_ops_task_id=item.project_ops_task_id or raw_payload.get("po_task_id"),
+        project_ops_task_url=item.project_ops_task_url,
+        project_ops_project_number=(
+            item.project_ops_project_number
+            or raw_payload.get("po_project_number")
+        ),
+        project_ops_task_status=item.project_ops_task_status,
+        project_ops_submitted_at=_iso_or_none(item.project_ops_submitted_at),
+        project_ops_last_sync_attempt_at=_iso_or_none(
+            item.project_ops_last_sync_attempt_at
+        ),
+        project_ops_last_synced_at=_iso_or_none(item.project_ops_last_synced_at),
+        project_ops_sync_error=item.project_ops_sync_error,
+        project_ops_retry_count=int(item.project_ops_retry_count or 0),
+        project_ops_triage_submitted_at=(
+            _iso_or_none(item.project_ops_submitted_at)
+            or _legacy_iso_or_none(raw_payload.get("po_triage_submitted_at"))
+        ),
     )
 
 
@@ -177,7 +226,10 @@ async def list_action_items(
     query = (
         db.query(ActionItem, RecordingSession)
         .join(RecordingSession, ActionItem.session_id == RecordingSession.id)
-        .filter(ActionItem.organization_id == org_id)
+        .filter(
+            ActionItem.organization_id == org_id,
+            RecordingSession.organization_id == org_id,
+        )
     )
 
     if status:
@@ -221,7 +273,10 @@ async def get_action_item(
         raise HTTPException(status_code=404, detail="Action item not found")
     sess = (
         db.query(RecordingSession)
-        .filter(RecordingSession.id == item.session_id)
+        .filter(
+            RecordingSession.id == item.session_id,
+            RecordingSession.organization_id == org_id,
+        )
         .first()
     )
     return _to_out(item, sess)
@@ -295,7 +350,10 @@ async def update_action_item(
 
     session = (
         db.query(RecordingSession)
-        .filter(RecordingSession.id == item.session_id)
+        .filter(
+            RecordingSession.id == item.session_id,
+            RecordingSession.organization_id == org_id,
+        )
         .first()
     )
     if not session:
@@ -304,6 +362,21 @@ async def update_action_item(
         raise HTTPException(status_code=403, detail="Not permitted to edit this action item")
 
     fields = payload.model_fields_set
+    content_fields = fields.intersection({"text", "owner", "due_date"})
+    if content_fields and (
+        item.project_ops_link_state in {"proposed", "approved_linked"}
+        or (
+            item.project_ops_link_state == "sync_failed"
+            and item.project_ops_submitted_at is not None
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Project-Ops owns the submitted proposal/task content. "
+                "Local completion may still be changed independently."
+            ),
+        )
 
     if "status" in fields:
         new_status = (payload.status or "").strip().lower()
@@ -333,27 +406,66 @@ async def update_action_item(
     db.commit()
     db.refresh(item)
 
-    # Best-effort: if this action item was bridged to a Project-Ops task
-    # and its status changed (e.g. user marked it done), propagate the
-    # new status to PO. Never blocks the response; swallowed on any error
-    # and a clean no-op when PO is unconfigured.
-    if "status" in fields and (item.raw_payload or {}).get("po_task_id"):
-        try:
-            from services.projectops_writer import propagate_action_item_status
-
-            await propagate_action_item_status(item)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "action_items: PO status propagation swallowed id=%s: %s",
-                item.id,
-                exc,
-            )
-
     logger.info(
         "action_items: patch id=%s user=%s fields=%s",
         item.id,
         current_user.id,
         sorted(fields),
+    )
+    return _to_out(item, session)
+
+
+@router.post("/{item_id}/project-ops/requeue", response_model=ActionItemOut)
+async def requeue_project_ops_action_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Retry/reconcile exactly one action item's Project-Ops lifecycle."""
+    org_id = active_org.organization.id
+    item = (
+        db.query(ActionItem)
+        .filter(ActionItem.id == item_id, ActionItem.organization_id == org_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not found")
+    session = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.id == item.session_id,
+            RecordingSession.organization_id == org_id,
+        )
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Parent session not found")
+    if not _can_edit_session(session, current_user, active_org):
+        raise HTTPException(
+            status_code=403,
+            detail="Not permitted to requeue this action item",
+        )
+
+    try:
+        from services.projectops_lifecycle import requeue_projectops_action_item
+
+        await requeue_projectops_action_item(
+            db=db,
+            organization_id=org_id,
+            item_id=item_id,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Action item not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    db.refresh(item)
+    logger.info(
+        "action_items: Project-Ops requeue id=%s org=%s user=%s",
+        item.id,
+        org_id,
+        current_user.id,
     )
     return _to_out(item, session)
 
@@ -376,11 +488,30 @@ async def delete_action_item(
 
     session = (
         db.query(RecordingSession)
-        .filter(RecordingSession.id == item.session_id)
+        .filter(
+            RecordingSession.id == item.session_id,
+            RecordingSession.organization_id == org_id,
+        )
         .first()
     )
     if session and not _can_edit_session(session, current_user, active_org):
         raise HTTPException(status_code=403, detail="Not permitted to delete this action item")
+    if (
+        item.project_ops_link_state in {"proposed", "approved_linked"}
+        or item.project_ops_task_id
+        or item.project_ops_proposal_id
+        or (
+            item.project_ops_link_state == "sync_failed"
+            and item.project_ops_submitted_at is not None
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This item has Project-Ops lifecycle history and cannot be "
+                "deleted from Meeting-Ops."
+            ),
+        )
 
     db.delete(item)
     db.commit()

@@ -41,6 +41,7 @@ import SessionDetailsTabs, { type SessionDetailsTab } from '../components/Sessio
 import { UpgradeBanner } from '../components/UpgradeBanner';
 import { config, appendWsToken } from '../config';
 import { showConfirm } from '../utils/notifications';
+import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
 import { clearAllHydratedCaches } from '../utils/cachedState';
 import {
   deleteLocalSession,
@@ -251,8 +252,17 @@ interface ActionItem {
   source: string;
   created_at?: string | null;
   completed_at?: string | null;
+  project_ops_link_state: 'local_only' | 'proposed' | 'approved_linked' | 'rejected' | 'sync_failed';
+  project_ops_proposal_id?: string | null;
   project_ops_task_id?: string | null;
+  project_ops_task_url?: string | null;
   project_ops_project_number?: string | null;
+  project_ops_task_status?: string | null;
+  project_ops_submitted_at?: string | null;
+  project_ops_last_sync_attempt_at?: string | null;
+  project_ops_last_synced_at?: string | null;
+  project_ops_sync_error?: string | null;
+  project_ops_retry_count?: number;
   project_ops_triage_submitted_at?: string | null;
 }
 
@@ -409,7 +419,18 @@ export const SessionDetails: React.FC = () => {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionUpdatingIds, setActionUpdatingIds] = useState<Set<number>>(new Set());
-  const [expandedActionId, setExpandedActionId] = useState<number | null>(null);
+  const requestedActionId = Number(searchParams.get('actionItem'));
+  const [expandedActionId, setExpandedActionId] = useState<number | null>(
+    Number.isInteger(requestedActionId) && requestedActionId > 0
+      ? requestedActionId
+      : null,
+  );
+  useEffect(() => {
+    const next = Number(searchParams.get('actionItem'));
+    if (Number.isInteger(next) && next > 0) {
+      setExpandedActionId(next);
+    }
+  }, [searchParams]);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const speakerSampleEndRef = useRef<number | null>(null);
@@ -1183,6 +1204,40 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const requeueProjectOpsAction = async (id: number) => {
+    setActionUpdatingIds((prev) => new Set(prev).add(id));
+    setActionError(null);
+    try {
+      const res = await fetch(
+        `${config.apiUrl}/api/action-items/${id}/project-ops/requeue`,
+        {
+          method: 'POST',
+          headers: participantHeaders(),
+        },
+      );
+      if (!res.ok) {
+        let body: any = null;
+        try { body = await res.json(); } catch { /* non-JSON */ }
+        setActionError(formatBackendError(body, res.status, 'Project-Ops retry failed'));
+        return;
+      }
+      const updated = await res.json();
+      setActionItems((prev) =>
+        prev.map((row) => (row.id === id ? { ...row, ...updated } : row)),
+      );
+    } catch (e) {
+      setActionError(
+        e instanceof Error ? e.message : 'Project-Ops retry failed',
+      );
+    } finally {
+      setActionUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
   const addActionItem = async () => {
     const text = newActionText.trim();
     if (!text) return;
@@ -1218,6 +1273,19 @@ export const SessionDetails: React.FC = () => {
           source: created.source,
           created_at: created.created_at ?? null,
           completed_at: created.completed_at ?? null,
+          project_ops_link_state: created.project_ops_link_state ?? 'local_only',
+          project_ops_proposal_id: created.project_ops_proposal_id ?? null,
+          project_ops_task_id: created.project_ops_task_id ?? null,
+          project_ops_task_url: created.project_ops_task_url ?? null,
+          project_ops_project_number: created.project_ops_project_number ?? null,
+          project_ops_task_status: created.project_ops_task_status ?? null,
+          project_ops_submitted_at: created.project_ops_submitted_at ?? null,
+          project_ops_last_sync_attempt_at:
+            created.project_ops_last_sync_attempt_at ?? null,
+          project_ops_last_synced_at:
+            created.project_ops_last_synced_at ?? null,
+          project_ops_sync_error: created.project_ops_sync_error ?? null,
+          project_ops_retry_count: created.project_ops_retry_count ?? 0,
         },
       ]);
       setNewActionText('');
@@ -1950,6 +2018,7 @@ export const SessionDetails: React.FC = () => {
     newActionOwner, setNewActionOwner,
     actionBusy, actionError,
     setActionStatus,
+    requeueProjectOpsAction,
     addActionItem,
     deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
@@ -3924,6 +3993,12 @@ export const SessionDetails: React.FC = () => {
                   const busy = actionUpdatingIds.has(item.id);
                   const done = item.status === 'done';
                   const cancelled = item.status === 'cancelled';
+                  const poState = item.project_ops_link_state || 'local_only';
+                  const hasProjectOpsHistory =
+                    poState === 'proposed' ||
+                    poState === 'approved_linked' ||
+                    (poState === 'sync_failed' &&
+                      Boolean(item.project_ops_submitted_at));
                   return (
                     <li
                       key={item.id}
@@ -3968,33 +4043,94 @@ export const SessionDetails: React.FC = () => {
                           </button>
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
                             {item.owner && <span>Owner: {item.owner}</span>}
-                            {item.due_date && (
-                              <span>Due {new Date(item.due_date).toLocaleDateString()}</span>
+                            {formatLifecycleDate(item.due_date) && (
+                              <span>Due {formatLifecycleDate(item.due_date)}</span>
                             )}
                             {item.source === 'manual' && (
                               <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600">manual</span>
                             )}
-                            {item.project_ops_task_id && (
+                            {poState === 'approved_linked' && (
                               <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-indigo-700">
-                                Project-Ops task
+                                Project-Ops linked
                               </span>
                             )}
-                            {!item.project_ops_task_id && item.project_ops_triage_submitted_at && (
+                            {poState === 'proposed' && (
                               <span className="rounded bg-purple-100 px-1.5 py-0.5 text-purple-700">
-                                Project-Ops triage
+                                Project-Ops proposed
+                              </span>
+                            )}
+                            {poState === 'rejected' && (
+                              <span className="rounded bg-gray-200 px-1.5 py-0.5 text-gray-700">
+                                Project-Ops rejected
+                              </span>
+                            )}
+                            {poState === 'sync_failed' && (
+                              <span className="rounded bg-red-100 px-1.5 py-0.5 text-red-700">
+                                Project-Ops sync failed
                               </span>
                             )}
                           </div>
                           {expandedActionId === item.id && (
                             <div className="mt-3 rounded border border-gray-200 bg-white p-3">
                               <p className="text-xs text-gray-600">
-                                {item.project_ops_task_id
+                                {poState === 'approved_linked'
                                   ? `Linked to ${
                                       item.project_ops_project_number || 'Project-Ops'
-                                    }. Status changes here are also sent to the linked task.`
-                                  : item.project_ops_triage_submitted_at
+                                    }. Project-Ops task status is read-only here: ${
+                                      item.project_ops_task_status || 'unknown'
+                                    }.`
+                                  : poState === 'proposed'
                                     ? 'Submitted to Project-Ops triage. It becomes a task only after approval in Project-Ops.'
-                                    : 'This item currently lives only in Meeting-Ops. No Project-Ops task has been created.'}
+                                    : poState === 'rejected'
+                                      ? 'Rejected in Project-Ops. No task was created.'
+                                      : poState === 'sync_failed'
+                                        ? `The last Project-Ops sync failed${
+                                            item.project_ops_sync_error
+                                              ? ` (${item.project_ops_sync_error})`
+                                              : ''
+                                          }.`
+                                        : 'This item currently lives only in Meeting-Ops. No Project-Ops task has been created.'}
+                              </p>
+                              {formatLifecycleTimestamp(item.project_ops_last_synced_at) && (
+                                <p className="mt-1 text-[11px] text-gray-500">
+                                  Last successful sync{' '}
+                                  {formatLifecycleTimestamp(item.project_ops_last_synced_at)}
+                                  {item.project_ops_retry_count
+                                    ? ` · ${item.project_ops_retry_count} failed attempt${
+                                        item.project_ops_retry_count === 1 ? '' : 's'
+                                      }`
+                                    : ''}
+                                </p>
+                              )}
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {item.project_ops_task_url && (
+                                  <a
+                                    href={item.project_ops_task_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-700"
+                                  >
+                                    Open in Project-Ops
+                                  </a>
+                                )}
+                                {(poState === 'sync_failed' ||
+                                  poState === 'proposed' ||
+                                  poState === 'approved_linked') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => requeueProjectOpsAction(item.id)}
+                                    disabled={busy}
+                                    className="inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                                  >
+                                    <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
+                                    {poState === 'sync_failed'
+                                      ? 'Retry Project-Ops sync'
+                                      : 'Refresh Project-Ops status'}
+                                  </button>
+                                )}
+                              </div>
+                              <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                                Meeting-Ops status
                               </p>
                               <div className="mt-2 flex flex-wrap gap-1.5">
                                 {[
@@ -4024,9 +4160,13 @@ export const SessionDetails: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => deleteActionItem(item.id)}
-                          disabled={busy}
+                          disabled={busy || hasProjectOpsHistory}
                           className="shrink-0 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
-                          title="Remove action item"
+                          title={
+                            hasProjectOpsHistory
+                              ? 'Project-Ops-linked items retain their Meeting-Ops source record'
+                              : 'Remove action item'
+                          }
                         >
                           <X className="h-3.5 w-3.5" />
                         </button>

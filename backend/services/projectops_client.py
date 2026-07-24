@@ -1,8 +1,7 @@
-"""HTTP client for Project-Ops — task write surface.
+"""HTTP client for the Project-Ops action-item federation surface.
 
-Used by ``services.projectops_writer`` to push Meeting-Ops action items
-into Project-Ops as tasks on a per-org project. One-way write only
-(Meeting-Ops -> Project-Ops); no read-back / sync.
+Used by ``services.projectops_writer`` to propose Meeting-Ops action items and
+by ``services.projectops_lifecycle`` to read back approval/task links.
 
 Project-Ops API surface used here (verified live against
 ``http://project-ops-backend:3201`` on bigboy — a NestJS app, global
@@ -20,9 +19,9 @@ prefix ``/api/v1``):
     201 -> the created task incl. ``id`` + ``project.projectNumber``.
     Guarded by JwtAuthGuard + RolesGuard (ADMIN | MANAGER | STAFF).
 
-  PATCH /api/v1/tasks/{id}/status
-    body: {status}  (PENDING|IN_PROGRESS|WAITING_FOR_CLIENT|COMPLETED|CANCELLED)
-    200 -> the updated task. Used by the marked-done propagation path.
+  POST /api/v1/triage/source-lifecycle
+    body: {sourceActionItemIds: [<Meeting-Ops action_items.id>]}
+    200 -> content-free proposal/task linkage records for the token workspace.
 
 Auth — two modes, picked at client construction:
 
@@ -64,6 +63,9 @@ import httpx
 
 
 logger = logging.getLogger(__name__)
+
+
+SOURCE_LIFECYCLE_VERSION = "meeting-ops.action-lifecycle.v1"
 
 
 # Internal default keeps the client working inside the bigboy stack with
@@ -492,9 +494,9 @@ class ProjectOpsClient:
     async def update_task_status(
         self, *, task_id: str, status: str
     ) -> dict[str, Any]:
-        """Patch a task's status (e.g. -> COMPLETED when the user marks
-        the action item done in Meeting-Ops). Returns the updated task
-        dict; raises ``ProjectOpsClientError`` on terminal failure."""
+        """Legacy explicit task-status client. The action-item lifecycle never
+        calls this: Project-Ops owns its Task status, and Meeting-Ops local
+        checkbox changes must not imply Project-Ops completion."""
         if not self.is_live:
             raise ProjectOpsClientError(
                 "update_task_status called while not configured"
@@ -503,6 +505,48 @@ class ProjectOpsClient:
             "PATCH", f"/tasks/{task_id}/status", json={"status": status}
         )
         return data if isinstance(data, dict) else {}
+
+    async def get_source_lifecycle(
+        self,
+        source_action_item_ids: list[str],
+        *,
+        bearer_override: str,
+    ) -> dict[str, Any]:
+        """Read proposal/task lifecycle records for up to 100 Meeting-Ops ids.
+
+        The workspace-bound federation bearer is mandatory; there is no
+        default-tenant fallback. The Project-Ops response contains ids/statuses
+        only, never meeting or action-item text.
+        """
+        if any(not isinstance(value, str) for value in source_action_item_ids):
+            raise ProjectOpsClientError(
+                "source lifecycle action-item ids must be strings"
+            )
+        ids = list(dict.fromkeys(value.strip() for value in source_action_item_ids))
+        ids = [value for value in ids if value]
+        if len(ids) > 100:
+            raise ProjectOpsClientError(
+                "source lifecycle reconciliation is limited to 100 items"
+            )
+        if not bearer_override:
+            raise ProjectOpsClientError(
+                "source lifecycle requires a workspace-bound federation token"
+            )
+        data = await self._request_with_retries(
+            "POST",
+            "/triage/source-lifecycle",
+            json={"sourceActionItemIds": ids},
+            bearer_override=bearer_override,
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ProjectOpsClientError(
+                "source lifecycle returned an unexpected response shape"
+            )
+        if data.get("version") != SOURCE_LIFECYCLE_VERSION:
+            raise ProjectOpsClientError(
+                "source lifecycle returned an unsupported contract version"
+            )
+        return data
 
     async def submit_candidate_action_items(
         self,
@@ -704,18 +748,16 @@ class ProjectOpsClient:
                             f"{method} {path}: non-JSON 2xx body: {exc}"
                         )
                 if 400 <= resp.status_code < 500:
-                    body = resp.text[:300]
                     logger.warning(
-                        "projectops_client 4xx %s %s %s body=%s",
+                        "projectops_client 4xx %s %s %s",
                         resp.status_code,
                         method,
                         path,
-                        body,
                     )
                     raise ProjectOpsClientError(
-                        f"HTTP {resp.status_code}: {body}"
+                        f"HTTP {resp.status_code} from {method} {path}"
                     )
-                last_detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                last_detail = f"HTTP {resp.status_code} from {method} {path}"
             except ProjectOpsClientError:
                 raise
             except (

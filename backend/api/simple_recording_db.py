@@ -185,6 +185,17 @@ def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
+def _safe_iso_or_none(value: Any) -> Optional[str]:
+    """Serialize persisted timestamps without letting malformed legacy data
+    break a session-detail response."""
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return value.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _session_recording_window(
     session: DBRecordingSession,
 ) -> Optional[tuple[datetime, datetime, float]]:
@@ -453,12 +464,32 @@ def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict
             "id": item.id,
             "text": item.text,
             "owner": item.owner,
-            "due_date": item.due_date.isoformat() if item.due_date else None,
+            "due_date": _safe_iso_or_none(item.due_date),
             "status": item.status,
             "sort_order": item.sort_order,
             "source": item.source,
-            "created_at": item.created_at.isoformat() if item.created_at else None,
-            "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+            "created_at": _safe_iso_or_none(item.created_at),
+            "completed_at": _safe_iso_or_none(item.completed_at),
+            "project_ops_link_state": item.project_ops_link_state or "local_only",
+            "project_ops_proposal_id": item.project_ops_proposal_id,
+            "project_ops_task_id": item.project_ops_task_id,
+            "project_ops_task_url": item.project_ops_task_url,
+            "project_ops_project_number": item.project_ops_project_number,
+            "project_ops_task_status": item.project_ops_task_status,
+            "project_ops_submitted_at": _safe_iso_or_none(
+                item.project_ops_submitted_at
+            ),
+            "project_ops_last_sync_attempt_at": _safe_iso_or_none(
+                item.project_ops_last_sync_attempt_at
+            ),
+            "project_ops_last_synced_at": _safe_iso_or_none(
+                item.project_ops_last_synced_at
+            ),
+            "project_ops_remote_updated_at": _safe_iso_or_none(
+                item.project_ops_remote_updated_at
+            ),
+            "project_ops_sync_error": item.project_ops_sync_error,
+            "project_ops_retry_count": int(item.project_ops_retry_count or 0),
         })
     return out
 

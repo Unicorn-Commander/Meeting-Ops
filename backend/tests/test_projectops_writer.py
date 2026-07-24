@@ -71,6 +71,25 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _writer_schema():
+    """Use the database seam directly instead of booting optional NPU routes."""
+    from auth import models as auth_models  # noqa: F401
+    from database import models_rooms  # noqa: F401
+    from database.database import engine
+    from database.models import Base
+
+    Base.metadata.create_all(bind=engine)
+    yield
+    Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def client():
+    """Compatibility fixture: these writer tests do not exercise HTTP."""
+    return None
+
+
 class _FakeProjectOpsClient:
     """Drop-in ProjectOpsClient stub. Records every call; makes no HTTP
     requests. ``create_task`` returns a fixed task id + project number
@@ -641,11 +660,11 @@ def test_override_beats_org_default(client):
 
 
 # ---------------------------------------------------------------------------
-# 8. Marked-done propagates COMPLETED on the skip path
+# 8. Local completion never propagates Project-Ops task completion
 # ---------------------------------------------------------------------------
 
 
-def test_done_status_propagates_on_replay(client):
+def test_done_status_does_not_propagate_on_replay(client):
     from services.projectops_writer import write_action_items_to_projectops
     from database.database import SessionLocal
 
@@ -681,9 +700,9 @@ def test_done_status_propagates_on_replay(client):
 
     assert result.created == 0
     assert result.skipped == 2
-    # Only the 'done' item triggers a status nudge; 'todo' -> PENDING is skipped.
-    assert ("task-A", "COMPLETED") in stub.status_updates
-    assert all(tid != "task-B" for tid, _ in stub.status_updates)
+    # Project-Ops owns task status. Even a linked local "done" item produces no
+    # task-status request.
+    assert stub.status_updates == []
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +816,8 @@ def test_triage_submits_and_stamps(client):
         assert rp.get("po_triage_submitted_at", "").endswith("Z")
         assert rp.get("po_triage_source_type") == "MEETING_OPS"
         assert rp.get("po_task_id") is None
+        assert it.project_ops_link_state == "proposed"
+        assert it.project_ops_last_synced_at is not None
 
 
 def test_triage_replay_skips_submitted(client):
@@ -959,9 +980,11 @@ def test_triage_failure_leaves_rows_unstamped(client):
 
     assert result.ok is False
     assert result.mode == "error"
-    # Nothing stamped -> items get retried on the next finalize/backfill.
+    # No submission stamp, but the recoverable failure is visible per item.
     for it in _items_for_session(session_id):
         assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
+        assert it.project_ops_link_state == "sync_failed"
+        assert it.project_ops_sync_error == "PROJECT_OPS_UNAVAILABLE"
 
 
 def test_triage_skips_direct_bridged_items(client):
@@ -1098,6 +1121,11 @@ def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
         (item.raw_payload or {}).get("po_triage_submitted_at") is None
         for item in _items_for_session(session_id)
     )
+    assert all(
+        item.project_ops_link_state == "sync_failed"
+        and item.project_ops_sync_error == "WORKSPACE_NOT_PROVISIONED"
+        for item in _items_for_session(session_id)
+    )
     assert any("workspace is not provisioned" in rec.getMessage() for rec in caplog.records)
 
 
@@ -1134,6 +1162,11 @@ def test_triage_fails_closed_when_federation_token_unavailable(
     assert stub.submitted == []
     assert all(
         (item.raw_payload or {}).get("po_triage_submitted_at") is None
+        for item in _items_for_session(session_id)
+    )
+    assert all(
+        item.project_ops_link_state == "sync_failed"
+        and item.project_ops_sync_error == "FEDERATION_TOKEN_UNAVAILABLE"
         for item in _items_for_session(session_id)
     )
     assert any(

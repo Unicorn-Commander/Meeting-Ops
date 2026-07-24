@@ -5,6 +5,7 @@ import { config } from '../../config';
 import { useOrg } from '../../contexts/OrgContext';
 import type { DashboardSession } from '../../pages/Dashboard';
 import { extractActionItems, type NormalizedActionItem } from './actionItems';
+import { formatLifecycleDate, formatLifecycleTimestamp } from '../../utils/lifecycleTimestamp';
 
 interface RecentActionItemsProps {
   sessions: DashboardSession[];
@@ -22,6 +23,12 @@ interface ActionItemRow {
   owner: string | null;
   due_date: string | null;
   status: string;
+  project_ops_link_state: 'local_only' | 'proposed' | 'approved_linked' | 'rejected' | 'sync_failed';
+  project_ops_task_url?: string | null;
+  project_ops_task_status?: string | null;
+  project_ops_last_synced_at?: string | null;
+  project_ops_sync_error?: string | null;
+  project_ops_retry_count?: number;
 }
 
 const LIMIT = 10;
@@ -165,6 +172,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
         {showRows &&
           rows.map((item) => {
             const busy = updatingIds.has(item.id);
+            const lastSynced = formatLifecycleTimestamp(item.project_ops_last_synced_at);
             return (
               <div key={item.id} className="px-4 py-3">
                 <div className="flex items-start gap-3">
@@ -184,7 +192,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                   </button>
                   <div className="min-w-0 flex-1">
                     <Link
-                      to={`/sessions/${item.session_key}?tab=action_items`}
+                      to={`/sessions/${item.session_key}?tab=action_items&actionItem=${item.id}`}
                       className="text-sm text-zinc-100 transition hover:text-fuchsia-200 hover:underline"
                       title="Open this action item in its meeting"
                     >
@@ -197,9 +205,9 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                           {item.owner}
                         </span>
                       )}
-                      {item.due_date && (
+                      {formatLifecycleDate(item.due_date) && (
                         <span className="text-zinc-400">
-                          Due {new Date(item.due_date).toLocaleDateString()}
+                          Due {formatLifecycleDate(item.due_date)}
                         </span>
                       )}
                       {item.session_title && (
@@ -211,6 +219,40 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                           {item.session_title}
                         </Link>
                       )}
+                      {item.project_ops_link_state &&
+                        item.project_ops_link_state !== 'local_only' && (
+                          <>
+                            <span
+                              className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-300"
+                              title={
+                                item.project_ops_link_state === 'sync_failed'
+                                  ? item.project_ops_sync_error || 'Project-Ops sync failed'
+                                  : undefined
+                              }
+                            >
+                              Project-Ops{' '}
+                              {item.project_ops_link_state === 'approved_linked'
+                                ? `linked${item.project_ops_task_status ? ` · ${item.project_ops_task_status}` : ''}`
+                                : item.project_ops_link_state.replace('_', ' ')}
+                            </span>
+                            {item.project_ops_task_url && (
+                              <a
+                                href={item.project_ops_task_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(event) => event.stopPropagation()}
+                                className="font-medium text-indigo-300 transition hover:text-indigo-200 hover:underline"
+                              >
+                                Open in Project-Ops
+                              </a>
+                            )}
+                            {lastSynced && (
+                              <span title={`Last successful sync ${lastSynced}`}>
+                                synced{item.project_ops_retry_count ? ` · ${item.project_ops_retry_count} retries` : ''}
+                              </span>
+                            )}
+                          </>
+                        )}
                     </div>
                   </div>
                 </div>
