@@ -25,10 +25,13 @@ class ContactOpsPersonOut(BaseModel):
     person_id: str
     display_name: str
     email: Optional[str] = None
+    match_confidence: float
+    match_basis: str
 
 
 class ContactOpsPeopleSearchOut(BaseModel):
     items: list[ContactOpsPersonOut]
+    ambiguous: bool
 
 
 @router.get("/people/search", response_model=ContactOpsPeopleSearchOut)
@@ -45,4 +48,9 @@ async def search_people(
             detail="Active organization is not mapped to a federation workspace",
         )
     people = await contact_ops_resolver.search_people(q, workspace_id, limit=limit)
-    return {"items": people}
+    top = people[0].get("match_confidence") if people else None
+    ambiguous = bool(
+        top is not None
+        and sum(1 for person in people if person.get("match_confidence") == top) > 1
+    )
+    return {"items": people, "ambiguous": ambiguous}

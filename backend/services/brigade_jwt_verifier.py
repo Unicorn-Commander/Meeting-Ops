@@ -14,8 +14,8 @@ Trust contract (SUITE-IDENTITY 0.1):
   * ``aud`` == ``BRIGADE_EXPECTED_AUDIENCE``   (default "meeting-ops")
   * ``iss`` == ``BRIGADE_TRUSTED_ISSUER``      (default Brigade prod)
   * exp / nbf / iat required; 30s clock-skew leeway.
-  * Tenancy claim is ``workspace_id`` (Brigade retired ``org_id``); we
-    accept either, workspace_id first. Binding to a Meeting-Ops org is
+  * Tenancy claim is ``workspace_id`` (legacy ``org_id`` is not accepted).
+    Binding to a Meeting-Ops org is
     done by the caller (api.federation_meetings.org_for_workspace_id) —
     NEVER from a header.
 
@@ -267,7 +267,7 @@ def _verify(
         return _reject("iss-mismatch", kid=kid)
     if not claims.get("sub"):
         return _reject("missing-sub", kid=kid)
-    if not (claims.get("workspace_id") or claims.get("org_id")):
+    if not claims.get("workspace_id"):
         return _reject("missing-workspace-id", kid=kid)
 
     return BrigadeJWTVerificationResult(valid=True, claims=claims, reason=None)

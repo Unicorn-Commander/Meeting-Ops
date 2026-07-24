@@ -28,15 +28,18 @@ This surface is read-only; no writes back into Meeting-Ops.
 
 from __future__ import annotations
 
+import base64
 import json
+import hashlib
+import hmac
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from auth.models import Organization
@@ -46,6 +49,7 @@ from services.brigade_jwt_verifier import (
     extract_scopes,
     verify_brigade_jwt_with_reason,
 )
+from services import contact_ops_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +58,17 @@ router = APIRouter(prefix="/api/federation", tags=["federation"])
 # The read scope a Brigade token must carry to read meeting signal. The
 # Customer-Ops KC client is granted this; Brigade propagates it.
 READ_SCOPE = os.getenv("FEDERATION_MEETINGS_READ_SCOPE", "meetings:read")
+TRANSCRIPT_SCOPE = os.getenv(
+    "FEDERATION_MEETINGS_TRANSCRIPT_SCOPE",
+    "meetings:transcript.read",
+)
+CONTRACT_VERSION = "meeting-summary.v1"
 
 # Default page size for the meeting list; the contract caps to keep the
 # cockpit responsive.
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
+MAX_CURSOR_LENGTH = 2048
 
 # Meeting-Ops action-item status -> the {open,in_progress,done,cancelled}
 # vocab the Customer-Ops signal derivation counts on (todo->open etc).
@@ -114,7 +124,7 @@ def require_brigade_token(
         )
 
     claims = result.claims
-    workspace_id = str(claims.get("workspace_id") or claims.get("org_id") or "")
+    workspace_id = str(claims.get("workspace_id") or "")
     org = org_for_workspace_id(db, workspace_id)
     if org is None:
         logger.warning(
@@ -139,6 +149,14 @@ def _require_read_scope(ctx: FederationContext) -> None:
     if READ_SCOPE not in ctx.scopes:
         raise HTTPException(
             status_code=403, detail=f"missing required scope: {READ_SCOPE}"
+        )
+
+
+def _require_transcript_scope(ctx: FederationContext) -> None:
+    if TRANSCRIPT_SCOPE not in ctx.scopes:
+        raise HTTPException(
+            status_code=403,
+            detail=f"missing required scope: {TRANSCRIPT_SCOPE}",
         )
 
 
@@ -175,12 +193,168 @@ def _participants_public(session: RecordingSession) -> list[dict]:
     return out
 
 
+def _participants_timeline(session: RecordingSession) -> list[dict]:
+    """Data-minimized participant projection for Customer-Ops.
+
+    Email is intentionally excluded: Customer-Ops already keys the customer to
+    Contact-Ops, and a timeline does not need a second copy of participant PII.
+    """
+
+    return [
+        {
+            "contact_id": participant["contact_id"],
+            "display_name": participant["display_name"],
+        }
+        for participant in _participants_public(session)
+    ]
+
+
+def _structured_transcript_text(value: Any) -> Optional[str]:
+    """Extract only textual fields from a legacy transcript document.
+
+    Older ``transcript`` rows can contain diarization documents, including
+    speaker turns and embedding vectors. Federation must not expose that
+    structure, even to a caller with the explicit transcript scope. This
+    deliberately projects the small textual subset we understand rather than
+    recursively copying a document and hoping every sensitive key is known.
+    """
+
+    if isinstance(value, dict):
+        text = value.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        value = value.get("segments") or value.get("utterances")
+    if not isinstance(value, list):
+        return None
+    parts = [
+        part.get("text", "").strip()
+        for part in value
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ]
+    joined = "\n".join(part for part in parts if part)
+    return joined or None
+
+
+def _sanitized_transcript_text(session: RecordingSession) -> Optional[str]:
+    """Return a text-only transcript projection with no biometric metadata."""
+
+    for raw in (session.transcript_simple, session.transcript):
+        if raw is None:
+            continue
+        if isinstance(raw, (dict, list)):
+            text = _structured_transcript_text(raw)
+        elif isinstance(raw, str):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                # A non-JSON TEXT column is the canonical plain-text form.
+                text = candidate
+            else:
+                text = (
+                    parsed.strip()
+                    if isinstance(parsed, str) and parsed.strip()
+                    else _structured_transcript_text(parsed)
+                )
+        else:
+            text = None
+        if text:
+            return text
+    return None
+
+
 def _contact_filter(contact_id: str):
     """JSONB containment predicate: participants @> [{"contact_id": X}].
 
     Backed by the GIN index on recording_sessions.participants (alembic
     041) so the lookup is index-assisted, not a full scan."""
     return RecordingSession.participants.contains([{"contact_id": contact_id}])
+
+
+def _contact_filter_any(contact_ids: list[str]):
+    predicates = [_contact_filter(contact_id) for contact_id in contact_ids]
+    if not predicates:
+        return RecordingSession.id == -1
+    return or_(*predicates)
+
+
+def _summary_projection(session: RecordingSession) -> Optional[dict]:
+    final = session.final_summary if isinstance(session.final_summary, dict) else {}
+    raw_body = (
+        final.get("executive")
+        or final.get("summary")
+        or final.get("overview")
+        or session.summary
+    )
+    if isinstance(raw_body, dict):
+        raw_body = (
+            raw_body.get("executive")
+            or raw_body.get("summary")
+            or raw_body.get("overview")
+        )
+    body = str(raw_body).strip() if raw_body else ""
+    key_points = final.get("key_points") or final.get("bullets") or []
+    if not isinstance(key_points, list):
+        key_points = []
+    key_points = [str(point).strip() for point in key_points if str(point).strip()]
+    raw_decisions = final.get("decisions") or final.get("key_decisions") or []
+    if not isinstance(raw_decisions, list):
+        raw_decisions = []
+    decisions: list[dict] = []
+    for decision in raw_decisions:
+        if isinstance(decision, dict):
+            text = decision.get("text") or decision.get("decision")
+        else:
+            text = decision
+        if text and str(text).strip():
+            decisions.append({"text": str(text).strip()})
+    if not body and not key_points and not decisions:
+        return None
+    return {
+        "body": body or None,
+        "key_points": key_points,
+        "decisions": decisions,
+    }
+
+
+def summary_approval_digest(session: RecordingSession) -> Optional[str]:
+    projection = _summary_projection(session)
+    if projection is None:
+        return None
+    encoded = json.dumps(
+        projection,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def approved_summary_payload(session: RecordingSession) -> tuple[str, Optional[dict]]:
+    projection = _summary_projection(session)
+    if projection is None:
+        return "unavailable", None
+    approved_digest = getattr(
+        session,
+        "federation_summary_approved_digest",
+        None,
+    )
+    approved_at = getattr(session, "federation_summary_approved_at", None)
+    current_digest = summary_approval_digest(session)
+    if not approved_digest or not approved_at:
+        return "unapproved", None
+    if not current_digest or not hmac.compare_digest(approved_digest, current_digest):
+        return "stale", None
+    return (
+        "approved",
+        {
+            "body": projection["body"],
+            "key_points": projection["key_points"],
+            "approved_at": _iso(approved_at),
+        },
+    )
 
 
 def _action_item_counts(db: Session, org_id: int, session_ids: list[int]) -> dict:
@@ -198,6 +372,136 @@ def _action_item_counts(db: Session, org_id: int, session_ids: list[int]) -> dic
         .all()
     )
     return {sid: int(n) for sid, n in rows}
+
+
+def _actions_by_session(
+    db: Session,
+    org_id: int,
+    session_ids: list[int],
+) -> dict[int, list[dict]]:
+    if not session_ids:
+        return {}
+    rows = (
+        db.query(ActionItem)
+        .filter(
+            ActionItem.organization_id == org_id,
+            ActionItem.session_id.in_(session_ids),
+        )
+        .order_by(
+            ActionItem.session_id.asc(),
+            ActionItem.sort_order.asc(),
+            ActionItem.id.asc(),
+        )
+        .all()
+    )
+    out: dict[int, list[dict]] = {}
+    for item in rows:
+        payload = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+        out.setdefault(item.session_id, []).append(
+            {
+                "id": str(item.id),
+                "text": item.text,
+                "status": _AI_STATUS_MAP.get(item.status, item.status),
+                "assignee_contact_id": None,
+                "assignee_label": item.owner or None,
+                "due_at": _iso(item.due_date),
+                "project_ops_task_id": payload.get("po_task_id"),
+                "created_at": _iso(item.created_at),
+            }
+        )
+    return out
+
+
+def _parse_updated_since(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="updated_since must be an ISO-8601 timestamp",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise HTTPException(
+            status_code=400,
+            detail="updated_since must include a timezone",
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _cursor_contact_key(contact_ids: list[str]) -> str:
+    joined = "\x00".join(sorted(set(contact_ids))).encode()
+    return hashlib.sha256(joined).hexdigest()[:24]
+
+
+def _cursor_signing_key() -> bytes:
+    """Use a deployment secret to make pagination cursors opaque and signed."""
+
+    secret = (
+        os.getenv("FEDERATION_CURSOR_SIGNING_SECRET")
+        or os.getenv("SECRET_KEY")
+        or ""
+    ).strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="federation cursor signing is not configured",
+        )
+    return secret.encode()
+
+
+def _encode_cursor(payload: dict) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    signature = hmac.new(_cursor_signing_key(), raw, hashlib.sha256).digest()
+    encoded = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+    return f"{encoded}.{encoded_signature}"
+
+
+def _decode_cursor(
+    cursor: str,
+    *,
+    contact_ids: list[str],
+    updated_since: Optional[datetime],
+) -> dict:
+    try:
+        if not cursor or len(cursor) > MAX_CURSOR_LENGTH:
+            raise ValueError("cursor length")
+        encoded, encoded_signature = cursor.split(".", 1)
+        payload_padding = "=" * (-len(encoded) % 4)
+        signature_padding = "=" * (-len(encoded_signature) % 4)
+        raw = base64.urlsafe_b64decode((encoded + payload_padding).encode())
+        supplied_signature = base64.urlsafe_b64decode(
+            (encoded_signature + signature_padding).encode()
+        )
+        expected_signature = hmac.new(
+            _cursor_signing_key(), raw, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ValueError("cursor signature")
+        payload = json.loads(
+            raw.decode()
+        )
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            raise ValueError("unsupported cursor")
+        if payload.get("contact_key") != _cursor_contact_key(contact_ids):
+            raise ValueError("cursor contact mismatch")
+        expected_since = _iso(updated_since)
+        if payload.get("updated_since") != expected_since:
+            raise ValueError("cursor updated_since mismatch")
+        snapshot_at = _parse_updated_since(payload.get("snapshot_at"))
+        last_updated_at = _parse_updated_since(payload.get("last_updated_at"))
+        last_id = int(payload.get("last_id"))
+        if snapshot_at is None or last_updated_at is None:
+            raise ValueError("cursor timestamp missing")
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    return {
+        "snapshot_at": snapshot_at,
+        "last_updated_at": last_updated_at,
+        "last_id": last_id,
+    }
 
 
 # ── The three contact-keyed reads ──────────────────────────────────────
@@ -274,19 +578,17 @@ def list_summaries_for_contact(
     )
     out: list[dict] = []
     for s in rows:
-        fs = s.final_summary if isinstance(s.final_summary, dict) else {}
-        key_points = fs.get("key_points") or fs.get("bullets") or []
-        if not isinstance(key_points, list):
-            key_points = []
-        body = s.summary or fs.get("summary") or fs.get("overview") or ""
+        approval_status, approved = approved_summary_payload(s)
+        if approval_status != "approved" or approved is None:
+            continue
         out.append(
             {
                 "id": f"summary-{s.id}",
                 "meeting_id": s.id,
-                "headline": s.title or s.name or fs.get("headline") or None,
-                "body": body,
-                "key_points": key_points,
-                "created_at": _iso(s.updated_at or s.created_at),
+                "headline": s.title or s.name or None,
+                "body": approved["body"],
+                "key_points": approved["key_points"],
+                "created_at": approved["approved_at"],
             }
         )
     return out
@@ -342,6 +644,149 @@ def list_action_items_for_contact(
     return out
 
 
+def list_meeting_summaries_v1(
+    db: Session,
+    org_id: int,
+    contact_ids: list[str],
+    *,
+    limit: Optional[int] = None,
+    cursor: Optional[str] = None,
+    updated_since: Optional[str] = None,
+    include_transcript: bool = False,
+) -> dict:
+    """Versioned Customer-Ops timeline contract.
+
+    Uses snapshot-bound keyset pagination on ``(updated_at, id)``. The snapshot
+    keeps a multi-page traversal stable while meetings continue to change; a
+    subsequent updated-since traversal picks up changes after that snapshot.
+    """
+
+    n = _clamp_limit(limit)
+    since = _parse_updated_since(updated_since)
+    cursor_data = (
+        _decode_cursor(
+            cursor,
+            contact_ids=contact_ids,
+            updated_since=since,
+        )
+        if cursor
+        else None
+    )
+    snapshot_at = (
+        cursor_data["snapshot_at"]
+        if cursor_data
+        else datetime.now(timezone.utc)
+    )
+    changed_at = func.coalesce(
+        RecordingSession.updated_at,
+        RecordingSession.created_at,
+    )
+    q = db.query(RecordingSession).filter(
+        RecordingSession.organization_id == org_id,
+        _contact_filter_any(contact_ids),
+        changed_at <= snapshot_at,
+    )
+    if since is not None:
+        q = q.filter(changed_at >= since)
+    if cursor_data:
+        q = q.filter(
+            or_(
+                changed_at < cursor_data["last_updated_at"],
+                (
+                    (changed_at == cursor_data["last_updated_at"])
+                    & (RecordingSession.id < cursor_data["last_id"])
+                ),
+            )
+        )
+    rows = (
+        q.order_by(changed_at.desc(), RecordingSession.id.desc())
+        .limit(n + 1)
+        .all()
+    )
+    has_more = len(rows) > n
+    page = rows[:n]
+    actions = _actions_by_session(db, org_id, [session.id for session in page])
+    items: list[dict] = []
+    for session in page:
+        approval_status, approved_summary = approved_summary_payload(session)
+        projection = _summary_projection(session)
+        changed = session.updated_at or session.created_at
+        item = {
+            "meeting_id": str(session.id),
+            "updated_at": _iso(changed),
+            "metadata": {
+                "title": session.title or session.name or None,
+                "started_at": _iso(session.started_at),
+                "ended_at": _iso(session.ended_at),
+                "duration_seconds": int(round(session.duration or 0)),
+                "status": session.status,
+            },
+            "participants": _participants_timeline(session),
+            "summary_approval_status": approval_status,
+            "approved_summary": approved_summary,
+            "decisions": (
+                projection.get("decisions", [])
+                if approval_status == "approved" and projection
+                else []
+            ),
+            "action_items": actions.get(session.id, []),
+        }
+        if include_transcript:
+            item["transcript"] = _sanitized_transcript_text(session)
+        items.append(item)
+
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        last_changed = last.updated_at or last.created_at
+        next_cursor = _encode_cursor(
+            {
+                "v": 1,
+                "snapshot_at": _iso(snapshot_at),
+                "last_updated_at": _iso(last_changed),
+                "last_id": last.id,
+                "contact_key": _cursor_contact_key(contact_ids),
+                "updated_since": _iso(since),
+            }
+        )
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "items": items,
+        "count": len(items),
+        "next_cursor": next_cursor,
+        "snapshot_at": _iso(snapshot_at),
+    }
+
+
+async def _resolved_contact_ids(
+    ctx: FederationContext,
+    contact_id: str,
+) -> list[str]:
+    """Return canonical + historical aliases within the token workspace."""
+
+    requested = contact_id.strip()
+    if not requested:
+        return []
+    resolution = await contact_ops_resolver.resolve_person_id(
+        requested,
+        ctx.workspace_id,
+    )
+    if resolution is None:
+        # The contact id is only meaningful after the Contact-Ops workspace
+        # boundary validates it. Do not turn a resolver outage into an
+        # unvalidated cross-tenant lookup.
+        logger.warning("federation: Contact-Ops identity resolution unavailable")
+        return []
+    canonical = resolution.get("canonical_person_id")
+    if resolution.get("status") not in {"canonical", "redirected"} or not canonical:
+        return []
+    ids = [
+        canonical,
+        *(resolution.get("alias_ids") or []),
+    ]
+    return sorted({str(person_id) for person_id in ids if person_id})
+
+
 # ── REST transport ─────────────────────────────────────────────────────
 
 
@@ -354,9 +799,21 @@ async def rest_meetings(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    if not contact_ids:
+        return _tool_envelope(
+            "list_meetings_for_contact",
+            {"items": [], "count": 0, "next_cursor": None},
+        )
     return _tool_envelope(
         "list_meetings_for_contact",
-        list_meetings_for_contact(db, ctx.org_id, contact_id, limit=limit, cursor=cursor),
+        list_meetings_for_contact(
+            db,
+            ctx.org_id,
+            contact_ids[0],
+            limit=limit,
+            cursor=cursor,
+        ),
     )
 
 
@@ -368,9 +825,12 @@ async def rest_summaries(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    if not contact_ids:
+        return _tool_envelope("list_summaries_for_contact", [])
     return _tool_envelope(
         "list_summaries_for_contact",
-        list_summaries_for_contact(db, ctx.org_id, contact_id, limit=limit),
+        list_summaries_for_contact(db, ctx.org_id, contact_ids[0], limit=limit),
     )
 
 
@@ -382,15 +842,68 @@ async def rest_action_items(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    if not contact_ids:
+        return _tool_envelope("list_action_items_for_contact", [])
     return _tool_envelope(
         "list_action_items_for_contact",
-        list_action_items_for_contact(db, ctx.org_id, contact_id, limit=limit),
+        list_action_items_for_contact(db, ctx.org_id, contact_ids[0], limit=limit),
+    )
+
+
+@router.get("/v1/contacts/{contact_id}/meeting-summaries")
+async def rest_meeting_summaries_v1(
+    contact_id: str,
+    limit: Optional[int] = None,
+    cursor: Optional[str] = None,
+    updated_since: Optional[str] = None,
+    include_transcript: bool = False,
+    ctx: FederationContext = Depends(require_brigade_token),
+    db: Session = Depends(get_db),
+):
+    _require_read_scope(ctx)
+    if include_transcript:
+        _require_transcript_scope(ctx)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    return list_meeting_summaries_v1(
+        db,
+        ctx.org_id,
+        contact_ids,
+        limit=limit,
+        cursor=cursor,
+        updated_since=updated_since,
+        include_transcript=include_transcript,
     )
 
 
 # ── MCP JSON-RPC transport ─────────────────────────────────────────────
 
 _TOOL_SCHEMAS = [
+    {
+        "name": "list_meeting_summaries_v1",
+        "description": (
+            "Versioned, response-minimized Customer-Ops meeting timeline. "
+            "Includes metadata, participants, approved summary, decisions, "
+            "and canonical action status. Transcript is opt-in and separately scoped."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "contact_id": {"type": "string"},
+                "limit": {"type": "integer"},
+                "cursor": {"type": "string"},
+                "updated_since": {
+                    "type": "string",
+                    "format": "date-time",
+                },
+                "include_transcript": {
+                    "type": "boolean",
+                    "default": False,
+                },
+            },
+            "required": ["contact_id"],
+        },
+    },
     {
         "name": "list_meetings_for_contact",
         "description": (
@@ -459,21 +972,41 @@ def _tool_envelope(name: str, data: Any) -> Any:
     return data
 
 
-def _dispatch_tool(
+async def _dispatch_tool(
     db: Session, ctx: FederationContext, name: str, args: dict
 ) -> Any:
     contact_id = str(args.get("contact_id") or "").strip()
     if not contact_id:
         raise HTTPException(status_code=400, detail="contact_id is required")
     limit = args.get("limit")
+    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    if name == "list_meeting_summaries_v1":
+        include_transcript = args.get("include_transcript") is True
+        if include_transcript:
+            _require_transcript_scope(ctx)
+        return list_meeting_summaries_v1(
+            db,
+            ctx.org_id,
+            contact_ids,
+            limit=limit,
+            cursor=args.get("cursor"),
+            updated_since=args.get("updated_since"),
+            include_transcript=include_transcript,
+        )
+    if not contact_ids:
+        if name == "list_meetings_for_contact":
+            return {"items": [], "count": 0, "next_cursor": None}
+        if name in {"list_summaries_for_contact", "list_action_items_for_contact"}:
+            return []
+    lookup_id = contact_ids[0]
     if name == "list_meetings_for_contact":
         return list_meetings_for_contact(
-            db, ctx.org_id, contact_id, limit=limit, cursor=args.get("cursor")
+            db, ctx.org_id, lookup_id, limit=limit, cursor=args.get("cursor")
         )
     if name == "list_summaries_for_contact":
-        return list_summaries_for_contact(db, ctx.org_id, contact_id, limit=limit)
+        return list_summaries_for_contact(db, ctx.org_id, lookup_id, limit=limit)
     if name == "list_action_items_for_contact":
-        return list_action_items_for_contact(db, ctx.org_id, contact_id, limit=limit)
+        return list_action_items_for_contact(db, ctx.org_id, lookup_id, limit=limit)
     raise KeyError(name)
 
 
@@ -519,12 +1052,21 @@ async def federation_mcp(
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            data = _dispatch_tool(db, ctx, str(name), args if isinstance(args, dict) else {})
+            data = await _dispatch_tool(
+                db,
+                ctx,
+                str(name),
+                args if isinstance(args, dict) else {},
+            )
         except KeyError:
             return _rpc_err(rpc_id, -32601, f"unknown tool: {name}")
         except HTTPException as exc:
             return _rpc_err(rpc_id, -32602, str(exc.detail))
-        envelope = _tool_envelope(str(name), data)
+        envelope = (
+            data
+            if str(name) == "list_meeting_summaries_v1"
+            else _tool_envelope(str(name), data)
+        )
         return _rpc_ok(
             rpc_id,
             {

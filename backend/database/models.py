@@ -78,6 +78,13 @@ class RecordingSession(Base):
     progressive_summaries = Column(JSON)  # List of summaries during recording
     final_summary = Column(JSON)  # Comprehensive final analysis
     summary_preview = Column(String(300), nullable=True)
+    # Explicit approval for the response-minimized Customer-Ops federation
+    # contract. The digest binds approval to the current summary projection, so
+    # a re-summary automatically becomes stale without requiring every summary
+    # writer to remember to clear a flag.
+    federation_summary_approved_at = Column(DateTime(timezone=True), nullable=True)
+    federation_summary_approved_by_user_id = Column(Integer, nullable=True)
+    federation_summary_approved_digest = Column(String(64), nullable=True)
     ai_insights = Column(JSON)  # Legacy field for compatibility
     processing_metadata = Column(JSON)  # Processing stats and metadata (renamed from metadata)
     generated_emails = Column(JSON)  # Generated follow-up emails

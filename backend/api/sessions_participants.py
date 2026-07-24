@@ -23,6 +23,7 @@ from auth.models import User
 from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import RecordingSession
+from services import contact_ops_resolver
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class ParticipantIn(BaseModel):
     # Contact-Ops person id (federation join key). Stamped when known
     # so the inbound Customer-Ops reads can find meetings by contact.
     contact_id: Optional[str] = Field(default=None, max_length=64)
+    contact_match_confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    contact_match_basis: Optional[str] = Field(default=None, max_length=40)
 
 
 class ParticipantPatch(BaseModel):
@@ -47,6 +50,8 @@ class ParticipantPatch(BaseModel):
     email: Optional[EmailStr] = None
     role: Optional[str] = Field(default=None, max_length=100)
     contact_id: Optional[str] = Field(default=None, max_length=64)
+    contact_match_confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    contact_match_basis: Optional[str] = Field(default=None, max_length=40)
 
 
 class ParticipantOut(BaseModel):
@@ -55,6 +60,9 @@ class ParticipantOut(BaseModel):
     email: Optional[str] = None
     role: Optional[str] = None
     contact_id: Optional[str] = None
+    contact_match_confidence: Optional[float] = None
+    contact_match_basis: Optional[str] = None
+    contact_link_source: Optional[str] = None
 
 
 def _resolve_session(
@@ -108,7 +116,57 @@ def _to_out(p: dict) -> ParticipantOut:
         email=p.get("email") or None,
         role=p.get("role") or None,
         contact_id=p.get("contact_id") or None,
+        contact_match_confidence=p.get("contact_match_confidence"),
+        contact_match_basis=p.get("contact_match_basis") or None,
+        contact_link_source=p.get("contact_link_source") or None,
     )
+
+
+async def _verified_contact_link(
+    *,
+    contact_id: str,
+    confidence: Optional[float],
+    basis: Optional[str],
+    workspace_id: str,
+) -> dict:
+    """Validate/reconcile a manual Contact-Ops link before persistence."""
+
+    if confidence is None or not basis:
+        raise HTTPException(
+            status_code=422,
+            detail="Manual Contact-Ops links require explicit match confidence and basis",
+        )
+    if not workspace_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Active organization is not mapped to a federation workspace",
+        )
+    if not contact_ops_resolver.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contact-Ops identity resolver is not configured",
+        )
+    resolution = await contact_ops_resolver.resolve_person_id(
+        contact_id,
+        workspace_id,
+    )
+    if resolution is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Contact-Ops identity resolution is unavailable",
+        )
+    canonical = resolution.get("canonical_person_id")
+    if resolution.get("status") not in {"canonical", "redirected"} or not canonical:
+        raise HTTPException(
+            status_code=422,
+            detail="Contact-Ops person is not linkable in this workspace",
+        )
+    return {
+        "contact_id": str(canonical),
+        "contact_match_confidence": float(confidence),
+        "contact_match_basis": basis.strip(),
+        "contact_link_source": "manual",
+    }
 
 
 @router.get("", response_model=List[ParticipantOut])
@@ -134,12 +192,27 @@ async def add_participant(
     if not _can_edit(session, current_user, active_org):
         raise HTTPException(status_code=403, detail="Not permitted to edit participants")
 
+    contact_fields = {
+        "contact_id": None,
+        "contact_match_confidence": None,
+        "contact_match_basis": None,
+        "contact_link_source": None,
+    }
+    if payload.contact_id:
+        contact_fields = await _verified_contact_link(
+            contact_id=payload.contact_id.strip(),
+            confidence=payload.contact_match_confidence,
+            basis=payload.contact_match_basis,
+            workspace_id=(
+                getattr(active_org.organization, "workspace_id", None) or ""
+            ).strip(),
+        )
     new = {
         "id": str(uuid.uuid4()),
         "name": payload.name.strip(),
         "email": (str(payload.email) if payload.email else None),
         "role": (payload.role.strip() if payload.role else None) or None,
-        "contact_id": (payload.contact_id.strip() if payload.contact_id else None) or None,
+        **contact_fields,
     }
     current = _normalize(session.participants)
     current.append(new)
@@ -175,7 +248,27 @@ async def update_participant(
             if "role" in payload.model_fields_set:
                 p["role"] = (payload.role.strip() if payload.role else None) or None
             if "contact_id" in payload.model_fields_set:
-                p["contact_id"] = (payload.contact_id.strip() if payload.contact_id else None) or None
+                if payload.contact_id:
+                    p.update(
+                        await _verified_contact_link(
+                            contact_id=payload.contact_id.strip(),
+                            confidence=payload.contact_match_confidence,
+                            basis=payload.contact_match_basis,
+                            workspace_id=(
+                                getattr(
+                                    active_org.organization,
+                                    "workspace_id",
+                                    None,
+                                )
+                                or ""
+                            ).strip(),
+                        )
+                    )
+                else:
+                    p["contact_id"] = None
+                    p["contact_match_confidence"] = None
+                    p["contact_match_basis"] = None
+                    p["contact_link_source"] = None
             updated = p
             break
 

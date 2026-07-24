@@ -365,6 +365,11 @@ _load_router(
 _load_router(app, "session_emails", "api.session_emails")
 _load_router(app, "session_participants", "api.sessions_participants")
 _load_router(app, "contact_ops_people", "api.contact_ops_people")
+_load_router(
+    app,
+    "federation_summary_approval",
+    "api.federation_summary_approval",
+)
 _load_router(app, "action_items", "api.action_items")
 # Per-session file attachments: Granola notes, external transcripts,
 # slide decks, photos, etc. `router` is the CRUD; `counts_router` is the

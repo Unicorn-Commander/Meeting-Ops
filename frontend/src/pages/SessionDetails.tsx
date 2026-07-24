@@ -237,12 +237,17 @@ interface Participant {
   email?: string | null;
   role?: string | null;
   contact_id?: string | null;
+  contact_match_confidence?: number | null;
+  contact_match_basis?: string | null;
+  contact_link_source?: string | null;
 }
 
 interface ContactOpsPerson {
   person_id: string;
   display_name: string;
   email?: string | null;
+  match_confidence: number;
+  match_basis: string;
 }
 
 interface ActionItem {
@@ -406,6 +411,7 @@ export const SessionDetails: React.FC = () => {
   const [contactSearchQuery, setContactSearchQuery] = useState('');
   const [contactSearchResults, setContactSearchResults] = useState<ContactOpsPerson[]>([]);
   const [contactSearchLoading, setContactSearchLoading] = useState(false);
+  const [contactSearchAmbiguous, setContactSearchAmbiguous] = useState(false);
 
   // Per-session free-form tags. Source of truth is each POST/DELETE
   // response; we render the local state for snappy add/remove.
@@ -997,6 +1003,7 @@ export const SessionDetails: React.FC = () => {
     const q = contactSearchQuery.trim();
     if (!contactSearchParticipantId || q.length < 2) {
       setContactSearchResults([]);
+      setContactSearchAmbiguous(false);
       setContactSearchLoading(false);
       return;
     }
@@ -1014,10 +1021,12 @@ export const SessionDetails: React.FC = () => {
             setParticipantError(await readParticipantError(res));
           }
           setContactSearchResults([]);
+          setContactSearchAmbiguous(false);
           return;
         }
         const data = await res.json();
         setContactSearchResults(Array.isArray(data.items) ? data.items : []);
+        setContactSearchAmbiguous(data.ambiguous === true);
       } catch (e) {
         if (!(e instanceof DOMException && e.name === 'AbortError')) {
           setParticipantError(e instanceof Error ? e.message : 'Contact search failed');
@@ -1126,23 +1135,36 @@ export const SessionDetails: React.FC = () => {
     setContactSearchParticipantId(p.id);
     setContactSearchQuery(p.email || p.name || '');
     setContactSearchResults([]);
+    setContactSearchAmbiguous(false);
   };
 
   const closeContactSearch = () => {
     setContactSearchParticipantId(null);
     setContactSearchQuery('');
     setContactSearchResults([]);
+    setContactSearchAmbiguous(false);
     setContactSearchLoading(false);
   };
 
-  const stampParticipantContact = async (participantId: string, contactId: string | null) => {
+  const stampParticipantContact = async (
+    participantId: string,
+    person: ContactOpsPerson | null,
+  ) => {
     setParticipantBusy(true);
     setParticipantError(null);
     try {
       const res = await fetch(`${participantsBase()}/${participantId}`, {
         method: 'PATCH',
         headers: participantHeaders(),
-        body: JSON.stringify({ contact_id: contactId }),
+        body: JSON.stringify(
+          person
+            ? {
+                contact_id: person.person_id,
+                contact_match_confidence: person.match_confidence,
+                contact_match_basis: person.match_basis,
+              }
+            : { contact_id: null },
+        ),
       });
       if (!res.ok) {
         setParticipantError(await readParticipantError(res));
@@ -3873,7 +3895,12 @@ export const SessionDetails: React.FC = () => {
                           {p.contact_id && (
                             <p className="mt-1 inline-flex max-w-full items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
                               <Check className="h-3 w-3 shrink-0" />
-                              <span className="truncate">Contact-Ops linked</span>
+                              <span className="truncate">
+                                Contact-Ops linked
+                                {typeof p.contact_match_confidence === 'number'
+                                  ? ` · ${Math.round(p.contact_match_confidence * 100)}%`
+                                  : ''}
+                              </span>
                             </p>
                           )}
                           {contactSearchParticipantId === p.id && (
@@ -3891,6 +3918,12 @@ export const SessionDetails: React.FC = () => {
                               {contactSearchLoading && (
                                 <p className="text-xs text-gray-500">Searching...</p>
                               )}
+                              {contactSearchAmbiguous && (
+                                <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                                  Multiple results have the same confidence. Choose the person manually;
+                                  no link will be selected automatically.
+                                </p>
+                              )}
                               {!contactSearchLoading && contactSearchQuery.trim().length >= 2 && contactSearchResults.length === 0 && (
                                 <p className="text-xs text-gray-500">No matches</p>
                               )}
@@ -3900,7 +3933,7 @@ export const SessionDetails: React.FC = () => {
                                     <button
                                       key={person.person_id}
                                       type="button"
-                                      onClick={() => stampParticipantContact(p.id, person.person_id)}
+                                      onClick={() => stampParticipantContact(p.id, person)}
                                       disabled={participantBusy}
                                       className="block w-full px-2 py-2 text-left text-sm hover:bg-purple-50 disabled:opacity-50"
                                     >
@@ -3908,6 +3941,9 @@ export const SessionDetails: React.FC = () => {
                                       {person.email && (
                                         <span className="block truncate text-xs text-gray-500">{person.email}</span>
                                       )}
+                                      <span className="block text-xs text-gray-500">
+                                        {Math.round(person.match_confidence * 100)}% · {person.match_basis.replaceAll('_', ' ')}
+                                      </span>
                                     </button>
                                   ))}
                                 </div>

@@ -161,8 +161,20 @@ async def test_search_people_returns_summaries(monkeypatch):
         ]
     }))
     assert await r.search_people("ada", "ws-1") == [
-        {"person_id": "p-1", "display_name": "Ada Lovelace", "email": "ada@example.com"},
-        {"person_id": "p-2", "display_name": "Grace Hopper", "email": "grace@example.com"},
+        {
+            "person_id": "p-1",
+            "display_name": "Ada Lovelace",
+            "email": "ada@example.com",
+            "match_confidence": 0.0,
+            "match_basis": "unknown",
+        },
+        {
+            "person_id": "p-2",
+            "display_name": "Grace Hopper",
+            "email": "grace@example.com",
+            "match_confidence": 0.0,
+            "match_basis": "unknown",
+        },
     ]
 
 
@@ -177,3 +189,44 @@ async def test_search_people_dormant_no_network(monkeypatch):
     monkeypatch.setattr(r, "_call_contact_ops_tool", _boom)
     assert await r.search_people("ada", "ws-1") == []
     assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_search_people_preserves_explicit_confidence(monkeypatch):
+    _wire(monkeypatch, _envelope({
+        "items": [
+            {
+                "person_id": "p-1",
+                "display_name": "Ada",
+                "primary_email": "ada@example.com",
+                "match_confidence": 1.0,
+                "match_basis": "exact_email",
+            }
+        ],
+        "ambiguous": False,
+    }))
+    assert await r.search_people("ada@example.com", "ws-1") == [
+        {
+            "person_id": "p-1",
+            "display_name": "Ada",
+            "email": "ada@example.com",
+            "match_confidence": 1.0,
+            "match_basis": "exact_email",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_person_id_contract(monkeypatch):
+    _wire(monkeypatch, _envelope({
+        "requested_person_id": "stale",
+        "canonical_person_id": "canonical",
+        "alias_ids": ["stale", "older"],
+        "status": "redirected",
+    }))
+    assert await r.resolve_person_id("stale", "ws-1") == {
+        "requested_person_id": "stale",
+        "canonical_person_id": "canonical",
+        "alias_ids": ["stale", "older"],
+        "status": "redirected",
+    }

@@ -240,10 +240,18 @@ def _person_summary(item: Any) -> Optional[dict]:
                 email = first
             elif isinstance(first, dict):
                 email = first.get("email") or first.get("value")
+    raw_confidence = item.get("match_confidence")
+    try:
+        match_confidence = float(raw_confidence)
+    except (TypeError, ValueError):
+        match_confidence = 0.0
+    match_confidence = max(0.0, min(match_confidence, 1.0))
     return {
         "person_id": str(person_id),
         "display_name": str(display_name) if display_name else str(person_id),
         "email": str(email) if email else None,
+        "match_confidence": match_confidence,
+        "match_basis": str(item.get("match_basis") or "unknown"),
     }
 
 
@@ -369,10 +377,49 @@ async def search_people(query: str, workspace_id: str, limit: int = 10) -> list[
 
     structured = await _call_contact_ops_tool(
         workspace_id,
-        "search_people",
+        "search_people_for_identity_link",
         {"query": query, "limit": n},
         label="search_people",
     )
     if not structured:
         return []
     return _people_from_structured(structured)[:n]
+
+
+async def resolve_person_id(person_id: str, workspace_id: str) -> Optional[dict]:
+    """Resolve a stale Contact-Ops id to its workspace-bound canonical id.
+
+    Returns the minimal ``resolve_person_id`` contract, or ``None`` when the
+    resolver is dormant/unavailable. Callers must not treat an unavailable
+    resolver as proof that an id is valid.
+    """
+
+    if not is_configured():
+        return None
+    person_id = (person_id or "").strip()
+    workspace_id = (workspace_id or "").strip()
+    if not person_id or not workspace_id:
+        return None
+    structured = await _call_contact_ops_tool(
+        workspace_id,
+        "resolve_person_id",
+        {"person_id": person_id},
+        label="resolve_person_id",
+    )
+    if not structured:
+        return None
+    status = structured.get("status")
+    if status not in {"canonical", "redirected", "not_found", "not_linkable"}:
+        return None
+    canonical = structured.get("canonical_person_id")
+    aliases = structured.get("alias_ids")
+    if not isinstance(aliases, list):
+        aliases = []
+    return {
+        "requested_person_id": str(
+            structured.get("requested_person_id") or person_id
+        ),
+        "canonical_person_id": str(canonical) if canonical else None,
+        "alias_ids": [str(alias) for alias in aliases if alias],
+        "status": status,
+    }
