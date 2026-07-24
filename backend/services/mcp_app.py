@@ -282,7 +282,17 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
         offset: Pagination offset (default 0)
     """
     limit = max(1, min(100, limit))
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    # Headless/MCP callers carry no X-MeetingOps-Org selector (only the web
+    # workspace-switcher sends that header), so the backend would otherwise
+    # scope to a single fallback active org — often the magic-unicorn platform
+    # default — and return nothing for users whose sessions live in their own
+    # orgs. Request the caller's full membership set instead: a member-scoped,
+    # privacy-safe path already supported by list_sessions. See issue #9.
+    params: dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "include_all_my_orgs": True,
+    }
     if status:
         params["status"] = status
 
