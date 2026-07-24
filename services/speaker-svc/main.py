@@ -81,16 +81,24 @@ _diarizer_load_error: Optional[str] = None
 # Task #79 v2: /diarize request counter, used to gate periodic empty_cache().
 _diarize_request_count: int = 0
 _gpu_semaphore = asyncio.Semaphore(max(1, int(os.getenv("MAX_CONCURRENT_DIARIZATIONS", "1"))))
+GPU_QUEUE_TIMEOUT = float(os.getenv("SPEAKER_GPU_QUEUE_TIMEOUT", "600"))
 
 
 @asynccontextmanager
 async def _gpu_slot():
     try:
-        await asyncio.wait_for(_gpu_semaphore.acquire(), timeout=0.01)
+        # Internal callers may launch several meetings concurrently while this
+        # service intentionally runs one GPU job at a time.  Queue them here
+        # instead of immediately returning 503 and silently dropping speaker
+        # data.  The event loop remains free while requests wait.
+        await asyncio.wait_for(
+            _gpu_semaphore.acquire(),
+            timeout=max(0.01, GPU_QUEUE_TIMEOUT),
+        )
     except asyncio.TimeoutError as exc:
         raise HTTPException(
             status_code=503,
-            detail="GPU is at capacity; retry shortly",
+            detail="GPU queue wait timed out; retry shortly",
             headers={"Retry-After": "5"},
         ) from exc
     try:

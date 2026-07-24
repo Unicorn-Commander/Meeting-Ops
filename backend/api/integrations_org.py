@@ -27,8 +27,12 @@ Authn/Authz:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import os
+import socket
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -132,6 +136,81 @@ def _validate_key(integration_key: str) -> None:
                 f"{list(VALID_INTEGRATION_KEYS)}"
             ),
         )
+
+
+_INTERNAL_INTEGRATION_HOSTS = {
+    "unicorn-brigade",
+    "project-ops-backend",
+    "contact-ops-backend",
+    "accounting-ops-backend",
+    "stable-bridge",
+}
+
+
+def _validated_integration_base_url(raw_url: str) -> str:
+    """Validate an admin-supplied upstream URL before attaching credentials.
+
+    Public integrations must use HTTPS and resolve only to globally-routable
+    addresses.  Plain HTTP is allowed solely for named service containers on
+    the shared Docker network. This prevents the credential-test feature from
+    becoming an authenticated SSRF probe into loopback, cloud metadata, or
+    other private network services.
+    """
+    value = raw_url.strip().rstrip("/")
+    try:
+        parsed = urlparse(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid API base URL") from exc
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.scheme not in {"http", "https"}
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="API base URL must be an HTTP(S) origin without credentials, query, or fragment",
+        )
+
+    configured_internal = {
+        item.strip().lower()
+        for item in os.getenv("INTEGRATION_INTERNAL_HOST_ALLOWLIST", "").split(",")
+        if item.strip()
+    }
+    internal_hosts = _INTERNAL_INTEGRATION_HOSTS | configured_internal
+    if host in internal_hosts:
+        return value
+    if parsed.scheme != "https":
+        raise HTTPException(
+            status_code=400,
+            detail="Public integration URLs must use HTTPS",
+        )
+
+    try:
+        literal = ipaddress.ip_address(host)
+        addresses = [literal]
+    except ValueError:
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            raise HTTPException(status_code=400, detail="Private integration hosts are not allowed")
+        try:
+            addresses = [
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+            ]
+        except (socket.gaierror, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Integration hostname could not be resolved",
+            ) from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise HTTPException(
+            status_code=400,
+            detail="Private, loopback, link-local, and reserved integration addresses are not allowed",
+        )
+    return value
 
 
 def _all_blocks(org: Organization) -> dict[str, dict[str, Any]]:
@@ -286,7 +365,12 @@ async def update_integration(
     if payload.enabled is not None:
         block["enabled"] = bool(payload.enabled)
     if payload.api_base_url is not None:
-        block["api_base_url"] = payload.api_base_url.strip()
+        supplied_url = payload.api_base_url.strip()
+        block["api_base_url"] = (
+            _validated_integration_base_url(supplied_url)
+            if supplied_url
+            else ""
+        )
     # api_key handling:
     #   - None: leave existing encrypted blob alone.
     #   - "":   clear the credential.
@@ -438,6 +522,10 @@ async def test_integration(
     base_url = (block.get("api_base_url") or "").strip()
     if not base_url:
         return TestResult(ok=False, error="No API base URL configured")
+    try:
+        base_url = _validated_integration_base_url(base_url)
+    except HTTPException as exc:
+        return TestResult(ok=False, error=str(exc.detail))
 
     try:
         cleartext = decrypt_api_key(ciphertext)
@@ -457,7 +545,11 @@ async def test_integration(
 
     url = f"{base_url.rstrip('/')}{path}"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(
+            timeout=5.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             resp = await client.get(url, headers=headers)
     except httpx.ConnectError:
         return TestResult(ok=False, error="Could not connect to upstream")

@@ -20,13 +20,48 @@ refactor reintroduces the bug by moving the blocks, this goes red.
 """
 from __future__ import annotations
 
-import inspect
+import ast
+from pathlib import Path
+
+
+def _process_recording_source() -> str:
+    """Read just the function source without importing hardware-heavy modules."""
+    path = Path(__file__).resolve().parents[1] / "api" / "simple_recording_db.py"
+    source = path.read_text()
+    tree = ast.parse(source)
+    node = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.AsyncFunctionDef) and item.name == "process_recording"
+    )
+    segment = ast.get_source_segment(source, node)
+    assert segment is not None
+    return segment
+
+
+def test_process_recording_starts_diarization_before_awaiting_stt():
+    """The primary live stop path must overlap the two independent GPU jobs.
+
+    Diarization runs on the speaker GPU and STT runs on Parakeet's GPU. The
+    diarization task must be created before STT is awaited, then joined only
+    after the transcript is ready for speaker-label alignment.
+    """
+    src = _process_recording_source()
+    launch_pos = src.find("diarize_task = asyncio.create_task(")
+    stt_pos = src.find("stt_provider.transcribe(")
+    join_pos = src.find("diar_segments = await diarize_task")
+
+    assert launch_pos != -1, "concurrent diarization launch not found"
+    assert stt_pos != -1, "STT call not found"
+    assert join_pos != -1, "diarization join not found"
+    assert launch_pos < stt_pos < join_pos, (
+        "process_recording must launch diarization, run STT concurrently, "
+        "then await diarization before merging speakers"
+    )
 
 
 def test_process_recording_identifies_speakers_before_indexing():
-    import api.simple_recording_db as srdb
-
-    src = inspect.getsource(srdb.process_recording)
+    src = _process_recording_source()
 
     # The actual call sites (not the imports, which lack the trailing "(").
     identify_pos = src.find("identify_speakers(")
@@ -44,9 +79,7 @@ def test_process_recording_indexes_from_diarized_segments():
     """The index transcript is built speaker-aware from transcript_diarized
     segments ('{speaker}: {text}'), not from the label-less transcript_simple
     — same shape as reprocess Stage-5.9."""
-    import api.simple_recording_db as srdb
-
-    src = inspect.getsource(srdb.process_recording)
+    src = _process_recording_source()
     # The speaker-aware join lives right before the index_session call.
     index_pos = src.find("index_session(")
     window = src[max(0, index_pos - 800):index_pos]
@@ -65,9 +98,7 @@ def test_process_recording_summarizes_after_identify_and_normalize():
     "Name: utterance" lines from the diarized segments) — NOT the legacy
     flat-text unified_agent_service.analyze_meeting call, which ran before
     identification and made the model guess who said what."""
-    import api.simple_recording_db as srdb
-
-    src = inspect.getsource(srdb.process_recording)
+    src = _process_recording_source()
 
     identify_pos = src.find("identify_speakers(")
     normalize_pos = src.find("normalize_session_speaker_labels(")

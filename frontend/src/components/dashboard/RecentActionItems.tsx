@@ -135,9 +135,14 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/50">
       <header className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">
-          Recent action items
-        </h2>
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">
+            Recent action items
+          </h2>
+          <p className="mt-1 text-[11px] normal-case tracking-normal text-zinc-500">
+            Checkbox marks done here. Open the item to review it in the meeting.
+          </p>
+        </div>
         <Link
           to="/sessions"
           className="text-xs font-medium text-fuchsia-300 transition hover:text-fuchsia-200"
@@ -178,7 +183,13 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                     )}
                   </button>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm text-zinc-100">{item.text}</p>
+                    <Link
+                      to={`/sessions/${item.session_key}?tab=action_items`}
+                      className="text-sm text-zinc-100 transition hover:text-fuchsia-200 hover:underline"
+                      title="Open this action item in its meeting"
+                    >
+                      {item.text}
+                    </Link>
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
                       {item.owner && (
                         <span className="inline-flex items-center gap-1">
@@ -213,7 +224,13 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
               <div className="flex items-start gap-3">
                 <CheckSquare className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm text-zinc-100">{item.text}</p>
+                  <Link
+                    to={`/sessions/${item.sessionId}?tab=action_items`}
+                    className="text-sm text-zinc-100 transition hover:text-fuchsia-200 hover:underline"
+                    title="Open this action item in its meeting"
+                  >
+                    {item.text}
+                  </Link>
                   <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
                     {item.owner && (
                       <span className="inline-flex items-center gap-1">

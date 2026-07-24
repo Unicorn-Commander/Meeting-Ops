@@ -43,7 +43,7 @@ add a second webhook endpoint for prod and paste the env vars.
 ### 1a. Create prod webhook
 
 ```bash
-export STRIPE_KEY='REMOVED'
+export STRIPE_KEY='<ROTATE_AND_LOAD_FROM_SECRET_STORE>'
 curl -s -u "$STRIPE_KEY:" https://api.stripe.com/v1/webhook_endpoints \
   -d "url=https://meeting-ops.unicorncommander.ai/api/stripe/webhook" \
   -d "description=Meeting-Ops VPS prod" \
@@ -68,7 +68,7 @@ cd /home/muut/UC-Meeting-Ops
 cat >> deploy/unicorncommander/.env.unicorncommander <<EOF
 
 # Stripe live mode — added at customer launch <date>
-STRIPE_API_KEY=REMOVED
+STRIPE_API_KEY=<ROTATE_AND_LOAD_FROM_SECRET_STORE>
 STRIPE_PUBLISHABLE_KEY=REMOVED
 STRIPE_WEBHOOK_SECRET=<paste from step 1a>
 STRIPE_PRO_PRICE_ID=price_1TcbE0Dzk9HqAZnHO3cv6mWN

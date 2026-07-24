@@ -42,9 +42,8 @@ Covers the contract for ``services.projectops_writer``:
   18-20. triage federation token     — the workspace-bound, aud=project-ops
                                        push: uses the Brigade-exchanged token
                                        as bearer_override when the org's
-                                       workspace_id resolves, else falls back
-                                       to the default token (no override) and
-                                       warns (no workspace_id / exchange miss).
+                                       workspace_id resolves, and fails closed
+                                       when the binding/token is unavailable.
 
 The PO HTTP client is replaced by an injected stub (``_FakeProjectOpsClient``)
 passed via ``write_action_items_to_projectops(client=...)`` — the same
@@ -185,6 +184,7 @@ def _clear_projectops_env(monkeypatch):
     for var in (
         "PROJECTOPS_API_KEY",
         "PROJECTOPS_BASE_URL",
+        "PROJECTOPS_API_BASE_URL",
         "PROJECTOPS_KC_TOKEN_URL",
         "PROJECTOPS_KC_CLIENT_ID",
         "PROJECTOPS_KC_CLIENT_SECRET",
@@ -239,6 +239,19 @@ def _enable_auto_push(monkeypatch):
     monkeypatch applies that override after this fixture's setup and
     restores on teardown, the two compose cleanly."""
     _patch_auto_push(monkeypatch, enabled=True)
+
+    # Live triage tests need the same tenant-bound token shape required in
+    # production. Individual federation failure tests override this seam.
+    from services import projectops_token as fed
+
+    async def _default_federation_token(workspace_id: str):
+        return f"test-federation-token-for-{workspace_id}"
+
+    monkeypatch.setattr(
+        fed,
+        "projectops_federation_token",
+        _default_federation_token,
+    )
     yield
 
 
@@ -256,7 +269,7 @@ def _seed(
     project_id: Optional[str] = None,
     processing_metadata: Optional[dict] = None,
     items: Optional[list[dict]] = None,
-    workspace_id: Optional[str] = None,
+    workspace_id: Optional[str] = "__auto__",
 ):
     """Create one org + one completed session + N action items.
 
@@ -271,12 +284,15 @@ def _seed(
     db = SessionLocal()
     suffix = uuid.uuid4().hex[:6]
     try:
+        resolved_workspace_id = (
+            f"ws-test-{suffix}" if workspace_id == "__auto__" else workspace_id
+        )
         org = Organization(
             name=f"POBridge {suffix}",
             slug=f"pob-{suffix}",
             is_active=True,
             settings=org_settings or {},
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace_id,
         )
         db.add(org)
         db.commit()
@@ -991,11 +1007,9 @@ def test_triage_skips_direct_bridged_items(client):
 # The triage push must carry a Brigade-vouched, workspace-bound token so PO
 # routes the proposals to the correct tenant. These cover: (a) when the org
 # has a workspace_id and the federation token mints, it's threaded to the
-# client as bearer_override; (b) when the org has NO workspace_id, the push
-# falls back to the default token (no override) and warns; (c) when the org
-# has a workspace_id but the exchange yields nothing (Brigade not configured
-# for project-ops), the push falls back to the default token and warns — the
-# finalize still succeeds (graceful degradation).
+# client as bearer_override; (b) when the org has NO workspace_id, nothing is
+# sent; (c) when token exchange yields nothing, nothing is sent. A delayed,
+# retryable proposal is safer than routing work through a default tenant.
 #
 # The writer imports ``projectops_federation_token`` lazily from
 # ``services.projectops_token`` inside the function body, so we patch it at
@@ -1050,7 +1064,7 @@ def test_triage_uses_federation_bearer_when_workspace_resolves(client, monkeypat
         assert (it.raw_payload or {}).get("po_triage_submitted_at", "").endswith("Z")
 
 
-def test_triage_falls_back_when_no_workspace_id(client, monkeypatch, caplog):
+def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
     import logging
 
     from services.projectops_writer import submit_action_items_to_triage
@@ -1074,22 +1088,22 @@ def test_triage_falls_back_when_no_workspace_id(client, monkeypatch, caplog):
     finally:
         db.close()
 
-    assert result.ok is True
-    assert result.mode == "live"
+    assert result.ok is False
+    assert result.mode == "error"
+    assert "workspace is not provisioned" in (result.detail or "")
     # No workspace_id -> never mint a federation token.
     assert asked == []
-    # The push falls back to the default token (no override).
-    assert len(stub.submitted) == 1
-    assert stub.submitted[0]["bearer_override"] is None
-    # And it warned that the default tenant routing will be used.
-    assert any(
-        "no workspace_id" in rec.getMessage()
-        and "default tenant routing" in rec.getMessage()
-        for rec in caplog.records
+    assert stub.submitted == []
+    assert all(
+        (item.raw_payload or {}).get("po_triage_submitted_at") is None
+        for item in _items_for_session(session_id)
     )
+    assert any("workspace is not provisioned" in rec.getMessage() for rec in caplog.records)
 
 
-def test_triage_falls_back_when_federation_token_unavailable(client, monkeypatch, caplog):
+def test_triage_fails_closed_when_federation_token_unavailable(
+    client, monkeypatch, caplog
+):
     import logging
 
     from services.projectops_writer import submit_action_items_to_triage
@@ -1113,16 +1127,16 @@ def test_triage_falls_back_when_federation_token_unavailable(client, monkeypatch
     finally:
         db.close()
 
-    # Graceful degradation: the finalize push STILL succeeds.
-    assert result.ok is True
-    assert result.mode == "live"
+    assert result.ok is False
+    assert result.mode == "error"
+    assert "federation token is unavailable" in (result.detail or "")
     assert asked == ["ws-tenant-2"]
-    # Fell back to the default token (no override).
-    assert len(stub.submitted) == 1
-    assert stub.submitted[0]["bearer_override"] is None
-    # Warned that the default tenant routing will be used.
+    assert stub.submitted == []
+    assert all(
+        (item.raw_payload or {}).get("po_triage_submitted_at") is None
+        for item in _items_for_session(session_id)
+    )
     assert any(
-        "federation token unavailable" in rec.getMessage()
-        and "default tenant routing" in rec.getMessage()
+        "workspace-bound federation token is unavailable" in rec.getMessage()
         for rec in caplog.records
     )

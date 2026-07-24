@@ -65,6 +65,63 @@ def test_export_session_not_found(client):
     assert response.status_code == 404
 
 
+def test_workspace_report_branding_round_trip_and_default_render(client):
+    """Admins can configure a bounded white-label lockup and the saved
+    workspace default is honored by both PDF and Word report downloads."""
+    headers = _admin_headers(client)
+    one_pixel_png = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l"
+        "EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    update = client.put(
+        "/api/export/branding",
+        headers=headers,
+        json={
+            "display_name": "Acme Advisory",
+            "accent_color": "#126E82",
+            "default_mode": "workspace",
+            "logo_data_uri": one_pixel_png,
+        },
+    )
+    assert update.status_code == 200, update.text
+    assert update.json() == {
+        "display_name": "Acme Advisory",
+        "accent_color": "#126E82",
+        "default_mode": "workspace",
+        "has_logo": True,
+        "logo_data_uri": one_pixel_png,
+    }
+
+    read = client.get("/api/export/branding", headers=headers)
+    assert read.status_code == 200, read.text
+    assert read.json()["default_mode"] == "workspace"
+
+    session_id = _create_session(client, name="White Label Export")
+    for fmt in ("pdf", "docx"):
+        report = client.get(
+            f"/api/simple/recording-sessions/{session_id}/download/summary/{fmt}",
+            headers=headers,
+        )
+        assert report.status_code == 200, report.text
+        assert len(report.content) > 500
+
+
+def test_report_branding_rejects_non_image_data(client):
+    response = client.put(
+        "/api/export/branding",
+        headers=_admin_headers(client),
+        json={
+            "logo_data_uri": (
+                "data:image/png;base64,"
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+            )
+        },
+    )
+    assert response.status_code == 422
+    assert "decode" in response.json()["detail"].lower()
+
+
 # ---------------------------------------------------------------------------
 # /api/recording-sessions/{id}/export — meeting_management endpoint
 #
@@ -311,3 +368,98 @@ def test_download_summary_md_includes_transcript_option(client, two_orgs_with_se
     )
     assert response.status_code == 200, response.text
     assert "Alpha Export Meeting transcript body." in response.text
+
+
+@pytest.mark.parametrize("renderer_name", ["export_to_pdf", "export_to_docx"])
+def test_branded_report_renderers_do_not_read_transcript_when_excluded(
+    monkeypatch, renderer_name
+):
+    """Summary reports default to the share-safe form. The raw transcript
+    helpers must not even be touched unless the caller explicitly opts in."""
+    from types import SimpleNamespace
+    from api import batch_export
+
+    monkeypatch.setattr(
+        batch_export,
+        "_get_summary_data",
+        lambda _session: {
+            "title": "Board Review",
+            "executive": "A concise executive brief.",
+            "bullets": ["Revenue grew."],
+            "actions": [{"action": "Send forecast", "owner": "Alex"}],
+            "decisions": ["Proceed with launch."],
+            "participants": ["Alex", "Taylor"],
+        },
+    )
+
+    def _unexpected(_session):
+        raise AssertionError("transcript helper must not run")
+
+    monkeypatch.setattr(batch_export, "_get_transcript_segments", _unexpected)
+    monkeypatch.setattr(batch_export, "_get_plain_transcript", _unexpected)
+    session = SimpleNamespace(
+        meeting_date=None,
+        meeting_time=None,
+        started_at=None,
+        created_at=None,
+        duration=95,
+    )
+
+    output = getattr(batch_export, renderer_name)(
+        session,
+        batch_export.ExportOptions(includeTranscript=False),
+    )
+    assert len(output) > 500
+
+
+@pytest.mark.parametrize("renderer_name", ["export_to_pdf", "export_to_docx"])
+def test_branded_report_renderers_read_transcript_only_when_included(
+    monkeypatch, renderer_name
+):
+    from types import SimpleNamespace
+    from api import batch_export
+
+    calls = {"segments": 0, "plain": 0}
+    monkeypatch.setattr(
+        batch_export,
+        "_get_summary_data",
+        lambda _session: {
+            "title": "Board Review",
+            "executive": "",
+            "bullets": [],
+            "actions": [],
+            "decisions": [],
+            "participants": [],
+        },
+    )
+
+    def _segments(_session):
+        calls["segments"] += 1
+        return [
+            {
+                "speaker": "Alex",
+                "text": "This line belongs only in the appendix.",
+                "start": 2.0,
+            }
+        ]
+
+    def _plain(_session):
+        calls["plain"] += 1
+        return ""
+
+    monkeypatch.setattr(batch_export, "_get_transcript_segments", _segments)
+    monkeypatch.setattr(batch_export, "_get_plain_transcript", _plain)
+    session = SimpleNamespace(
+        meeting_date=None,
+        meeting_time=None,
+        started_at=None,
+        created_at=None,
+        duration=95,
+    )
+
+    output = getattr(batch_export, renderer_name)(
+        session,
+        batch_export.ExportOptions(includeTranscript=True),
+    )
+    assert len(output) > 500
+    assert calls == {"segments": 1, "plain": 1}

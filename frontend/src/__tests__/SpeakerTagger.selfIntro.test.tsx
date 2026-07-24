@@ -96,7 +96,7 @@ function installFetch() {
     fetchCalls.push({ url, init });
 
     if (url.endsWith("/api/auth/me")) return jsonResponse(ME);
-    if (url.endsWith("/api/speakers")) return jsonResponse(SPEAKERS);
+    if (url.includes("/api/speakers?session_id=42")) return jsonResponse(SPEAKERS);
     if (url.match(/\/speaker-links$/)) return jsonResponse(LINKS);
     return jsonResponse({}, 404);
   }));

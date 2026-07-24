@@ -14,6 +14,12 @@ interface SpeakerLink {
   } | null;
 }
 
+interface SpeakerOption {
+  id: number;
+  display_name: string;
+  email?: string | null;
+}
+
 interface Props {
   sessionId: string | number;
   isOpen: boolean;
@@ -33,6 +39,8 @@ interface SendResult {
   }>;
 }
 
+type ReportBrandMode = 'default' | 'meeting_ops' | 'workspace' | 'unbranded';
+
 // Client-side sanity check. The server uses pydantic EmailStr for the
 // strict validation; this just keeps obvious typos out of the chip list.
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -49,6 +57,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
   const [includeLink, setIncludeLink] = useState(true);
   const [includeSummary, setIncludeSummary] = useState(false);
   const [includeTranscript, setIncludeTranscript] = useState(false);
+  const [brandMode, setBrandMode] = useState<ReportBrandMode>('default');
   const [customMessage, setCustomMessage] = useState('');
 
   // Free-form external recipients (people NOT identified as speakers in
@@ -66,34 +75,68 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
 
   useEffect(() => {
     if (!isOpen) return;
-    // Reset external-recipient state every time the modal opens so old
-    // chips from a previous meeting don't carry over.
+    // Reset the whole composer every time it opens so recipients/content
+    // from another meeting or a previous send never carry over.
     setExternalRecipients([]);
     setExternalDraft('');
     setExternalError(null);
+    setSelected(new Set());
+    setIncludeLink(true);
+    setIncludeSummary(false);
+    setIncludeTranscript(false);
+    setBrandMode('default');
+    setCustomMessage('');
+    setResult(null);
     let cancelled = false;
     (async () => {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(
-          `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links`,
-          { headers: orgHeaders() },
-        );
+        const [linksRes, speakersRes] = await Promise.all([
+          fetch(
+            `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links`,
+            { headers: orgHeaders() },
+          ),
+          fetch(
+            `${config.apiBaseUrl}/api/speakers?session_id=${encodeURIComponent(String(sessionId))}`,
+            { headers: orgHeaders() },
+          ),
+        ]);
         if (cancelled) return;
-        if (res.ok) {
-          const data = await res.json();
-          // We want full speaker info (incl. email) — speaker-links endpoint
-          // returns the nested speaker object when speaker_id is set.
-          setLinks(Array.isArray(data) ? data : []);
+        if (linksRes.ok && speakersRes.ok) {
+          const linksData: SpeakerLink[] = await linksRes.json();
+          const speakersData: SpeakerOption[] = await speakersRes.json();
+          const speakersById = new Map(
+            (Array.isArray(speakersData) ? speakersData : []).map((speaker) => [
+              speaker.id,
+              speaker,
+            ]),
+          );
+          const hydratedLinks = (Array.isArray(linksData) ? linksData : []).map((link) => {
+            const speaker = link.speaker_id
+              ? speakersById.get(link.speaker_id) || null
+              : null;
+            return {
+              ...link,
+              speaker: speaker
+                ? {
+                    id: speaker.id,
+                    display_name: speaker.display_name,
+                    email: speaker.email,
+                  }
+                : null,
+            };
+          });
+          setLinks(hydratedLinks);
           // Default-select every speaker who has an email on file.
           const auto = new Set<number>();
-          for (const l of Array.isArray(data) ? data : []) {
+          for (const l of hydratedLinks) {
             if (l.speaker_id && l.speaker?.email) auto.add(l.speaker_id as number);
           }
           setSelected(auto);
         } else {
-          setError(`Couldn't load attendee list (HTTP ${res.status}).`);
+          const status = !linksRes.ok ? linksRes.status : speakersRes.status;
+          setError(`Couldn't load attendee list (HTTP ${status}).`);
         }
       } catch (e) {
         setError('Network error loading speakers.');
@@ -199,6 +242,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
             speaker_ids: Array.from(selected),
             additional_recipients: externalRecipients,
             include,
+            brand_mode: brandMode,
             message: customMessage.trim() || undefined,
           }),
         },
@@ -224,7 +268,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
           <div>
             <h2 className="text-lg font-semibold text-white">Share via email</h2>
             <p className="mt-0.5 text-xs text-gray-400">
-              Send the meeting to identified speakers or anyone else by email. Magic-link recipients can view the meeting without an account.
+              Send a link or branded report. Link recipients sign in with the invited email address.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
@@ -281,8 +325,8 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                 <div className="space-y-1.5">
                   {namedSpeakers.length === 0 && (
                     <p className="text-xs text-gray-500">
-                      No named speakers on this meeting yet. Click a speaker label in the
-                      transcript to rename + enroll them, or just add other recipients below.
+                      No named speakers on this meeting yet. Open the Speakers tab to
+                      listen to samples and identify them, or add recipients below.
                     </p>
                   )}
                   {namedSpeakers.map((s) => {
@@ -304,7 +348,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                           <div className="font-medium text-white truncate">{s.name}</div>
                           {missing ? (
                             <div className="text-[11px] text-amber-300">
-                              No email on file — click the speaker in the transcript to add one.
+                              No email on file — update this person in the Speaker Library.
                             </div>
                           ) : (
                             <div className="text-[11px] text-gray-500 truncate">{s.email}</div>
@@ -315,7 +359,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                   })}
                   {unmappedLinks.length > 0 && (
                     <p className="text-[11px] text-gray-500 pt-1">
-                      {unmappedLinks.length} unnamed cluster{unmappedLinks.length === 1 ? '' : 's'} ({unmappedLinks.map((l) => l.raw_label).join(', ')}) — give them a name in the transcript first.
+                      {unmappedLinks.length} unnamed cluster{unmappedLinks.length === 1 ? '' : 's'} ({unmappedLinks.map((l) => l.raw_label).join(', ')}) — identify them in the Speakers tab first.
                     </p>
                   )}
                 </div>
@@ -326,8 +370,8 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                   Other recipients
                 </p>
                 <p className="mb-2 text-[11px] text-gray-500">
-                  Send the meeting to people who weren’t identified as speakers. They’ll get a
-                  magic link that opens this meeting only.
+                  Send the meeting to people who weren’t identified as speakers. They’ll
+                  sign in with this email address, then the invitation opens only this meeting.
                 </p>
                 {externalRecipients.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
@@ -415,6 +459,21 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                       className="h-3.5 w-3.5"
                     />
                     Full transcript (PDF attachment)
+                  </label>
+                  <label className="block pt-2 text-xs font-medium text-gray-400">
+                    Attachment branding
+                    <select
+                      value={brandMode}
+                      onChange={(event) =>
+                        setBrandMode(event.target.value as ReportBrandMode)
+                      }
+                      className="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-sm text-gray-200"
+                    >
+                      <option value="default">Workspace default</option>
+                      <option value="meeting_ops">Meeting-Ops</option>
+                      <option value="workspace">Workspace white-label</option>
+                      <option value="unbranded">No logo or heading</option>
+                    </select>
                   </label>
                 </div>
               </div>

@@ -39,6 +39,7 @@ interface Props {
   sessionId: string | number;
   isOpen: boolean;
   onClose: () => void;
+  onEmailCopy?: () => void;
 }
 
 const ACCESS_LEVELS: { id: AccessLevel; label: string; hint: string }[] = [
@@ -47,7 +48,12 @@ const ACCESS_LEVELS: { id: AccessLevel; label: string; hint: string }[] = [
   { id: 'edit', label: 'Can edit', hint: 'View plus rename speakers and tweak.' },
 ];
 
-export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, onClose }) => {
+export const SessionPermissionsModal: React.FC<Props> = ({
+  sessionId,
+  isOpen,
+  onClose,
+  onEmailCopy,
+}) => {
   const { activeOrganization } = useOrg();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -190,7 +196,7 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
           <div>
             <h2 className="text-lg font-semibold text-white">Share this meeting</h2>
             <p className="mt-0.5 text-xs text-gray-400">
-              Internal teammates or external folks. Magic-link invites work for emails outside your org.
+              Invite people for ongoing access, or email a one-time copy.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
@@ -369,12 +375,24 @@ export const SessionPermissionsModal: React.FC<Props> = ({ sessionId, isOpen, on
             <ExternalLink className="h-3 w-3" />
             Manage org-level membership
           </a>
-          <button
-            onClick={onClose}
-            className="rounded-md bg-gray-800 px-4 py-2 text-sm text-gray-200 hover:bg-gray-700"
-          >
-            Done
-          </button>
+          <div className="flex items-center gap-2">
+            {onEmailCopy && (
+              <button
+                type="button"
+                onClick={onEmailCopy}
+                className="inline-flex items-center gap-2 rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500"
+              >
+                <Mail className="h-4 w-4" />
+                Email a copy
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="rounded-md bg-gray-800 px-4 py-2 text-sm text-gray-200 hover:bg-gray-700"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
     </div>

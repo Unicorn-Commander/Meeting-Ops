@@ -1,24 +1,296 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from typing import List, Optional, Dict, Any, Literal
+from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 from io import BytesIO
+import base64
+import binascii
+import html
 import logging
 import json
 import os
+import re
 import uuid
 from pathlib import Path
+from sqlalchemy.orm.attributes import flag_modified
 
 from database.database import get_db
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
-from auth.models import User
+from auth.models import Organization, User
 from auth.tier import gate_feature_for_caller
 from database.models import RecordingSession
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
 logger = logging.getLogger(__name__)
+
+
+def _report_logo_path() -> Optional[str]:
+    """Resolve the optional Meeting-Ops report mark without a network fetch."""
+    candidates = [
+        os.getenv("MEETING_OPS_REPORT_LOGO", "").strip(),
+        "/app/assets/meeting-ops-mark.png",
+        str(
+            Path(__file__).resolve().parents[2]
+            / "frontend"
+            / "public"
+            / "brand"
+            / "meeting-ops-mark.png"
+        ),
+    ]
+    return next((path for path in candidates if path and Path(path).is_file()), None)
+
+
+BrandMode = Literal["default", "meeting_ops", "workspace", "unbranded"]
+_BRAND_MODES = {"meeting_ops", "workspace", "unbranded"}
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_LOGO_DATA_RE = re.compile(
+    r"^data:image/(?P<kind>png|jpeg);base64,(?P<payload>[A-Za-z0-9+/=]+)$"
+)
+_MAX_REPORT_LOGO_BYTES = 512 * 1024
+
+
+class ReportBrandingView(BaseModel):
+    display_name: str
+    accent_color: str
+    default_mode: Literal["meeting_ops", "workspace", "unbranded"]
+    has_logo: bool
+    logo_data_uri: Optional[str] = None
+
+
+class ReportBrandingUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=100)
+    accent_color: Optional[str] = Field(default=None, max_length=7)
+    default_mode: Optional[
+        Literal["meeting_ops", "workspace", "unbranded"]
+    ] = None
+    logo_data_uri: Optional[str] = Field(default=None, max_length=720_000)
+    clear_logo: bool = False
+
+
+def _organization_report_settings(
+    organization: Optional[Organization],
+) -> dict[str, Any]:
+    if organization is None:
+        return {}
+    settings = (
+        organization.settings
+        if isinstance(getattr(organization, "settings", None), dict)
+        else {}
+    )
+    report = settings.get("report_branding")
+    return dict(report) if isinstance(report, dict) else {}
+
+
+def _validated_logo_bytes(data_uri: Optional[str]) -> Optional[bytes]:
+    if not data_uri:
+        return None
+    match = _LOGO_DATA_RE.fullmatch(data_uri.strip())
+    if not match:
+        raise ValueError("Logo must be a PNG or JPEG data URL.")
+    try:
+        raw = base64.b64decode(match.group("payload"), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Logo data is not valid base64.") from exc
+    if len(raw) > _MAX_REPORT_LOGO_BYTES:
+        raise ValueError("Logo must be 512 KB or smaller.")
+    kind = match.group("kind")
+    if kind == "png" and not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Logo content is not a valid PNG.")
+    if kind == "jpeg" and not raw.startswith(b"\xff\xd8\xff"):
+        raise ValueError("Logo content is not a valid JPEG.")
+    try:
+        from reportlab.lib.utils import ImageReader
+
+        width, height = ImageReader(BytesIO(raw)).getSize()
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("Logo image could not be decoded.") from exc
+    if width < 1 or height < 1 or width > 4096 or height > 4096:
+        raise ValueError("Logo dimensions must be between 1 and 4096 pixels.")
+    return raw
+
+
+def _serialize_report_branding(
+    organization: Organization,
+) -> ReportBrandingView:
+    report = _organization_report_settings(organization)
+    accent = str(report.get("accent_color") or "#7C3AED")
+    if not _HEX_COLOR_RE.fullmatch(accent):
+        accent = "#7C3AED"
+    mode = str(report.get("default_mode") or "meeting_ops")
+    if mode not in _BRAND_MODES:
+        mode = "meeting_ops"
+    logo_data_uri = report.get("logo_data_uri")
+    try:
+        has_logo = _validated_logo_bytes(logo_data_uri) is not None
+    except ValueError:
+        logo_data_uri = None
+        has_logo = False
+    return ReportBrandingView(
+        display_name=(
+            str(report.get("display_name") or organization.name).strip()
+            or organization.name
+        ),
+        accent_color=accent.upper(),
+        default_mode=mode,  # type: ignore[arg-type]
+        has_logo=has_logo,
+        logo_data_uri=logo_data_uri if has_logo else None,
+    )
+
+
+def _require_report_brand_admin(
+    active_org: ActiveOrganization,
+    current_user: User,
+) -> None:
+    if current_user.is_superuser:
+        return
+    if active_org.role_name not in {"owner", "admin", "manager"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Workspace report branding requires an admin or manager.",
+        )
+
+
+@router.get("/branding", response_model=ReportBrandingView)
+async def get_report_branding(
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+) -> ReportBrandingView:
+    """Return safe workspace report-brand settings for previews/exports."""
+    return _serialize_report_branding(active_org.organization)
+
+
+@router.put("/branding", response_model=ReportBrandingView)
+async def update_report_branding(
+    payload: ReportBrandingUpdate,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> ReportBrandingView:
+    """Persist a small, database-backed white-label lockup per workspace."""
+    _require_report_brand_admin(active_org, current_user)
+    organization = active_org.organization
+    settings = dict(organization.settings or {})
+    report = _organization_report_settings(organization)
+
+    if payload.display_name is not None:
+        report["display_name"] = (
+            payload.display_name.strip() or organization.name
+        )
+    if payload.accent_color is not None:
+        accent = payload.accent_color.strip()
+        if not _HEX_COLOR_RE.fullmatch(accent):
+            raise HTTPException(
+                status_code=422,
+                detail="Accent color must be a six-digit hex color such as #7C3AED.",
+            )
+        report["accent_color"] = accent.upper()
+    if payload.default_mode is not None:
+        report["default_mode"] = payload.default_mode
+    if payload.clear_logo:
+        report.pop("logo_data_uri", None)
+    elif payload.logo_data_uri is not None:
+        try:
+            _validated_logo_bytes(payload.logo_data_uri)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report["logo_data_uri"] = payload.logo_data_uri.strip()
+
+    settings["report_branding"] = report
+    organization.settings = settings
+    flag_modified(organization, "settings")
+    db.commit()
+    db.refresh(organization)
+    return _serialize_report_branding(organization)
+
+
+def _report_organization(session: RecordingSession) -> Optional[Organization]:
+    """Load the session workspace only when the ORM row is still bound."""
+    try:
+        from sqlalchemy.orm import object_session
+
+        db = object_session(session)
+        if db is None or not getattr(session, "organization_id", None):
+            return None
+        return (
+            db.query(Organization)
+            .filter(Organization.id == session.organization_id)
+            .first()
+        )
+    except Exception:  # noqa: BLE001 - detached/test rows use safe defaults
+        logger.debug("Could not resolve report organization", exc_info=True)
+        return None
+
+
+def _resolve_report_brand(
+    session: RecordingSession,
+    options: "ExportOptions",
+) -> dict[str, Any]:
+    organization = _report_organization(session)
+    configured = (
+        _serialize_report_branding(organization)
+        if organization is not None
+        else None
+    )
+    mode = options.brandMode
+    if mode == "default":
+        mode = configured.default_mode if configured else "meeting_ops"
+
+    if mode == "unbranded":
+        return {
+            "mode": "unbranded",
+            "name": "",
+            "tagline": "",
+            "accent_color": "#374151",
+            "logo_path": None,
+            "logo_bytes": None,
+            "footer": "Meeting report",
+        }
+
+    if mode == "workspace":
+        report = _organization_report_settings(organization)
+        logo_data_uri = report.get("logo_data_uri")
+        try:
+            logo_bytes = _validated_logo_bytes(logo_data_uri)
+        except ValueError:
+            logo_bytes = None
+        name = (
+            configured.display_name
+            if configured
+            else (
+                getattr(organization, "name", None)
+                or "Meeting Intelligence"
+            )
+        )
+        return {
+            "mode": "workspace",
+            "name": name,
+            "tagline": "MEETING INTELLIGENCE REPORT",
+            "accent_color": (
+                configured.accent_color if configured else "#374151"
+            ),
+            "logo_path": None,
+            "logo_bytes": logo_bytes,
+            "footer": f"{name}  •  Meeting intelligence report",
+        }
+
+    return {
+        "mode": "meeting_ops",
+        "name": "MEETING-OPS",
+        "tagline": "MEETING INTELLIGENCE REPORT",
+        "accent_color": "#7C3AED",
+        "logo_path": _report_logo_path(),
+        "logo_bytes": None,
+        "footer": "MEETING-OPS  •  Meeting intelligence, ready to share",
+    }
+
+
+def _brand_logo_source(brand: dict[str, Any]):
+    if brand.get("logo_bytes"):
+        return BytesIO(brand["logo_bytes"])
+    return brand.get("logo_path")
+
 
 # Export models
 class ExportOptions(BaseModel):
@@ -32,6 +304,9 @@ class ExportOptions(BaseModel):
     # the value and then crash with AttributeError at access time (the
     # silent-fail mode behind the Markdown export button).
     includeTranscript: bool = False
+    # "default" resolves through the active workspace's saved choice.
+    # White-label and unbranded modes never include Meeting-Ops vendor copy.
+    brandMode: BrandMode = "default"
     mergeFiles: bool = False
     emailTo: Optional[str] = None
     scheduleTime: Optional[str] = None
@@ -113,10 +388,9 @@ _ATTACHMENT_CONTENT_TYPES = {
 
 def _email_configured() -> bool:
     """True when the env carries everything _postmark_send needs."""
-    return bool(
-        os.getenv("POSTMARK_SERVER_TOKEN", "").strip()
-        and os.getenv("POSTMARK_FROM", "").strip()
-    )
+    from auth.email import _postmark_token
+
+    return bool(_postmark_token())
 
 
 def _send_export_email(job: "ExportJob", to_email: str, artifact_path: Path) -> None:
@@ -258,7 +532,7 @@ async def create_batch_export(
             status="pending",
             progress=0,
             createdAt=datetime.now(timezone.utc),
-            options=request.options.dict()
+            options=request.options.model_dump()
         )
         
         # Store job
@@ -505,10 +779,16 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
         "bullets": [],
         "actions": [],
         "decisions": [],
+        "participants": (
+            session.participants
+            if isinstance(getattr(session, "participants", None), list)
+            else []
+        ),
         "title": session.title or session.name or "Untitled Meeting",
     }
 
     # Try final_summary first (preferred)
+    final_loaded = False
     final = session.final_summary
     if final:
         if isinstance(final, str):
@@ -517,17 +797,19 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
             except (json.JSONDecodeError, TypeError):
                 final = {}
         if isinstance(final, dict):
+            final_loaded = True
             summary_data["executive"] = final.get("executive", "")
             summary_data["bullets"] = final.get("bullets", [])
             summary_data["actions"] = final.get("actions", [])
             summary_data["decisions"] = final.get("decisions", [])
             if final.get("title"):
                 summary_data["title"] = final["title"]
-            return summary_data
+            # Continue below so first-class ActionItem rows can replace the
+            # stale action snapshot captured at summarization time.
 
     # Fallback to legacy summary field
     legacy = session.summary
-    if legacy:
+    if legacy and not final_loaded:
         if isinstance(legacy, str):
             try:
                 legacy = json.loads(legacy)
@@ -542,6 +824,42 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
             summary_data["decisions"] = source.get("decisions", [])
             if source.get("title"):
                 summary_data["title"] = source["title"]
+
+    # The editable ActionItem table is canonical after summarization.  When
+    # the ORM row is bound, render current owners/due dates/statuses in every
+    # report instead of the frozen final_summary.actions list.
+    try:
+        from sqlalchemy.orm import object_session
+        from database.models import ActionItem
+
+        db = object_session(session)
+        if db is not None:
+            current_actions = (
+                db.query(ActionItem)
+                .filter(
+                    ActionItem.session_id == session.id,
+                    ActionItem.organization_id == session.organization_id,
+                )
+                .order_by(ActionItem.sort_order.asc(), ActionItem.id.asc())
+                .all()
+            )
+            if current_actions:
+                summary_data["actions"] = [
+                    {
+                        "action": item.text,
+                        "owner": item.owner or "",
+                        "status": item.status or "todo",
+                        "due_date": (
+                            item.due_date.strftime("%b %d, %Y")
+                            if item.due_date
+                            else ""
+                        ),
+                        "priority": (item.raw_payload or {}).get("priority", ""),
+                    }
+                    for item in current_actions
+                ]
+    except Exception:  # noqa: BLE001 - a report should still use summary data
+        logger.exception("Could not load canonical action items for report")
 
     return summary_data
 
@@ -594,11 +912,12 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     from reportlab.lib.colors import HexColor
     from reportlab.lib.units import inch
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        Image, SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
         HRFlowable, PageBreak
     )
     from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
+    brand = _resolve_report_brand(session, options)
     buffer = BytesIO()
     page_width, page_height = letter
     doc = SimpleDocTemplate(
@@ -611,7 +930,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     )
 
     # Colors
-    purple = HexColor("#7C3AED")
+    purple = HexColor(brand["accent_color"])
     dark_gray = HexColor("#374151")
     medium_gray = HexColor("#6B7280")
     light_gray = HexColor("#F3F4F6")
@@ -683,30 +1002,156 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
         spaceAfter=8,
         leftIndent=8,
     ))
+    styles.add(ParagraphStyle(
+        "BrandMark",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        alignment=TA_CENTER,
+        textColor=HexColor("#FFFFFF"),
+    ))
+    styles.add(ParagraphStyle(
+        "BrandLockup",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=13,
+        textColor=dark_gray,
+    ))
+    styles.add(ParagraphStyle(
+        "TableText",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=11,
+        textColor=dark_gray,
+    ))
+    styles.add(ParagraphStyle(
+        "TableHeaderText",
+        parent=styles["TableText"],
+        fontName="Helvetica-Bold",
+        textColor=HexColor("#FFFFFF"),
+    ))
 
     story = []
     summary_data = _get_summary_data(session)
 
-    # --- Header ---
-    story.append(Paragraph("Meeting-Ops", ParagraphStyle(
-        "BrandName", parent=styles["Normal"],
-        fontName="Helvetica-Bold", fontSize=12, textColor=purple,
-    )))
+    # --- Branded report lockup ---
+    if brand["mode"] != "unbranded":
+        safe_brand_name = html.escape(str(brand["name"]))
+        safe_tagline = html.escape(str(brand["tagline"]))
+        brand_text = Paragraph(
+            f"{safe_brand_name}<br/><font size=\"7\" "
+            f'color="{brand["accent_color"]}">{safe_tagline}</font>',
+            styles["BrandLockup"],
+        )
+        logo_source = _brand_logo_source(brand)
+        fallback_mark = brand["mode"] == "meeting_ops" and not logo_source
+        if logo_source:
+            brand_mark = Image(logo_source)
+            brand_mark._restrictSize(0.72 * inch, 0.54 * inch)
+            lockup_rows = [[brand_mark, brand_text]]
+            lockup_widths = [0.82 * inch, 3.2 * inch]
+        elif fallback_mark:
+            lockup_rows = [[Paragraph("M", styles["BrandMark"]), brand_text]]
+            lockup_widths = [0.42 * inch, 3.2 * inch]
+        else:
+            lockup_rows = [[brand_text]]
+            lockup_widths = [3.8 * inch]
+
+        brand_lockup = Table(lockup_rows, colWidths=lockup_widths)
+        brand_lockup_style = [
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (0, 0), 0 if logo_source else 4),
+            ("RIGHTPADDING", (0, 0), (0, 0), 4),
+            ("TOPPADDING", (0, 0), (0, 0), 0 if logo_source else 4),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 0 if logo_source else 4),
+        ]
+        if fallback_mark:
+            brand_lockup_style.extend([
+                ("BACKGROUND", (0, 0), (0, 0), purple),
+                ("LEFTPADDING", (1, 0), (1, 0), 9),
+            ])
+        elif logo_source:
+            brand_lockup_style.append(
+                ("LEFTPADDING", (1, 0), (1, 0), 9)
+            )
+        brand_lockup.setStyle(TableStyle(brand_lockup_style))
+        story.append(brand_lockup)
     story.append(HRFlowable(
-        width="100%", thickness=2, color=purple, spaceAfter=12,
+        width="100%",
+        thickness=2 if brand["mode"] != "unbranded" else 0.75,
+        color=purple,
+        spaceAfter=12,
     ))
     story.append(Paragraph(
         summary_data["title"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
         styles["MeetingTitle"]
     ))
 
-    # Meeting metadata
-    date_str = session.created_at.strftime("%B %d, %Y at %I:%M %p") if session.created_at else "N/A"
+    # Meeting metadata uses the user-corrected meeting date rather than the
+    # ingestion timestamp whenever it is available.
+    meeting_day = (
+        session.meeting_date
+        or (session.started_at.date() if session.started_at else None)
+        or (session.created_at.date() if session.created_at else None)
+    )
+    date_str = meeting_day.strftime("%B %d, %Y") if meeting_day else "N/A"
+    if session.meeting_time:
+        date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
     duration_secs = session.duration or 0
     duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A"
-    story.append(Paragraph(f"Date: {date_str}", styles["MetaText"]))
-    story.append(Paragraph(f"Duration: {duration_str}", styles["MetaText"]))
+    participants = summary_data["participants"]
+    meta_table = Table(
+        [[
+            Paragraph(f"<b>Date</b><br/>{date_str}", styles["MetaText"]),
+            Paragraph(f"<b>Duration</b><br/>{duration_str}", styles["MetaText"]),
+            Paragraph(
+                f"<b>Participants</b><br/>{len(participants) if participants else 'Not listed'}",
+                styles["MetaText"],
+            ),
+            Paragraph(
+                "<b>Transcript</b><br/>"
+                + ("Included" if options.includeTranscript else "Not included"),
+                styles["MetaText"],
+            ),
+        ]],
+        colWidths=[2.25 * inch, 1.3 * inch, 1.45 * inch, 1.5 * inch],
+    )
+    meta_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), light_gray),
+        ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#E5E7EB")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, HexColor("#E5E7EB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(meta_table)
     story.append(Spacer(1, 12))
+
+    if participants:
+        participant_names = []
+        for participant in participants:
+            if isinstance(participant, dict):
+                participant_names.append(
+                    participant.get("name")
+                    or participant.get("display_name")
+                    or participant.get("email")
+                    or "Participant"
+                )
+            else:
+                participant_names.append(str(participant))
+        story.append(Paragraph(
+            "<b>Participants:</b> "
+            + ", ".join(
+                name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                for name in participant_names
+            ),
+            styles["MetaText"],
+        ))
 
     has_summary = bool(
         summary_data["executive"] or summary_data["bullets"]
@@ -731,21 +1176,48 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     # --- Action Items ---
     if summary_data["actions"]:
         story.append(Paragraph("Action Items", styles["SectionHeading"]))
+        action_rows = [[
+            Paragraph("Action", styles["TableHeaderText"]),
+            Paragraph("Owner", styles["TableHeaderText"]),
+            Paragraph("Status", styles["TableHeaderText"]),
+            Paragraph("Due", styles["TableHeaderText"]),
+        ]]
         for action in summary_data["actions"]:
             if isinstance(action, dict):
                 action_text = action.get("action", str(action))
                 owner = action.get("owner", "")
-                priority = action.get("priority", "")
-                safe_action = action_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                line = f"\u25a1  {safe_action}"
-                if owner:
-                    line += f"  &mdash; <i>{owner.replace('&', '&amp;')}</i>"
-                if priority:
-                    line += f"  [{priority}]"
-                story.append(Paragraph(line, styles["BulletText"]))
+                status = action.get("status", "todo")
+                due = action.get("due_date", "")
             else:
-                safe = str(action).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                story.append(Paragraph(f"\u25a1  {safe}", styles["BulletText"]))
+                action_text = str(action)
+                owner = ""
+                status = "todo"
+                due = ""
+            safe_action = str(action_text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            safe_owner = str(owner).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            action_rows.append([
+                Paragraph(safe_action, styles["TableText"]),
+                Paragraph(safe_owner or "—", styles["TableText"]),
+                Paragraph(str(status).replace("_", " ").title(), styles["TableText"]),
+                Paragraph(str(due) or "—", styles["TableText"]),
+            ])
+        action_table = Table(
+            action_rows,
+            colWidths=[3.35 * inch, 1.15 * inch, 0.85 * inch, 1.15 * inch],
+            repeatRows=1,
+        )
+        action_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), purple),
+            ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#FFFFFF")),
+            ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#D1D5DB")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [HexColor("#FFFFFF"), light_gray]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(action_table)
         story.append(Spacer(1, 8))
 
     # --- Important Decisions ---
@@ -756,11 +1228,11 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
             story.append(Paragraph(f"\u2713  {safe}", styles["BulletText"]))
         story.append(Spacer(1, 8))
 
-    # --- Transcript ---
-    segments = _get_transcript_segments(session)
-    plain_transcript = _get_plain_transcript(session)
+    # --- Optional transcript appendix ---
+    segments = _get_transcript_segments(session) if options.includeTranscript else []
+    plain_transcript = _get_plain_transcript(session) if options.includeTranscript else ""
 
-    if segments or plain_transcript:
+    if options.includeTranscript and (segments or plain_transcript):
         if has_summary:
             story.append(PageBreak())
         story.append(Paragraph("Full Transcript", styles["SectionHeading"]))
@@ -790,7 +1262,12 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
                     safe = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     story.append(Paragraph(safe, styles["TranscriptText"]))
     elif not has_summary:
-        story.append(Paragraph("No transcript or summary data available for this session.", styles["BodyText2"]))
+        message = (
+            "No summary data is available for this session."
+            if not options.includeTranscript
+            else "No transcript or summary data is available for this session."
+        )
+        story.append(Paragraph(message, styles["BodyText2"]))
 
     # --- Footer callback ---
     def add_footer(canvas, doc):
@@ -802,7 +1279,11 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
         # Footer text
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(medium_gray)
-        canvas.drawString(0.75 * inch, 0.45 * inch, "Generated by Meeting-Ops AI Recording Suite")
+        canvas.drawString(
+            0.75 * inch,
+            0.45 * inch,
+            str(brand["footer"]),
+        )
         canvas.drawRightString(page_width - 0.75 * inch, 0.45 * inch, f"Page {doc.page}")
         canvas.restoreState()
 
@@ -813,11 +1294,17 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
 def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     """Export session to a professional DOCX document using python-docx."""
     from docx import Document
-    from docx.shared import Inches, Pt, Cm, RGBColor
+    from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.enum.table import WD_TABLE_ALIGNMENT
 
+    brand = _resolve_report_brand(session, options)
     doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.72)
+    section.right_margin = Inches(0.72)
 
     # --- Style configuration ---
     style = doc.styles["Normal"]
@@ -826,18 +1313,36 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     font.size = Pt(10)
     font.color.rgb = RGBColor(0x37, 0x41, 0x51)
 
-    purple_rgb = RGBColor(0x7C, 0x3A, 0xED)
+    accent_bytes = bytes.fromhex(brand["accent_color"].lstrip("#"))
+    purple_rgb = RGBColor(*accent_bytes)
     dark_gray_rgb = RGBColor(0x37, 0x41, 0x51)
     medium_gray_rgb = RGBColor(0x6B, 0x72, 0x80)
+    for heading_name in ("Title", "Heading 1", "Heading 2"):
+        heading_style = doc.styles[heading_name]
+        heading_style.font.name = "Calibri"
+        heading_style.font.color.rgb = (
+            dark_gray_rgb if heading_name in {"Title", "Heading 1"} else purple_rgb
+        )
 
     summary_data = _get_summary_data(session)
 
     # --- Brand header ---
-    brand_para = doc.add_paragraph()
-    brand_run = brand_para.add_run("Meeting-Ops")
-    brand_run.font.size = Pt(12)
-    brand_run.font.bold = True
-    brand_run.font.color.rgb = purple_rgb
+    if brand["mode"] != "unbranded":
+        brand_para = doc.add_paragraph()
+        brand_para.paragraph_format.space_after = Pt(1)
+        logo_source = _brand_logo_source(brand)
+        if logo_source:
+            logo_run = brand_para.add_run()
+            logo_run.add_picture(logo_source, width=Inches(0.5))
+            brand_para.add_run("  ")
+        brand_run = brand_para.add_run(str(brand["name"]))
+        brand_run.font.size = Pt(12)
+        brand_run.font.bold = True
+        brand_run.font.color.rgb = purple_rgb
+        report_run = brand_para.add_run(f"\n{brand['tagline']}")
+        report_run.font.size = Pt(7)
+        report_run.font.bold = True
+        report_run.font.color.rgb = medium_gray_rgb
 
     # Purple divider line (thin horizontal rule via a border paragraph)
     divider = doc.add_paragraph()
@@ -850,7 +1355,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     bottom.set(qn("w:val"), "single")
     bottom.set(qn("w:sz"), "6")
     bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "7C3AED")
+    bottom.set(qn("w:color"), brand["accent_color"].lstrip("#"))
     pBdr.append(bottom)
     divider.paragraph_format.element.get_or_add_pPr().append(pBdr)
 
@@ -860,19 +1365,63 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
         run.font.color.rgb = dark_gray_rgb
 
     # --- Metadata ---
-    date_str = session.created_at.strftime("%B %d, %Y at %I:%M %p") if session.created_at else "N/A"
+    meeting_day = (
+        session.meeting_date
+        or (session.started_at.date() if session.started_at else None)
+        or (session.created_at.date() if session.created_at else None)
+    )
+    date_str = meeting_day.strftime("%B %d, %Y") if meeting_day else "N/A"
+    if session.meeting_time:
+        date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
     duration_secs = session.duration or 0
     duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A"
+    participants = summary_data["participants"]
 
-    meta = doc.add_paragraph()
-    meta.paragraph_format.space_after = Pt(2)
-    date_run = meta.add_run(f"Date: {date_str}")
-    date_run.font.size = Pt(9)
-    date_run.font.color.rgb = medium_gray_rgb
-    meta.add_run("\n")
-    dur_run = meta.add_run(f"Duration: {duration_str}")
-    dur_run.font.size = Pt(9)
-    dur_run.font.color.rgb = medium_gray_rgb
+    meta_table = doc.add_table(rows=1, cols=4)
+    meta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    meta_values = [
+        ("DATE", date_str),
+        ("DURATION", duration_str),
+        ("PARTICIPANTS", str(len(participants)) if participants else "Not listed"),
+        ("TRANSCRIPT", "Included" if options.includeTranscript else "Not included"),
+    ]
+    for cell, (label, value) in zip(meta_table.rows[0].cells, meta_values):
+        cell.text = ""
+        shading = OxmlElement("w:shd")
+        shading.set(qn("w:fill"), "F3F0FF")
+        cell._tc.get_or_add_tcPr().append(shading)
+        paragraph = cell.paragraphs[0]
+        paragraph.paragraph_format.space_after = Pt(0)
+        label_run = paragraph.add_run(label + "\n")
+        label_run.font.size = Pt(7)
+        label_run.font.bold = True
+        label_run.font.color.rgb = purple_rgb
+        value_run = paragraph.add_run(value)
+        value_run.font.size = Pt(8)
+        value_run.font.color.rgb = dark_gray_rgb
+
+    if participants:
+        participant_names = []
+        for participant in participants:
+            if isinstance(participant, dict):
+                participant_names.append(
+                    participant.get("name")
+                    or participant.get("display_name")
+                    or participant.get("email")
+                    or "Participant"
+                )
+            else:
+                participant_names.append(str(participant))
+        participant_para = doc.add_paragraph()
+        participant_para.paragraph_format.space_before = Pt(5)
+        participant_para.paragraph_format.space_after = Pt(2)
+        participant_label = participant_para.add_run("Participants: ")
+        participant_label.font.bold = True
+        participant_label.font.size = Pt(8)
+        participant_label.font.color.rgb = medium_gray_rgb
+        participant_run = participant_para.add_run(", ".join(participant_names))
+        participant_run.font.size = Pt(8)
+        participant_run.font.color.rgb = medium_gray_rgb
 
     has_summary = bool(
         summary_data["executive"] or summary_data["bullets"]
@@ -898,7 +1447,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
         table.style = "Light Grid Accent 1"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        headers = ["Task", "Owner", "Priority", "Status"]
+        headers = ["Task", "Owner", "Status", "Due"]
         header_cells = table.rows[0].cells
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
@@ -911,19 +1460,19 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
             if isinstance(action, dict):
                 task = action.get("action", str(action))
                 owner = action.get("owner", "")
-                priority = action.get("priority", "")
                 status = action.get("status", "Pending")
+                due_date = action.get("due_date", "")
             else:
                 task = str(action)
                 owner = ""
-                priority = ""
                 status = "Pending"
+                due_date = ""
 
             row_cells = table.add_row().cells
             row_cells[0].text = task
-            row_cells[1].text = owner
-            row_cells[2].text = priority
-            row_cells[3].text = status
+            row_cells[1].text = owner or "—"
+            row_cells[2].text = str(status).replace("_", " ").title()
+            row_cells[3].text = due_date or "—"
 
             for cell in row_cells:
                 for paragraph in cell.paragraphs:
@@ -936,11 +1485,11 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
         for decision in summary_data["decisions"]:
             doc.add_paragraph(str(decision), style="List Bullet")
 
-    # --- Full Transcript ---
-    segments = _get_transcript_segments(session)
-    plain_transcript = _get_plain_transcript(session)
+    # --- Optional transcript appendix ---
+    segments = _get_transcript_segments(session) if options.includeTranscript else []
+    plain_transcript = _get_plain_transcript(session) if options.includeTranscript else ""
 
-    if segments or plain_transcript:
+    if options.includeTranscript and (segments or plain_transcript):
         if has_summary:
             doc.add_page_break()
         doc.add_heading("Full Transcript", level=2)
@@ -976,15 +1525,18 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
                     for run in p.runs:
                         run.font.size = Pt(9)
     elif not has_summary:
-        doc.add_paragraph("No transcript or summary data available for this session.")
+        doc.add_paragraph(
+            "No summary data is available for this session."
+            if not options.includeTranscript
+            else "No transcript or summary data is available for this session."
+        )
 
     # --- Footer ---
-    section = doc.sections[0]
     footer = section.footer
     footer.is_linked_to_previous = False
     footer_para = footer.paragraphs[0]
     footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    footer_run = footer_para.add_run("Generated by Meeting-Ops AI Recording Suite")
+    footer_run = footer_para.add_run(str(brand["footer"]))
     footer_run.font.size = Pt(7)
     footer_run.font.color.rgb = medium_gray_rgb
 
@@ -1039,6 +1591,7 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
     parsing session.summary (JSON-stringified). Includes transcript only
     when options.includeTranscript is set.
     """
+    brand = _resolve_report_brand(session, options)
     title = session.title or session.name or "Untitled Meeting"
     duration_min = round((session.duration or 0) / 60, 1)
     created = session.created_at.strftime("%Y-%m-%d %H:%M") if session.created_at else "(unknown date)"
@@ -1052,6 +1605,9 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
             fs = {}
 
     lines: list[str] = []
+    if brand["mode"] != "unbranded":
+        lines.append(f"> **{brand['name']}** · {brand['tagline'].title()}")
+        lines.append("")
     lines.append(f"# {title}")
     lines.append("")
     lines.append(f"**Date:** {created}  ")

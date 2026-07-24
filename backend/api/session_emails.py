@@ -10,7 +10,7 @@ import html
 import logging
 import os
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
@@ -52,6 +52,9 @@ class EmailAttendeesRequest(BaseModel):
         default_factory=lambda: ["link"],
         description="Which artifacts to include: link, summary_pdf, transcript_pdf",
     )
+    brand_mode: Literal[
+        "default", "meeting_ops", "workspace", "unbranded"
+    ] = "default"
     message: Optional[str] = Field(default=None, max_length=4000)
 
 
@@ -152,7 +155,10 @@ def _build_html(
 
 
 def _build_attachments(
-    db: Session, session: RecordingSession, include: List[str]
+    db: Session,
+    session: RecordingSession,
+    include: List[str],
+    brand_mode: str = "default",
 ) -> List[dict]:
     """Generate base64-encoded attachments for any requested PDFs."""
     import base64
@@ -161,8 +167,14 @@ def _build_attachments(
     out: List[dict] = []
     safe_title = (session.title or session.name or "meeting").replace(" ", "_")[:80]
     if "summary_pdf" in include or "transcript_pdf" in include:
-        opts_summary = ExportOptions(includeTranscript=False)
-        opts_transcript = ExportOptions(includeTranscript=True)
+        opts_summary = ExportOptions(
+            includeTranscript=False,
+            brandMode=brand_mode,
+        )
+        opts_transcript = ExportOptions(
+            includeTranscript=True,
+            brandMode=brand_mode,
+        )
         if "summary_pdf" in include:
             try:
                 pdf_bytes = export_to_pdf(session, opts_summary)
@@ -196,12 +208,16 @@ def _postmark_send(
     attachments: Optional[List[dict]] = None,
 ) -> dict:
     import httpx
+    from auth.email import _postmark_sender, _postmark_token
 
-    token = os.getenv("POSTMARK_SERVER_TOKEN", "").strip()
-    sender = os.getenv("POSTMARK_FROM", "").strip()
+    token = _postmark_token()
+    sender = _postmark_sender()
     stream = os.getenv("POSTMARK_MESSAGE_STREAM", "outbound").strip() or "outbound"
-    if not token or not sender:
-        return {"ok": False, "error": "POSTMARK_SERVER_TOKEN/POSTMARK_FROM not configured"}
+    if not token:
+        return {
+            "ok": False,
+            "error": "Postmark is not configured for this deployment",
+        }
 
     to_field = f"{to_name} <{to_email}>" if to_name else to_email
     payload = {
@@ -338,7 +354,12 @@ async def email_attendees(
         )
 
     include = [s.lower() for s in (payload.include or ["link"])]
-    attachments = _build_attachments(db, session, include) or None
+    attachments = _build_attachments(
+        db,
+        session,
+        include,
+        payload.brand_mode,
+    ) or None
 
     sent = 0
     skipped = 0

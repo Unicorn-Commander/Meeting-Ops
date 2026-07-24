@@ -28,7 +28,12 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 
 
 def _base_url() -> str:
-    return os.getenv("PROJECT_OPS_URL", DEFAULT_PROJECT_OPS_URL).rstrip("/")
+    return (
+        os.getenv("PROJECT_OPS_URL")
+        or os.getenv("PROJECTOPS_BASE_URL")
+        or os.getenv("PROJECTOPS_API_BASE_URL")
+        or DEFAULT_PROJECT_OPS_URL
+    ).rstrip("/")
 
 
 def _timeout() -> float:

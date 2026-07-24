@@ -20,16 +20,17 @@ Contact-Ops resolver (``services.contact_ops_resolver``) uses for
 DORMANT-SAFE: when the KC client secret is unset, or any step fails (mint /
 exchange transport, non-200, non-JSON, missing token), every call returns
 ``None`` WITHOUT raising — a federation-token miss must never break finalize.
-The writer falls back to its existing default service-token path (default
-tenant routing) when this returns ``None``. Tokens are cached per-workspace
-~30s before exp, in the SAME module-level cache shape as the resolver.
+The writer treats that result as a recoverable sync failure and does not send
+the proposal; it never falls back to a default service tenant. Tokens are
+cached per-workspace ~30s before exp, in the SAME module-level cache shape as
+the resolver.
 
 BRIGADE-CONFIG DEPENDENCY: Brigade must allow actor ``meeting-ops`` to exchange
 for audience ``project-ops`` — i.e. ``project-ops`` in Brigade's
 ``BRIGADE_EXCHANGE_ALLOWED_AUDIENCES`` and ``meeting-ops`` in
 ``BRIGADE_EXCHANGE_ALLOWED_ACTORS``. Until that grant exists the exchange
-returns non-200 and this degrades to ``None`` (default routing) rather than
-failing the push.
+returns non-200 and the writer records a recoverable sync failure without
+sending the proposal.
 
 JWT note: this module does not decode tokens (it only forwards them); the rest
 of the backend uses python-jose, not PyJWT — keep that if decode is ever added.

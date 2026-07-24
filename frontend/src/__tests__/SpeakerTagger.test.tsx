@@ -99,7 +99,7 @@ function installFetch(opts: { linksAfterUpdate?: unknown } = {}) {
     if (url.endsWith("/api/auth/me")) {
       return jsonResponse(ME);
     }
-    if (url.endsWith("/api/speakers")) {
+    if (url.includes("/api/speakers?session_id=42")) {
       return jsonResponse(SPEAKERS);
     }
     if (url.match(/\/speaker-links$/)) {
@@ -142,13 +142,15 @@ function installLocalStorage() {
   });
 }
 
-async function renderTagger() {
+async function renderTagger(
+  props: React.ComponentProps<typeof SpeakerTagger> = { sessionId: "42" },
+) {
   await act(async () => {
     render(
       <MemoryRouter>
         <AuthProvider>
           <OrgProvider>
-            <SpeakerTagger sessionId="42" />
+            <SpeakerTagger {...props} />
           </OrgProvider>
         </AuthProvider>
       </MemoryRouter>
@@ -176,6 +178,9 @@ describe("SpeakerTagger", () => {
     expect(screen.getByText("81%")).toBeInTheDocument();
     // SPEAKER_01 has no match
     expect(screen.getByText(/no match/i)).toBeInTheDocument();
+    expect(
+      fetchCalls.some((call) => call.url.includes("/api/speakers?session_id=42")),
+    ).toBe(true);
   });
 
   it("PATCHes a manual confirmation when a user picks a speaker for an unmatched label", async () => {
@@ -197,5 +202,30 @@ describe("SpeakerTagger", () => {
       const headers = new Headers(patchCall?.init?.headers as HeadersInit);
       expect(headers.get("X-MeetingOps-Org")).toBe("magic-unicorn");
     });
+  });
+
+  it("plays representative moments from the existing meeting audio", async () => {
+    installFetch();
+    const onPlaySample = vi.fn();
+    await renderTagger({
+      sessionId: "42",
+      onPlaySample,
+      segments: [
+        {
+          start: 12,
+          end: 20,
+          text: "This is a clear representative sentence from Shafen.",
+          speaker: "SPEAKER_01",
+          raw_label: "SPEAKER_01",
+        },
+      ],
+    });
+
+    const sample = await screen.findByTitle(/Play SPEAKER_01 at 0:12/i);
+    fireEvent.click(sample);
+    expect(onPlaySample).toHaveBeenCalledWith(12, 20);
+    expect(
+      screen.getByText(/not saved as separate biometric clips/i),
+    ).toBeInTheDocument();
   });
 });

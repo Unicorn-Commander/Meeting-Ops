@@ -7,10 +7,10 @@ shipped diarizer without direct test coverage, so this pins its contract:
 
   1. A 200 response from speaker-svc /diarize parses each segment's speaker
      + embedding (and stamps the ``backend`` from the payload).
-  2. A missing audio path short-circuits to [] before any HTTP call (the
-     cross-host topology guard — the file may not exist on the svc host).
-  3. An HTTP 500 is swallowed and yields [] — diarization is non-fatal to
-     the pipeline; we keep the un-diarized transcript rather than 500.
+  2. A missing audio path raises before any HTTP call.
+  3. A terminal HTTP failure raises instead of masquerading as a successful
+     zero-speaker result; pipeline callers can then flag diarization for retry.
+  4. A busy GPU (503) is retried and the multipart stream is re-opened.
 
 httpx is mocked with httpx.MockTransport (no network), mirroring
 test_sortformer_hybrid.py's approach.
@@ -81,21 +81,61 @@ def test_diarize_parses_segments_speaker_and_embedding(monkeypatch, tmp_path):
     assert segs[1]["backend"] == "pyannote"
 
 
-def test_diarize_missing_file_returns_empty(tmp_path):
+def test_diarize_missing_file_raises(tmp_path):
     missing = tmp_path / "nope.wav"
     # No transport patch needed — the provider must short-circuit before any
     # HTTP call when the audio path doesn't exist on disk.
-    assert asyncio.run(_provider().diarize(str(missing))) == []
+    with pytest.raises(FileNotFoundError, match="audio file is missing"):
+        asyncio.run(_provider().diarize(str(missing)))
 
 
-def test_diarize_http_error_returns_empty(monkeypatch, tmp_path):
+def test_diarize_terminal_http_error_raises(monkeypatch, tmp_path):
     wav = tmp_path / "session.wav"
     wav.write_bytes(b"RIFF")
+    monkeypatch.setenv("SPEAKER_SVC_RETRY_ATTEMPTS", "1")
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="speaker-svc exploded")
 
     _patch_mock_transport(monkeypatch, handler)
-    # 500 raises HTTPStatusError internally; the provider swallows it and
-    # returns [] so a transient svc outage never fails the pipeline.
-    assert asyncio.run(_provider().diarize(str(wav))) == []
+    with pytest.raises(RuntimeError, match=r"HTTP 500"):
+        asyncio.run(_provider().diarize(str(wav)))
+
+
+def test_diarize_retries_busy_gpu_and_ignores_deprecated_threshold(
+    monkeypatch, tmp_path
+):
+    wav = tmp_path / "session.wav"
+    wav.write_bytes(b"RIFF")
+    monkeypatch.setenv("SPEAKER_SVC_RETRY_ATTEMPTS", "2")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(
+            200,
+            json={
+                "segments": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "speaker": "SPEAKER_00",
+                        "embedding": [0.1, 0.2],
+                    }
+                ],
+                "backend": "pyannote",
+            },
+        )
+
+    _patch_mock_transport(monkeypatch, handler)
+    segments = asyncio.run(
+        _provider().diarize(str(wav), clustering_threshold=0.8)
+    )
+
+    assert len(requests) == 2
+    assert segments[0]["speaker"] == "SPEAKER_00"
+    # The service fixes clustering threshold at startup; sending the stale
+    # per-request field makes speaker-svc reject the request with HTTP 400.
+    assert all(b"clustering_threshold" not in request.content for request in requests)

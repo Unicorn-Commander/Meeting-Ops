@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Play, Pause, Download, Share2, Flag,
   Users, Clock, Calendar, FileText, Volume2, Mic,
@@ -32,7 +32,6 @@ import {
 import { SpeakerTagger } from '../components/SpeakerTagger';
 import AudioPlayer from '../components/AudioPlayer';
 import { SessionPermissionsModal } from '../components/SessionPermissionsModal';
-import { SpeakerLabelEditor } from '../components/SpeakerLabelEditor';
 import { SpeakerTimeline } from '../components/SpeakerTimeline';
 import { EmailAttendeesModal } from '../components/EmailAttendeesModal';
 import { TagChip } from '../components/TagChip';
@@ -96,6 +95,7 @@ interface TranscriptionSegment {
   end: number;
   text: string;
   speaker?: string;
+  raw_label?: string;
   confidence?: number;
 }
 
@@ -181,14 +181,6 @@ interface Session {
       finalize_chunks_received?: number;
     };
   };
-  generated_emails?: Array<{    // Generated follow-up emails
-    subject: string;
-    to?: string;
-    cc?: string;
-    body: string;
-    attachments?: string[];
-    type?: string;              // follow-up, action-items, summary, etc.
-  }>;
   transcription?: {
     text?: string;
     segments?: TranscriptionSegment[];
@@ -259,16 +251,31 @@ interface ActionItem {
   source: string;
   created_at?: string | null;
   completed_at?: string | null;
+  project_ops_task_id?: string | null;
+  project_ops_project_number?: string | null;
+  project_ops_triage_submitted_at?: string | null;
 }
+
+type ReportBrandMode = 'default' | 'meeting_ops' | 'workspace' | 'unbranded';
 
 const PROJECT_APP_LABELS: Record<string, string> = {
   'project-ops': 'Project-Ops',
   'crisis-ops': 'Crisis-Ops',
 };
 
+const SESSION_DETAILS_TABS: SessionDetailsTab[] = [
+  'summary',
+  'transcript',
+  'action_items',
+  'speakers',
+  'attachments',
+  'chat',
+];
+
 export const SessionDetails: React.FC = () => {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { getOrgQueryUrl, activeOrganization, organizations = [] } = useOrg();
   const { startUploads } = useUploads();
   // v3.19 (audit §5). Brigade graph banner / inline 3D viewer surface
@@ -313,8 +320,6 @@ export const SessionDetails: React.FC = () => {
   const [activeSegment, setActiveSegment] = useState<number>(-1);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>('all');
-  // v3.29.5: speaker roster surfaced IN the record (collapsible), not only the Speakers tab.
-  const [speakersCardOpen, setSpeakersCardOpen] = useState(true);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploading, setUploading] = useState(false);
   // Re-process modal: re-runs the transcribe -> diarize -> summarize -> embed
@@ -322,6 +327,9 @@ export const SessionDetails: React.FC = () => {
   const [showReprocessModal, setShowReprocessModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const [reportIncludesTranscript, setReportIncludesTranscript] = useState(false);
+  const [reportBrandMode, setReportBrandMode] = useState<ReportBrandMode>('default');
   const [moveOrgDropdownOpen, setMoveOrgDropdownOpen] = useState(false);
   const [moveOrgTarget, setMoveOrgTarget] = useState<{ id: number; name: string; slug: string } | null>(null);
   const [movingOrg, setMovingOrg] = useState(false);
@@ -335,7 +343,24 @@ export const SessionDetails: React.FC = () => {
   // the main content column; sidebar (participants/metadata/insights) is
   // shared across tabs. Advanced surfaces (Brigade graph, podcast, etc.)
   // are tucked behind a "More" toggle inside the Summary tab.
-  const [activeTab, setActiveTab] = useState<SessionDetailsTab>('summary');
+  const requestedTab = searchParams.get('tab') as SessionDetailsTab | null;
+  const validRequestedTab: SessionDetailsTab =
+    requestedTab && SESSION_DETAILS_TABS.includes(requestedTab)
+    ? requestedTab
+    : 'summary';
+  const [activeTab, setActiveTab] = useState<SessionDetailsTab>(validRequestedTab);
+  useEffect(() => {
+    setActiveTab(validRequestedTab);
+  }, [validRequestedTab]);
+  const selectTab = (nextTab: SessionDetailsTab) => {
+    setActiveTab(nextTab);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextTab === 'summary') next.delete('tab');
+      else next.set('tab', nextTab);
+      return next;
+    }, { replace: true });
+  };
   const [moreOpen, setMoreOpen] = useState(false);
   // Speaker link + org speaker library — fetched once per session so the
   // inline SpeakerLabelEditor popover can render assign/merge targets
@@ -351,9 +376,6 @@ export const SessionDetails: React.FC = () => {
   const [attachOpts, setAttachOpts] = useState<TranscriptionOptions>(
     DEFAULT_TRANSCRIPTION_OPTIONS,
   );
-  const [generatingEmail, setGeneratingEmail] = useState(false);
-  const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
-
   // Per-session participants. Mirrored from session.participants for snappier
   // editing; sources of truth are the POST/PATCH/DELETE responses.
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -387,8 +409,10 @@ export const SessionDetails: React.FC = () => {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionUpdatingIds, setActionUpdatingIds] = useState<Set<number>>(new Set());
+  const [expandedActionId, setExpandedActionId] = useState<number | null>(null);
 
   const audioRef = useRef<HTMLAudioElement>(null);
+  const speakerSampleEndRef = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1466,6 +1490,46 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const downloadReport = async (format: 'pdf' | 'docx' | 'md') => {
+    if (!session) return;
+    const id = session.id || sessionId;
+    const token = localStorage.getItem('access_token');
+    const endpoint = getOrgQueryUrl(
+      `${config.apiUrl}/api/simple/recording-sessions/${id}/download/summary/${format}` +
+      `?include_transcript=${reportIncludesTranscript ? 'true' : 'false'}` +
+      `&brand_mode=${encodeURIComponent(reportBrandMode)}`,
+    );
+    try {
+      const response = await fetch(endpoint, {
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const safeName = (session.title || session.name || 'meeting')
+        .replace(/[^a-z0-9_-]+/gi, '_');
+      anchor.href = url;
+      anchor.download = `${safeName}_report${reportIncludesTranscript ? '_with_transcript' : ''}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setDownloadsOpen(false);
+    } catch (err) {
+      console.error(`${format.toUpperCase()} report export error:`, err);
+      toast.error(
+        `Could not build the ${format.toUpperCase()} report. ` +
+        (err instanceof Error ? err.message : 'Please try again.'),
+      );
+    }
+  };
+
   const runReprocess = async () => {
     if (!session) return;
     setReprocessing(true);
@@ -1719,37 +1783,6 @@ export const SessionDetails: React.FC = () => {
       toast.error('Failed to update project link');
     } finally {
       setSavingProjectLink(false);
-    }
-  };
-
-  const generateEmails = async () => {
-    if (!session) return;
-    
-    setGeneratingEmail(true);
-    
-    try {
-      const response = await fetch(
-        `${config.apiUrl}/api/simple/recording-sessions/${session.id}/generate-emails`,
-        { method: 'POST' }
-      );
-      
-      if (response.ok) {
-        const emails = await response.json();
-        setGeneratedEmails(emails);
-        
-        // Store emails in session data
-        setSession({
-          ...session,
-          generated_emails: emails
-        });
-      } else {
-        toast.error('Failed to generate emails');
-      }
-    } catch (error) {
-      console.error('Email generation failed:', error);
-      toast.error('Failed to generate emails');
-    } finally {
-      setGeneratingEmail(false);
     }
   };
 
@@ -2276,17 +2309,6 @@ export const SessionDetails: React.FC = () => {
                 <Share2 className="w-4 h-4" />
                 Share
               </button>
-              {/* Email button — opens the email-attendees modal where the
-                  user picks named speakers + content (link / summary PDF /
-                  transcript PDF) and sends via Postmark Meeting-Ops server. */}
-              <button
-                onClick={() => setShowEmailModal(true)}
-                className="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 flex items-center gap-2 text-sm"
-                title="Email this meeting to attendees"
-              >
-                <Mail className="w-4 h-4" />
-                Email
-              </button>
               {!session.is_local && movableOrganizations.length > 1 && (
                 <div className="relative">
                   <button
@@ -2347,35 +2369,93 @@ export const SessionDetails: React.FC = () => {
                 </button>
               )}
               
-              {/* Generate Emails Button */}
-              <button
-                onClick={generateEmails}
-                disabled={generatingEmail || !(session.transcript || session.transcript_simple || session.transcription?.text || session.transcription?.segments?.length)}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                {generatingEmail ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Generating...
-                  </>
-                ) : (
-                  <>
-                    <Mail className="w-4 h-4" />
-                    Generate Emails
-                  </>
-                )}
-              </button>
-              
               {/* Download Dropdown Menu */}
-              <div className="relative group">
-                <button className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setDownloadsOpen((open) => !open)}
+                  aria-haspopup="menu"
+                  aria-expanded={downloadsOpen}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2"
+                >
                   <Download className="w-4 h-4" />
                   Downloads
-                  <ChevronRight className="w-4 h-4 transform group-hover:rotate-90 transition-transform" />
+                  <ChevronDown className={`w-4 h-4 transition-transform ${downloadsOpen ? 'rotate-180' : ''}`} />
                 </button>
                 
-                <div className="absolute right-0 mt-2 w-56 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
+                {downloadsOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 mt-2 w-72 bg-white text-gray-800 rounded-lg shadow-xl border border-gray-200 z-20"
+                >
                   <div className="py-2">
+                    <div className="border-b border-gray-100 px-4 pb-3">
+                      <p className="text-sm font-semibold text-gray-900">Branded meeting report</p>
+                      <p className="mt-0.5 text-xs text-gray-500">
+                        Executive summary, decisions, and action items.
+                      </p>
+                      <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={reportIncludesTranscript}
+                          onChange={(event) => setReportIncludesTranscript(event.target.checked)}
+                          className="mt-0.5 h-3.5 w-3.5 accent-purple-600"
+                        />
+                        <span>
+                          Include the raw transcript as an appendix
+                          <span className="block text-gray-400">Off by default for safer sharing.</span>
+                        </span>
+                      </label>
+                      <label className="mt-3 block text-xs font-medium text-gray-700">
+                        Report branding
+                        <select
+                          value={reportBrandMode}
+                          onChange={(event) =>
+                            setReportBrandMode(event.target.value as ReportBrandMode)
+                          }
+                          className="mt-1 w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-800"
+                        >
+                          <option value="default">Workspace default</option>
+                          <option value="meeting_ops">Meeting-Ops</option>
+                          <option value="workspace">
+                            {activeOrganization?.name || 'Workspace'} (white-label)
+                          </option>
+                          <option value="unbranded">No logo or heading</option>
+                        </select>
+                        <a
+                          href="/settings?section=report-branding"
+                          className="mt-1 block font-normal text-purple-600 hover:underline"
+                        >
+                          Configure workspace logo and color
+                        </a>
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => downloadReport('pdf')}
+                      className="mt-1 w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-red-600" />
+                      Report (PDF)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadReport('docx')}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <FileText className="w-4 h-4 text-blue-600" />
+                      Report (Word)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadReport('md')}
+                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <FileDown className="w-4 h-4 text-gray-700" />
+                      Report (Markdown)
+                    </button>
+
+                    <div className="border-t my-2"></div>
                     <button
                       onClick={downloadAudio}
                       disabled={!session.audio_file}
@@ -2445,96 +2525,9 @@ export const SessionDetails: React.FC = () => {
                       Meeting Minutes
                     </button>
                     
-                    <div className="border-t my-2"></div>
-                    
-                    <button
-                      onClick={async () => {
-                        try {
-                          const token = localStorage.getItem('access_token');
-                          const response = await fetch(
-                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/pdf`,
-                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
-                          );
-                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
-                          const blob = await response.blob();
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.pdf`;
-                          document.body.appendChild(a);
-                          a.click();
-                          document.body.removeChild(a);
-                          URL.revokeObjectURL(url);
-                        } catch (err) {
-                          console.error('PDF export error:', err);
-                          toast.error('PDF export failed. Please try again.');
-                        }
-                      }}
-                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <FileSpreadsheet className="w-4 h-4 text-red-600" />
-                      Summary (PDF)
-                    </button>
-
-                    <button
-                      onClick={async () => {
-                        try {
-                          const token = localStorage.getItem('access_token');
-                          const response = await fetch(
-                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/docx`,
-                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
-                          );
-                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
-                          const blob = await response.blob();
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.docx`;
-                          document.body.appendChild(a);
-                          a.click();
-                          document.body.removeChild(a);
-                          URL.revokeObjectURL(url);
-                        } catch (err) {
-                          console.error('DOCX export error:', err);
-                          toast.error('DOCX export failed. Please try again.');
-                        }
-                      }}
-                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <FileText className="w-4 h-4 text-blue-600" />
-                      Summary (DOCX)
-                    </button>
-
-                    <button
-                      onClick={async () => {
-                        try {
-                          const token = localStorage.getItem('access_token');
-                          const response = await fetch(
-                            `${config.apiUrl}/api/simple/recording-sessions/${session.id}/download/summary/md`,
-                            { headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) } }
-                          );
-                          if (!response.ok) throw new Error(`Export failed: ${response.status}`);
-                          const blob = await response.blob();
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.md`;
-                          document.body.appendChild(a);
-                          a.click();
-                          document.body.removeChild(a);
-                          URL.revokeObjectURL(url);
-                        } catch (err) {
-                          console.error('Markdown export error:', err);
-                          toast.error('Markdown export failed. Please try again.');
-                        }
-                      }}
-                      className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <FileDown className="w-4 h-4 text-gray-700" />
-                      Summary (Markdown)
-                    </button>
                   </div>
                 </div>
+                )}
               </div>
                 </>
               )}
@@ -2559,7 +2552,7 @@ export const SessionDetails: React.FC = () => {
         <div className="mx-auto max-w-7xl px-4">
           <SessionDetailsTabs
             value={activeTab}
-            onChange={setActiveTab}
+            onChange={selectTab}
             chatDisabled={!!session.is_local}
             chatDisabledReason="Local-only session — Ask not available"
           />
@@ -2617,58 +2610,107 @@ export const SessionDetails: React.FC = () => {
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
 
-            {/* Speakers tab: full Phase-3 tagger (confirm/change diarized labels) */}
+            {/* Dedicated identity workspace: sample playback and assignment
+                live here rather than inside the reading-focused transcript. */}
             {activeTab === 'speakers' && (
-              <SpeakerTagger sessionId={String(session.id || sessionId)} />
+              <div className="space-y-4">
+                <div className="rounded-lg border border-purple-200 bg-gradient-to-br from-purple-50 to-indigo-50 p-5">
+                  <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+                    <Users className="h-5 w-5 text-purple-600" />
+                    Identify the voices in this meeting
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-600">
+                    Play a few representative moments for each voice, then
+                    choose an existing person or enroll a new speaker.
+                  </p>
+                </div>
+                {session.audio_file ? (
+                  <AudioPlayer
+                    src={getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)}
+                    downloadAs={`${(session.title || session.name || 'meeting').replace(/\s+/g, '_')}.wav`}
+                    externalAudioRef={audioRef}
+                    caption="Sample buttons below seek within this authorized meeting recording."
+                    onTimeUpdate={(time) => {
+                      setCurrentTime(time);
+                      if (
+                        speakerSampleEndRef.current !== null &&
+                        time >= speakerSampleEndRef.current
+                      ) {
+                        audioRef.current?.pause();
+                        speakerSampleEndRef.current = null;
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    This meeting has no retained audio, so sample playback is unavailable.
+                    You can still assign speakers using transcript evidence.
+                  </div>
+                )}
+                <SpeakerTagger
+                  sessionId={String(session.id || sessionId)}
+                  segments={segments}
+                  onPlaySample={session.audio_file
+                    ? (start, end) => {
+                        if (!audioRef.current) return;
+                        speakerSampleEndRef.current = Math.min(
+                          Math.max(end, start + 3),
+                          start + 12,
+                        );
+                        audioRef.current.currentTime = Math.max(0, start);
+                        audioRef.current.play().catch(() => undefined);
+                      }
+                    : undefined}
+                  onChange={() => {
+                    setSpeakerVersion((version) => version + 1);
+                    void fetchSession();
+                  }}
+                />
+              </div>
             )}
 
-            {/* Speaker roster surfaced IN the record (not only the Speakers tab):
-                a collapsible card on every other view so you can name SPEAKER_xx
-                inline — pick an existing person, add to training, or create new.
-                Mutually exclusive with the Speakers tab above so SpeakerTagger
-                never double-mounts. */}
+            {/* Compact roster on the main record. Identity work itself belongs
+                in Speakers; clicking any person opens the review workspace. */}
             {activeTab !== 'speakers' && speakers.length > 0 && (
               <div
-                className={`rounded-lg shadow-sm ${
+                className={`rounded-lg p-4 shadow-sm ${
                   unnamedSpeakerCount > 0
                     ? 'bg-amber-50 border border-amber-300 ring-1 ring-amber-200'
                     : 'bg-white'
                 }`}
               >
-                <button
-                  type="button"
-                  onClick={() => setSpeakersCardOpen((v) => !v)}
-                  className={`w-full flex items-center justify-between px-6 py-3 text-left rounded-t-lg ${
-                    unnamedSpeakerCount > 0 ? 'hover:bg-amber-100' : 'hover:bg-gray-50'
-                  }`}
-                  aria-expanded={speakersCardOpen}
-                >
-                  {unnamedSpeakerCount > 0 ? (
-                    <span className="text-sm font-semibold text-amber-900 flex items-center gap-2">
-                      <Mic className="w-4 h-4 flex-shrink-0" />
-                      {unnamedSpeakerCount} of {speakers.length} speaker{speakers.length !== 1 ? 's' : ''} still need{unnamedSpeakerCount === 1 ? 's' : ''} a name — tap to assign
-                    </span>
-                  ) : (
-                    <span className="text-sm font-semibold text-gray-800">
-                      Speakers ({speakers.length}) — assign or name
-                    </span>
-                  )}
-                  <span className={`text-xs ${unnamedSpeakerCount > 0 ? 'text-amber-700' : 'text-gray-400'}`}>
-                    {speakersCardOpen ? '▾ Hide' : '▸ Show'}
-                  </span>
-                </button>
-                {speakersCardOpen && (
-                  <div className="px-2 pb-2">
-                    {unnamedSpeakerCount > 0 && (
-                      <p className="px-4 pt-1 pb-2 text-xs text-amber-800">
-                        Naming speakers makes the summary, transcript, and search use real
-                        names instead of “Speaker 1.” Pick a person from the dropdown
-                        (we pre-fill our best guess) — usually one tap each.
-                      </p>
-                    )}
-                    <SpeakerTagger sessionId={String(session.id || sessionId)} />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className={`text-sm font-semibold ${unnamedSpeakerCount > 0 ? 'text-amber-900' : 'text-gray-900'}`}>
+                      {unnamedSpeakerCount > 0
+                        ? `${unnamedSpeakerCount} speaker${unnamedSpeakerCount === 1 ? '' : 's'} still need a name`
+                        : `${speakers.length} identified speaker${speakers.length === 1 ? '' : 's'}`}
+                    </p>
+                    <p className={`text-xs ${unnamedSpeakerCount > 0 ? 'text-amber-700' : 'text-gray-500'}`}>
+                      Click a speaker to hear samples and confirm who they are.
+                    </p>
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => selectTab('speakers')}
+                    className="rounded-md bg-purple-600 px-3 py-2 text-xs font-medium text-white hover:bg-purple-500"
+                  >
+                    Review speakers
+                  </button>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {speakers.map((speaker) => (
+                    <button
+                      key={speaker}
+                      type="button"
+                      onClick={() => selectTab('speakers')}
+                      className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:border-purple-300 hover:text-purple-700"
+                    >
+                      <Mic className="mr-1 inline h-3 w-3" />
+                      {speaker}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -2925,32 +2967,25 @@ export const SessionDetails: React.FC = () => {
                       </div>
                     )}
                     
-                    {/* Action Items */}
-                    {((session.final_summary?.actions && session.final_summary.actions.length > 0) ||
-                      (session.summary?.actions && session.summary.actions.length > 0) ||
-                      (session.summary?.analysis?.actions && session.summary.analysis.actions.length > 0)) && (
-                      <div>
-                        <h3 className="text-md font-medium text-gray-800 mb-2">Action Items</h3>
-                        <div className="space-y-2">
-                          {(session.final_summary?.actions || session.summary?.actions || session.summary?.analysis?.actions || []).map((action: any, idx: number) => (
-                            <div key={idx} className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded">
-                              <p className="text-gray-800 font-medium">{action.action || action}</p>
-                              {action.owner && (
-                                <p className="text-sm text-gray-600 mt-1">Owner: {action.owner}</p>
-                              )}
-                              {action.priority && (
-                                <span className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
-                                  action.priority.toLowerCase() === 'high' ? 'bg-red-100 text-red-800' :
-                                  action.priority.toLowerCase() === 'medium' ? 'bg-yellow-100 text-yellow-800' :
-                                  'bg-green-100 text-green-800'
-                                }`}>
-                                  {action.priority} Priority
-                                </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                    {/* Canonical action items live in their own editable table.
+                        Do not repeat the stale summary snapshot here: the two
+                        lists used to look alike but only one could be completed. */}
+                    {actionItems.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => selectTab('action_items')}
+                        className="flex w-full items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left transition hover:border-amber-300 hover:bg-amber-100"
+                      >
+                        <span>
+                          <span className="block text-sm font-semibold text-amber-900">
+                            {actionItems.filter((item) => item.status !== 'done' && item.status !== 'cancelled').length} open action item{actionItems.filter((item) => item.status !== 'done' && item.status !== 'cancelled').length === 1 ? '' : 's'}
+                          </span>
+                          <span className="block text-xs text-amber-700">
+                            Review owners, due dates, and completion status.
+                          </span>
+                        </span>
+                        <ChevronRight className="h-4 w-4 text-amber-700" />
+                      </button>
                     )}
                     
                     {/* Important Decisions */}
@@ -3311,64 +3346,6 @@ export const SessionDetails: React.FC = () => {
               </div>
             )}
 
-            {/* Generated Emails Section */}
-            {(generatedEmails.length > 0 || (session?.generated_emails?.length ?? 0) > 0) && (
-              <div className="bg-white rounded-lg shadow-sm p-6">
-                <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <Mail className="w-5 h-5 text-green-600" />
-                  Generated Emails
-                  <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full">
-                    {generatedEmails.length || session?.generated_emails?.length} emails
-                  </span>
-                </h2>
-                
-                <div className="space-y-4">
-                  {(generatedEmails.length > 0 ? generatedEmails : session?.generated_emails || []).map((email: any, idx: number) => (
-                    <div key={idx} className="border rounded-lg p-4 hover:bg-gray-50">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <h4 className="font-medium text-gray-900">{email.subject}</h4>
-                          <p className="text-sm text-gray-500 mt-1">
-                            To: {email.to || 'stakeholders@company.com'}
-                          </p>
-                          {email.cc && (
-                            <p className="text-sm text-gray-500">
-                              CC: {email.cc}
-                            </p>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => {
-                            // Copy email to clipboard. Only claim success once the
-                            // write actually resolves — an unhandled writeText (denied
-                            // permission / insecure context) used to alert "copied!"
-                            // even when nothing was copied.
-                            const emailText = `To: ${email.to || 'stakeholders@company.com'}\n${email.cc ? `CC: ${email.cc}\n` : ''}Subject: ${email.subject}\n\n${email.body}`;
-                            navigator.clipboard.writeText(emailText)
-                              .then(() => toast.success('Email copied to clipboard'))
-                              .catch(() => toast.error('Could not copy — your browser blocked clipboard access'));
-                          }}
-                          className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-                        >
-                          Copy
-                        </button>
-                      </div>
-                      
-                      <div className="text-sm text-gray-700 whitespace-pre-wrap bg-gray-50 p-3 rounded">
-                        {email.body}
-                      </div>
-                      
-                      {email.attachments && email.attachments.length > 0 && (
-                        <div className="mt-2 text-sm text-gray-500">
-                          <span className="font-medium">Attachments:</span> {email.attachments.join(', ')}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
                   </div>
                 )}
               </div>
@@ -3567,16 +3544,17 @@ export const SessionDetails: React.FC = () => {
                       }`}
                     >
                       <div className="flex items-center gap-3 mb-1">
-                        <SpeakerLabelEditor
-                          speaker={segment.speaker || 'Speaker'}
-                          sessionId={String(session.id || sessionId)}
-                          links={speakerLinks}
-                          speakers={orgSpeakers}
-                          onChanged={() => {
-                            setSpeakerVersion((v) => v + 1);
-                            fetchSession();
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            selectTab('speakers');
                           }}
-                        />
+                          className="rounded-full bg-purple-100 px-2.5 py-1 text-xs font-medium text-purple-700 hover:bg-purple-200"
+                          title="Open speaker samples and identity controls"
+                        >
+                          {segment.speaker || 'Speaker'}
+                        </button>
                         <span className="text-xs text-gray-500">
                           {formatTime(segment.start)} - {formatTime(segment.end)}
                         </span>
@@ -3918,6 +3896,18 @@ export const SessionDetails: React.FC = () => {
                 )}
               </h3>
 
+              <div className="mb-3 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                The checkbox only marks an item complete in Meeting-Ops.
+                It does not create a Project-Ops task. Automatic delivery is
+                an opt-in, propose-only triage workflow in{' '}
+                <a
+                  href="/settings?section=integrations"
+                  className="font-medium underline hover:text-blue-950"
+                >
+                  Integration settings
+                </a>.
+              </div>
+
               {actionError && (
                 <div className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
                   {actionError}
@@ -3958,11 +3948,25 @@ export const SessionDetails: React.FC = () => {
                           )}
                         </button>
                         <div className="min-w-0 flex-1">
-                          <p
-                            className={`text-sm ${done ? 'line-through text-gray-500' : cancelled ? 'text-gray-500' : 'text-gray-900'}`}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedActionId((current) =>
+                                current === item.id ? null : item.id
+                              )
+                            }
+                            className={`text-left text-sm underline-offset-2 hover:underline ${
+                              done
+                                ? 'line-through text-gray-500'
+                                : cancelled
+                                  ? 'text-gray-500'
+                                  : 'text-gray-900'
+                            }`}
+                            aria-expanded={expandedActionId === item.id}
+                            title="Open action item details"
                           >
                             {item.text}
-                          </p>
+                          </button>
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
                             {item.owner && <span>Owner: {item.owner}</span>}
                             {item.due_date && (
@@ -3971,7 +3975,52 @@ export const SessionDetails: React.FC = () => {
                             {item.source === 'manual' && (
                               <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600">manual</span>
                             )}
+                            {item.project_ops_task_id && (
+                              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-indigo-700">
+                                Project-Ops task
+                              </span>
+                            )}
+                            {!item.project_ops_task_id && item.project_ops_triage_submitted_at && (
+                              <span className="rounded bg-purple-100 px-1.5 py-0.5 text-purple-700">
+                                Project-Ops triage
+                              </span>
+                            )}
                           </div>
+                          {expandedActionId === item.id && (
+                            <div className="mt-3 rounded border border-gray-200 bg-white p-3">
+                              <p className="text-xs text-gray-600">
+                                {item.project_ops_task_id
+                                  ? `Linked to ${
+                                      item.project_ops_project_number || 'Project-Ops'
+                                    }. Status changes here are also sent to the linked task.`
+                                  : item.project_ops_triage_submitted_at
+                                    ? 'Submitted to Project-Ops triage. It becomes a task only after approval in Project-Ops.'
+                                    : 'This item currently lives only in Meeting-Ops. No Project-Ops task has been created.'}
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {[
+                                  ['todo', 'To do'],
+                                  ['doing', 'In progress'],
+                                  ['done', 'Done'],
+                                  ['cancelled', 'Cancelled'],
+                                ].map(([value, label]) => (
+                                  <button
+                                    key={value}
+                                    type="button"
+                                    onClick={() => setActionStatus(item.id, value)}
+                                    disabled={busy || item.status === value}
+                                    className={`rounded px-2 py-1 text-[11px] font-medium ${
+                                      item.status === value
+                                        ? 'bg-purple-600 text-white'
+                                        : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+                                    } disabled:cursor-default disabled:opacity-70`}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                         <button
                           type="button"
@@ -4294,6 +4343,10 @@ export const SessionDetails: React.FC = () => {
         sessionId={session.id || sessionId || ''}
         isOpen={showShareModal}
         onClose={() => setShowShareModal(false)}
+        onEmailCopy={() => {
+          setShowShareModal(false);
+          setShowEmailModal(true);
+        }}
       />
 
       {/* Email-to-attendees modal */}

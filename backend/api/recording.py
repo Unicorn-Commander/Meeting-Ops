@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -325,7 +326,7 @@ def _synthetic_org_for_internal_caller(
 def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) -> dict[str, Any]:
     # v3.44: render speaker names live from the current profiles so a rename
     # shows instantly here without rewriting the stored transcript.
-    from services.speaker_service import hydrate_diarized_for_session
+    from services.speaker_service import hydrate_diarized_for_response
     return {
         "id": session.session_id or str(session.id),
         "pk": session.id,
@@ -338,7 +339,7 @@ def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) 
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
         "duration": float(session.duration or 0),
         "transcript_simple": session.transcript_simple or "",
-        "transcript_diarized": hydrate_diarized_for_session(session) or {"segments": []},
+        "transcript_diarized": hydrate_diarized_for_response(session) or {"segments": []},
         "final_summary": session.final_summary,
         "ai_insights": session.ai_insights,
         "summary": session.summary,
@@ -597,8 +598,11 @@ async def _broadcast_segments(session: RecordingSession, segments: list[dict[str
     try:
         from api.websocket_transcription import broadcast_transcription_update
 
+        from services.speaker_service import sanitize_diarized_for_response
+
         session_key = session.session_id or str(session.id)
-        for segment in segments:
+        safe_segments = sanitize_diarized_for_response({"segments": segments})["segments"]
+        for segment in safe_segments:
             await broadcast_transcription_update(session_key, segment)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not broadcast always-on transcription segments: %s", exc)
@@ -815,10 +819,13 @@ async def upload_always_on_chunk(
     # never block chunk ingest on an LLM hiccup.
     await _maybe_persist_slice_after_chunk(db, session)
 
+    from services.speaker_service import sanitize_diarized_for_response
+
+    safe_segments = sanitize_diarized_for_response({"segments": segments})["segments"]
     return {
         "session": _session_payload(session),
-        "segments": segments,
-        "text": " ".join(seg["text"] for seg in segments),
+        "segments": safe_segments,
+        "text": " ".join(seg["text"] for seg in safe_segments),
         "chunk_id": chunk_id,
     }
 
@@ -1928,6 +1935,8 @@ async def _run_session_reprocess(session_pk: int) -> None:
             # doesn't outlive the request as an orphaned pending task.
             if diarize_task is not None:
                 diarize_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await diarize_task
             raise
         # Overwrite transcript_simple + transcript_diarized with the
         # server-quality result. The browser STT path's segments were
@@ -1978,6 +1987,9 @@ async def _run_session_reprocess(session_pk: int) -> None:
         # overlay its per-segment labels + embeddings onto the transcript.
         try:
             diar_segments = await diarize_task if diarize_task is not None else None
+            from api.uploads import _clear_stage_needs_retry
+            _clear_stage_needs_retry(session, "diarization")
+            flag_modified(session, "processing_metadata")
             if diar_segments:
                 # Overlay diarization labels + embeddings onto the
                 # transcription segments using the same overlap rule as
@@ -2031,6 +2043,10 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 session.id,
                 exc,
             )
+            from api.uploads import _flag_stage_needs_retry
+            _flag_stage_needs_retry(session, "diarization", exc)
+            flag_modified(session, "processing_metadata")
+            db.commit()
 
         # Stage 4 — Identify enrolled speakers. Best-effort — a transient
         # speaker-svc outage shouldn't fail the whole reprocess.

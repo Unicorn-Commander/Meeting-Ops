@@ -154,6 +154,13 @@ async def enroll_my_voice_from_session(
     )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    from api.session_permissions import has_session_access
+
+    # A workspace viewer may read the meeting, but must not harvest its
+    # biometric vectors into a personal voiceprint.  Require the same edit
+    # permission used by speaker-label mutations before touching embeddings.
+    if has_session_access(session.id, current_user, db) != "edit":
+        raise HTTPException(status_code=404, detail="Session not found")
 
     raw_label = (payload.raw_label or "").strip()
     if not raw_label:

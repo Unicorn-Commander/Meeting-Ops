@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -192,6 +193,14 @@ def _flag_stage_needs_retry(session, stage: str, exc: Exception) -> None:
     metadata = dict(session.processing_metadata or {})
     metadata[f"needs_{stage}"] = True
     metadata[f"{stage}_error"] = str(exc)[:500]
+    session.processing_metadata = metadata
+
+
+def _clear_stage_needs_retry(session, stage: str) -> None:
+    """Clear a prior degraded-stage marker after a successful retry."""
+    metadata = dict(session.processing_metadata or {})
+    metadata.pop(f"needs_{stage}", None)
+    metadata.pop(f"{stage}_error", None)
     session.processing_metadata = metadata
 
 
@@ -975,8 +984,18 @@ async def run_upload_pipeline(upload_id: str) -> None:
             # outlive the request as an orphaned pending task.
             if diarize_task is not None:
                 diarize_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await diarize_task
             raise
-        await _persist_transcription(db, session, transcription_result)
+        try:
+            await _persist_transcription(db, session, transcription_result)
+        except BaseException:
+            if diarize_task is not None:
+                if not diarize_task.done():
+                    diarize_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await diarize_task
+            raise
         await _set_job_state(db, job, progress_pct=100, last_completed_stage="transcribing")
 
         # Diarization. Honor explicit off / manual count overrides; auto is
@@ -1020,6 +1039,9 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 # summary said "Speaker 1" (audit finding #2).
                 from services.speaker_labels import normalize_session_speaker_labels
                 await asyncio.to_thread(normalize_session_speaker_labels, session, db)
+                _clear_stage_needs_retry(session, "diarization")
+                flag_modified(session, "processing_metadata")
+                db.commit()
             except Exception as exc:
                 logger.warning("Speaker diarization/identification failed for upload %s: %s", upload_id, exc)
                 # Complete with the transcript, but flag the degraded stage so

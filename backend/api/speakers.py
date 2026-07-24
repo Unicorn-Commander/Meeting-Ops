@@ -26,14 +26,14 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
-from auth.models import AuditLog, User
+from auth.models import AuditLog, User, UserOrganization
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
 from database.database import get_db
@@ -306,6 +306,9 @@ def _get_session_or_404(
     organization_id: int,
     session_id: int | str,
     current_user: User,
+    *,
+    min_level: str = "view",
+    require_speaker_editor: bool = False,
 ) -> RecordingSession:
     q = db.query(RecordingSession).filter(RecordingSession.organization_id == organization_id)
     try:
@@ -320,19 +323,52 @@ def _get_session_or_404(
     # resolution — resolve cross-org and delegate the final permission
     # check to has_session_access. Imported inside the function to avoid a
     # circular import, exactly as get_session does.
-    if not session:
-        from api.session_permissions import (
-            _get_session_by_str_id,
-            has_session_access,
-        )
+    from api.session_permissions import _get_session_by_str_id, has_session_access
 
+    if not session:
         candidate = _get_session_by_str_id(db, str(session_id))
-        if candidate and has_session_access(candidate.id, current_user, db) != "denied":
+        if candidate:
             session = candidate
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Resolve the caller's actual permission even when the row was found in
+    # the active org.  Active-org viewers are read-only, and cross-org
+    # collaborators may have view/comment/edit grants.  Speaker relabeling,
+    # enrollment, merging and re-diarization all mutate meeting or biometric
+    # state, so their callers pass min_level="edit".
+    ranks = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
+    level = has_session_access(session.id, current_user, db)
+    if ranks.get(level, 0) < ranks.get(min_level, 1):
+        # Keep the existing non-disclosure behavior: callers without enough
+        # access should not be able to confirm that another meeting exists.
+        raise HTTPException(status_code=404, detail="Session not found")
+    if require_speaker_editor and not _can_edit_speaker_state(db, session, current_user):
+        raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+def _can_edit_speaker_state(
+    db: Session,
+    session: RecordingSession,
+    current_user: User,
+) -> bool:
+    """Limit biometric/speaker mutations to members of the host workspace."""
+    if current_user.is_superuser:
+        return True
+    membership = (
+        db.query(UserOrganization)
+        .filter(
+            UserOrganization.user_id == current_user.id,
+            UserOrganization.organization_id == session.organization_id,
+        )
+        .first()
+    )
+    return bool(
+        membership
+        and membership.role in {"admin", "manager", "member", "user"}
+    )
 
 
 async def _enqueue_summary_refresh(session: RecordingSession, db: Session) -> None:
@@ -548,13 +584,28 @@ def _delete_merged_source(db: Session, source: SpeakerProfile) -> None:
 
 @router.get("/api/speakers", response_model=list[SpeakerResponse])
 async def list_speakers(
+    session_id: Optional[str] = Query(
+        default=None,
+        description="When set, list candidates from that meeting's workspace.",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
+    organization_id = active_org.organization.id
+    if session_id:
+        session = _get_session_or_404(
+            db,
+            active_org.organization.id,
+            session_id,
+            current_user,
+            min_level="edit",
+            require_speaker_editor=True,
+        )
+        organization_id = session.organization_id
     rows = (
         db.query(SpeakerProfile)
-        .filter(SpeakerProfile.organization_id == active_org.organization.id)
+        .filter(SpeakerProfile.organization_id == organization_id)
         .order_by(SpeakerProfile.display_name.asc())
         .all()
     )
@@ -1129,7 +1180,12 @@ async def list_speaker_links(
     names to. This makes the UI immediately useful after a fresh upload
     without first having to click Re-identify.
     """
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+    )
     links = (
         db.query(SpeakerSessionLink)
         .filter(SpeakerSessionLink.session_id == session.id)
@@ -1137,7 +1193,10 @@ async def list_speaker_links(
         .all()
     )
 
-    if not links:
+    # Keep this GET read-only for viewers.  Missing rows are materialized only
+    # for host-workspace editors; read/comment collaborators can still inspect
+    # any existing labels without causing a database write.
+    if not links and _can_edit_speaker_state(db, session, current_user):
         diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
         segs = diarized.get("segments", []) if isinstance(diarized, dict) else []
         seen: set[str] = set()
@@ -1207,7 +1266,14 @@ async def update_speaker_link(
     # mutates persistent library state, so free users (no speaker_library)
     # don't get it.
     gate_feature_for_caller(current_user, "speaker_library", active_org)
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     link = (
         db.query(SpeakerSessionLink)
         .filter(
@@ -1382,7 +1448,14 @@ async def create_speaker_for_link(
     # v3.18.3: speaker_library write gate (creates+links persistent library state).
     gate_feature_for_caller(current_user, "speaker_library", active_org)
 
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     link = (
         db.query(SpeakerSessionLink)
         .filter(
@@ -1669,7 +1742,14 @@ async def rediarize_session_endpoint(
     from datetime import datetime, timezone
     from sqlalchemy.orm.attributes import flag_modified
 
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     if not session.audio_file or not os.path.exists(session.audio_file):
         raise HTTPException(status_code=400, detail="Session has no audio file to re-diarize")
 
@@ -1922,7 +2002,14 @@ async def enroll_speaker_from_session(
     import subprocess
     import tempfile
 
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     link = (
         db.query(SpeakerSessionLink)
         .filter(
@@ -2156,7 +2243,14 @@ async def merge_speaker_links(
     if payload.source_link_id == payload.target_link_id:
         raise HTTPException(status_code=400, detail="source and target must differ")
 
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     source = (
         db.query(SpeakerSessionLink)
         .filter(
@@ -2269,7 +2363,14 @@ async def identify_speakers_endpoint(
     enrolling new speakers or to refresh stale mappings."""
     # v3.18.3: speaker_library write gate (mutates speaker_links on the session).
     gate_feature_for_caller(current_user, "speaker_library", active_org)
-    session = _get_session_or_404(db, active_org.organization.id, session_id, current_user)
+    session = _get_session_or_404(
+        db,
+        active_org.organization.id,
+        session_id,
+        current_user,
+        min_level="edit",
+        require_speaker_editor=True,
+    )
     summary = identify_speakers(session, db)
     # identify_speakers rewrote transcript_diarized speaker names for any
     # newly-matched clusters; regenerate the summary so it picks up the new

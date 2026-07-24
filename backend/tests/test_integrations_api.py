@@ -82,6 +82,53 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000",
+        "http://169.254.169.254/latest/meta-data",
+        "https://localhost:8443",
+        "https://user:password@example.com",
+        "https://example.com?redirect=http://127.0.0.1",
+    ],
+)
+def test_integration_url_validation_blocks_private_and_credentialed_targets(url):
+    from fastapi import HTTPException
+    from api.integrations_org import _validated_integration_base_url
+
+    with pytest.raises(HTTPException):
+        _validated_integration_base_url(url)
+
+
+def test_integration_url_validation_rejects_dns_to_private_address():
+    from fastapi import HTTPException
+    from api.integrations_org import _validated_integration_base_url
+
+    with patch(
+        "api.integrations_org.socket.getaddrinfo",
+        return_value=[(2, 1, 6, "", ("10.20.30.40", 443))],
+    ):
+        with pytest.raises(HTTPException, match="Private"):
+            _validated_integration_base_url("https://integration.example.com")
+
+
+def test_integration_url_validation_allows_public_https_and_named_services():
+    from api.integrations_org import _validated_integration_base_url
+
+    assert (
+        _validated_integration_base_url("http://project-ops-backend/api/v1/")
+        == "http://project-ops-backend/api/v1"
+    )
+    with patch(
+        "api.integrations_org.socket.getaddrinfo",
+        return_value=[(2, 1, 6, "", ("8.8.8.8", 443))],
+    ):
+        assert (
+            _validated_integration_base_url("https://integration.example.com/v1/")
+            == "https://integration.example.com/v1"
+        )
+
+
 class TestListMasksSecrets:
     def test_list_returns_all_five_integrations_with_masked_secrets(self, client):
         _, _, _, SessionLocal = _current_models()
@@ -100,7 +147,7 @@ class TestListMasksSecrets:
                 "/api/integrations/me/brigade",
                 json={
                     "enabled": True,
-                    "api_base_url": "http://brigade.local",
+                    "api_base_url": "http://unicorn-brigade",
                     "api_key": "super-secret-key-abcd1234",
                     "tenancy_mode": "per_org_graph",
                 },
@@ -172,7 +219,7 @@ class TestPutRequiresAdmin:
                 "/api/integrations/me/project_ops",
                 json={
                     "enabled": True,
-                    "api_base_url": "http://project-ops.local/api/v1",
+                    "api_base_url": "http://project-ops-backend/api/v1",
                     "api_key": cleartext,
                     "default_project_number": "P-00055",
                 },
@@ -218,7 +265,7 @@ class TestDelete:
                 "/api/integrations/me/brigade",
                 json={
                     "enabled": True,
-                    "api_base_url": "http://brigade.local",
+                    "api_base_url": "http://unicorn-brigade",
                     "api_key": "k1234",
                 },
                 headers=headers,
@@ -230,7 +277,7 @@ class TestDelete:
             assert body["enabled"] is False
             assert body["has_api_key"] is False
             # api_base_url stays (admin can re-enable without re-entering URL).
-            assert body["api_base_url"] == "http://brigade.local"
+            assert body["api_base_url"] == "http://unicorn-brigade"
 
             db.refresh(org)
             assert org.integrations["brigade"]["enabled"] is False
@@ -256,7 +303,7 @@ class TestProbe:
                 "/api/integrations/me/brigade",
                 json={
                     "enabled": True,
-                    "api_base_url": "http://brigade.local",
+                    "api_base_url": "http://unicorn-brigade",
                     "api_key": "brigade-key-zzzz",
                 },
                 headers=headers,
@@ -303,7 +350,7 @@ class TestProbe:
                 "/api/integrations/me/project_ops",
                 json={
                     "enabled": True,
-                    "api_base_url": "http://project-ops.local/api/v1",
+                    "api_base_url": "http://project-ops-backend/api/v1",
                     "api_key": "po-key-zzzz",
                 },
                 headers=headers,

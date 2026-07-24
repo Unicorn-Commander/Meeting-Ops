@@ -82,6 +82,8 @@ def _attach_tracker(token_source, tracker: _MintTracker) -> None:
 def _clean_env(monkeypatch):
     for k in [
         "PROJECTOPS_API_KEY",
+        "PROJECTOPS_BASE_URL",
+        "PROJECTOPS_API_BASE_URL",
         "PROJECTOPS_KC_TOKEN_URL",
         "PROJECTOPS_KC_CLIENT_ID",
         "PROJECTOPS_KC_CLIENT_SECRET",
@@ -95,6 +97,26 @@ def test_unconfigured_is_not_live():
     client = ProjectOpsClient()
     assert client.is_live is False
     assert client.auth_mode == "unconfigured"
+
+
+def test_deploy_api_base_url_alias_is_honored(monkeypatch):
+    from services.projectops_client import ProjectOpsClient
+
+    monkeypatch.setenv(
+        "PROJECTOPS_API_BASE_URL",
+        "https://project-ops.example.test/api/v1/",
+    )
+    client = ProjectOpsClient()
+    assert client._base_url == "https://project-ops.example.test/api/v1"
+
+
+def test_canonical_base_url_wins_over_deploy_alias(monkeypatch):
+    from services.projectops_client import ProjectOpsClient
+
+    monkeypatch.setenv("PROJECTOPS_BASE_URL", "https://canonical.example.test/v1")
+    monkeypatch.setenv("PROJECTOPS_API_BASE_URL", "https://legacy.example.test/v1")
+    client = ProjectOpsClient()
+    assert client._base_url == "https://canonical.example.test/v1"
 
 
 def test_static_token_is_live():

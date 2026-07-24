@@ -11,6 +11,7 @@ with code paths that haven't migrated yet.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional
@@ -62,8 +63,9 @@ class LocalSpeakerSvcProvider:
         # case is fast enough that the extra copy is invisible.
         import os as _os
         if not _os.path.exists(audio_path):
-            logger.error("speaker-svc /diarize: audio file missing on disk: %s", audio_path)
-            return []
+            raise FileNotFoundError(
+                f"speaker-svc /diarize audio file is missing: {audio_path}"
+            )
 
         data: dict[str, str] = {"return_embeddings": "true"}
         if num_speakers is not None:
@@ -73,29 +75,65 @@ class LocalSpeakerSvcProvider:
         if max_speakers is not None:
             data["max_speakers"] = str(max_speakers)
         if clustering_threshold is not None:
-            data["clustering_threshold"] = str(clustering_threshold)
+            # speaker-svc fixes this value at startup to avoid rebuilding the
+            # pyannote graph (and leaking VRAM) per request.  Older saved
+            # upload preferences may still contain a threshold; intentionally
+            # ignore it instead of sending a request the service rejects.
+            logger.info(
+                "Ignoring deprecated per-request diarization threshold %s",
+                clustering_threshold,
+            )
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                with open(audio_path, "rb") as f:
-                    files = {"audio": (_os.path.basename(audio_path), f, "audio/wav")}
-                    resp = await client.post(
-                        f"{self.endpoint}/diarize",
-                        data=data,
-                        files=files,
-                    )
-                resp.raise_for_status()
-                payload = resp.json()
-                segments = payload.get("segments", []) or []
-                # Annotate with backend so callers can branch
-                for seg in segments:
-                    seg.setdefault("backend", payload.get("backend", "unknown"))
-                return segments
-        except httpx.HTTPStatusError as exc:
-            logger.error("speaker-svc /diarize HTTP %s: %s", exc.response.status_code, exc.response.text[:200])
-        except Exception as exc:  # noqa: BLE001
-            logger.error("speaker-svc /diarize failed: %s", exc)
-        return []
+        retry_attempts = max(1, int(os.getenv("SPEAKER_SVC_RETRY_ATTEMPTS", "3")))
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    # Re-open on every attempt: httpx consumes the multipart
+                    # stream even when speaker-svc answers 429/503.
+                    with open(audio_path, "rb") as f:
+                        files = {
+                            "audio": (_os.path.basename(audio_path), f, "audio/wav")
+                        }
+                        resp = await client.post(
+                            f"{self.endpoint}/diarize",
+                            data=data,
+                            files=files,
+                        )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    segments = payload.get("segments", []) or []
+                    for seg in segments:
+                        seg.setdefault("backend", payload.get("backend", "unknown"))
+                    return segments
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if (
+                        exc.response.status_code in {429, 503}
+                        and attempt < retry_attempts
+                    ):
+                        try:
+                            retry_after = float(
+                                exc.response.headers.get("Retry-After", "5")
+                            )
+                        except (TypeError, ValueError):
+                            retry_after = 5.0
+                        await asyncio.sleep(max(0.25, min(retry_after, 30.0)))
+                        continue
+                    raise RuntimeError(
+                        "speaker-svc diarization failed "
+                        f"(HTTP {exc.response.status_code})"
+                    ) from exc
+                except httpx.RequestError as exc:
+                    last_error = exc
+                    if attempt < retry_attempts:
+                        await asyncio.sleep(min(2**attempt, 10))
+                        continue
+                    raise RuntimeError(
+                        "speaker-svc diarization request failed"
+                    ) from exc
+
+        raise RuntimeError("speaker-svc diarization failed") from last_error
 
     # ---------- embed ----------
 

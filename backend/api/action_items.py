@@ -54,6 +54,9 @@ class ActionItemOut(BaseModel):
     source: str
     created_at: str
     completed_at: Optional[str] = None
+    project_ops_task_id: Optional[str] = None
+    project_ops_project_number: Optional[str] = None
+    project_ops_triage_submitted_at: Optional[str] = None
 
 
 class ActionItemCreate(BaseModel):
@@ -123,6 +126,7 @@ def _can_edit_session(
 
 
 def _to_out(item: ActionItem, session: Optional[RecordingSession]) -> ActionItemOut:
+    raw_payload = item.raw_payload if isinstance(item.raw_payload, dict) else {}
     return ActionItemOut(
         id=item.id,
         session_id=item.session_id,
@@ -148,6 +152,9 @@ def _to_out(item: ActionItem, session: Optional[RecordingSession]) -> ActionItem
         source=item.source,
         created_at=item.created_at.isoformat() if item.created_at else "",
         completed_at=item.completed_at.isoformat() if item.completed_at else None,
+        project_ops_task_id=raw_payload.get("po_task_id"),
+        project_ops_project_number=raw_payload.get("po_project_number"),
+        project_ops_triage_submitted_at=raw_payload.get("po_triage_submitted_at"),
     )
 
 

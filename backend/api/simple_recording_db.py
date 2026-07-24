@@ -6,7 +6,7 @@ Fixed version that persists to PostgreSQL
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from sqlalchemy.orm import Session, defer
 from sqlalchemy import and_, desc, or_, func
 import base64
@@ -17,6 +17,7 @@ import json
 import logging
 import uuid
 import time
+from contextlib import suppress
 
 # Database imports
 from database.database import get_db
@@ -85,6 +86,9 @@ import redis.asyncio as aioredis
 
 router = APIRouter(prefix="/api/simple", tags=["simple-recording-db"])
 logger = logging.getLogger(__name__)
+DIARIZATION_TIMEOUT_SECONDS = float(
+    os.getenv("DIARIZATION_TIMEOUT_SECONDS", "1800")
+)
 
 # Redis URL (matches docker-compose port)
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6381")
@@ -1030,7 +1034,10 @@ async def get_session(
 ) -> dict:
     """Get a specific recording session from database with error handling"""
     try:
-        from services.speaker_service import hydrate_diarized_for_session
+        from services.speaker_service import (
+            hydrate_diarized_for_response,
+            sanitize_diarized_for_response,
+        )
         # Find by session_id (UUID string), org-scoped first.
         session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
 
@@ -1111,6 +1118,26 @@ async def get_session(
             transcription_data["segments"] = segments
         elif not transcription_data:
             transcription_data = {"text": "", "segments": []}
+
+        # Legacy rows can carry the same biometric embedding arrays in
+        # ``transcript``/``transcription`` that newer rows keep in
+        # ``transcript_diarized``.  Sanitize every public alias so clients
+        # cannot recover vectors by reading an older compatibility field.
+        transcription_data = sanitize_diarized_for_response(transcription_data)
+        safe_legacy_transcript = session.transcript or ""
+        if isinstance(safe_legacy_transcript, str):
+            try:
+                parsed_legacy = json.loads(safe_legacy_transcript)
+                if isinstance(parsed_legacy, dict):
+                    safe_legacy_transcript = json.dumps(
+                        sanitize_diarized_for_response(parsed_legacy)
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
+        elif isinstance(safe_legacy_transcript, dict):
+            safe_legacy_transcript = sanitize_diarized_for_response(
+                safe_legacy_transcript
+            )
         
         # Parse summary with error handling
         summary_data = None
@@ -1147,11 +1174,11 @@ async def get_session(
             "transcription": transcription_data,
             "transcription_segments": segments,
             "summary": summary_data,
-            "transcript": session.transcript or "",
+            "transcript": safe_legacy_transcript,
             # New enhanced fields
             "transcript_simple": session.transcript_simple or "",
             "transcript_diarized": (
-                hydrate_diarized_for_session(session)
+                hydrate_diarized_for_response(session)
                 if session.transcript_diarized else transcription_data
             ),
             "progressive_summaries": session.progressive_summaries or [],
@@ -1726,6 +1753,7 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
         # on each utterance so identify_speakers can match Aaron's voice
         # automatically.
         transcription_result = None
+        diarize_task = None
         try:
             logger.info(f"Starting canonical transcribe+diarize for {audio_file}")
 
@@ -1733,6 +1761,25 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
             from services.providers.registry import get_provider_registry
 
             registry = get_provider_registry(db)
+
+            # Launch speaker diarization first.  It reads the same audio
+            # independently on the speaker GPU, so it can overlap the STT
+            # request running on the Parakeet GPU.  We merge only after STT
+            # has been persisted below.
+            try:
+                diar_provider = registry.get_diarization(session.organization_id)
+                diarize_task = asyncio.create_task(
+                    asyncio.wait_for(
+                        diar_provider.diarize(audio_file),
+                        timeout=DIARIZATION_TIMEOUT_SECONDS,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not launch concurrent diarization; will retry after "
+                    "transcription: %s",
+                    exc,
+                )
 
             # 1a. Transcribe via STT provider (default: Parakeet 1.1B on midboy2)
             stt_provider = registry.get_stt(session.organization_id)
@@ -1791,18 +1838,32 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                 # each turn carries a 256-d ECAPA embedding for identify_speakers.
                 diar_segments = []
                 try:
-                    diar_provider = registry.get_diarization(session.organization_id)
-                    diar_segments = await asyncio.wait_for(
-                        diar_provider.diarize(audio_file),
-                        timeout=600
-                    )
+                    if diarize_task is not None:
+                        diar_segments = await diarize_task
+                    else:
+                        diar_provider = registry.get_diarization(
+                            session.organization_id
+                        )
+                        diar_segments = await asyncio.wait_for(
+                            diar_provider.diarize(audio_file),
+                            timeout=DIARIZATION_TIMEOUT_SECONDS,
+                        )
                     logger.info(
                         f"Canonical diarize: {len(diar_segments)} turns, "
                         f"embeddings={'yes' if (diar_segments and diar_segments[0].get('embedding')) else 'no'}"
                     )
                 except Exception as exc:
                     logger.warning(f"Diarization step failed (non-fatal): {exc}")
+                    from api.uploads import _flag_stage_needs_retry
+                    from sqlalchemy.orm.attributes import flag_modified
+                    _flag_stage_needs_retry(session, "diarization", exc)
+                    flag_modified(session, "processing_metadata")
                     diar_segments = []
+                else:
+                    from api.uploads import _clear_stage_needs_retry
+                    from sqlalchemy.orm.attributes import flag_modified
+                    _clear_stage_needs_retry(session, "diarization")
+                    flag_modified(session, "processing_metadata")
 
                 if diar_segments:
                     # _assign_speakers_from_diarization writes labels + embeddings
@@ -1855,6 +1916,15 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
         except Exception as e:
             logger.error(f"Transcription error: {e}", exc_info=True)
             session.transcript = json.dumps({"text": f"Transcription error: {str(e)}", "segments": []})
+        finally:
+            # A timeout/persistence error can leave the independently-running
+            # speaker request alive. Cancel and *await* it so no GPU job or
+            # pending task escapes this meeting's lifecycle.
+            if diarize_task is not None:
+                if not diarize_task.done():
+                    diarize_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await diarize_task
         
         # Step 1.5: Apply vocabulary replacements to transcript
         try:
@@ -2434,6 +2504,18 @@ def _safe_export_filename(session: DBRecordingSession) -> str:
     return f"{safe[:120]}.md"
 
 
+def _safe_download_filename(
+    session: DBRecordingSession,
+    descriptor: str,
+    extension: str,
+) -> str:
+    """Return a header-safe filename for a single-session download."""
+    stem = _safe_export_filename(session).removesuffix(".md")
+    safe_descriptor = re.sub(r"[^A-Za-z0-9._-]+", "-", descriptor).strip("-_.")
+    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", extension).lower()
+    return f"{stem}-{safe_descriptor}.{safe_extension}"
+
+
 def _session_action_items_markdown(db: Session, session: DBRecordingSession) -> str:
     """Render the canonical ActionItem rows for one session as markdown.
 
@@ -2755,11 +2837,15 @@ async def download_transcript(
 @router.get("/recording-sessions/{session_id}/download/summary/pdf")
 async def download_summary_pdf(
     session_id: str,
+    include_transcript: bool = False,
+    brand_mode: Literal[
+        "default", "meeting_ops", "workspace", "unbranded"
+    ] = "default",
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
-    """Download meeting summary as PDF"""
+    """Download a branded meeting report, optionally with a transcript appendix."""
     from fastapi.responses import Response
 
     session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
@@ -2769,9 +2855,16 @@ async def download_summary_pdf(
 
     try:
         from api.batch_export import export_to_pdf, ExportOptions
-        options = ExportOptions()
+        options = ExportOptions(
+            includeTranscript=include_transcript,
+            brandMode=brand_mode,
+        )
         pdf_bytes = export_to_pdf(session, options)
-        filename = f"{(session.name or session.title or 'meeting').replace(' ', '_')}_summary.pdf"
+        filename = _safe_download_filename(
+            session,
+            "report-with-transcript" if include_transcript else "report",
+            "pdf",
+        )
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -2787,6 +2880,9 @@ async def download_summary_pdf(
 async def download_summary_md(
     session_id: str,
     include_transcript: bool = False,
+    brand_mode: Literal[
+        "default", "meeting_ops", "workspace", "unbranded"
+    ] = "default",
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
@@ -2804,9 +2900,16 @@ async def download_summary_md(
 
     try:
         from api.batch_export import export_to_markdown, ExportOptions
-        options = ExportOptions(includeTranscript=include_transcript)
+        options = ExportOptions(
+            includeTranscript=include_transcript,
+            brandMode=brand_mode,
+        )
         md = export_to_markdown(session, options)
-        filename = f"{(session.title or session.name or 'meeting').replace(' ', '_')}_summary.md"
+        filename = _safe_download_filename(
+            session,
+            "report-with-transcript" if include_transcript else "report",
+            "md",
+        )
         return Response(
             content=md,
             media_type="text/markdown; charset=utf-8",
@@ -2820,11 +2923,15 @@ async def download_summary_md(
 @router.get("/recording-sessions/{session_id}/download/summary/docx")
 async def download_summary_docx(
     session_id: str,
+    include_transcript: bool = False,
+    brand_mode: Literal[
+        "default", "meeting_ops", "workspace", "unbranded"
+    ] = "default",
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db)
 ):
-    """Download meeting summary as DOCX"""
+    """Download a branded meeting report, optionally with a transcript appendix."""
     from fastapi.responses import Response
 
     session = _get_session_for_org(db, active_org.organization.id, session_id, user=current_user)
@@ -2834,9 +2941,16 @@ async def download_summary_docx(
 
     try:
         from api.batch_export import export_to_docx, ExportOptions
-        options = ExportOptions()
+        options = ExportOptions(
+            includeTranscript=include_transcript,
+            brandMode=brand_mode,
+        )
         docx_bytes = export_to_docx(session, options)
-        filename = f"{(session.name or session.title or 'meeting').replace(' ', '_')}_summary.docx"
+        filename = _safe_download_filename(
+            session,
+            "report-with-transcript" if include_transcript else "report",
+            "docx",
+        )
         return Response(
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

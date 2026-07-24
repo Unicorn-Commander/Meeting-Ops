@@ -625,9 +625,8 @@ async def submit_action_items_to_triage(
         # so the triage push can carry it via a Brigade-vouched federation
         # token and PO routes the proposals to the correct tenant. Mirrors the
         # recorder-autostamp path in api.recording (load Organization by
-        # session.organization_id, read org.workspace_id). When the org has no
-        # workspace_id (e.g. a dogfood org not yet registered), this stays None
-        # and the push degrades to the default token / default tenant routing.
+        # session.organization_id, read org.workspace_id). Tenant routing is
+        # fail-closed: no workspace binding means no cross-app write.
         from auth.models import Organization
 
         org = (
@@ -726,33 +725,50 @@ async def submit_action_items_to_triage(
             ]
 
             # Obtain a Brigade-exchanged, workspace-bound federation token
-            # (aud=project-ops) so PO routes these proposals to the correct
-            # tenant. Graceful degradation: when the org has no workspace_id,
-            # or the exchange yields nothing (Brigade not yet granting
-            # actor=meeting-ops -> aud=project-ops, or KC secret unset), we
-            # fall back to the default service token (default tenant routing)
-            # and log a warning rather than failing the finalize push.
-            bearer_override: Optional[str] = None
-            if workspace_id:
-                from services.projectops_token import projectops_federation_token
-
-                bearer_override = await projectops_federation_token(workspace_id)
-                if bearer_override is None:
-                    logger.warning(
-                        "projectops_triage session=%s org=%s ws=%s: federation "
-                        "token unavailable — push will use the default tenant "
-                        "routing (Brigade not configured for project-ops, or KC "
-                        "secret unset)",
-                        session_pk,
-                        session.organization_id,
-                        workspace_id,
-                    )
-            else:
-                logger.warning(
-                    "projectops_triage session=%s org=%s: no workspace_id on "
-                    "org — push will use the default tenant routing",
+            # (aud=project-ops) so Project-Ops routes proposals to the exact
+            # tenant. Never fall back to a default service tenant: a delayed
+            # proposal is recoverable; a cross-tenant task is not.
+            if not workspace_id:
+                detail = "Project-Ops sync blocked: workspace is not provisioned"
+                logger.error(
+                    "projectops_triage session=%s org=%s: %s",
                     session_pk,
                     session.organization_id,
+                    detail,
+                )
+                _stamp_session_push_failure(
+                    db, session, mode=completion_mode, detail=detail
+                )
+                return ProjectOpsWriteResult(
+                    ok=False,
+                    mode="error",
+                    skipped=already,
+                    detail=detail,
+                )
+
+            from services.projectops_token import projectops_federation_token
+
+            bearer_override = await projectops_federation_token(workspace_id)
+            if bearer_override is None:
+                detail = (
+                    "Project-Ops sync blocked: workspace-bound federation "
+                    "token is unavailable"
+                )
+                logger.error(
+                    "projectops_triage session=%s org=%s ws=%s: %s",
+                    session_pk,
+                    session.organization_id,
+                    workspace_id,
+                    detail,
+                )
+                _stamp_session_push_failure(
+                    db, session, mode=completion_mode, detail=detail
+                )
+                return ProjectOpsWriteResult(
+                    ok=False,
+                    mode="error",
+                    skipped=already,
+                    detail=detail,
                 )
 
             try:

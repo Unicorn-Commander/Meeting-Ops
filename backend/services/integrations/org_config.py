@@ -295,7 +295,9 @@ def resolve_project_ops(
     from config.features import PROJECTOPS_AUTO_PUSH_ACTION_ITEMS
 
     env_key = os.getenv("PROJECTOPS_API_KEY")
-    env_url = os.getenv("PROJECTOPS_BASE_URL")
+    env_url = os.getenv("PROJECTOPS_BASE_URL") or os.getenv(
+        "PROJECTOPS_API_BASE_URL"
+    )
     return IntegrationConfig(
         enabled=bool(env_key),
         api_base_url=env_url,

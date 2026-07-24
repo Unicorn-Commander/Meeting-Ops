@@ -207,39 +207,12 @@ export const TranscriptionOptionsPanel: React.FC<Props> = ({
                 />
               </div>
             )}
-            {diarMode === 'auto' && (
-              <div className="mt-3">
-                <label className="mb-1 block text-xs text-gray-400">
-                  Sensitivity
-                  <span className="ml-1 text-gray-500">
-                    (Strict groups similar voices; Loose splits them apart)
-                  </span>
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {([
-                    { id: 0.78, label: 'Strict' },
-                    { id: 0.72, label: 'Balanced' },
-                    { id: 0.66, label: 'Loose' },
-                  ] as const).map((p) => {
-                    const current = value.diarization_clustering_threshold ?? 0.72;
-                    const active = Math.abs(current - p.id) < 0.001;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => set('diarization_clustering_threshold', p.id)}
-                        className={`rounded border px-3 py-2 text-xs ${
-                          active
-                            ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200'
-                            : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+            {diarMode === 'auto' && !hideHelp && (
+              <p className="mt-2 text-[11px] text-gray-500">
+                Speaker sensitivity is tuned centrally for reliable GPU
+                processing. Use Manual count only when you know exactly how
+                many people spoke.
+              </p>
             )}
           </div>
 

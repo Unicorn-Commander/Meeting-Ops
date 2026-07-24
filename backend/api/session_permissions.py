@@ -412,11 +412,16 @@ def _send_invitation_email(
     codebase. If neither is configured, logs the TODO and returns —
     we don't want a missing email config to break the API call.
     """
-    postmark_token = os.getenv("POSTMARK_SERVER_TOKEN", "").strip()
+    from auth.email import _postmark_sender, _postmark_token
+
+    postmark_token = _postmark_token()
     from_email = (
-        os.getenv("POSTMARK_FROM", "").strip()
-        or os.getenv("SMTP_FROM", "").strip()
-        or os.getenv("SMTP_USER", "").strip()
+        _postmark_sender()
+        if postmark_token
+        else (
+            os.getenv("SMTP_FROM", "").strip()
+            or os.getenv("SMTP_USER", "").strip()
+        )
     )
     subject = (
         f"{inviter.full_name or inviter.email} shared a meeting with you"
@@ -543,19 +548,22 @@ async def get_permissions(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> PermissionsOut:
-    """Return the full permission picture for a recording session.
+    """Return the collaborator-management view for a recording session.
 
-    Visible to anyone who has at least read access (org member, project
-    member, or explicit collaborator). Anyone else gets 404 to avoid
-    leaking the existence of a private session.
+    This payload includes invitee email addresses and pending magic links,
+    so it is restricted to the session creator or an org admin/manager.
+    Ordinary readers use the meeting endpoint and never receive the
+    collaborator roster or bearer tokens.
     """
     session = _get_session_by_str_id(db, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    access = has_session_access(session.id, current_user, db)
-    if access == "denied":
-        raise HTTPException(status_code=404, detail="Session not found")
+    if not _can_manage_collaborators(db, current_user, session):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the session creator or an org admin/manager can manage collaborators",
+        )
 
     collaborators = (
         db.query(SessionCollaborator)

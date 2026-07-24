@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Users, Check, X, RefreshCw, AlertCircle } from 'lucide-react';
+import { Users, Check, X, RefreshCw, AlertCircle, Play } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { showToast } from './Toast';
@@ -58,6 +58,16 @@ interface SpeakerOption {
 interface SpeakerTaggerProps {
   sessionId: string;
   onChange?: (links: SpeakerLink[]) => void;
+  segments?: SpeakerSampleSegment[];
+  onPlaySample?: (start: number, end: number) => void;
+}
+
+export interface SpeakerSampleSegment {
+  start: number;
+  end: number;
+  text: string;
+  speaker?: string;
+  raw_label?: string;
 }
 
 /**
@@ -65,7 +75,12 @@ interface SpeakerTaggerProps {
  * speaker_session_link rows for a single session. Surfaces under the
  * SessionDetails header so users can fix labels without leaving the page.
  */
-export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChange }) => {
+export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
+  sessionId,
+  onChange,
+  segments = [],
+  onPlaySample,
+}) => {
   const { activeOrganization } = useOrg();
   const [links, setLinks] = useState<SpeakerLink[]>([]);
   const [speakers, setSpeakers] = useState<SpeakerOption[]>([]);
@@ -105,7 +120,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
     try {
       const [linksRes, speakersRes] = await Promise.all([
         fetch(`${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links`, { headers: orgHeaders() }),
-        fetch(`${config.apiBaseUrl}/api/speakers`, { headers: orgHeaders() }),
+        fetch(
+          `${config.apiBaseUrl}/api/speakers?session_id=${encodeURIComponent(sessionId)}`,
+          { headers: orgHeaders() },
+        ),
       ]);
       if (linksRes.ok) {
         const data: SpeakerLink[] = await linksRes.json();
@@ -384,6 +402,14 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
         </div>
       </div>
 
+      {onPlaySample && segments.length > 0 && (
+        <p className="mb-3 text-xs text-gray-500">
+          Listen to representative moments, then assign each voice to a person.
+          Samples play from this meeting&apos;s existing audio and are not saved as
+          separate biometric clips.
+        </p>
+      )}
+
       {error && (
         <div className="mb-2 text-xs text-red-600 flex items-center gap-1">
           <AlertCircle className="w-3 h-3" />
@@ -406,8 +432,32 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
           const sim = link.similarity ?? null;
           const simBadge = sim !== null ? `${(sim * 100).toFixed(0)}%` : null;
           const isEnrolling = enrollingLinkId === link.id;
+          const representativeSamples = segments
+            .filter((segment) => {
+              const raw = (segment.raw_label || '').trim();
+              const named = (segment.speaker || '').trim();
+              return (
+                Number.isFinite(segment.start) &&
+                !!segment.text?.trim() &&
+                (
+                  raw === link.raw_label ||
+                  named === link.raw_label ||
+                  (!!link.speaker_name && named === link.speaker_name)
+                )
+              );
+            })
+            .sort((a, b) => {
+              const score = (segment: SpeakerSampleSegment) => {
+                const duration = Math.max(0, segment.end - segment.start);
+                const words = segment.text.trim().split(/\s+/).length;
+                return Math.min(duration, 12) * 2 + Math.min(words, 30);
+              };
+              return score(b) - score(a);
+            })
+            .slice(0, 3);
           return (
-            <div key={link.id} className="flex items-center gap-3 text-sm">
+            <div key={link.id} className="rounded-lg border border-gray-200 bg-gray-50/70 p-3">
+            <div className="flex items-center gap-3 text-sm">
               <span className="font-mono text-xs text-gray-500 w-24 truncate" title={link.raw_label}>
                 {link.raw_label}
               </span>
@@ -513,6 +563,31 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({ sessionId, onChang
                   )}
                 </>
               )}
+            </div>
+            {onPlaySample && representativeSamples.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {representativeSamples.map((sample, index) => {
+                  const mins = Math.floor(sample.start / 60);
+                  const secs = Math.floor(sample.start % 60).toString().padStart(2, '0');
+                  const excerpt = sample.text.trim().replace(/\s+/g, ' ');
+                  return (
+                    <button
+                      key={`${sample.start}-${index}`}
+                      type="button"
+                      onClick={() => onPlaySample(sample.start, sample.end)}
+                      className="group inline-flex max-w-full items-center gap-1.5 rounded-full border border-purple-200 bg-white px-2.5 py-1 text-xs text-purple-700 shadow-sm hover:border-purple-400 hover:bg-purple-50"
+                      title={`Play ${link.speaker_name || link.raw_label} at ${mins}:${secs}`}
+                    >
+                      <Play className="h-3 w-3 shrink-0 fill-current" />
+                      <span className="font-mono text-[10px] text-purple-500">{mins}:{secs}</span>
+                      <span className="max-w-[18rem] truncate text-gray-600">
+                        {excerpt}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             </div>
           );
         })}

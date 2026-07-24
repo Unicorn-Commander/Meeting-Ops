@@ -260,8 +260,12 @@ def _best_transcript(session: DBRecordingSession) -> str:
 
 
 def _diarized_payload(session: DBRecordingSession) -> dict[str, Any] | None:
+    from services.speaker_service import sanitize_diarized_for_response
+
     diarized = session.transcript_diarized
-    return diarized if isinstance(diarized, dict) else None
+    if not isinstance(diarized, dict):
+        return None
+    return sanitize_diarized_for_response(diarized)
 
 
 def _shape_session(session: DBRecordingSession) -> dict[str, Any]:

@@ -52,6 +52,9 @@ const ThemeSettings = lazy(() => import('../components/settings/ThemeSettings'))
 const PrivacySettings = lazy(() => import('../components/settings/PrivacySettings'));
 const EmptyPanel = lazy(() => import('../components/settings/EmptyPanel'));
 const IntegrationsPanel = lazy(() => import('../components/settings/IntegrationsPanel'));
+const ReportBrandingPanel = lazy(
+  () => import('../components/settings/ReportBrandingPanel')
+);
 const InviteCodesCard = lazy(() => import('../components/settings/InviteCodesCard'));
 const BillingSettings = lazy(() => import('../components/settings/BillingSettings'));
 
@@ -426,6 +429,8 @@ export default function SettingsEnhanced() {
       // ── Workspace settings ──
       case 'integrations':
         return <IntegrationsPanel />;
+      case 'report-branding':
+        return <ReportBrandingPanel />;
       case 'calendar-sync':
         return (
           <EmptyPanel

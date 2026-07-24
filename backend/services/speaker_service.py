@@ -186,6 +186,39 @@ def hydrate_diarized_for_session(session):
     return hydrate_diarized_speaker_names(session.transcript_diarized, db, session.id)
 
 
+def sanitize_diarized_for_response(diarized):
+    """Return a browser-safe copy of a diarized transcript.
+
+    Speaker embeddings are biometric identifiers used only by the backend
+    matching pipeline.  They must never cross the API response boundary.
+    ``speaker_turns`` is an internal embedding bank and has no UI consumer,
+    while older rows may also carry an ``embedding`` directly on a segment.
+    Strip both shapes recursively without mutating the persisted JSON value.
+    """
+    if not isinstance(diarized, dict):
+        return diarized
+
+    def _clean(value):
+        if isinstance(value, dict):
+            return {
+                key: _clean(item)
+                for key, item in value.items()
+                if key not in {"embedding", "embeddings", "centroid_embedding"}
+            }
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        return value
+
+    safe = _clean(diarized)
+    safe.pop("speaker_turns", None)
+    return safe
+
+
+def hydrate_diarized_for_response(session):
+    """Hydrate current speaker names, then remove backend-only biometrics."""
+    return sanitize_diarized_for_response(hydrate_diarized_for_session(session))
+
+
 # ---------- DB helpers ----------
 
 

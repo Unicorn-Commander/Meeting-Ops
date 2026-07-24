@@ -119,7 +119,14 @@ def _env(name: str) -> Optional[str]:
 
 
 def _base_url() -> str:
-    return os.getenv("PROJECTOPS_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    # The bigboy compose historically exposed PROJECTOPS_API_BASE_URL while
+    # this client read PROJECTOPS_BASE_URL. Accept both so operator overrides
+    # reach the write client instead of silently falling back.
+    return (
+        _env("PROJECTOPS_BASE_URL")
+        or _env("PROJECTOPS_API_BASE_URL")
+        or DEFAULT_BASE_URL
+    ).rstrip("/")
 
 
 def _looks_like_uuid(value: str) -> bool:
