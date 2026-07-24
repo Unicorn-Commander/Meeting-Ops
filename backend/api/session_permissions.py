@@ -18,11 +18,12 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, EmailStr, model_validator
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -32,6 +33,14 @@ from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession
 from database.models import SessionCollaborator
+from services.invitation_tokens import (
+    INVITATION_TOKEN_VERSION,
+    build_invitation_url,
+    generate_invitation_secret,
+    hash_invitation_secret,
+    invitation_resend_minimum_interval_seconds,
+    legacy_invitation_is_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +64,14 @@ public_router = APIRouter(
 
 AccessLevel = Literal["read", "comment", "edit"]
 _VALID_ACCESS_LEVELS = ("read", "comment", "edit")
+DeliveryState = Literal[
+    "pending",
+    "sent",
+    "failed",
+    "accepted",
+    "revoked",
+    "expired",
+]
 
 
 class CollaboratorCreate(BaseModel):
@@ -91,19 +108,33 @@ class CollaboratorOut(BaseModel):
     user: Optional[CollaboratorUserOut] = None
     email: Optional[str] = None
     access_level: AccessLevel
-    invited_by_user_id: Optional[int] = None
-    token: str
     expires_at: Optional[str] = None
     accepted_at: Optional[str] = None
     revoked_at: Optional[str] = None
     created_at: Optional[str] = None
-    # Convenience: did this row already get accepted (i.e. the invitee
-    # opened the magic link and we resolved their user_id)?
     accepted: bool = False
-    # Pre-baked magic link the frontend can show in the share modal.
-    # The route resolution happens client-side; we just hand back the
-    # token so the UI can build whatever URL pattern it wants.
-    invite_url: Optional[str] = None
+    delivery_state: DeliveryState
+    delivery_attempt_count: int = 0
+    last_delivery_attempt_at: Optional[str] = None
+    delivery_failure_reason: Optional[str] = None
+
+
+class CollaboratorCreateOut(CollaboratorOut):
+    """Creation response.
+
+    `invite_url_once` is populated only when this request created a new
+    external invitation secret. It is absent from all list/update responses.
+    """
+
+    created: bool
+    invite_url_once: Optional[str] = None
+    delivered: Optional[bool] = None
+
+
+class ResendOut(BaseModel):
+    collaborator: CollaboratorOut
+    invite_url_once: str
+    delivered: bool
 
 
 class PermissionsOut(BaseModel):
@@ -121,9 +152,9 @@ class PermissionsOut(BaseModel):
 
 
 class AccessTokenOut(BaseModel):
-    """Response for GET /permissions/access?token=...
+    """Response for POST /permissions/access.
 
-    Public, no auth. The frontend uses this to verify a magic link
+    Public, no auth. A client may use this to verify a magic link
     before redirecting the viewer into the shared-session view.
     """
     valid: bool
@@ -365,36 +396,69 @@ def _serialize_collaborator(
         user=user_out,
         email=row.email,
         access_level=row.access_level,  # type: ignore[arg-type]
-        invited_by_user_id=row.invited_by_user_id,
-        token=str(row.token),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         accepted_at=row.accepted_at.isoformat() if row.accepted_at else None,
         revoked_at=row.revoked_at.isoformat() if row.revoked_at else None,
         created_at=row.created_at.isoformat() if row.created_at else None,
         accepted=row.accepted_at is not None,
-        invite_url=_build_invite_url(row.token),
+        delivery_state=_effective_delivery_state(row),
+        delivery_attempt_count=row.delivery_attempt_count or 0,
+        last_delivery_attempt_at=(
+            row.last_delivery_attempt_at.isoformat()
+            if row.last_delivery_attempt_at
+            else None
+        ),
+        delivery_failure_reason=row.delivery_failure_reason,
     )
 
 
-def _build_invite_url(token: uuid.UUID) -> str:
-    """Build a magic-link URL the frontend can show in the share modal.
+def _effective_delivery_state(row: SessionCollaborator) -> DeliveryState:
+    if row.revoked_at is not None:
+        return "revoked"
+    if row.expires_at is not None:
+        expires_at = row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            return "expired"
+    if row.accepted_at is not None:
+        return "accepted"
+    state = row.delivery_state or "pending"
+    if state not in {"pending", "sent", "failed"}:
+        return "pending"
+    return state  # type: ignore[return-value]
 
-    Reads MEETING_OPS_PUBLIC_URL (preferred) or APP_PUBLIC_URL as the
-    base; falls back to a relative URL the frontend will resolve
-    against window.location.
-    """
-    base = (
-        os.getenv("MEETING_OPS_PUBLIC_URL", "").strip()
-        or os.getenv("APP_PUBLIC_URL", "").strip()
-        or ""
-    ).rstrip("/")
-    suffix = f"/shared/sessions?token={token}"
-    return f"{base}{suffix}" if base else suffix
+
+def _find_invitation_by_secret(
+    db: Session,
+    secret: str,
+) -> Optional[SessionCollaborator]:
+    """Hash a presented secret and resolve it without plaintext lookup."""
+    digest = hash_invitation_secret(secret)
+    row = (
+        db.query(SessionCollaborator)
+        .filter(SessionCollaborator.token_hash == digest)
+        .first()
+    )
+    if row and legacy_invitation_is_allowed(row.token_version):
+        return row
+    return None
+
+
+def _resend_minimum_interval_seconds() -> int:
+    """Compatibility wrapper for the explicit collaborator resend path."""
+    return invitation_resend_minimum_interval_seconds()
 
 
 # ---------------------------------------------------------------------
-# Invitation email (Postmark via existing SMTP env if available)
+# Invitation delivery
 # ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InvitationDeliveryResult:
+    sent: bool
+    failure_reason: Optional[str] = None
 
 
 def _send_invitation_email(
@@ -404,13 +468,14 @@ def _send_invitation_email(
     inviter: User,
     session: DBRecordingSession,
     access_level: str,
-) -> None:
+) -> InvitationDeliveryResult:
     """Send an external-collaborator invitation email.
 
-    Looks for POSTMARK_SERVER_TOKEN (Postmark HTTP API) first; if not
-    present, falls back to the SMTP env vars used elsewhere in the
-    codebase. If neither is configured, logs the TODO and returns —
-    we don't want a missing email config to break the API call.
+    Exactly one configured transport is attempted. A failed or ambiguous
+    Postmark attempt never falls through to SMTP because doing so could
+    duplicate a delivery that the first provider actually accepted.
+
+    Only bounded operator-safe reason codes are returned for persistence.
     """
     from auth.email import _postmark_sender, _postmark_token
 
@@ -438,15 +503,16 @@ def _send_invitation_email(
     )
 
     if not from_email:
-        logger.info(
-            "TODO: send invitation email to %s (no from-address "
-            "configured; would have sent: %s)",
-            to_email,
-            invite_url,
+        logger.warning(
+            "invitation delivery skipped reason=sender_not_configured "
+            "session=%s",
+            session.session_id or session.id,
         )
-        return
+        return InvitationDeliveryResult(
+            sent=False,
+            failure_reason="delivery_not_configured",
+        )
 
-    # 1) Postmark HTTP API
     if postmark_token:
         try:
             import json as _json
@@ -476,29 +542,32 @@ def _send_invitation_email(
                 if resp.status >= 300:
                     raise RuntimeError(f"Postmark HTTP {resp.status}")
             logger.info(
-                "Sent collaborator invitation via Postmark to %s "
-                "(session %s)",
-                to_email,
+                "invitation delivery sent session=%s",
                 session.session_id or session.id,
             )
-            return
-        except Exception as exc:
+            return InvitationDeliveryResult(sent=True)
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Postmark send failed for %s: %s — falling back to SMTP",
-                to_email,
-                exc,
+                "invitation delivery failed session=%s error_type=%s",
+                session.session_id or session.id,
+                type(exc).__name__,
+            )
+            return InvitationDeliveryResult(
+                sent=False,
+                failure_reason="delivery_failed",
             )
 
-    # 2) SMTP fallback (reuses creds the rest of the app uses)
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     if not smtp_host:
-        logger.info(
-            "TODO: send invitation email to %s (no Postmark token, no "
-            "SMTP host; would have sent: %s)",
-            to_email,
-            invite_url,
+        logger.warning(
+            "invitation delivery skipped reason=delivery_not_configured "
+            "session=%s",
+            session.session_id or session.id,
         )
-        return
+        return InvitationDeliveryResult(
+            sent=False,
+            failure_reason="delivery_not_configured",
+        )
 
     try:
         import smtplib
@@ -521,19 +590,41 @@ def _send_invitation_email(
                 smtp.login(smtp_user, smtp_password)
             smtp.send_message(msg)
         logger.info(
-            "Sent collaborator invitation via SMTP to %s (session %s)",
-            to_email,
+            "invitation delivery sent session=%s",
             session.session_id or session.id,
         )
-    except Exception as exc:
+        return InvitationDeliveryResult(sent=True)
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "SMTP invitation email failed for %s: %s "
-            "(invite_url=%s) — frontend can still surface the link "
-            "for manual sharing",
-            to_email,
-            exc,
-            invite_url,
+            "invitation delivery failed session=%s error_type=%s",
+            session.session_id or session.id,
+            type(exc).__name__,
         )
+        return InvitationDeliveryResult(
+            sent=False,
+            failure_reason="delivery_failed",
+        )
+
+
+def _apply_delivery_result(
+    row: SessionCollaborator,
+    result: InvitationDeliveryResult,
+) -> None:
+    row.delivery_state = "sent" if result.sent else "failed"
+    safe_reasons = {
+        "delivery_not_configured",
+        "delivery_failed",
+        "delivery_internal_error",
+    }
+    row.delivery_failure_reason = (
+        None
+        if result.sent
+        else (
+            result.failure_reason
+            if result.failure_reason in safe_reasons
+            else "delivery_failed"
+        )
+    )
 
 
 # ---------------------------------------------------------------------
@@ -550,10 +641,9 @@ async def get_permissions(
 ) -> PermissionsOut:
     """Return the collaborator-management view for a recording session.
 
-    This payload includes invitee email addresses and pending magic links,
-    so it is restricted to the session creator or an org admin/manager.
-    Ordinary readers use the meeting endpoint and never receive the
-    collaborator roster or bearer tokens.
+    This payload includes the collaborator roster, so it is restricted to the
+    session creator or an org admin/manager. It never includes invitation
+    plaintext, hashes, provider responses, or internal provider metadata.
     """
     session = _get_session_by_str_id(db, session_id)
     if not session:
@@ -567,10 +657,7 @@ async def get_permissions(
 
     collaborators = (
         db.query(SessionCollaborator)
-        .filter(
-            SessionCollaborator.session_id == session.id,
-            SessionCollaborator.revoked_at.is_(None),
-        )
+        .filter(SessionCollaborator.session_id == session.id)
         .order_by(SessionCollaborator.created_at.asc())
         .all()
     )
@@ -585,21 +672,24 @@ async def get_permissions(
     )
 
 
-@router.post("/permissions/collaborators", response_model=CollaboratorOut)
+@router.post(
+    "/permissions/collaborators",
+    response_model=CollaboratorCreateOut,
+)
 async def add_collaborator(
     session_id: str,
     body: CollaboratorCreate,
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
-) -> CollaboratorOut:
+) -> CollaboratorCreateOut:
     """Add a collaborator to a recording session.
 
     - If body.user_id is set, the row is created with that user.
     - If only body.email is set and matches an existing user, user_id is
       auto-resolved (the invitee already has a uchub account).
-    - If only body.email is set and no user matches, the row stays
-      email-only and the magic-link token gates access until they accept.
+    - If only body.email is set and no user matches, the row stays email-only
+      and a copy-once magic-link secret gates access until acceptance.
 
     Restricted to org admin/manager OR the session creator.
     """
@@ -620,7 +710,7 @@ async def add_collaborator(
         )
 
     user_id = body.user_id
-    email_value = body.email
+    email_value = str(body.email).strip().lower() if body.email else None
     resolved_email = email_value
 
     if user_id:
@@ -630,14 +720,12 @@ async def add_collaborator(
         resolved_email = invitee.email
     elif email_value:
         # Resolve to an existing user if we already have one for this email.
-        invitee = (
-            db.query(User).filter(User.email.ilike(str(email_value))).first()
-        )
+        invitee = db.query(User).filter(User.email.ilike(email_value)).first()
         if invitee:
             user_id = invitee.id
             resolved_email = invitee.email
 
-    # Avoid duplicate active rows for the same (session, user) pair.
+    existing: Optional[SessionCollaborator] = None
     if user_id:
         existing = (
             db.query(SessionCollaborator)
@@ -648,44 +736,83 @@ async def add_collaborator(
             )
             .first()
         )
-        if existing:
-            existing.access_level = body.access_level
-            db.commit()
-            db.refresh(existing)
-            return _serialize_collaborator(db, existing)
+    elif resolved_email:
+        existing = (
+            db.query(SessionCollaborator)
+            .filter(
+                SessionCollaborator.session_id == session.id,
+                SessionCollaborator.email == str(resolved_email),
+                SessionCollaborator.revoked_at.is_(None),
+            )
+            .first()
+        )
 
+    # POST is idempotent for an already-active grant. Access may be updated,
+    # but a reusable secret is never re-exposed and no delivery is retried.
+    if existing:
+        existing.access_level = body.access_level
+        db.commit()
+        db.refresh(existing)
+        serialized = _serialize_collaborator(db, existing)
+        return CollaboratorCreateOut(
+            **serialized.model_dump(),
+            created=False,
+        )
+
+    now = datetime.now(timezone.utc)
+    secret = generate_invitation_secret() if not user_id else None
     row = SessionCollaborator(
         session_id=session.id,
         user_id=user_id,
         email=str(resolved_email) if resolved_email else None,
         access_level=body.access_level,
         invited_by_user_id=current_user.id,
+        # Compatibility UUID for the pre-scrub NOT NULL legacy column. It is
+        # unrelated to the bearer secret and is never queried for validation.
         token=uuid.uuid4(),
+        token_hash=hash_invitation_secret(secret) if secret else None,
+        token_version=INVITATION_TOKEN_VERSION,
+        accepted_at=now if user_id else None,
+        delivery_state="accepted" if user_id else "pending",
+        delivery_attempt_count=0 if user_id else 1,
+        last_delivery_attempt_at=None if user_id else now,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
 
-    # External-only invite -> send magic-link email
+    delivery_result: Optional[InvitationDeliveryResult] = None
     if not user_id and resolved_email:
         try:
-            _send_invitation_email(
+            delivery_result = _send_invitation_email(
                 to_email=str(resolved_email),
-                invite_url=_build_invite_url(row.token),
+                invite_url=build_invitation_url(secret or ""),
                 inviter=current_user,
                 session=session,
                 access_level=body.access_level,
             )
-        except Exception as exc:
-            # Don't unwind the DB write — the magic link still works,
-            # the user can resend manually if needed.
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Invitation email send failed (non-fatal) for %s: %s",
-                resolved_email,
-                exc,
+                "invitation delivery failed unexpectedly session=%s "
+                "error_type=%s",
+                session.session_id or session.id,
+                type(exc).__name__,
             )
+            delivery_result = InvitationDeliveryResult(
+                sent=False,
+                failure_reason="delivery_internal_error",
+            )
+        _apply_delivery_result(row, delivery_result)
+        db.commit()
+        db.refresh(row)
 
-    return _serialize_collaborator(db, row)
+    serialized = _serialize_collaborator(db, row)
+    return CollaboratorCreateOut(
+        **serialized.model_dump(),
+        created=True,
+        invite_url_once=build_invitation_url(secret) if secret else None,
+        delivered=delivery_result.sent if delivery_result else None,
+    )
 
 
 @router.patch(
@@ -725,11 +852,128 @@ async def update_collaborator(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Collaborator not found")
+    if row.revoked_at is not None:
+        raise HTTPException(status_code=409, detail="Collaborator is revoked")
 
     row.access_level = body.access_level
     db.commit()
     db.refresh(row)
     return _serialize_collaborator(db, row)
+
+
+@router.post(
+    "/permissions/collaborators/{collaborator_id}/resend",
+    response_model=ResendOut,
+)
+async def resend_collaborator_invitation(
+    session_id: str,
+    collaborator_id: int,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> ResendOut:
+    """Rotate and deliver a fresh external invitation.
+
+    The row is locked while the rate-limit/idempotency decision is recorded.
+    The provider call happens only after the new attempt timestamp commits, so
+    concurrent or repeated requests cannot create a second grant or send again.
+    """
+    session = _get_session_by_str_id(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not _can_manage_collaborators(db, current_user, session):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the session creator or an org admin/manager can manage collaborators",
+        )
+
+    row = (
+        db.query(SessionCollaborator)
+        .filter(
+            SessionCollaborator.id == collaborator_id,
+            SessionCollaborator.session_id == session.id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Collaborator not found")
+    state = _effective_delivery_state(row)
+    if state in {"accepted", "revoked", "expired"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot resend an invitation in {state} state",
+        )
+    if not row.email:
+        raise HTTPException(
+            status_code=409,
+            detail="Collaborator has no invitation email",
+        )
+
+    now = datetime.now(timezone.utc)
+    minimum_interval = _resend_minimum_interval_seconds()
+    if row.last_delivery_attempt_at is not None:
+        last_attempt = row.last_delivery_attempt_at
+        if last_attempt.tzinfo is None:
+            last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+        retry_at = last_attempt + timedelta(seconds=minimum_interval)
+        if retry_at > now:
+            retry_after = max(1, int((retry_at - now).total_seconds()) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="Invitation was attempted recently",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    secret = generate_invitation_secret()
+    row.token = uuid.uuid4()
+    row.token_hash = hash_invitation_secret(secret)
+    row.token_version = INVITATION_TOKEN_VERSION
+    row.delivery_state = "pending"
+    row.delivery_failure_reason = None
+    row.last_delivery_attempt_at = now
+    row.delivery_attempt_count = (row.delivery_attempt_count or 0) + 1
+    db.commit()
+
+    try:
+        result = _send_invitation_email(
+            to_email=str(row.email),
+            invite_url=build_invitation_url(secret),
+            inviter=current_user,
+            session=session,
+            access_level=row.access_level,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "invitation resend failed unexpectedly session=%s error_type=%s",
+            session.session_id or session.id,
+            type(exc).__name__,
+        )
+        result = InvitationDeliveryResult(
+            sent=False,
+            failure_reason="delivery_internal_error",
+        )
+
+    row = (
+        db.query(SessionCollaborator)
+        .filter(
+            SessionCollaborator.id == collaborator_id,
+            SessionCollaborator.session_id == session.id,
+        )
+        .first()
+    )
+    if not row or row.revoked_at is not None:
+        # A concurrent revocation wins. Do not resurrect the invitation state.
+        raise HTTPException(status_code=409, detail="Invitation was revoked")
+    _apply_delivery_result(row, result)
+    db.commit()
+    db.refresh(row)
+
+    return ResendOut(
+        collaborator=_serialize_collaborator(db, row),
+        invite_url_once=build_invitation_url(secret),
+        delivered=result.sent,
+    )
 
 
 @router.delete("/permissions/collaborators/{collaborator_id}")
@@ -761,13 +1005,21 @@ async def revoke_collaborator(
     if not row:
         raise HTTPException(status_code=404, detail="Collaborator not found")
 
-    row.revoked_at = datetime.now(timezone.utc)
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(timezone.utc)
+    row.delivery_state = "revoked"
+    row.delivery_failure_reason = None
+    # Keep the one-way digest so a holder of the original secret receives the
+    # controlled "revoked" terminal state. It is never a bearer value; the
+    # active-state check rejects the row immediately. Rotate the legacy UUID
+    # too, so a pre-migration plaintext value cannot remain useful.
+    row.token = uuid.uuid4()
     db.commit()
     return {"status": "revoked", "collaborator_id": collaborator_id}
 
 
 class RedeemTokenRequest(BaseModel):
-    token: str
+    token: str = Field(min_length=20, max_length=256)
 
 
 class RedeemTokenResponse(BaseModel):
@@ -779,7 +1031,7 @@ class RedeemTokenResponse(BaseModel):
     bound_user_id: Optional[int] = None
 
 
-@router.post(
+@public_router.post(
     "/permissions/redeem",
     response_model=RedeemTokenResponse,
 )
@@ -796,20 +1048,9 @@ async def redeem_magic_link(
     token-in-URL pattern) and returns the session id + granted access
     level. Idempotent.
     """
-    import uuid as _uuid
-
-    try:
-        token_uuid = _uuid.UUID(payload.token)
-    except (ValueError, AttributeError):
-        return RedeemTokenResponse(valid=False, reason="invalid token format")
-
-    row = (
-        db.query(SessionCollaborator)
-        .filter(SessionCollaborator.token == token_uuid)
-        .first()
-    )
+    row = _find_invitation_by_secret(db, payload.token)
     if not row:
-        return RedeemTokenResponse(valid=False, reason="token not found")
+        return RedeemTokenResponse(valid=False, reason="invitation not found")
     if not _is_collaborator_active(row):
         reason = "revoked" if row.revoked_at is not None else "expired"
         return RedeemTokenResponse(valid=False, reason=reason)
@@ -825,18 +1066,27 @@ async def redeem_magic_link(
     # Optional email match check. If the original invite was scoped to a
     # specific email, refuse to bind a different user. Stops a leaked
     # token from being redeemed by anyone other than the invitee.
-    if row.email and current_user.email and row.email.lower() != current_user.email.lower():
+    if row.email and (
+        not current_user.email
+        or row.email.strip().casefold() != current_user.email.strip().casefold()
+    ):
         return RedeemTokenResponse(
             valid=False,
             reason="this invitation was sent to a different email address",
+        )
+    if row.user_id is not None and row.user_id != current_user.id:
+        return RedeemTokenResponse(
+            valid=False,
+            reason="this invitation belongs to a different account",
         )
 
     # Bind the user, mark accepted.
     if row.user_id != current_user.id:
         row.user_id = current_user.id
     if not row.accepted_at:
-        from datetime import datetime, timezone as _tz
-        row.accepted_at = datetime.now(_tz.utc)
+        row.accepted_at = datetime.now(timezone.utc)
+    row.delivery_state = "accepted"
+    row.delivery_failure_reason = None
     db.commit()
 
     return RedeemTokenResponse(
@@ -848,32 +1098,22 @@ async def redeem_magic_link(
     )
 
 
-@public_router.get(
+@public_router.post(
     "/permissions/access",
     response_model=AccessTokenOut,
 )
 async def resolve_access_token(
-    token: str = Query(..., description="Magic-link share token"),
+    payload: RedeemTokenRequest,
     db: Session = Depends(get_db),
 ) -> AccessTokenOut:
-    """Resolve a magic-link share token. Public — no auth required.
+    """Resolve a magic-link share secret. Public — no auth required.
 
-    Returns whether the token is valid and, if so, the session.id so the
-    share-link flow can route the viewer into the correct shared-session
-    view.
+    The secret is accepted only in a JSON request body so reverse-proxy request
+    lines do not capture it.
     """
-    try:
-        token_uuid = uuid.UUID(token)
-    except (ValueError, AttributeError):
-        return AccessTokenOut(valid=False, reason="invalid token format")
-
-    row = (
-        db.query(SessionCollaborator)
-        .filter(SessionCollaborator.token == token_uuid)
-        .first()
-    )
+    row = _find_invitation_by_secret(db, payload.token)
     if not row:
-        return AccessTokenOut(valid=False, reason="token not found")
+        return AccessTokenOut(valid=False, reason="invitation not found")
     if not _is_collaborator_active(row):
         reason = (
             "revoked"

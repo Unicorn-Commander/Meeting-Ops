@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 
 from auth.utils import get_password_hash
+from services.invitation_tokens import hash_invitation_secret
 
 
 def _seed_workspace():
@@ -101,6 +102,9 @@ def _seed_workspace():
             access_level="read",
             invited_by_user_id=creator.id,
             token=uuid.uuid4(),
+            token_hash=hash_invitation_secret(f"seed-{suffix}"),
+            token_version=2,
+            delivery_state="sent",
         )
         db.add(invite)
         db.commit()
@@ -195,7 +199,10 @@ def test_collaborator_roster_and_invite_tokens_are_manager_only(client):
 
     creator_read = client.get(url, headers=creator_headers)
     assert creator_read.status_code == 200, creator_read.text
-    assert creator_read.json()["collaborators"][0]["token"]
+    creator_keys = set(_all_keys(creator_read.json()))
+    assert "token" not in creator_keys
+    assert "token_hash" not in creator_keys
+    assert "invite_url" not in creator_keys
 
     viewer_read = client.get(url, headers=viewer_headers)
     assert viewer_read.status_code == 403

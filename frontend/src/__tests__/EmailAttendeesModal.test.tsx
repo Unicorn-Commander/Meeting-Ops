@@ -112,6 +112,15 @@ describe('EmailAttendeesModal', () => {
     });
     expect(recipient).toBeChecked();
     expect(
+      screen.getByRole('checkbox', { name: /Static summary copy/i }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole('checkbox', { name: /Ongoing access link/i }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByText(/receive ongoing access only if you select/i),
+    ).toBeInTheDocument();
+    expect(
       calls.some((call) =>
         call.url.includes('/api/speakers?session_id=42'),
       ),
@@ -130,7 +139,7 @@ describe('EmailAttendeesModal', () => {
       expect(JSON.parse(sendCall?.init?.body as string)).toEqual({
         speaker_ids: [7],
         additional_recipients: [],
-        include: ['link'],
+        include: ['summary_pdf'],
         brand_mode: 'default',
       });
     });

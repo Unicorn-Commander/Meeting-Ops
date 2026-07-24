@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 import { config } from '../config';
 
@@ -27,9 +27,22 @@ interface RedeemResponse {
  * session has been deleted.
  */
 export const SharedSessionRedirect: React.FC = () => {
-  const [search] = useSearchParams();
   const navigate = useNavigate();
-  const token = search.get('token') || '';
+  const [token] = useState(() => {
+    try {
+      const pending = window.sessionStorage.getItem(
+        'meetingops.pendingInvitationSecret',
+      );
+      if (pending) return pending;
+    } catch {
+      // Storage can be disabled; legacy direct links still get a chance below.
+    }
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    if (fragment.get('token')) return fragment.get('token') || '';
+    // Compatibility for v1 links. New links always use the fragment so the
+    // secret is not sent in HTTP request lines.
+    return new URLSearchParams(window.location.search).get('token') || '';
+  });
   const [status, setStatus] = useState<'pending' | 'ok' | 'error'>('pending');
   const [reason, setReason] = useState<string>('');
 
@@ -39,6 +52,13 @@ export const SharedSessionRedirect: React.FC = () => {
       setReason('Missing share token.');
       return;
     }
+    try {
+      window.sessionStorage.removeItem('meetingops.pendingInvitationSecret');
+    } catch {
+      // The in-memory value is enough for this one redemption attempt.
+    }
+    // Remove the secret from browser history before making any API request.
+    window.history.replaceState({}, '', window.location.pathname);
     (async () => {
       try {
         const res = await fetch(
@@ -57,7 +77,7 @@ export const SharedSessionRedirect: React.FC = () => {
           setStatus('error');
           setReason(data.reason || `Could not open the shared meeting (HTTP ${res.status}).`);
         }
-      } catch (e) {
+      } catch {
         setStatus('error');
         setReason('Network error while validating the share link.');
       }

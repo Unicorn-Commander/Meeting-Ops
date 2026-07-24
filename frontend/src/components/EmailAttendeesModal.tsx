@@ -34,7 +34,6 @@ interface SendResult {
     participant_id?: number | string;
     external?: boolean;
     name?: string;
-    email?: string;
     reason: string;
   }>;
 }
@@ -54,15 +53,15 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
   const [result, setResult] = useState<SendResult | null>(null);
 
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [includeLink, setIncludeLink] = useState(true);
-  const [includeSummary, setIncludeSummary] = useState(false);
+  const [includeLink, setIncludeLink] = useState(false);
+  const [includeSummary, setIncludeSummary] = useState(true);
   const [includeTranscript, setIncludeTranscript] = useState(false);
   const [brandMode, setBrandMode] = useState<ReportBrandMode>('default');
   const [customMessage, setCustomMessage] = useState('');
 
   // Free-form external recipients (people NOT identified as speakers in
-  // this meeting). Each one gets a session-scoped magic link from the
-  // backend.
+  // this meeting). A collaborator grant is created only if the sender
+  // explicitly chooses the ongoing-access link.
   const [externalRecipients, setExternalRecipients] = useState<string[]>([]);
   const [externalDraft, setExternalDraft] = useState('');
   const [externalError, setExternalError] = useState<string | null>(null);
@@ -81,8 +80,8 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
     setExternalDraft('');
     setExternalError(null);
     setSelected(new Set());
-    setIncludeLink(true);
-    setIncludeSummary(false);
+    setIncludeLink(false);
+    setIncludeSummary(true);
     setIncludeTranscript(false);
     setBrandMode('default');
     setCustomMessage('');
@@ -138,7 +137,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
           const status = !linksRes.ok ? linksRes.status : speakersRes.status;
           setError(`Couldn't load attendee list (HTTP ${status}).`);
         }
-      } catch (e) {
+      } catch {
         setError('Network error loading speakers.');
       }
       setLoading(false);
@@ -253,7 +252,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
       } else {
         setError(`Send failed (HTTP ${res.status}): ${(data?.detail || JSON.stringify(data)).toString().slice(0, 200)}`);
       }
-    } catch (e) {
+    } catch {
       setError('Network error during send.');
     }
     setSending(false);
@@ -268,7 +267,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
           <div>
             <h2 className="text-lg font-semibold text-white">Share via email</h2>
             <p className="mt-0.5 text-xs text-gray-400">
-              Send a link or branded report. Link recipients sign in with the invited email address.
+              Send a static report copy, or explicitly add ongoing meeting access.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
@@ -302,7 +301,6 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                   {result.failures.map((f, idx) => {
                     const label =
                       f.name ||
-                      f.email ||
                       (f.speaker_id ? `speaker ${f.speaker_id}` : null) ||
                       (f.external ? 'external recipient' : `recipient ${idx + 1}`);
                     return (
@@ -370,8 +368,8 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                   Other recipients
                 </p>
                 <p className="mb-2 text-[11px] text-gray-500">
-                  Send the meeting to people who weren’t identified as speakers. They’ll
-                  sign in with this email address, then the invitation opens only this meeting.
+                  Send a static report to people who weren’t identified as speakers.
+                  They receive ongoing access only if you select the access link below.
                 </p>
                 {externalRecipients.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
@@ -431,7 +429,9 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
               </div>
 
               <div className="rounded-lg border border-gray-800 bg-gray-900 p-3">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Include</p>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+                  Choose the outcome
+                </p>
                 <div className="space-y-1.5">
                   <label className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
                     <input
@@ -440,8 +440,14 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                       onChange={(e) => setIncludeLink(e.target.checked)}
                       className="h-3.5 w-3.5"
                     />
-                    Magic link to view the meeting
+                    Ongoing access link (revocable)
                   </label>
+                  {includeLink && (
+                    <p className="ml-5 text-[11px] text-amber-300">
+                      Creates or rotates a collaborator invitation. The recipient can
+                      return to the live meeting record until access is revoked.
+                    </p>
+                  )}
                   <label className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
                     <input
                       type="checkbox"
@@ -449,7 +455,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                       onChange={(e) => setIncludeSummary(e.target.checked)}
                       className="h-3.5 w-3.5"
                     />
-                    Summary (PDF attachment)
+                    Static summary copy (PDF attachment)
                   </label>
                   <label className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
                     <input
@@ -458,7 +464,7 @@ export const EmailAttendeesModal: React.FC<Props> = ({ sessionId, isOpen, onClos
                       onChange={(e) => setIncludeTranscript(e.target.checked)}
                       className="h-3.5 w-3.5"
                     />
-                    Full transcript (PDF attachment)
+                    Static full transcript copy (PDF attachment)
                   </label>
                   <label className="block pt-2 text-xs font-medium text-gray-400">
                     Attachment branding

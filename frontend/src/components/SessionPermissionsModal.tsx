@@ -18,14 +18,27 @@ interface Collaborator {
   user?: CollaboratorUser | null;
   email?: string | null;
   access_level: AccessLevel;
-  invited_by_user_id?: number | null;
-  token: string;
   expires_at?: string | null;
   accepted_at?: string | null;
   revoked_at?: string | null;
   created_at?: string | null;
   accepted: boolean;
-  invite_url?: string | null;
+  delivery_state: 'pending' | 'sent' | 'failed' | 'accepted' | 'revoked' | 'expired';
+  delivery_attempt_count: number;
+  last_delivery_attempt_at?: string | null;
+  delivery_failure_reason?: string | null;
+}
+
+interface CollaboratorCreateResponse extends Collaborator {
+  created: boolean;
+  invite_url_once?: string | null;
+  delivered?: boolean | null;
+}
+
+interface ResendResponse {
+  collaborator: Collaborator;
+  invite_url_once: string;
+  delivered: boolean;
 }
 
 interface PermissionsResponse {
@@ -61,7 +74,8 @@ export const SessionPermissionsModal: React.FC<Props> = ({
   const [error, setError] = useState<string | null>(null);
   const [draftEmail, setDraftEmail] = useState('');
   const [draftLevel, setDraftLevel] = useState<AccessLevel>('read');
-  const [copiedTokenId, setCopiedTokenId] = useState<number | null>(null);
+  const [oneTimeInviteLink, setOneTimeInviteLink] = useState<string | null>(null);
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
 
   const orgHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = {};
@@ -84,14 +98,18 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       }
       const data: PermissionsResponse = await res.json();
       setPermissions(data);
-    } catch (e) {
+    } catch {
       setError('Network error loading permissions.');
     }
     setLoading(false);
   };
 
   useEffect(() => {
-    if (isOpen) loadPermissions();
+    if (isOpen) {
+      setOneTimeInviteLink(null);
+      setCopiedInviteLink(false);
+      loadPermissions();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, sessionId, activeOrganization?.slug]);
 
@@ -113,14 +131,43 @@ export const SessionPermissionsModal: React.FC<Props> = ({
         },
       );
       if (res.ok) {
+        const created: CollaboratorCreateResponse = await res.json();
         setDraftEmail('');
+        setOneTimeInviteLink(created.invite_url_once || null);
+        setCopiedInviteLink(false);
         await loadPermissions();
       } else {
         const txt = await res.text();
         setError(`Invite failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
       }
-    } catch (e) {
+    } catch {
       setError('Network error sending invite.');
+    }
+    setSaving(false);
+  };
+
+  const resendInvitation = async (collaboratorId: number) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${config.apiBaseUrl}/api/simple/recording-sessions/${sessionId}/permissions/collaborators/${collaboratorId}/resend`,
+        { method: 'POST', headers: orgHeaders() },
+      );
+      if (res.ok) {
+        const resent: ResendResponse = await res.json();
+        setOneTimeInviteLink(resent.invite_url_once);
+        setCopiedInviteLink(false);
+        await loadPermissions();
+      } else if (res.status === 429) {
+        const retryAfter = res.headers.get('Retry-After');
+        setError(`Invitation was attempted recently. Try again in ${retryAfter || 'a few'} seconds.`);
+      } else {
+        const txt = await res.text();
+        setError(`Resend failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
+      }
+    } catch {
+      setError('Network error resending invitation.');
     }
     setSaving(false);
   };
@@ -143,7 +190,7 @@ export const SessionPermissionsModal: React.FC<Props> = ({
         const txt = await res.text();
         setError(`Update failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
       }
-    } catch (e) {
+    } catch {
       setError('Network error updating access.');
     }
     setSaving(false);
@@ -166,23 +213,21 @@ export const SessionPermissionsModal: React.FC<Props> = ({
         const txt = await res.text();
         setError(`Revoke failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
       }
-    } catch (e) {
+    } catch {
       setError('Network error revoking access.');
     }
     setSaving(false);
   };
 
-  const copyInviteLink = (c: Collaborator) => {
-    // Backend may hand back a relative path when MEETING_OPS_PUBLIC_URL is unset;
-    // resolve against current origin so the copied link is always usable.
-    const raw = c.invite_url || `/shared/sessions?token=${c.token}`;
+  const copyInviteLink = () => {
+    if (!oneTimeInviteLink) return;
+    // Backend may hand back a relative path when MEETING_OPS_PUBLIC_URL is unset.
+    const raw = oneTimeInviteLink;
     const url = raw.startsWith('http') ? raw : `${window.location.origin}${raw}`;
-    // Only flip the "Copied" chip once the write resolves — a denied/insecure-context
-    // clipboard would otherwise flash "Copied" having copied nothing.
     navigator.clipboard.writeText(url)
       .then(() => {
-        setCopiedTokenId(c.id);
-        setTimeout(() => setCopiedTokenId(null), 2000);
+        setCopiedInviteLink(true);
+        setTimeout(() => setCopiedInviteLink(false), 2000);
       })
       .catch(() => { /* clipboard blocked — leave the chip unset */ });
   };
@@ -245,9 +290,15 @@ export const SessionPermissionsModal: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Add a collaborator */}
+              {/* Add an ongoing-access collaborator */}
               <div className="rounded-lg border border-gray-800 bg-gray-900 p-3">
-                <p className="text-xs font-medium uppercase tracking-wide text-gray-400 mb-2">Invite by email</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-400 mb-1">
+                  Invite for ongoing access
+                </p>
+                <p className="mb-3 text-xs text-gray-500">
+                  They can return to the live meeting record until you revoke access.
+                  This is different from emailing a static PDF copy.
+                </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="relative flex-1 min-w-[200px]">
                     <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
@@ -282,9 +333,27 @@ export const SessionPermissionsModal: React.FC<Props> = ({
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
                   If they already have an account on this instance they'll see the meeting on next sign-in.
-                  Otherwise they get an email with a magic link.
+                  Otherwise they get a single-use-visible magic link bound to this email address.
                 </p>
               </div>
+
+              {oneTimeInviteLink && (
+                <div className="rounded-lg border border-cyan-700/70 bg-cyan-950/30 p-3">
+                  <p className="text-sm font-medium text-cyan-100">Fresh invitation link</p>
+                  <p className="mt-1 text-xs text-cyan-200/70">
+                    This link is shown only for this create or resend response. Copy it
+                    now if you need a manual delivery; it will not appear in the people list.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={copyInviteLink}
+                    className="mt-3 inline-flex items-center gap-1.5 rounded border border-cyan-700 px-2.5 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/40"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedInviteLink ? 'Copied!' : 'Copy fresh link'}
+                  </button>
+                </div>
+              )}
 
               {/* Collaborator list */}
               {permissions.collaborators.length > 0 && (
@@ -298,7 +367,17 @@ export const SessionPermissionsModal: React.FC<Props> = ({
                         c.user?.email ||
                         c.email ||
                         '(unknown)';
-                      const isPending = !c.accepted && !c.user;
+                      const canResend =
+                        Boolean(c.email) &&
+                        ['pending', 'sent', 'failed'].includes(c.delivery_state);
+                      const isInactive = ['revoked', 'expired'].includes(c.delivery_state);
+                      const stateLabel = c.delivery_state === 'accepted'
+                        ? 'access accepted'
+                        : c.delivery_state === 'sent'
+                          ? 'invitation sent'
+                          : c.delivery_state === 'failed'
+                            ? 'delivery failed'
+                            : c.delivery_state;
                       return (
                         <div
                           key={c.id}
@@ -309,46 +388,54 @@ export const SessionPermissionsModal: React.FC<Props> = ({
                             {c.user?.email && c.user.email !== displayName && (
                               <div className="text-xs text-gray-500 truncate">{c.user.email}</div>
                             )}
-                            {isPending && (
-                              <div className="mt-0.5 inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
-                                pending acceptance
+                            <div className={`mt-0.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                              c.delivery_state === 'failed'
+                                ? 'bg-red-500/15 text-red-300'
+                                : c.delivery_state === 'accepted'
+                                  ? 'bg-emerald-500/15 text-emerald-300'
+                                  : isInactive
+                                    ? 'bg-gray-700/50 text-gray-400'
+                                    : 'bg-amber-500/15 text-amber-300'
+                            }`}>
+                              {stateLabel}
+                            </div>
+                            {c.delivery_state === 'failed' && c.delivery_failure_reason && (
+                              <div className="mt-1 text-[10px] text-red-300/80">
+                                {c.delivery_failure_reason.replaceAll('_', ' ')}
                               </div>
                             )}
                           </div>
                           <select
                             value={c.access_level}
                             onChange={(e) => updateAccess(c.id, e.target.value as AccessLevel)}
-                            disabled={saving}
+                            disabled={saving || isInactive}
                             className="rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white"
                           >
                             {ACCESS_LEVELS.map((l) => (
                               <option key={l.id} value={l.id}>{l.label}</option>
                             ))}
                           </select>
-                          {isPending && (
+                          {canResend && (
                             <button
-                              onClick={() => copyInviteLink(c)}
-                              className="flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
-                              title="Copy magic link"
+                              onClick={() => resendInvitation(c.id)}
+                              disabled={saving}
+                              className="flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                              title="Rotate and resend invitation"
                             >
-                              {copiedTokenId === c.id ? (
-                                <>Copied!</>
-                              ) : (
-                                <>
-                                  <Copy className="h-3 w-3" />
-                                  Copy link
-                                </>
-                              )}
+                              <RefreshCw className="h-3 w-3" />
+                              Resend
                             </button>
                           )}
-                          <button
-                            onClick={() => revokeCollaborator(c.id)}
-                            disabled={saving}
-                            className="flex items-center gap-1 rounded border border-red-800/50 px-2 py-1 text-xs text-red-300 hover:bg-red-900/30 disabled:opacity-50"
-                            title="Revoke access"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
+                          {!isInactive && (
+                            <button
+                              onClick={() => revokeCollaborator(c.id)}
+                              disabled={saving}
+                              className="flex items-center gap-1 rounded border border-red-800/50 px-2 py-1 text-xs text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+                              title="Revoke access immediately"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -380,10 +467,11 @@ export const SessionPermissionsModal: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={onEmailCopy}
+                title="Send a static PDF copy without granting ongoing access"
                 className="inline-flex items-center gap-2 rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500"
               >
                 <Mail className="h-4 w-4" />
-                Email a copy
+                Email static copy
               </button>
             )}
             <button

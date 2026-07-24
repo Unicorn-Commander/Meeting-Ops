@@ -1,16 +1,17 @@
 """POST /api/simple/recording-sessions/{id}/email-attendees
 
-Send a meeting summary/transcript/link to selected attendees via
-Postmark. When the link is included, each recipient gets (or reuses) a
-session_collaborators row so their token grants read access.
+Send a meeting summary/transcript/link to selected attendees via Postmark.
+Static PDF copy is the safe default. Only an explicitly included link creates
+or rotates a session-scoped collaborator grant.
 """
 from __future__ import annotations
 
 import html
 import logging
 import os
-import uuid
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Literal
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
@@ -26,6 +27,13 @@ from database.models import (
     SpeakerProfile,
     SpeakerSessionLink,
 )
+from services.invitation_tokens import (
+    INVITATION_TOKEN_VERSION,
+    build_invitation_url,
+    generate_invitation_secret,
+    hash_invitation_secret,
+    invitation_resend_minimum_interval_seconds,
+)
 from sqlalchemy.orm import Session
 
 
@@ -39,17 +47,16 @@ class EmailAttendeesRequest(BaseModel):
     # behavior). When omitted/empty AND additional_recipients is also empty,
     # fall back to session.participants[*].email.
     speaker_ids: Optional[List[int]] = Field(default=None, max_length=64)
-    # Arbitrary external email addresses — people who were NOT identified
-    # as speakers in this meeting. Each one gets a fresh (or reused)
-    # SessionCollaborator row + magic-link token granting read access to
-    # ONLY this session.
+    # Arbitrary external email addresses — people who were NOT identified as
+    # speakers in this meeting. A collaborator grant is created only when the
+    # caller explicitly includes "link".
     additional_recipients: List[EmailStr] = Field(
         default_factory=list,
         max_length=64,
         description="Free-form external email addresses to also send to",
     )
     include: List[str] = Field(
-        default_factory=lambda: ["link"],
+        default_factory=lambda: ["summary_pdf"],
         description="Which artifacts to include: link, summary_pdf, transcript_pdf",
     )
     brand_mode: Literal[
@@ -83,35 +90,80 @@ def _resolve_link_for_email(
     session: RecordingSession,
     inviter: User,
     email: str,
-) -> str:
-    """Find or create a session_collaborators row for this email with
-    read access, then return the magic-link URL. Idempotent — reuses
-    any existing un-revoked row."""
-    existing = (
+) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    """Prepare one copy-once link without duplicating the access grant.
+
+    Reusing a pending grant rotates its secret because plaintext is never
+    recoverable from the stored digest. Accepted grants are never silently
+    rotated, and both share surfaces honor the same bounded resend interval.
+
+    The final string is an operator-safe failure code, never a provider
+    response or recipient address.
+    """
+    normalized_email = email.strip().lower()
+    existing_rows = (
         db.query(SessionCollaborator)
         .filter(
             SessionCollaborator.session_id == session.id,
-            SessionCollaborator.email == email,
+            SessionCollaborator.email == normalized_email,
             SessionCollaborator.revoked_at.is_(None),
         )
-        .first()
+        .order_by(SessionCollaborator.created_at.desc())
+        .all()
     )
-    if not existing:
+    now = datetime.now(timezone.utc)
+    active_existing: Optional[SessionCollaborator] = None
+    for row in existing_rows:
+        if row.accepted_at is not None:
+            return None, None, "invitation_already_accepted"
+        if row.expires_at is not None:
+            expires_at = row.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= now:
+                continue
+        active_existing = row
+        break
+
+    if active_existing and active_existing.last_delivery_attempt_at is not None:
+        last_attempt = active_existing.last_delivery_attempt_at
+        if last_attempt.tzinfo is None:
+            last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+        if last_attempt + timedelta(
+            seconds=invitation_resend_minimum_interval_seconds()
+        ) > now:
+            return None, None, "invitation_attempted_recently"
+
+    secret = generate_invitation_secret()
+    existing = active_existing
+    if existing is None:
         existing = SessionCollaborator(
             session_id=session.id,
-            email=email,
+            email=normalized_email,
             access_level="read",
             invited_by_user_id=inviter.id,
             token=uuid.uuid4(),
+            token_hash=hash_invitation_secret(secret),
+            token_version=INVITATION_TOKEN_VERSION,
+            delivery_state="pending",
+            delivery_attempt_count=1,
+            last_delivery_attempt_at=now,
         )
         db.add(existing)
-        db.commit()
-        db.refresh(existing)
-    base = (
-        os.getenv("MEETING_OPS_PUBLIC_URL", "").strip().rstrip("/")
-        or "https://meetingops.magicunicorn.dev"
-    )
-    return f"{base}/shared/sessions?token={existing.token}"
+    else:
+        existing.token = uuid.uuid4()
+        existing.token_hash = hash_invitation_secret(secret)
+        existing.token_version = INVITATION_TOKEN_VERSION
+        existing.delivery_failure_reason = None
+        existing.last_delivery_attempt_at = now
+        existing.delivery_attempt_count = (
+            existing.delivery_attempt_count or 0
+        ) + 1
+        if existing.accepted_at is None:
+            existing.delivery_state = "pending"
+    db.commit()
+    db.refresh(existing)
+    return build_invitation_url(secret), existing.id, None
 
 
 def _build_html(
@@ -216,7 +268,7 @@ def _postmark_send(
     if not token:
         return {
             "ok": False,
-            "error": "Postmark is not configured for this deployment",
+            "error": "delivery_not_configured",
         }
 
     to_field = f"{to_name} <{to_email}>" if to_name else to_email
@@ -246,9 +298,10 @@ def _postmark_send(
         data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code == 200:
             return {"ok": True, "message_id": data.get("MessageID")}
-        return {"ok": False, "error": data.get("Message") or f"HTTP {resp.status_code}"}
+        return {"ok": False, "error": "delivery_failed"}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc)}
+        logger.warning("email-attendees delivery failed error_type=%s", type(exc).__name__)
+        return {"ok": False, "error": "delivery_failed"}
 
 
 @router.post(
@@ -353,7 +406,7 @@ async def email_attendees(
             detail="No recipients to send to",
         )
 
-    include = [s.lower() for s in (payload.include or ["link"])]
+    include = [s.lower() for s in (payload.include or ["summary_pdf"])]
     attachments = _build_attachments(
         db,
         session,
@@ -382,7 +435,27 @@ async def email_attendees(
                 failure["external"] = True
             failures.append(failure)
             continue
-        link = _resolve_link_for_email(db, session, current_user, email) if "link" in include else None
+        collaborator_id: Optional[int] = None
+        if "link" in include:
+            link, collaborator_id, link_error = _resolve_link_for_email(
+                db,
+                session,
+                current_user,
+                email,
+            )
+            if link_error:
+                skipped += 1
+                failure = {"name": name, "reason": link_error}
+                if "speaker_id" in r:
+                    failure["speaker_id"] = r["speaker_id"]
+                elif "participant_id" in r:
+                    failure["participant_id"] = r["participant_id"]
+                elif r.get("ref", "").startswith("external:"):
+                    failure["external"] = True
+                failures.append(failure)
+                continue
+        else:
+            link = None
         html_body = _build_html(session, current_user, name or email, link, payload.message)
         result = _postmark_send(
             to_email=email,
@@ -392,10 +465,34 @@ async def email_attendees(
             reply_to=current_user.email,
             attachments=attachments,
         )
+        if collaborator_id is not None:
+            collaborator = (
+                db.query(SessionCollaborator)
+                .filter(SessionCollaborator.id == collaborator_id)
+                .first()
+            )
+            if collaborator and collaborator.revoked_at is None:
+                if collaborator.accepted_at is not None:
+                    collaborator.delivery_state = "accepted"
+                else:
+                    collaborator.delivery_state = (
+                        "sent" if result.get("ok") else "failed"
+                    )
+                collaborator.delivery_failure_reason = (
+                    None
+                    if result.get("ok")
+                    else "delivery_not_configured"
+                    if result.get("error") == "delivery_not_configured"
+                    else "delivery_failed"
+                )
+                db.commit()
         if result.get("ok"):
             sent += 1
         else:
-            failure = {"name": name, "email": email, "reason": result.get("error") or "send failed"}
+            failure = {
+                "name": name,
+                "reason": "delivery failed",
+            }
             if "speaker_id" in r:
                 failure["speaker_id"] = r["speaker_id"]
             elif "participant_id" in r:

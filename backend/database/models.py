@@ -201,14 +201,17 @@ class SessionCollaborator(Base):
 
     - Existing uchub Keycloak user invited by user_id (we know who they
       are; user_id is set, email may also be cached for display).
-    - External email invitee (user_id is NULL until they accept; the
-      magic-link `token` is the only way in until then).
+    - External email invitee (user_id is NULL until they accept; a
+      magic-link secret whose SHA-256 digest is stored in `token_hash`
+      is the only way in until then).
 
     `access_level` is one of: 'read', 'comment', 'edit'.
 
-    Constraints are enforced by the migration (014_session_collaborators):
-    CHECK on access_level, CHECK that at least one of user_id/email is
-    set, unique index on token.
+    The deployed 053 schema keeps the legacy UUID `token` column non-null
+    during the bounded rollout/rollback window. New v2 rows store an unrelated
+    random UUID there solely for schema compatibility; runtime validation
+    never queries it. The approval-gated scrub makes the live column nullable
+    and clears existing plaintext only after every runtime is hash-aware.
     """
     __tablename__ = "session_collaborators"
     __table_args__ = (
@@ -225,6 +228,11 @@ class SessionCollaborator(Base):
         Index(
             "ix_session_collaborators_token",
             "token",
+            unique=True,
+        ),
+        Index(
+            "ix_session_collaborators_token_hash",
+            "token_hash",
             unique=True,
         ),
     )
@@ -258,12 +266,36 @@ class SessionCollaborator(Base):
     token = Column(
         UUID(as_uuid=True),
         unique=True,
-        nullable=False,
+        # 014/053 deployments remain NOT NULL until the separately approved
+        # scrub. The model is permissive so the hash-aware app can continue
+        # to read rows after that irreversible schema operation.
+        nullable=True,
         default=uuid.uuid4,
+    )
+    token_hash = Column(String(64), nullable=True)
+    token_version = Column(
+        Integer,
+        nullable=False,
+        default=2,
+        server_default="2",
     )
     expires_at = Column(DateTime(timezone=True), nullable=True)
     accepted_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    delivery_state = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    delivery_attempt_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_delivery_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    delivery_failure_reason = Column(String(120), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,

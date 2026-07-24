@@ -21,8 +21,10 @@ Coverage:
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from typing import Any
+from urllib.parse import unquote
 from unittest.mock import patch
 
 import pytest
@@ -186,6 +188,9 @@ def test_external_only_recipients_send(client, two_orgs_email):
         assert emails == ["alice@example.com", "bob@example.com"]
         for r in rows:
             assert r.token is not None
+            assert r.token_hash is not None
+            assert len(r.token_hash) == 64
+            assert r.delivery_state == "sent"
             assert r.access_level == "read"
     finally:
         db.close()
@@ -298,7 +303,15 @@ def test_external_token_only_grants_one_session(client, two_orgs_email):
         )
     assert res.status_code == 200, res.text
 
-    # Pull the freshly-minted token out of the database.
+    # Pull the freshly-minted plaintext from the outbound message. The
+    # database contains only its digest.
+    match = re.search(
+        r'href="[^"]*/invite-bootstrap\.html#token=([^"]+)"',
+        sends[0]["html_body"],
+    )
+    assert match
+    token = unquote(match.group(1))
+
     _, _, _, SessionLocal, _, SessionCollaborator = _models()
     db = SessionLocal()
     try:
@@ -310,15 +323,19 @@ def test_external_token_only_grants_one_session(client, two_orgs_email):
             )
             .one()
         )
-        token = str(row.token)
+        assert row.token is not None
+        compatibility_uuid = str(row.token)
+        assert row.token_hash
+        leaked_hash = row.token_hash
     finally:
         db.close()
 
     # The token resolves — but ONLY to session A. We hit the public
     # resolve endpoint (no auth) and check the bound session_id matches A
     # and is NOT session B.
-    resolve = client.get(
-        f"/api/simple/recording-sessions/permissions/access?token={token}"
+    resolve = client.post(
+        "/api/simple/recording-sessions/permissions/access",
+        json={"token": token},
     )
     assert resolve.status_code == 200, resolve.text
     body = resolve.json()
@@ -328,3 +345,74 @@ def test_external_token_only_grants_one_session(client, two_orgs_email):
     # session_id is the public string id and must match A's, not B's
     assert body["session_id"] == two_orgs_email["sess_a_public_id"]
     assert body["session_id"] != two_orgs_email["sess_b_public_id"]
+
+    # A leaked row contains only the digest, which is not a bearer secret.
+    leaked = client.post(
+        "/api/simple/recording-sessions/permissions/access",
+        json={"token": leaked_hash},
+    )
+    assert leaked.status_code == 200
+    assert leaked.json()["valid"] is False
+    leaked_compatibility = client.post(
+        "/api/simple/recording-sessions/permissions/access",
+        json={"token": compatibility_uuid},
+    )
+    assert leaked_compatibility.status_code == 200
+    assert leaked_compatibility.json()["valid"] is False
+
+
+def test_email_link_retry_is_rate_limited_after_a_failed_delivery(
+    client,
+    two_orgs_email,
+):
+    """The copy workflow cannot duplicate a grant or retry a provider rapidly."""
+    attempts: list[dict[str, Any]] = []
+
+    def failed_postmark(**kwargs):
+        attempts.append(kwargs)
+        return {"ok": False, "error": "provider_private_detail"}
+
+    payload = {
+        "additional_recipients": ["retry@example.com"],
+        "include": ["link"],
+    }
+    with patch("api.session_emails._postmark_send", side_effect=failed_postmark):
+        first = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json=payload,
+            headers=two_orgs_email["headers"],
+        )
+        repeated = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json=payload,
+            headers=two_orgs_email["headers"],
+        )
+
+    assert first.status_code == 200, first.text
+    assert first.json()["sent"] == 0
+    assert first.json()["failures"][0]["reason"] == "delivery failed"
+    assert "provider_private_detail" not in first.text
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["sent"] == 0
+    assert repeated.json()["skipped"] == 1
+    assert repeated.json()["failures"][0]["reason"] == "invitation_attempted_recently"
+    assert len(attempts) == 1
+
+    _, _, _, SessionLocal, _, SessionCollaborator = _models()
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(SessionCollaborator)
+            .filter(
+                SessionCollaborator.session_id == two_orgs_email["sess_a_db_id"],
+                SessionCollaborator.email == "retry@example.com",
+            )
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].delivery_attempt_count == 1
+        assert rows[0].delivery_state == "failed"
+        assert rows[0].delivery_failure_reason == "delivery_failed"
+        assert rows[0].token_hash is not None
+    finally:
+        db.close()
