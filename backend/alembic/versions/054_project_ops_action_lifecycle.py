@@ -1,7 +1,7 @@
 """Project-Ops action-item approval/backlink lifecycle.
 
-Revision ID: 053_project_ops_action_lifecycle
-Revises: 052_beta_invite_codes_emailed_at
+Revision ID: 054_project_ops_action_lifecycle
+Revises: 053_invitation_hashes_delivery
 Create Date: 2026-07-24 00:00:00.000000
 
 Promotes the Project-Ops linkage out of action_items.raw_payload into explicit,
@@ -12,8 +12,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "053_project_ops_action_lifecycle"
-down_revision = "052_beta_invite_codes_emailed_at"
+revision = "054_project_ops_action_lifecycle"
+down_revision = "053_invitation_hashes_delivery"
 branch_labels = None
 depends_on = None
 

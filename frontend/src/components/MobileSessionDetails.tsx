@@ -1652,7 +1652,9 @@ function PeopleTagsTab(props: {
                       {p.email && <p className="truncate text-xs text-zinc-500">{p.email}</p>}
                       {p.contact_id && (
                         <p className="mt-1 text-xs font-medium text-emerald-300">
-                          Contact-Ops: Manually linked
+                          {p.contact_link_source === 'manual'
+                            ? 'Contact-Ops: Manually linked'
+                            : 'Contact-Ops linked'}
                         </p>
                       )}
                       {contactSearchParticipantId === p.id && (

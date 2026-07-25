@@ -1,7 +1,7 @@
 """federation: bind explicit approval to the current summary projection
 
-Revision ID: 053_federation_summary_approval
-Revises: 052_beta_invite_codes_emailed_at
+Revision ID: 055_federation_summary_approval
+Revises: 054_project_ops_action_lifecycle
 Create Date: 2026-07-24
 """
 
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "053_federation_summary_approval"
-down_revision = "052_beta_invite_codes_emailed_at"
+revision = "055_federation_summary_approval"
+down_revision = "054_project_ops_action_lifecycle"
 branch_labels = None
 depends_on = None
 
