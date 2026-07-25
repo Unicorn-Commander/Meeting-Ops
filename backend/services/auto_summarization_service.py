@@ -134,12 +134,14 @@ _SUMMARY_PROMPTS = {
         "5. Dependencies and Blockers"
     ),
     "standard": (
-        "Create a meeting summary with:\n"
-        "1. Main Topics (3-5 bullet points)\n"
+        "Write the meeting brief from the supplied transcript now. Do not ask for "
+        "a recording, another transcript, more context, or a summary; do not explain "
+        "your process. Use only transcript facts. Include:\n"
+        "1. Main Topics (3-5 concrete bullet points)\n"
         "2. Key Decisions Made\n"
-        "3. Action Items (who, what, when)\n"
-        "4. Follow-up Required\n"
-        "Keep it clear and organized."
+        "3. Action Items (who, what, when; use 'owner not stated' when absent)\n"
+        "4. Open Questions and Risks\n"
+        "Write 'None noted' for an empty section. Keep it clear, specific, and organized."
     ),
 }
 
@@ -222,7 +224,11 @@ def _summarize_with_org(
             db.close()
 
         text = provider.chat_sync(
-            system_prompt="You are a meeting assistant. Provide clear, structured meeting summaries.",
+            system_prompt=(
+                "You are a precise meeting-notes writer. The supplied transcript is the "
+                "source material: produce the finished brief, never a request for more "
+                "material or instructions for the user."
+            ),
             user_prompt=f"{prompt_body}\n\nTranscript:\n{transcript[:16000]}",
             max_tokens=500,
             temperature=0.5,

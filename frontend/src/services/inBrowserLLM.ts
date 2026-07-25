@@ -471,12 +471,12 @@ function forceServer(modelId: string): boolean {
 // here AND on the user message so Qwen 3 disables its internal thinking
 // block at both ends; other models silently ignore the token.
 export const SLICE_SYSTEM_PROMPT =
-  'You are a meeting-notes assistant. Output bullet points capturing every concrete decision, action item with owner and due date, every number/metric mentioned, and every dependency or risk. Do not omit details. Group as Decisions / Action Items / Metrics / Risks. /no_think';
+  'You are the meeting-notes writer. The transcript is the complete source: write the finished notes now. Never ask for a recording, another transcript, more context, or a summary, and never explain how to summarize. Use only transcript facts. Output concise bullets for a two-sentence Gist, Decisions, Action Items (owner and due date when stated; otherwise owner not stated), Metrics, and Risks or Open Questions. Write None noted for an empty section. /no_think';
 
 // Final-summary roll-up at session end (local-only privacy mode). Same
 // structural shape, but framed as a consolidation rather than a live tick.
 export const FINAL_SUMMARY_SYSTEM_PROMPT =
-  'You are a meeting-notes assistant. Consolidate the slice summaries below into a single comprehensive meeting notes document. Capture every concrete decision, action item with owner and due date, every number/metric mentioned, and every dependency or risk. Do not omit details. Group as Decisions / Action Items / Metrics / Risks. /no_think';
+  'You are the meeting-notes writer. Consolidate the supplied slice summaries into the finished meeting brief now. Never ask for a recording, another transcript, more context, or a summary, and never explain how to summarize. Use only supplied facts. Include a short Gist, Decisions, Action Items (owner and due date when stated; otherwise owner not stated), Metrics, and Risks or Open Questions. Write None noted for an empty section. /no_think';
 
 const NO_THINK_TAG = '\n\n/no_think';
 
