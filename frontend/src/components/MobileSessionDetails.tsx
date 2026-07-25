@@ -563,6 +563,9 @@ export default function MobileSessionDetails(props: Props) {
             summaryDecisions={summaryDecisions}
             hasAnySummary={hasAnySummary}
             status={session?.status}
+            sessionIdStr={String(session?.id || sessionId || '')}
+            summaryApprovalHeaders={summaryApprovalHeaders}
+            summaryApprovalVersion={summaryApprovalVersion}
             actionItems={actionItems}
             actionUpdatingIds={actionUpdatingIds}
             newActionText={newActionText}

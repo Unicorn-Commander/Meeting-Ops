@@ -7,9 +7,11 @@ during a bounded transition.
 ## Rollout
 
 1. Back up the database and record `alembic current`.
-2. Apply `alembic upgrade 053_invitation_hashes_delivery` (the current head).
-   It hashes every existing UUID but deliberately leaves the legacy column
-   populated. The old application can still run at this point.
+2. Apply `alembic upgrade head`. In this integrated release the ordered tail is
+   `053_invitation_hashes_delivery` → `054_project_ops_action_lifecycle` →
+   `055_federation_summary_approval`. Revision 053 hashes every existing UUID
+   but deliberately leaves the legacy column populated. All three migrations
+   are additive, so the old application can still run at this point.
 3. Verify there are no missing hashes:
 
    ```sql
@@ -36,10 +38,10 @@ during a bounded transition.
 
 ### Enable order
 
-For single-instance staging, apply 053, stop the old API, start the new API
-with issuance off, verify v1 redemption, then restart that one API with
-issuance enabled and exercise one controlled v2 invitation. There must never
-be an old API process alongside the enabled process.
+For single-instance staging, upgrade through the integrated head, stop the old
+API, start the new API with issuance off, verify v1 redemption, then restart
+that one API with issuance enabled and exercise one controlled v2 invitation.
+There must never be an old API process alongside the enabled process.
 
 For production blue/green, apply 053 first, bring up the green hash-aware
 fleet with issuance off, move traffic, and drain/stop every blue API instance.
@@ -95,10 +97,14 @@ early.
 
 ## Rollback
 
-Before the separately approved scrub, downgrade revision `053` and return to
-the old application; original v1 UUIDs are still present. Any v2 invitations
-created by the new application use unrelated compatibility UUIDs. Before an
-application rollback, turn issuance off and check for active v2 bearer grants:
+Before the separately approved scrub, the integrated release can be downgraded
+to `052_beta_invite_codes_emailed_at` and returned to the old application;
+original v1 UUIDs are still present. That downgrade also removes the additive
+054 Project-Ops lifecycle fields and 055 federation-approval fields, so export
+or explicitly accept losing data written to those fields before proceeding.
+Any v2 invitations created by the new application use unrelated compatibility
+UUIDs. Before an application rollback, turn issuance off and check for active
+v2 bearer grants:
 
 ```sql
 SELECT id, session_id, user_id, delivery_state
