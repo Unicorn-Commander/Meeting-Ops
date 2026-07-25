@@ -297,6 +297,8 @@ async def test_source_lifecycle_requires_workspace_bearer_and_sends_bounded_ids(
 
     with pytest.raises(ProjectOpsClientError):
         await client.get_source_lifecycle(["41"], bearer_override="")
+    with pytest.raises(ProjectOpsClientError):
+        await client.get_source_lifecycle(["41"], bearer_override="   ")
 
     result = await client.get_source_lifecycle(
         ["41", "41", "42"],
@@ -308,6 +310,38 @@ async def test_source_lifecycle_requires_workspace_bearer_and_sends_bounded_ids(
     assert json.loads(requests[0].content) == {
         "sourceActionItemIds": ["41", "42"]
     }
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_triage_submit_accepts_workspace_bearer_without_legacy_credentials():
+    from services.projectops_client import ProjectOpsClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"created": 1, "skipped": 0, "proposals": []},
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ProjectOpsClient(
+        base_url="https://projectops.example.test/api/v1",
+        _client=http,
+    )
+    assert client.is_live is False
+
+    result = await client.submit_candidate_action_items(
+        [{"text": "Prepare evidence", "sourceActionItemId": "41"}],
+        bearer_override="workspace-bound-token",
+    )
+
+    assert result["created"] == 1
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/v1/triage/ingest"
+    assert requests[0].headers["authorization"] == "Bearer workspace-bound-token"
     await http.aclose()
 
 

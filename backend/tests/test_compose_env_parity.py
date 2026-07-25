@@ -20,6 +20,12 @@ COMPOSE = (
     / "bigboy"
     / "docker-compose.bigboy.yml"
 )
+ENV_EXAMPLE = COMPOSE.with_name(".env.bigboy.example")
+PROJECTOPS_LIFECYCLE_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "services"
+    / "projectops_lifecycle.py"
+)
 
 # Names whose absence on the worker breaks the reprocess pipeline.
 SERVICE_VAR_RE = re.compile(
@@ -108,6 +114,26 @@ def test_retention_env_is_present_on_backend_and_worker():
     required = {"MEETING_RETENTION_ENABLED", "MEETING_RETENTION_DAYS", "MEETING_RETENTION_MAX_PER_RUN"}
     for service_name in ("backend", "meet-bulk-import-worker"):
         assert required <= _env_names(services[service_name])
+
+
+def test_projectops_public_url_is_wired_to_the_canonical_bigboy_origin():
+    """The stored human backlink must not fall back to an unrelated domain."""
+    data = yaml.safe_load(COMPOSE.read_text())
+    expected = "${PROJECTOPS_PUBLIC_URL:-https://projectops.magicunicorn.dev}"
+    for service_name in ("backend", "meet-bulk-import-worker"):
+        assert _env_pairs(data["services"][service_name]).get(
+            "PROJECTOPS_PUBLIC_URL"
+        ) == expected
+
+    assert (
+        "PROJECTOPS_PUBLIC_URL=https://projectops.magicunicorn.dev"
+        in ENV_EXAMPLE.read_text()
+    )
+    source = PROJECTOPS_LIFECYCLE_SOURCE.read_text()
+    assert (
+        '"PROJECTOPS_PUBLIC_URL", "https://projectops.magicunicorn.dev"'
+        in source
+    )
 
 
 def test_meet_host_model_urls_have_a_matching_container():

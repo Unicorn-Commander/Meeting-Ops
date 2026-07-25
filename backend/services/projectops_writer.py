@@ -25,10 +25,10 @@ Idempotency: legacy direct links remain readable from ``raw_payload``. The
 propose/review lifecycle uses explicit ActionItem linkage columns.
 
 Failure posture: the writer NEVER raises into the recording pipeline.
-Every exception is logged + swallowed (top-level catch). When
-``PROJECTOPS_API_KEY`` is unset the client is log-only and the writer
-returns ``ok=True, mode="no-op"`` without any HTTP calls — a deployment
-without Project-Ops wiring completes the meeting pipeline cleanly.
+Every exception is logged + swallowed (top-level catch). The legacy direct-task
+writer is a no-op without its own Project-Ops credential. The triage writer
+instead requires a workspace-bound Brigade token and fails closed when that
+exchange is unavailable; it does not require a second Project-Ops credential.
 """
 
 from __future__ import annotations
@@ -415,11 +415,8 @@ async def write_action_items_to_projectops(
         # the env-default path) via the PROJECTOPS_AUTO_PUSH_ACTION_ITEMS
         # deploy flag. Both default OFF. This gate ONLY governs the
         # automatic push driven by the recording/finalize pipeline; action
-        # item extraction, storage, and display are untouched, and the
-        # on-demand status-propagation path
-        # (``propagate_action_item_status``) and the raw client
-        # ``create_task`` remain available for an explicit
-        # review-then-push on demand.
+        # item extraction, storage, and display are untouched. Project-Ops
+        # Task status is never written from this Meeting-Ops path.
         if not po_cfg.extra.get("auto_push_action_items", False):
             logger.info(
                 "projectops_writer org=%s auto-push disabled (opt-in OFF, "
@@ -581,7 +578,7 @@ async def submit_action_items_to_triage(
 
     Contract mirrors the direct writer: NEVER raises into the recording
     pipeline; honors the per-org integration enable + the v3.26.0 auto-push
-    opt-in; a clean no-op when PO is unconfigured. Idempotent via a
+    opt-in; fails closed when workspace federation is unconfigured. Idempotent via a
     ``po_triage_submitted_at`` stamp on ``action_items.raw_payload`` AND
     PO's own ``(sourceType, sourceActionItemId)`` uniqueness — a re-run
     submits only the un-stamped items and PO skips any it has already seen.
@@ -663,14 +660,6 @@ async def submit_action_items_to_triage(
         else:
             active_client = client
         try:
-            if not active_client.is_live:
-                logger.info(
-                    "projectops_triage: PO unconfigured (PROJECTOPS_API_KEY / "
-                    "KC creds unset), skipping session=%s",
-                    session_pk,
-                )
-                return ProjectOpsWriteResult(ok=True, mode="no-op")
-
             action_items = (
                 db.query(ActionItem)
                 .filter(ActionItem.session_id == session.id)
@@ -745,7 +734,10 @@ async def submit_action_items_to_triage(
             from services.projectops_token import projectops_federation_token
 
             bearer_override = await projectops_federation_token(workspace_id)
-            if bearer_override is None:
+            if (
+                not isinstance(bearer_override, str)
+                or not bearer_override.strip()
+            ):
                 detail = (
                     "Project-Ops sync blocked: workspace-bound federation "
                     "token is unavailable"
@@ -771,6 +763,7 @@ async def submit_action_items_to_triage(
                     skipped=already,
                     detail=detail,
                 )
+            bearer_override = bearer_override.strip()
 
             try:
                 result = await active_client.submit_candidate_action_items(

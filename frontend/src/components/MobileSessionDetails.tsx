@@ -15,7 +15,13 @@ import { Briefcase, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
 import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
 
-type TabKey = 'summary' | 'transcript' | 'speakers' | 'insights' | 'people';
+type TabKey =
+  | 'summary'
+  | 'action_items'
+  | 'transcript'
+  | 'speakers'
+  | 'insights'
+  | 'people';
 
 interface TranscriptionSegment {
   start: number;
@@ -146,6 +152,9 @@ interface Props {
   actionError: string | null;
   setActionStatus: (id: number, status: string) => Promise<void> | void;
   requeueProjectOpsAction: (id: number) => Promise<void> | void;
+  actionItemsOpen: boolean;
+  targetActionItemId: number | null;
+  onOpenActionItems: () => Promise<void> | void;
   addActionItem: () => void;
   deleteActionItem: (id: number) => void;
 
@@ -174,6 +183,7 @@ interface Props {
 
 const TAB_CONFIG: Array<{ key: TabKey; label: string; icon: React.ComponentType<any> }> = [
   { key: 'summary', label: 'Summary', icon: Sparkles },
+  { key: 'action_items', label: 'Action items', icon: Zap },
   { key: 'transcript', label: 'Transcript', icon: FileText },
   { key: 'speakers', label: 'Speakers', icon: Users },
   { key: 'insights', label: 'Insights', icon: Brain },
@@ -212,6 +222,9 @@ export default function MobileSessionDetails(props: Props) {
     actionBusy, actionError,
     setActionStatus,
     requeueProjectOpsAction,
+    actionItemsOpen,
+    targetActionItemId,
+    onOpenActionItems,
     addActionItem,
     deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
@@ -219,7 +232,9 @@ export default function MobileSessionDetails(props: Props) {
     formatTime, formatDate,
   } = props;
 
-  const [tab, setTab] = useState<TabKey>('summary');
+  const [tab, setTab] = useState<TabKey>(
+    actionItemsOpen || targetActionItemId !== null ? 'action_items' : 'summary',
+  );
   const [moreOpen, setMoreOpen] = useState(false);
   const segmentRefs = useRef<Array<HTMLDivElement | null>>([]);
   const navigate = useNavigate();
@@ -236,6 +251,18 @@ export default function MobileSessionDetails(props: Props) {
   useEffect(() => {
     setRelatedBannerDismissed(false);
   }, [sessionKey]);
+
+  useEffect(() => {
+    if (actionItemsOpen || targetActionItemId !== null) {
+      setTab('action_items');
+    }
+  }, [actionItemsOpen, targetActionItemId]);
+
+  useEffect(() => {
+    if (tab === 'action_items') {
+      void onOpenActionItems();
+    }
+  }, [onOpenActionItems, tab]);
 
   const filteredSegments = useMemo(() => {
     return segments.filter((seg) => {
@@ -492,6 +519,34 @@ export default function MobileSessionDetails(props: Props) {
             requeueProjectOpsAction={requeueProjectOpsAction}
             addActionItem={addActionItem}
             deleteActionItem={deleteActionItem}
+            actionItemsOnly={false}
+            targetActionItemId={targetActionItemId}
+          />
+        )}
+
+        {tab === 'action_items' && (
+          <SummaryTab
+            insightsLoading={insightsLoading}
+            summaryExec={summaryExec}
+            summaryBullets={summaryBullets}
+            summaryActions={summaryActions}
+            summaryDecisions={summaryDecisions}
+            hasAnySummary={hasAnySummary}
+            status={session?.status}
+            actionItems={actionItems}
+            actionUpdatingIds={actionUpdatingIds}
+            newActionText={newActionText}
+            setNewActionText={setNewActionText}
+            newActionOwner={newActionOwner}
+            setNewActionOwner={setNewActionOwner}
+            actionBusy={actionBusy}
+            actionError={actionError}
+            setActionStatus={setActionStatus}
+            requeueProjectOpsAction={requeueProjectOpsAction}
+            addActionItem={addActionItem}
+            deleteActionItem={deleteActionItem}
+            actionItemsOnly
+            targetActionItemId={targetActionItemId}
           />
         )}
 
@@ -691,6 +746,8 @@ function SummaryTab({
   requeueProjectOpsAction,
   addActionItem,
   deleteActionItem,
+  actionItemsOnly,
+  targetActionItemId,
 }: {
   insightsLoading: boolean;
   summaryExec: string;
@@ -711,14 +768,27 @@ function SummaryTab({
   requeueProjectOpsAction: (id: number) => Promise<void> | void;
   addActionItem: () => void;
   deleteActionItem: (id: number) => void;
+  actionItemsOnly: boolean;
+  targetActionItemId: number | null;
 }) {
-  const [expandedActionId, setExpandedActionId] = useState<number | null>(null);
+  const [expandedActionId, setExpandedActionId] = useState<number | null>(
+    targetActionItemId,
+  );
   const hasPersistedActions = Array.isArray(actionItems) && actionItems.length > 0;
+  useEffect(() => {
+    if (targetActionItemId === null) return;
+    setExpandedActionId(targetActionItemId);
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`mobile-action-item-${targetActionItemId}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, [actionItems, targetActionItemId]);
   // hasAnySummary includes the empty-state case for the LLM summary
   // sections. Action items live in their own table so we want to show
   // the panel even if the summary text hasn't generated yet (e.g. the
   // user is manually adding items first).
-  if (!hasAnySummary && !hasPersistedActions && insightsLoading) {
+  if (!actionItemsOnly && !hasAnySummary && !hasPersistedActions && insightsLoading) {
     return (
       <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 flex items-center justify-center gap-3">
         <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
@@ -727,7 +797,7 @@ function SummaryTab({
     );
   }
 
-  if (!hasAnySummary && !hasPersistedActions) {
+  if (!actionItemsOnly && !hasAnySummary && !hasPersistedActions) {
     return (
       <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400">
         {status === 'processing'
@@ -739,7 +809,7 @@ function SummaryTab({
 
   return (
     <div className="space-y-3">
-      {summaryExec && (
+      {!actionItemsOnly && summaryExec && (
         <SectionCard title="Summary" icon={Sparkles}>
           <div className="prose prose-invert prose-sm max-w-none text-zinc-200 leading-relaxed text-sm session-md">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{String(summaryExec)}</ReactMarkdown>
@@ -747,7 +817,7 @@ function SummaryTab({
         </SectionCard>
       )}
 
-      {summaryBullets.length > 0 && (
+      {!actionItemsOnly && summaryBullets.length > 0 && (
         <SectionCard title="Key discussion points" icon={FileText}>
           <ul className="space-y-2">
             {summaryBullets.map((b, i) => (
@@ -782,6 +852,7 @@ function SummaryTab({
                 return (
                   <div
                     key={item.id}
+                    id={`mobile-action-item-${item.id}`}
                     className={`rounded-lg border px-3 py-2 ${done ? 'border-emerald-500/30 bg-emerald-500/10' : cancelled ? 'border-zinc-700 bg-zinc-800/40' : 'border-amber-500/30 bg-amber-500/10'}`}
                   >
                     <div className="flex items-start gap-2">
@@ -961,7 +1032,7 @@ function SummaryTab({
         </SectionCard>
       )}
 
-      {summaryDecisions.length > 0 && (
+      {!actionItemsOnly && summaryDecisions.length > 0 && (
         <SectionCard title="Key decisions" icon={Check}>
           <ul className="space-y-2">
             {summaryDecisions.map((d: any, i: number) => {

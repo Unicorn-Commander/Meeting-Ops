@@ -1,6 +1,12 @@
 {
   "version": "meeting-ops.action-lifecycle.v1",
   "endpoint": "POST /api/v1/triage/source-lifecycle",
+  "meetingOpsRefreshEndpoint": {
+    "route": "POST /api/action-items/sessions/{sessionId}/project-ops/reconcile",
+    "maximumItems": 100,
+    "scope": "authenticated organization and exact session",
+    "writesProjectOpsTaskStatus": false
+  },
   "authentication": {
     "audience": "project-ops",
     "actor": "meeting-ops",
@@ -47,6 +53,8 @@
     "meetingOpsStatus": "Meeting-Ops only",
     "projectOpsTaskStatus": "Project-Ops only",
     "localCompletionCompletesProjectOpsTask": false,
+    "taskUrlTaskIdMustEqualRecordTaskId": true,
+    "encodedRouteSeparatorsAllowed": false,
     "terminalLinksDoNotReopen": true,
     "staleOrConflictingRemoteRecordsDoNotOverwriteKnownLinks": true
   },

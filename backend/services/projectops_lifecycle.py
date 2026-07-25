@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import logging
 import os
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 from sqlalchemy.orm import Session
 
@@ -62,7 +62,7 @@ def _project_ops_public_origin() -> Optional[tuple[str, str]]:
     accepted only for loopback local development.
     """
     configured = os.getenv(
-        "PROJECTOPS_PUBLIC_URL", "https://projectops.unicorncommander.ai"
+        "PROJECTOPS_PUBLIC_URL", "https://projectops.magicunicorn.dev"
     ).strip()
     parsed = urlparse(configured)
     hostname = (parsed.hostname or "").lower()
@@ -75,8 +75,23 @@ def _project_ops_public_origin() -> Optional[tuple[str, str]]:
     return None
 
 
-def _valid_task_url(value: Any) -> Optional[str]:
-    if not isinstance(value, str) or not value.strip():
+def _valid_task_url(value: Any, expected_task_id: Any) -> Optional[str]:
+    """Validate the human backlink and bind its route segment to ``taskId``.
+
+    Comparing only origin/path shape is insufficient: an encoded slash or a
+    callback that pairs task A's id with task B's URL can otherwise persist a
+    misleading link. Decode the one route segment, reject path separators, and
+    require exact identity with the separately supplied lifecycle ``taskId``.
+    """
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or not isinstance(expected_task_id, str)
+        or not expected_task_id.strip()
+    ):
+        return None
+    expected = expected_task_id.strip()
+    if any(ch in expected for ch in {"/", "\\", "?", "#", "%"}):
         return None
     url = value.strip()
     parsed = urlparse(url)
@@ -89,8 +104,16 @@ def _valid_task_url(value: Any) -> Optional[str]:
         or not parsed.path.startswith("/dashboard/tasks/")
     ):
         return None
-    task_id = parsed.path.removeprefix("/dashboard/tasks/")
-    return url if task_id and "/" not in task_id else None
+    encoded_task_id = parsed.path.removeprefix("/dashboard/tasks/")
+    if not encoded_task_id or "/" in encoded_task_id or "\\" in encoded_task_id:
+        return None
+    try:
+        decoded_task_id = unquote_to_bytes(encoded_task_id).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if "/" in decoded_task_id or "\\" in decoded_task_id:
+        return None
+    return url if decoded_task_id == expected else None
 
 
 def _parse_remote_updated_at(value: Any) -> Optional[datetime]:
@@ -189,7 +212,7 @@ def _apply_lifecycle_record(item: Any, record: dict[str, Any]) -> None:
     task_id = record.get("taskId")
     project_number = record.get("projectNumber")
     raw_task_url = record.get("taskUrl")
-    task_url = _valid_task_url(raw_task_url)
+    task_url = _valid_task_url(raw_task_url, task_id)
     task_status = record.get("taskStatus")
     if not isinstance(proposal_id, str) or not proposal_id.strip():
         mark_sync_failed(item, "INVALID_PROPOSAL_LINK")
@@ -327,11 +350,12 @@ async def reconcile_projectops_action_items(
     from services.projectops_token import projectops_federation_token
 
     bearer = await projectops_federation_token(workspace_id)
-    if not bearer:
+    if not isinstance(bearer, str) or not bearer.strip():
         for item in items:
             mark_sync_failed(item, "FEDERATION_TOKEN_UNAVAILABLE")
         db.commit()
         return {"requested": len(items), "reconciled": 0, "failed": len(items)}
+    bearer = bearer.strip()
 
     active_client, owned = _project_ops_client(db, organization_id, client)
     try:
@@ -412,6 +436,73 @@ async def reconcile_projectops_action_items(
             await active_client.aclose()
 
 
+async def reconcile_projectops_session_action_items(
+    *,
+    db: Session,
+    organization_id: int,
+    session_id: int,
+    limit: int = MAX_RECONCILE_ITEMS,
+    client: Any = None,
+) -> dict[str, Any]:
+    """Refresh one session's remote lifecycle rows with a hard item bound.
+
+    The session and every action item are constrained to the active
+    organization before any federation call. Local-only items are omitted:
+    opening the UI is a read/refresh action and must never submit new meeting
+    content or create a proposal.
+    """
+    if limit < 1 or limit > MAX_RECONCILE_ITEMS:
+        raise ValueError(f"limit must be between 1 and {MAX_RECONCILE_ITEMS}")
+
+    from database.models import ActionItem, RecordingSession
+
+    session_exists = (
+        db.query(RecordingSession.id)
+        .filter(
+            RecordingSession.id == session_id,
+            RecordingSession.organization_id == organization_id,
+        )
+        .first()
+    )
+    if not session_exists:
+        raise LookupError("session not found")
+
+    rows = (
+        db.query(ActionItem.id)
+        .filter(
+            ActionItem.session_id == session_id,
+            ActionItem.organization_id == organization_id,
+            ActionItem.project_ops_link_state != LOCAL_ONLY,
+        )
+        .order_by(ActionItem.id.asc())
+        .limit(limit + 1)
+        .all()
+    )
+    item_ids = [int(row[0]) for row in rows[:limit]]
+    truncated = len(rows) > limit
+    if not item_ids:
+        return {
+            "requested": 0,
+            "reconciled": 0,
+            "failed": 0,
+            "item_ids": [],
+            "truncated": truncated,
+        }
+
+    result = await reconcile_projectops_action_items(
+        db=db,
+        organization_id=organization_id,
+        item_ids=item_ids,
+        limit=limit,
+        client=client,
+    )
+    return {
+        **result,
+        "item_ids": item_ids,
+        "truncated": truncated,
+    }
+
+
 async def requeue_projectops_action_item(
     *,
     db: Session,
@@ -477,10 +568,11 @@ async def requeue_projectops_action_item(
             )
 
             bearer = await projectops_federation_token(workspace_id)
-            if not bearer:
+            if not isinstance(bearer, str) or not bearer.strip():
                 mark_sync_failed(item, "FEDERATION_TOKEN_UNAVAILABLE")
                 db.commit()
                 return item
+            bearer = bearer.strip()
 
             item.project_ops_last_sync_attempt_at = _now()
             db.commit()
@@ -548,5 +640,6 @@ __all__ = [
     "mark_proposed",
     "mark_sync_failed",
     "reconcile_projectops_action_items",
+    "reconcile_projectops_session_action_items",
     "requeue_projectops_action_item",
 ]

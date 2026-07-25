@@ -170,8 +170,9 @@ async def _project_ops_token(
     if not j:
         return None
     token = j.get("access_token") or j.get("token")
-    if not token:
+    if not isinstance(token, str) or not token.strip():
         return None
+    token = token.strip()
     _store(key, token, j.get("expires_in", 300))
     return token
 
@@ -188,7 +189,7 @@ async def projectops_federation_token(workspace_id: str) -> Optional[str]:
     when unconfigured (KC secret unset), the workspace_id is empty, or any step
     fails (mint / exchange transport, non-200, non-JSON, missing token, or
     Brigade not yet granting actor=meeting-ops -> aud=project-ops). The caller
-    falls back to the default service token on ``None``. NEVER raises.
+    fails closed and performs no Project-Ops request on ``None``. NEVER raises.
     """
     if not is_configured():
         return None

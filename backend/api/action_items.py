@@ -109,6 +109,14 @@ class ActionItemPatch(BaseModel):
     status: Optional[str] = None
 
 
+class ProjectOpsSessionReconcileOut(BaseModel):
+    requested: int
+    reconciled: int
+    failed: int
+    truncated: bool
+    items: List[ActionItemOut]
+
+
 def _resolve_session(
     db: Session, organization_id: int, session_id: str
 ) -> RecordingSession:
@@ -254,6 +262,60 @@ async def list_action_items(
         .all()
     )
     return [_to_out(item, sess) for item, sess in rows]
+
+
+@router.post(
+    "/sessions/{session_id}/project-ops/reconcile",
+    response_model=ProjectOpsSessionReconcileOut,
+)
+async def reconcile_session_project_ops_action_items(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Non-submitting, bounded lifecycle refresh for one visible session."""
+    org_id = active_org.organization.id
+    session = _resolve_session(db, org_id, session_id)
+
+    from services.projectops_lifecycle import (
+        reconcile_projectops_session_action_items,
+    )
+
+    try:
+        result = await reconcile_projectops_session_action_items(
+            db=db,
+            organization_id=org_id,
+            session_id=session.id,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    item_ids = result.pop("item_ids")
+    rows = (
+        db.query(ActionItem)
+        .filter(
+            ActionItem.organization_id == org_id,
+            ActionItem.session_id == session.id,
+            ActionItem.id.in_(item_ids),
+        )
+        .order_by(ActionItem.id.asc())
+        .all()
+        if item_ids
+        else []
+    )
+    logger.info(
+        "action_items: Project-Ops session reconcile session=%s org=%s "
+        "user=%s requested=%s",
+        session.id,
+        org_id,
+        current_user.id,
+        result["requested"],
+    )
+    return {
+        **result,
+        "items": [_to_out(item, session) for item in rows],
+    }
 
 
 @router.get("/{item_id}", response_model=ActionItemOut)

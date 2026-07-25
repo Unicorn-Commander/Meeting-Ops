@@ -185,7 +185,7 @@ async def test_mint_failure_returns_none(monkeypatch):
 @pytest.mark.asyncio
 async def test_exchange_failure_returns_none(monkeypatch):
     # Brigade exchange 403 (e.g. actor not yet allowed for aud=project-ops)
-    # -> None (graceful degradation to the default token in the caller).
+    # -> None; the caller fails closed without a Project-Ops request.
     _wire(
         monkeypatch,
         responses=[

@@ -26,9 +26,8 @@ Covers the contract for ``services.projectops_writer``:
                                        as the create target.
    7. override_beats_org_default    — processing_metadata.po_project_override
                                        wins over the org default.
-   8. done_status_propagates        — on replay, an already-synced item now
-                                       marked 'done' triggers a best-effort
-                                       update_task_status(COMPLETED).
+   8. done_status_is_local          — replay never sends a Project-Ops status
+                                       update; each app owns its own status.
    9. gated_off_when_auto_push       — default posture: with the v3.26.0
       _disabled                        auto-push opt-in gate OFF the writer
                                        returns mode="gated-off", created=0,
@@ -37,8 +36,8 @@ Covers the contract for ``services.projectops_writer``:
   10-17. submit_action_items_to_triage — the triage submit path (submit +
                                        stamp, replay-skip, no-target-still-
                                        works, linked-project hint, shared
-                                       auto-push gate, no-op, eventual-
-                                       consistency on failure, no double-file).
+                                       auto-push gate, eventual-consistency
+                                       on failure, no double-file).
   18-20. triage federation token     — the workspace-bound, aud=project-ops
                                        push: uses the Brigade-exchanged token
                                        as bearer_override when the org's
@@ -59,11 +58,13 @@ that seam back OFF to cover the default-disabled state. See
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pytest
+import httpx
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +263,7 @@ def _enable_auto_push(monkeypatch):
     # Live triage tests need the same tenant-bound token shape required in
     # production. Individual federation failure tests override this seam.
     from services import projectops_token as fed
+    real_federation_token = fed.projectops_federation_token
 
     async def _default_federation_token(workspace_id: str):
         return f"test-federation-token-for-{workspace_id}"
@@ -271,7 +273,7 @@ def _enable_auto_push(monkeypatch):
         "projectops_federation_token",
         _default_federation_token,
     )
-    yield
+    yield real_federation_token
 
 
 # asyncio.run() is the supported, version-proof replacement for the
@@ -489,7 +491,7 @@ def test_replay_skips_already_synced(client):
     assert r2.created == 0
     assert r2.skipped == 3
     assert second.created == []  # no duplicate tasks
-    # Items still marked todo => no status propagation either.
+    # Items remain Meeting-Ops-local; no task-status write is attempted.
     assert second.status_updates == []
 
 
@@ -763,8 +765,8 @@ def test_gated_off_when_auto_push_disabled(client, monkeypatch):
 # inbox (propose-only) instead of creating tasks directly. These cover the
 # new writer's contract: submit + stamp, replay-skip, no-target-still-works
 # (the key win over the direct writer), the linked-project routing hint, the
-# shared auto-push gate, no-op when unconfigured, eventual-consistency on
-# failure (don't stamp), and not double-filing direct-bridged items.
+# shared auto-push gate, eventual-consistency on failure (don't stamp), and
+# not double-filing direct-bridged items.
 # ---------------------------------------------------------------------------
 
 
@@ -936,31 +938,6 @@ def test_triage_gated_off_when_auto_push_disabled(client, monkeypatch):
         assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
 
 
-def test_triage_noop_when_unconfigured(client):
-    from services.projectops_client import ProjectOpsClient
-    from services.projectops_writer import submit_action_items_to_triage
-    from database.database import SessionLocal
-
-    org_id, session_id = _seed()
-    probe = ProjectOpsClient()
-    assert probe.is_live is False
-
-    db = SessionLocal()
-    try:
-        result = _run(
-            submit_action_items_to_triage(
-                db=db, session_pk=session_id, client=probe
-            )
-        )
-    finally:
-        db.close()
-
-    assert result.ok is True
-    assert result.mode == "no-op"
-    for it in _items_for_session(session_id):
-        assert (it.raw_payload or {}).get("po_triage_submitted_at") is None
-
-
 def test_triage_failure_leaves_rows_unstamped(client):
     from services.projectops_writer import submit_action_items_to_triage
     from database.database import SessionLocal
@@ -1085,6 +1062,120 @@ def test_triage_uses_federation_bearer_when_workspace_resolves(client, monkeypat
     # Items still get stamped (happy path).
     for it in _items_for_session(session_id):
         assert (it.raw_payload or {}).get("po_triage_submitted_at", "").endswith("Z")
+
+
+def test_triage_exchange_bearer_drives_unconfigured_real_client(
+    client, monkeypatch, _enable_auto_push
+):
+    """The Brigade exchange is the only credential required by triage."""
+    from database.database import SessionLocal
+    from services import projectops_token
+    from services.projectops_client import ProjectOpsClient
+    from services.projectops_writer import submit_action_items_to_triage
+
+    monkeypatch.setenv("MEETING_OPS_KC_CLIENT_ID", "meeting-ops")
+    monkeypatch.setenv("MEETING_OPS_KC_CLIENT_SECRET", "meeting-secret")
+    monkeypatch.setenv("MEETING_OPS_KC_TOKEN_URL", "https://auth.test/token")
+    monkeypatch.setenv(
+        "BRIGADE_EXCHANGE_URL",
+        "https://brigade.test/api/v1/federation/token",
+    )
+    monkeypatch.setattr(
+        projectops_token,
+        "projectops_federation_token",
+        _enable_auto_push,
+    )
+    projectops_token._token_cache.clear()
+    real_async_client = httpx.AsyncClient
+
+    class _TokenResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _TokenClient:
+        def __init__(self):
+            self.posts: list[dict] = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, **kwargs):
+            self.posts.append({"url": url, "data": kwargs.get("data")})
+            if len(self.posts) == 1:
+                return _TokenResponse(
+                    {"access_token": "meeting-subject", "expires_in": 300}
+                )
+            return _TokenResponse(
+                {"access_token": "workspace-bearer", "expires_in": 300}
+            )
+
+    token_http = _TokenClient()
+    monkeypatch.setattr(
+        projectops_token.httpx,
+        "AsyncClient",
+        lambda *_args, **_kwargs: token_http,
+    )
+
+    ingest_requests: list[httpx.Request] = []
+
+    def ingest_handler(request: httpx.Request) -> httpx.Response:
+        ingest_requests.append(request)
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "created": len(body["items"]),
+                "skipped": 0,
+                "proposals": [
+                    {
+                        "id": f"proposal-{item['sourceActionItemId']}",
+                        "sourceActionItemId": item["sourceActionItemId"],
+                    }
+                    for item in body["items"]
+                ],
+            },
+        )
+
+    org_id, session_id = _seed(workspace_id="ws-exchange-only")
+
+    async def exercise():
+        async with real_async_client(
+            transport=httpx.MockTransport(ingest_handler)
+        ) as ingest_http:
+            unconfigured = ProjectOpsClient(
+                base_url="https://projectops.example.test/api/v1",
+                _client=ingest_http,
+            )
+            assert unconfigured.is_live is False
+            db = SessionLocal()
+            try:
+                return await submit_action_items_to_triage(
+                    db=db,
+                    session_pk=session_id,
+                    client=unconfigured,
+                )
+            finally:
+                db.close()
+
+    try:
+        result = _run(exercise())
+    finally:
+        projectops_token._token_cache.clear()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    assert len(token_http.posts) == 2
+    assert token_http.posts[1]["data"]["workspace_id"] == "ws-exchange-only"
+    assert len(ingest_requests) == 1
+    assert ingest_requests[0].headers["authorization"] == "Bearer workspace-bearer"
 
 
 def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):

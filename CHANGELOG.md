@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Changed
+- Project-Ops action-item integration now uses a workspace-bound Brigade token
+  for proposal submission and read-only lifecycle refresh. Meeting-Ops
+  checkbox changes no longer propagate Task status; Project-Ops remains the
+  sole owner of its Task status.
+
 ## [3.57.3] - 2026-07-17
 
 ### Changed

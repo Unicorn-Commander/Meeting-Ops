@@ -239,8 +239,9 @@ def resolve_project_ops(
     per-org. For orgs on the env-default path (no integration block) the
     default comes from the ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS`` deploy
     flag (also OFF by default). This flag does NOT affect extraction,
-    storage, in-app display, the on-demand status-propagation path, or any
-    future explicit review-then-push — only the auto-push.
+    storage, in-app display, read-only lifecycle reconciliation, or any
+    future explicit review-then-push — only the auto-push. Meeting-Ops never
+    writes Project-Ops Task status.
     """
     block: Optional[dict[str, Any]] = None
     legacy_default: Optional[str] = None

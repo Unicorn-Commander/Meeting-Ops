@@ -63,6 +63,43 @@ def test_lifecycle_rejects_unknown_task_status(monkeypatch):
     assert item.project_ops_sync_error == "INVALID_TASK_STATUS"
 
 
+def test_lifecycle_rejects_task_url_bound_to_a_different_task(monkeypatch):
+    from services.projectops_lifecycle import _apply_lifecycle_record
+
+    monkeypatch.setenv("PROJECTOPS_PUBLIC_URL", "https://projectops.unicorncommander.ai")
+    item = _item()
+    _apply_lifecycle_record(
+        item,
+        _approved_record(
+            taskUrl="https://projectops.unicorncommander.ai/dashboard/tasks/task-99"
+        ),
+    )
+
+    assert item.project_ops_link_state == "sync_failed"
+    assert item.project_ops_sync_error == "INVALID_TASK_LINK"
+    assert item.project_ops_task_url is None
+
+
+def test_lifecycle_rejects_encoded_route_separators(monkeypatch):
+    from services.projectops_lifecycle import _apply_lifecycle_record
+
+    monkeypatch.setenv("PROJECTOPS_PUBLIC_URL", "https://projectops.unicorncommander.ai")
+    for suffix in ("task-41%2Fother", "task-41%5Cother", "task-41%252Fother"):
+        item = _item()
+        _apply_lifecycle_record(
+            item,
+            _approved_record(
+                taskUrl=(
+                    "https://projectops.unicorncommander.ai/dashboard/tasks/"
+                    + suffix
+                )
+            ),
+        )
+        assert item.project_ops_link_state == "sync_failed"
+        assert item.project_ops_sync_error == "INVALID_TASK_LINK"
+        assert item.project_ops_task_url is None
+
+
 def test_lifecycle_rejects_malformed_remote_timestamp(monkeypatch):
     from services.projectops_lifecycle import _apply_lifecycle_record
 

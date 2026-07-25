@@ -160,6 +160,8 @@ def _seed_world():
         return {
             "org_a": org_a.id,
             "org_b": org_b.id,
+            "session_a": session_a.id,
+            "session_b": session_b.id,
             "item_a": item_a.id,
             "item_b": item_b.id,
         }
@@ -244,6 +246,59 @@ def test_reconcile_cannot_read_or_update_another_organization(monkeypatch):
         db.close()
 
     assert upstream.lifecycle_calls == []
+
+
+def test_session_refresh_is_bounded_and_cannot_cross_organizations(monkeypatch):
+    from database.database import SessionLocal
+    from services.projectops_lifecycle import (
+        reconcile_projectops_session_action_items,
+    )
+
+    world = _seed_world()
+    _patch_token(monkeypatch)
+    upstream = _LifecycleClient()
+    db = SessionLocal()
+    try:
+        result = _run(
+            reconcile_projectops_session_action_items(
+                db=db,
+                organization_id=world["org_a"],
+                session_id=world["session_a"],
+                client=upstream,
+            )
+        )
+        assert result == {
+            "requested": 1,
+            "reconciled": 1,
+            "failed": 0,
+            "item_ids": [world["item_a"]],
+            "truncated": False,
+        }
+        assert upstream.lifecycle_calls[0]["ids"] == [str(world["item_a"])]
+
+        with pytest.raises(LookupError):
+            _run(
+                reconcile_projectops_session_action_items(
+                    db=db,
+                    organization_id=world["org_a"],
+                    session_id=world["session_b"],
+                    client=upstream,
+                )
+            )
+        with pytest.raises(ValueError):
+            _run(
+                reconcile_projectops_session_action_items(
+                    db=db,
+                    organization_id=world["org_a"],
+                    session_id=world["session_a"],
+                    limit=101,
+                    client=upstream,
+                )
+            )
+    finally:
+        db.close()
+
+    assert len(upstream.lifecycle_calls) == 1
 
 
 def test_requeue_is_one_item_and_replay_does_not_resubmit(monkeypatch):

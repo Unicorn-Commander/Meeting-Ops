@@ -33,10 +33,11 @@ unambiguous.
 - Approval creates at most one Project-Ops task, including repeated callbacks
   and reconciliation runs.
 - A local-only checkbox never implies a Project-Ops task was completed.
-- Linked status propagation is idempotent and records the last successful sync.
+- Linked lifecycle refresh is idempotent and records the last successful sync;
+  it never writes either app's task/completion status.
 - Logs include request/correlation IDs but no bearer tokens or meeting content.
 - End-to-end staging evidence covers proposal, human approval, backlink, and
-  status propagation using a disposable test action item.
+  independent status refresh using a disposable test action item.
 
 ## Handoff
 

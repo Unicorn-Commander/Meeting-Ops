@@ -42,6 +42,10 @@ import { UpgradeBanner } from '../components/UpgradeBanner';
 import { config, appendWsToken } from '../config';
 import { showConfirm } from '../utils/notifications';
 import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
+import {
+  mergeProjectOpsLifecycle,
+  parseActionItemTarget,
+} from '../utils/projectOpsLifecycle';
 import { clearAllHydratedCaches } from '../utils/cachedState';
 import {
   deleteLocalSession,
@@ -419,15 +423,14 @@ export const SessionDetails: React.FC = () => {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionUpdatingIds, setActionUpdatingIds] = useState<Set<number>>(new Set());
-  const requestedActionId = Number(searchParams.get('actionItem'));
+  const projectOpsRefreshes = useRef<Set<string>>(new Set());
+  const requestedActionId = parseActionItemTarget(searchParams.get('actionItem'));
   const [expandedActionId, setExpandedActionId] = useState<number | null>(
-    Number.isInteger(requestedActionId) && requestedActionId > 0
-      ? requestedActionId
-      : null,
+    requestedActionId,
   );
   useEffect(() => {
-    const next = Number(searchParams.get('actionItem'));
-    if (Number.isInteger(next) && next > 0) {
+    const next = parseActionItemTarget(searchParams.get('actionItem'));
+    if (next !== null) {
       setExpandedActionId(next);
     }
   }, [searchParams]);
@@ -935,6 +938,53 @@ export const SessionDetails: React.FC = () => {
     if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
     return headers;
   };
+
+  const refreshProjectOpsLifecycle = async () => {
+    // Prefer the route identifier because it is stable before and after the
+    // session payload loads; switching from UUID -> numeric id would otherwise
+    // defeat the one-shot gate and issue two refreshes for the same session.
+    const targetSession = String(sessionId || session?.id || '').trim();
+    if (
+      !targetSession ||
+      targetSession.startsWith('local-') ||
+      !activeOrganization?.slug
+    ) {
+      return;
+    }
+    const refreshKey = `${activeOrganization.slug}:${targetSession}`;
+    if (projectOpsRefreshes.current.has(refreshKey)) return;
+    projectOpsRefreshes.current.add(refreshKey);
+
+    try {
+      const response = await fetch(
+        `${config.apiUrl}/api/action-items/sessions/${encodeURIComponent(
+          targetSession,
+        )}/project-ops/reconcile`,
+        {
+          method: 'POST',
+          headers: participantHeaders(),
+        },
+      );
+      if (!response.ok) return;
+      const result = await response.json();
+      if (!Array.isArray(result?.items)) return;
+      setActionItems((current) =>
+        mergeProjectOpsLifecycle(current, result.items),
+      );
+    } catch {
+      // Automatic freshness is best effort and nonblocking. The per-item
+      // Retry/Refresh control remains visible for an explicit user retry.
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'action_items') {
+      void refreshProjectOpsLifecycle();
+    }
+    // The refresh is intentionally one-shot per org/session; the helper's
+    // ref gate absorbs re-renders and mobile/desktop overlap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, activeOrganization?.slug, session?.id, sessionId]);
 
   const participantsBase = () =>
     `${config.apiUrl}/api/simple/recording-sessions/${session?.id || sessionId}/participants`;
@@ -2019,6 +2069,9 @@ export const SessionDetails: React.FC = () => {
     actionBusy, actionError,
     setActionStatus,
     requeueProjectOpsAction,
+    actionItemsOpen: activeTab === 'action_items',
+    targetActionItemId: requestedActionId,
+    onOpenActionItems: refreshProjectOpsLifecycle,
     addActionItem,
     deleteActionItem,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,

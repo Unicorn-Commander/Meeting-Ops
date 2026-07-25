@@ -528,15 +528,19 @@ class ProjectOpsClient:
             raise ProjectOpsClientError(
                 "source lifecycle reconciliation is limited to 100 items"
             )
-        if not bearer_override:
+        if (
+            not isinstance(bearer_override, str)
+            or not bearer_override.strip()
+        ):
             raise ProjectOpsClientError(
                 "source lifecycle requires a workspace-bound federation token"
             )
+        bearer = bearer_override.strip()
         data = await self._request_with_retries(
             "POST",
             "/triage/source-lifecycle",
             json={"sourceActionItemIds": ids},
-            bearer_override=bearer_override,
+            bearer_override=bearer,
         )
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise ProjectOpsClientError(
@@ -577,18 +581,24 @@ class ProjectOpsClient:
         writer's eventual-consistency posture (don't stamp on failure,
         re-submit next finalize/backfill, PO dedups) already covers a
         dropped response. Raises ``ProjectOpsClientError`` on terminal
-        failure; callers gate on ``is_live`` first.
+        failure.
 
         ``bearer_override`` (optional) forces a specific bearer for this push
         — used to send a Brigade-exchanged, workspace-bound federation token
         (``aud=project-ops``) so PO routes the proposals to the correct
-        tenant. When None, the default token source is used (legacy / default
-        tenant routing).
+        tenant. A non-empty override is sufficient authentication even when
+        the legacy PROJECTOPS_API_KEY / PROJECTOPS_KC_* source is unconfigured.
+        When None, the configured legacy token source is used.
         """
-        if not self.is_live:
+        override = (
+            bearer_override.strip()
+            if isinstance(bearer_override, str) and bearer_override.strip()
+            else None
+        )
+        if not self.is_live and override is None:
             raise ProjectOpsClientError(
                 "submit_candidate_action_items called while not configured "
-                "(PROJECTOPS_API_KEY or KC credentials unset)"
+                "(no bearer_override, PROJECTOPS_API_KEY, or KC credentials)"
             )
         if not items:
             return {"created": 0, "skipped": 0, "proposals": []}
@@ -599,7 +609,7 @@ class ProjectOpsClient:
             json=body,
             timeout=timeout_seconds or TRIAGE_INGEST_TIMEOUT_SECONDS,
             max_attempts=1,
-            bearer_override=bearer_override,
+            bearer_override=override,
         )
         if not isinstance(data, dict):
             return {"created": 0, "skipped": 0, "proposals": []}

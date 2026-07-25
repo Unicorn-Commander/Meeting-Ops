@@ -2218,8 +2218,9 @@ async def _run_session_reprocess(session_pk: int) -> None:
         # po_triage_submitted_at stamp on action_items.raw_payload (and PO's
         # own sourceActionItemId uniqueness), so reprocess re-runs don't
         # duplicate. Same swallow-all posture as the Brigade block above:
-        # failures NEVER raise into the reprocess pipeline, and an
-        # unconfigured PO (PROJECTOPS_API_KEY unset) is a clean no-op.
+        # failures NEVER raise into the reprocess pipeline. Submission
+        # requires a workspace-bound Brigade exchange token and fails closed
+        # without one; no default Project-Ops tenant credential is used.
         try:
             from services.projectops_writer import submit_action_items_to_triage
 

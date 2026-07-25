@@ -16,6 +16,15 @@ data. Do not run it against production.
 - Set Meeting-Ops `PROJECTOPS_PUBLIC_URL` to the same origin as Project-Ops
   `FRONTEND_URL` (HTTPS outside loopback development). This origin must serve
   `/dashboard/tasks/<task-id>` behind normal Project-Ops workspace auth.
+  Bigboy defaults this pass-through to
+  `https://projectops.magicunicorn.dev`; verify the rendered compose config
+  before starting either the backend or reprocess worker:
+
+  ```bash
+  docker compose -f deploy/bigboy/docker-compose.bigboy.yml \
+    --env-file deploy/bigboy/.env.bigboy config |
+    grep PROJECTOPS_PUBLIC_URL
+  ```
 - Record `STAGING_ORGANIZATION_ID`, `STAGING_WORKSPACE_ID`, and a unique marker
   such as `MO-LIFECYCLE-YYYYMMDD-HHMM`.
 
