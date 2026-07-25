@@ -24,7 +24,7 @@ from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field, model_validator
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
@@ -35,11 +35,15 @@ from database.models import RecordingSession as DBRecordingSession
 from database.models import SessionCollaborator
 from services.invitation_tokens import (
     INVITATION_TOKEN_VERSION,
+    INVITATION_ISSUANCE_UNAVAILABLE,
     build_invitation_url,
     generate_invitation_secret,
     hash_invitation_secret,
+    invitation_delivery_url_is_allowed,
     invitation_resend_minimum_interval_seconds,
+    invitation_v2_issuance_enabled,
     legacy_invitation_is_allowed,
+    smtp_plaintext_is_allowed,
 )
 
 logger = logging.getLogger(__name__)
@@ -283,10 +287,7 @@ def has_session_access(
         .filter(
             SessionCollaborator.session_id == session.id,
             SessionCollaborator.revoked_at.is_(None),
-            or_(
-                SessionCollaborator.user_id == user.id,
-                SessionCollaborator.email == user.email,
-            ),
+            SessionCollaborator.user_id == user.id,
         )
         .first()
     )
@@ -364,6 +365,155 @@ def _is_collaborator_active(row: SessionCollaborator) -> bool:
     return True
 
 
+def _normalize_invitation_email(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip().casefold()
+    return normalized or None
+
+
+def _verified_user_for_email(
+    db: Session,
+    email: Optional[str],
+) -> Optional[User]:
+    """Resolve an email identity only to an active, verified account."""
+    normalized = _normalize_invitation_email(email)
+    if not normalized:
+        return None
+    return (
+        db.query(User)
+        .filter(
+            func.lower(User.email) == normalized,
+            User.is_active.is_(True),
+            User.is_verified.is_(True),
+        )
+        .order_by(User.id.asc())
+        .first()
+    )
+
+
+def _lock_invitation_parent(
+    db: Session,
+    session_id: int,
+) -> DBRecordingSession:
+    """Serialize invitation identity changes on the parent meeting row."""
+    return (
+        db.query(DBRecordingSession)
+        .filter(DBRecordingSession.id == session_id)
+        .with_for_update()
+        .populate_existing()
+        .one()
+    )
+
+
+def _identity_emails(
+    db: Session,
+    *,
+    user_id: Optional[int],
+    email: Optional[str],
+) -> set[str]:
+    emails: set[str] = set()
+    normalized = _normalize_invitation_email(email)
+    if normalized:
+        emails.add(normalized)
+    if user_id is not None:
+        user = db.query(User).filter(User.id == user_id).first()
+        user_email = _normalize_invitation_email(user.email if user else None)
+        if user_email:
+            emails.add(user_email)
+    return emails
+
+
+def _identity_rows(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: Optional[int],
+    emails: set[str],
+    include_revoked: bool = False,
+) -> list[SessionCollaborator]:
+    conditions = []
+    if user_id is not None:
+        conditions.append(SessionCollaborator.user_id == user_id)
+    conditions.extend(
+        func.lower(SessionCollaborator.email) == email
+        for email in sorted(emails)
+    )
+    if not conditions:
+        return []
+    query = db.query(SessionCollaborator).filter(
+        SessionCollaborator.session_id == session_id,
+        or_(*conditions),
+    )
+    if not include_revoked:
+        query = query.filter(SessionCollaborator.revoked_at.is_(None))
+    return query.order_by(SessionCollaborator.id.asc()).with_for_update().all()
+
+
+def _revoke_invitation_row(
+    row: SessionCollaborator,
+    *,
+    now: datetime,
+) -> None:
+    if row.revoked_at is None:
+        row.revoked_at = now
+    row.delivery_state = "revoked"
+    row.delivery_failure_reason = None
+    # Preserve the digest for a controlled terminal "revoked" result, while
+    # rotating the legacy compatibility UUID away from any prior plaintext.
+    row.token = uuid.uuid4()
+
+
+def _consolidate_invitation_identity(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: Optional[int],
+    email: Optional[str],
+) -> Optional[SessionCollaborator]:
+    """Return one deterministic active grant and revoke every sibling.
+
+    Callers must first lock the parent recording_sessions row. That gives both
+    issuance surfaces the same race boundary without relying on an unsafe
+    partial unique index over legacy data.
+    """
+    emails = _identity_emails(db, user_id=user_id, email=email)
+    rows = _identity_rows(
+        db,
+        session_id=session_id,
+        user_id=user_id,
+        emails=emails,
+    )
+    active_rows = [row for row in rows if _is_collaborator_active(row)]
+    if active_rows:
+        # Prefer an already user-bound/accepted grant, then the oldest row.
+        # This keeps accepted access stable and makes consolidation independent
+        # of query planner or request ordering.
+        survivor = min(
+            active_rows,
+            key=lambda row: (
+                0
+                if row.user_id is not None or row.accepted_at is not None
+                else 1,
+                row.id,
+            ),
+        )
+    else:
+        survivor = None
+
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        if survivor is None or row.id != survivor.id:
+            _revoke_invitation_row(row, now=now)
+    return survivor
+
+
+def _require_v2_invitation_issuance() -> None:
+    if not invitation_v2_issuance_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=INVITATION_ISSUANCE_UNAVAILABLE,
+        )
+
+
 def _can_manage_collaborators(
     db: Session,
     user: User,
@@ -421,7 +571,9 @@ def _effective_delivery_state(row: SessionCollaborator) -> DeliveryState:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at <= datetime.now(timezone.utc):
             return "expired"
-    if row.accepted_at is not None:
+    # Legacy direct user grants did not always populate accepted_at. A bound
+    # user_id is already an accepted grant and must never become resendable.
+    if row.user_id is not None or row.accepted_at is not None:
         return "accepted"
     state = row.delivery_state or "pending"
     if state not in {"pending", "sent", "failed"}:
@@ -432,14 +584,17 @@ def _effective_delivery_state(row: SessionCollaborator) -> DeliveryState:
 def _find_invitation_by_secret(
     db: Session,
     secret: str,
+    *,
+    lock: bool = False,
 ) -> Optional[SessionCollaborator]:
     """Hash a presented secret and resolve it without plaintext lookup."""
     digest = hash_invitation_secret(secret)
-    row = (
-        db.query(SessionCollaborator)
-        .filter(SessionCollaborator.token_hash == digest)
-        .first()
+    query = db.query(SessionCollaborator).filter(
+        SessionCollaborator.token_hash == digest
     )
+    if lock:
+        query = query.with_for_update().populate_existing()
+    row = query.first()
     if row and legacy_invitation_is_allowed(row.token_version):
         return row
     return None
@@ -478,6 +633,17 @@ def _send_invitation_email(
     Only bounded operator-safe reason codes are returned for persistence.
     """
     from auth.email import _postmark_sender, _postmark_token
+
+    if not invitation_delivery_url_is_allowed(invite_url):
+        logger.warning(
+            "invitation delivery skipped reason=public_url_not_configured "
+            "session=%s",
+            session.session_id or session.id,
+        )
+        return InvitationDeliveryResult(
+            sent=False,
+            failure_reason="public_url_not_configured",
+        )
 
     postmark_token = _postmark_token()
     from_email = (
@@ -577,6 +743,16 @@ def _send_invitation_email(
         smtp_user = os.getenv("SMTP_USER", "").strip()
         smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
         use_tls = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+        if not use_tls and not smtp_plaintext_is_allowed(smtp_host):
+            logger.warning(
+                "invitation delivery skipped reason=insecure_smtp_not_allowed "
+                "session=%s",
+                session.session_id or session.id,
+            )
+            return InvitationDeliveryResult(
+                sent=False,
+                failure_reason="insecure_smtp_not_allowed",
+            )
 
         msg = MIMEText(body_text)
         msg["Subject"] = subject
@@ -585,7 +761,9 @@ def _send_invitation_email(
 
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as smtp:
             if use_tls:
-                smtp.starttls()
+                import ssl
+
+                smtp.starttls(context=ssl.create_default_context())
             if smtp_user and smtp_password:
                 smtp.login(smtp_user, smtp_password)
             smtp.send_message(msg)
@@ -615,6 +793,8 @@ def _apply_delivery_result(
         "delivery_not_configured",
         "delivery_failed",
         "delivery_internal_error",
+        "public_url_not_configured",
+        "insecure_smtp_not_allowed",
     }
     row.delivery_failure_reason = (
         None
@@ -709,48 +889,54 @@ async def add_collaborator(
             detail=f"access_level must be one of {_VALID_ACCESS_LEVELS}",
         )
 
+    # Every identity lookup and mutation is serialized on the parent session
+    # row. This is the shared race boundary used by both invite issuance paths.
+    session = _lock_invitation_parent(db, session.id)
+
     user_id = body.user_id
-    email_value = str(body.email).strip().lower() if body.email else None
+    email_value = _normalize_invitation_email(
+        str(body.email) if body.email else None
+    )
     resolved_email = email_value
 
     if user_id:
         invitee = db.query(User).filter(User.id == user_id).first()
         if not invitee:
             raise HTTPException(status_code=404, detail="Invitee user not found")
-        resolved_email = invitee.email
+        resolved_email = _normalize_invitation_email(invitee.email)
     elif email_value:
-        # Resolve to an existing user if we already have one for this email.
-        invitee = db.query(User).filter(User.email.ilike(email_value)).first()
+        # An unverified account does not own an email invitation identity.
+        # It must verify the matching address and present the bearer secret.
+        invitee = _verified_user_for_email(db, email_value)
         if invitee:
             user_id = invitee.id
-            resolved_email = invitee.email
+            resolved_email = _normalize_invitation_email(invitee.email)
 
-    existing: Optional[SessionCollaborator] = None
-    if user_id:
-        existing = (
-            db.query(SessionCollaborator)
-            .filter(
-                SessionCollaborator.session_id == session.id,
-                SessionCollaborator.user_id == user_id,
-                SessionCollaborator.revoked_at.is_(None),
-            )
-            .first()
-        )
-    elif resolved_email:
-        existing = (
-            db.query(SessionCollaborator)
-            .filter(
-                SessionCollaborator.session_id == session.id,
-                SessionCollaborator.email == str(resolved_email),
-                SessionCollaborator.revoked_at.is_(None),
-            )
-            .first()
-        )
+    existing = _consolidate_invitation_identity(
+        db,
+        session_id=session.id,
+        user_id=user_id,
+        email=resolved_email,
+    )
 
     # POST is idempotent for an already-active grant. Access may be updated,
     # but a reusable secret is never re-exposed and no delivery is retried.
     if existing:
         existing.access_level = body.access_level
+        if user_id is not None:
+            existing.user_id = user_id
+            existing.email = resolved_email
+            existing.accepted_at = existing.accepted_at or datetime.now(
+                timezone.utc
+            )
+            existing.delivery_state = "accepted"
+            existing.delivery_failure_reason = None
+            # A direct user grant needs no bearer. Invalidate any older
+            # email-only secret if this row was consolidated into it.
+            existing.token_hash = None
+            existing.token = uuid.uuid4()
+        elif resolved_email:
+            existing.email = resolved_email
         db.commit()
         db.refresh(existing)
         serialized = _serialize_collaborator(db, existing)
@@ -758,6 +944,9 @@ async def add_collaborator(
             **serialized.model_dump(),
             created=False,
         )
+
+    if user_id is None:
+        _require_v2_invitation_issuance()
 
     now = datetime.now(timezone.utc)
     secret = generate_invitation_secret() if not user_id else None
@@ -784,24 +973,35 @@ async def add_collaborator(
     delivery_result: Optional[InvitationDeliveryResult] = None
     if not user_id and resolved_email:
         try:
-            delivery_result = _send_invitation_email(
-                to_email=str(resolved_email),
-                invite_url=build_invitation_url(secret or ""),
-                inviter=current_user,
-                session=session,
-                access_level=body.access_level,
+            delivery_url = build_invitation_url(
+                secret or "",
+                require_public=True,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "invitation delivery failed unexpectedly session=%s "
-                "error_type=%s",
-                session.session_id or session.id,
-                type(exc).__name__,
-            )
+        except ValueError:
             delivery_result = InvitationDeliveryResult(
                 sent=False,
-                failure_reason="delivery_internal_error",
+                failure_reason="public_url_not_configured",
             )
+        else:
+            try:
+                delivery_result = _send_invitation_email(
+                    to_email=str(resolved_email),
+                    invite_url=delivery_url,
+                    inviter=current_user,
+                    session=session,
+                    access_level=body.access_level,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "invitation delivery failed unexpectedly session=%s "
+                    "error_type=%s",
+                    session.session_id or session.id,
+                    type(exc).__name__,
+                )
+                delivery_result = InvitationDeliveryResult(
+                    sent=False,
+                    failure_reason="delivery_internal_error",
+                )
         _apply_delivery_result(row, delivery_result)
         db.commit()
         db.refresh(row)
@@ -887,6 +1087,9 @@ async def resend_collaborator_invitation(
             detail="Only the session creator or an org admin/manager can manage collaborators",
         )
 
+    session = _lock_invitation_parent(db, session.id)
+    _require_v2_invitation_issuance()
+
     row = (
         db.query(SessionCollaborator)
         .filter(
@@ -898,6 +1101,22 @@ async def resend_collaborator_invitation(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Collaborator not found")
+
+    canonical = _consolidate_invitation_identity(
+        db,
+        session_id=session.id,
+        user_id=row.user_id,
+        email=row.email,
+    )
+    if canonical is not None and canonical.id != row.id:
+        # Persist deterministic cleanup, then require the caller to refresh the
+        # roster rather than rotating a now-revoked duplicate.
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="Duplicate invitation was consolidated; refresh and retry",
+        )
+
     state = _effective_delivery_state(row)
     if state in {"accepted", "revoked", "expired"}:
         raise HTTPException(
@@ -936,23 +1155,31 @@ async def resend_collaborator_invitation(
     db.commit()
 
     try:
-        result = _send_invitation_email(
-            to_email=str(row.email),
-            invite_url=build_invitation_url(secret),
-            inviter=current_user,
-            session=session,
-            access_level=row.access_level,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "invitation resend failed unexpectedly session=%s error_type=%s",
-            session.session_id or session.id,
-            type(exc).__name__,
-        )
+        delivery_url = build_invitation_url(secret, require_public=True)
+    except ValueError:
         result = InvitationDeliveryResult(
             sent=False,
-            failure_reason="delivery_internal_error",
+            failure_reason="public_url_not_configured",
         )
+    else:
+        try:
+            result = _send_invitation_email(
+                to_email=str(row.email),
+                invite_url=delivery_url,
+                inviter=current_user,
+                session=session,
+                access_level=row.access_level,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "invitation resend failed unexpectedly session=%s error_type=%s",
+                session.session_id or session.id,
+                type(exc).__name__,
+            )
+            result = InvitationDeliveryResult(
+                sent=False,
+                failure_reason="delivery_internal_error",
+            )
 
     row = (
         db.query(SessionCollaborator)
@@ -994,26 +1221,29 @@ async def revoke_collaborator(
             detail="Only the session creator or an org admin/manager can manage collaborators",
         )
 
+    session = _lock_invitation_parent(db, session.id)
     row = (
         db.query(SessionCollaborator)
         .filter(
             SessionCollaborator.id == collaborator_id,
             SessionCollaborator.session_id == session.id,
         )
+        .with_for_update()
         .first()
     )
     if not row:
         raise HTTPException(status_code=404, detail="Collaborator not found")
 
-    if row.revoked_at is None:
-        row.revoked_at = datetime.now(timezone.utc)
-    row.delivery_state = "revoked"
-    row.delivery_failure_reason = None
-    # Keep the one-way digest so a holder of the original secret receives the
-    # controlled "revoked" terminal state. It is never a bearer value; the
-    # active-state check rejects the row immediately. Rotate the legacy UUID
-    # too, so a pre-migration plaintext value cannot remain useful.
-    row.token = uuid.uuid4()
+    emails = _identity_emails(db, user_id=row.user_id, email=row.email)
+    identity_rows = _identity_rows(
+        db,
+        session_id=session.id,
+        user_id=row.user_id,
+        emails=emails,
+    )
+    now = datetime.now(timezone.utc)
+    for identity_row in identity_rows:
+        _revoke_invitation_row(identity_row, now=now)
     db.commit()
     return {"status": "revoked", "collaborator_id": collaborator_id}
 
@@ -1048,7 +1278,10 @@ async def redeem_magic_link(
     token-in-URL pattern) and returns the session id + granted access
     level. Idempotent.
     """
-    row = _find_invitation_by_secret(db, payload.token)
+    # The row lock makes the user binding a deterministic first-writer
+    # operation. A retry by that same user is idempotent; a different account
+    # cannot overwrite the established binding.
+    row = _find_invitation_by_secret(db, payload.token, lock=True)
     if not row:
         return RedeemTokenResponse(valid=False, reason="invitation not found")
     if not _is_collaborator_active(row):
@@ -1063,22 +1296,25 @@ async def redeem_magic_link(
     if not session:
         return RedeemTokenResponse(valid=False, reason="session not found")
 
-    # Optional email match check. If the original invite was scoped to a
-    # specific email, refuse to bind a different user. Stops a leaked
-    # token from being redeemed by anyone other than the invitee.
-    if row.email and (
-        not current_user.email
-        or row.email.strip().casefold() != current_user.email.strip().casefold()
-    ):
-        return RedeemTokenResponse(
-            valid=False,
-            reason="this invitation was sent to a different email address",
-        )
-    if row.user_id is not None and row.user_id != current_user.id:
-        return RedeemTokenResponse(
-            valid=False,
-            reason="this invitation belongs to a different account",
-        )
+    if row.user_id is not None:
+        if row.user_id != current_user.id:
+            return RedeemTokenResponse(
+                valid=False,
+                reason="this invitation belongs to a different account",
+            )
+        # Already bound to this account: continue to the same successful
+        # response without changing ownership.
+    elif row.email:
+        current_email = _normalize_invitation_email(current_user.email)
+        if (
+            not getattr(current_user, "is_verified", False)
+            or not current_email
+            or _normalize_invitation_email(row.email) != current_email
+        ):
+            return RedeemTokenResponse(
+                valid=False,
+                reason="this invitation requires a verified matching email",
+            )
 
     # Bind the user, mark accepted.
     if row.user_id != current_user.id:

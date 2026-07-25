@@ -20,7 +20,6 @@ Coverage:
 """
 from __future__ import annotations
 
-import os
 import re
 import uuid
 from typing import Any
@@ -30,6 +29,16 @@ from unittest.mock import patch
 import pytest
 
 from auth.utils import get_password_hash
+
+
+@pytest.fixture(autouse=True)
+def _enabled_test_invitation_transport(monkeypatch):
+    monkeypatch.setenv("MEETING_INVITE_V2_ISSUANCE_ENABLED", "true")
+    monkeypatch.setenv(
+        "MEETING_OPS_PUBLIC_URL",
+        "https://meetingops.test",
+    )
+    monkeypatch.delenv("APP_PUBLIC_URL", raising=False)
 
 
 def _models():
@@ -414,5 +423,245 @@ def test_email_link_retry_is_rate_limited_after_a_failed_delivery(
         assert rows[0].delivery_state == "failed"
         assert rows[0].delivery_failure_reason == "delivery_failed"
         assert rows[0].token_hash is not None
+    finally:
+        db.close()
+
+
+def test_email_link_issuance_is_controlled_unavailable_while_flag_is_off(
+    client,
+    two_orgs_email,
+    monkeypatch,
+):
+    monkeypatch.delenv("MEETING_INVITE_V2_ISSUANCE_ENABLED", raising=False)
+    email = f"flag-off-{uuid.uuid4().hex[:8]}@example.com"
+    with patch("api.session_emails._postmark_send") as sender:
+        response = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json={"additional_recipients": [email], "include": ["link"]},
+            headers=two_orgs_email["headers"],
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Invitation link issuance is temporarily unavailable"
+    )
+    sender.assert_not_called()
+
+    _, _, _, SessionLocal, _, SessionCollaborator = _models()
+    db = SessionLocal()
+    try:
+        assert db.query(SessionCollaborator).filter(
+            SessionCollaborator.session_id == two_orgs_email["sess_a_db_id"],
+            SessionCollaborator.email == email,
+        ).count() == 0
+    finally:
+        db.close()
+
+
+def test_email_link_mint_consolidates_duplicates_at_the_parent_lock_boundary(
+    client,
+    two_orgs_email,
+):
+    from api import session_emails
+    from services.invitation_tokens import (
+        generate_invitation_secret,
+        hash_invitation_secret,
+    )
+
+    email = f"email-dedupe-{uuid.uuid4().hex[:8]}@example.com"
+    old_secrets = [generate_invitation_secret() for _ in range(3)]
+    _, _, _, SessionLocal, _, SessionCollaborator = _models()
+    db = SessionLocal()
+    try:
+        rows = []
+        for index, secret in enumerate(old_secrets):
+            row = SessionCollaborator(
+                session_id=two_orgs_email["sess_a_db_id"],
+                email=email.upper() if index == 1 else email,
+                access_level="read",
+                token=uuid.uuid4(),
+                token_hash=hash_invitation_secret(secret),
+                token_version=2,
+                delivery_state="sent",
+            )
+            db.add(row)
+            db.flush()
+            rows.append(row)
+        db.commit()
+        survivor_id = rows[0].id
+    finally:
+        db.close()
+
+    sends: list[dict[str, Any]] = []
+
+    def fake_postmark(**kwargs):
+        sends.append(kwargs)
+        return {"ok": True, "message_id": "stub"}
+
+    with (
+        patch(
+            "api.session_emails._lock_invitation_parent",
+            wraps=session_emails._lock_invitation_parent,
+        ) as parent_lock,
+        patch("api.session_emails._postmark_send", side_effect=fake_postmark),
+    ):
+        response = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json={"additional_recipients": [email], "include": ["link"]},
+            headers=two_orgs_email["headers"],
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["sent"] == 1
+    parent_lock.assert_called_once()
+    assert len(sends) == 1
+
+    match = re.search(
+        r'href="[^"]*/invite-bootstrap\.html#token=([^"]+)"',
+        sends[0]["html_body"],
+    )
+    assert match
+    new_secret = unquote(match.group(1))
+
+    db = SessionLocal()
+    try:
+        rows = db.query(SessionCollaborator).filter(
+            SessionCollaborator.session_id == two_orgs_email["sess_a_db_id"],
+            SessionCollaborator.email.ilike(email),
+        ).order_by(SessionCollaborator.id).all()
+        assert [row.id for row in rows if row.revoked_at is None] == [survivor_id]
+        assert rows[0].delivery_state == "sent"
+        assert all(row.delivery_state == "revoked" for row in rows[1:])
+        assert rows[0].token_hash == hash_invitation_secret(new_secret)
+    finally:
+        db.close()
+
+    old_states = [
+        client.post(
+            "/api/simple/recording-sessions/permissions/access",
+            json={"token": secret},
+        ).json()
+        for secret in old_secrets
+    ]
+    assert old_states[0]["reason"] == "invitation not found"
+    assert [state["reason"] for state in old_states[1:]] == [
+        "revoked",
+        "revoked",
+    ]
+    assert client.post(
+        "/api/simple/recording-sessions/permissions/access",
+        json={"token": new_secret},
+    ).json()["valid"] is True
+
+
+def test_already_authorized_recipient_gets_bearer_free_link_and_email_continues(
+    client,
+    two_orgs_email,
+    monkeypatch,
+):
+    _, User, _, SessionLocal, _, SessionCollaborator = _models()
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        recipient = User(
+            email=f"accepted-{suffix}@example.com",
+            username=f"accepted_{suffix}",
+            hashed_password=get_password_hash("Password123"),
+            is_active=True,
+            is_verified=True,
+        )
+        db.add(recipient)
+        db.flush()
+        row = SessionCollaborator(
+            session_id=two_orgs_email["sess_a_db_id"],
+            user_id=recipient.id,
+            email=recipient.email,
+            access_level="read",
+            token=uuid.uuid4(),
+            token_hash=None,
+            token_version=1,
+            accepted_at=None,
+            delivery_state="sent",
+        )
+        db.add(row)
+        db.commit()
+        recipient_email = recipient.email
+        row_id = row.id
+    finally:
+        db.close()
+
+    # This path needs no new bearer, so it remains usable with issuance off.
+    monkeypatch.delenv("MEETING_INVITE_V2_ISSUANCE_ENABLED", raising=False)
+    sends: list[dict[str, Any]] = []
+
+    def fake_postmark(**kwargs):
+        sends.append(kwargs)
+        return {"ok": True, "message_id": "stub"}
+
+    with (
+        patch("api.session_emails._build_attachments", return_value=[]),
+        patch("api.session_emails._postmark_send", side_effect=fake_postmark),
+    ):
+        response = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json={
+                "additional_recipients": [recipient_email],
+                "include": ["summary_pdf", "link"],
+            },
+            headers=two_orgs_email["headers"],
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"sent": 1, "skipped": 0, "failures": []}
+    assert len(sends) == 1
+    html_body = sends[0]["html_body"]
+    assert (
+        f"https://meetingops.test/sessions/{two_orgs_email['sess_a_public_id']}"
+        in html_body
+    )
+    assert "invite-bootstrap" not in html_body
+    assert "#token=" not in html_body
+
+    db = SessionLocal()
+    try:
+        row = db.query(SessionCollaborator).filter(
+            SessionCollaborator.id == row_id
+        ).one()
+        assert row.token_hash is None
+        assert row.delivery_state == "accepted"
+        assert row.delivery_failure_reason is None
+    finally:
+        db.close()
+
+
+def test_email_link_missing_public_url_is_persisted_without_provider_call(
+    client,
+    two_orgs_email,
+    monkeypatch,
+):
+    monkeypatch.delenv("MEETING_OPS_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("APP_PUBLIC_URL", raising=False)
+    email = f"missing-public-{uuid.uuid4().hex[:8]}@example.com"
+    with patch("api.session_emails._postmark_send") as sender:
+        response = client.post(
+            f"/api/simple/recording-sessions/{two_orgs_email['sess_a_public_id']}/email-attendees",
+            json={"additional_recipients": [email], "include": ["link"]},
+            headers=two_orgs_email["headers"],
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["sent"] == 0
+    assert response.json()["skipped"] == 1
+    assert response.json()["failures"][0]["reason"] == (
+        "public_url_not_configured"
+    )
+    sender.assert_not_called()
+
+    _, _, _, SessionLocal, _, SessionCollaborator = _models()
+    db = SessionLocal()
+    try:
+        row = db.query(SessionCollaborator).filter(
+            SessionCollaborator.session_id == two_orgs_email["sess_a_db_id"],
+            SessionCollaborator.email == email,
+        ).one()
+        assert row.delivery_state == "failed"
+        assert row.delivery_failure_reason == "public_url_not_configured"
+        assert row.token_hash is not None
     finally:
         db.close()

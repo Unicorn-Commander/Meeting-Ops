@@ -22,7 +22,18 @@ The bootstrap flow is:
    sessionStorage value, then posts it in JSON to
    `/api/simple/recording-sessions/permissions/redeem`.
 4. Redemption remains authenticated and binds only the matching invited
-   account. The database lookup hashes the presented secret.
+   account. Email-bound redemption requires a nonempty, verified matching
+   account email, then binds `user_id`; email text alone never authorizes a
+   meeting request. The database lookup hashes the presented secret and locks
+   the invitation row so the first binding is deterministic.
+
+Outbound invitation email additionally requires an absolute HTTPS public URL.
+Only explicit development/test environments may use HTTP, and then only on a
+loopback hostname. An invalid or missing public URL fails closed with the safe
+`public_url_not_configured` delivery state; the authenticated share UI may
+still turn a relative copy-once URL into a same-origin manual copy. SMTP uses
+STARTTLS with certificate validation for remote hosts. Plaintext SMTP is
+permitted only for loopback in an explicit development/test environment.
 
 The unicorncommander.ai deployment serves the SPA directly and uses the native
 OIDC start route; the same bootstrap selects that route by hostname. No proxy

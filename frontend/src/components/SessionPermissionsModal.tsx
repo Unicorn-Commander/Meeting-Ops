@@ -100,8 +100,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       setPermissions(data);
     } catch {
       setError('Network error loading permissions.');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -142,8 +143,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       }
     } catch {
       setError('Network error sending invite.');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const resendInvitation = async (collaboratorId: number) => {
@@ -168,8 +170,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       }
     } catch {
       setError('Network error resending invitation.');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const updateAccess = async (collaboratorId: number, level: AccessLevel) => {
@@ -192,8 +195,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       }
     } catch {
       setError('Network error updating access.');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const revokeCollaborator = async (collaboratorId: number) => {
@@ -215,8 +219,9 @@ export const SessionPermissionsModal: React.FC<Props> = ({
       }
     } catch {
       setError('Network error revoking access.');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const copyInviteLink = () => {

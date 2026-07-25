@@ -81,7 +81,8 @@ def upgrade() -> None:
             token_version = 1,
             delivery_state = CASE
                 WHEN revoked_at IS NOT NULL THEN 'revoked'
-                WHEN accepted_at IS NOT NULL THEN 'accepted'
+                WHEN user_id IS NOT NULL OR accepted_at IS NOT NULL
+                    THEN 'accepted'
                 WHEN expires_at IS NOT NULL AND expires_at <= now() THEN 'expired'
                 ELSE 'sent'
             END

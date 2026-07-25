@@ -19,6 +19,12 @@ from pydantic import BaseModel, EmailStr, Field
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
+from api.session_permissions import (
+    _consolidate_invitation_identity,
+    _effective_delivery_state,
+    _lock_invitation_parent,
+    _verified_user_for_email,
+)
 from database.database import get_db
 from auth.models import User
 from database.models import (
@@ -29,10 +35,13 @@ from database.models import (
 )
 from services.invitation_tokens import (
     INVITATION_TOKEN_VERSION,
+    INVITATION_ISSUANCE_UNAVAILABLE,
+    build_authenticated_session_url,
     build_invitation_url,
     generate_invitation_secret,
     hash_invitation_secret,
     invitation_resend_minimum_interval_seconds,
+    invitation_v2_issuance_enabled,
 )
 from sqlalchemy.orm import Session
 
@@ -101,41 +110,49 @@ def _resolve_link_for_email(
     response or recipient address.
     """
     normalized_email = email.strip().lower()
-    existing_rows = (
-        db.query(SessionCollaborator)
-        .filter(
-            SessionCollaborator.session_id == session.id,
-            SessionCollaborator.email == normalized_email,
-            SessionCollaborator.revoked_at.is_(None),
-        )
-        .order_by(SessionCollaborator.created_at.desc())
-        .all()
+    session = _lock_invitation_parent(db, session.id)
+    resolved_user = _verified_user_for_email(db, normalized_email)
+    existing = _consolidate_invitation_identity(
+        db,
+        session_id=session.id,
+        user_id=resolved_user.id if resolved_user else None,
+        email=normalized_email,
     )
     now = datetime.now(timezone.utc)
-    active_existing: Optional[SessionCollaborator] = None
-    for row in existing_rows:
-        if row.accepted_at is not None:
-            return None, None, "invitation_already_accepted"
-        if row.expires_at is not None:
-            expires_at = row.expires_at
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if expires_at <= now:
-                continue
-        active_existing = row
-        break
+    if existing and existing.user_id is not None:
+        try:
+            authenticated_url = build_authenticated_session_url(
+                session.session_id or session.id
+            )
+        except ValueError:
+            existing.delivery_failure_reason = "public_url_not_configured"
+            db.commit()
+            return None, existing.id, "public_url_not_configured"
+        existing.delivery_state = "accepted"
+        existing.delivery_failure_reason = None
+        db.commit()
+        return authenticated_url, existing.id, None
+    if existing and _effective_delivery_state(existing) == "accepted":
+        db.commit()
+        return None, existing.id, "invitation_already_accepted"
 
-    if active_existing and active_existing.last_delivery_attempt_at is not None:
-        last_attempt = active_existing.last_delivery_attempt_at
+    if not invitation_v2_issuance_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=INVITATION_ISSUANCE_UNAVAILABLE,
+        )
+
+    if existing and existing.last_delivery_attempt_at is not None:
+        last_attempt = existing.last_delivery_attempt_at
         if last_attempt.tzinfo is None:
             last_attempt = last_attempt.replace(tzinfo=timezone.utc)
         if last_attempt + timedelta(
             seconds=invitation_resend_minimum_interval_seconds()
         ) > now:
-            return None, None, "invitation_attempted_recently"
+            db.commit()
+            return None, existing.id, "invitation_attempted_recently"
 
     secret = generate_invitation_secret()
-    existing = active_existing
     if existing is None:
         existing = SessionCollaborator(
             session_id=session.id,
@@ -161,9 +178,19 @@ def _resolve_link_for_email(
         ) + 1
         if existing.accepted_at is None:
             existing.delivery_state = "pending"
+
+    try:
+        invitation_url = build_invitation_url(secret, require_public=True)
+    except ValueError:
+        existing.delivery_state = "failed"
+        existing.delivery_failure_reason = "public_url_not_configured"
+        db.commit()
+        db.refresh(existing)
+        return None, existing.id, "public_url_not_configured"
+
     db.commit()
     db.refresh(existing)
-    return build_invitation_url(secret), existing.id, None
+    return invitation_url, existing.id, None
 
 
 def _build_html(
@@ -472,7 +499,10 @@ async def email_attendees(
                 .first()
             )
             if collaborator and collaborator.revoked_at is None:
-                if collaborator.accepted_at is not None:
+                if (
+                    collaborator.user_id is not None
+                    or collaborator.accepted_at is not None
+                ):
                     collaborator.delivery_state = "accepted"
                 else:
                     collaborator.delivery_state = (

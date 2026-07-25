@@ -19,12 +19,34 @@ during a bounded transition.
    ```
 
    The result must be zero.
-4. Deploy the hash-aware application. New v2 invitation secrets are never
-   stored: the required legacy `token` column receives an unrelated random
-   compatibility UUID, while only the real secret's digest is persisted.
-5. Confirm an existing v1 link still resolves through its hash and a newly
+4. Deploy the hash-aware application with
+   `MEETING_INVITE_V2_ISSUANCE_ENABLED=false` on every API instance. Existing
+   v1 redemption remains available, but external create, resend, and email-link
+   minting fail with a controlled unavailable response. No v2 secret is minted
+   during mixed-version service.
+5. Drain every pre-053 API instance before enabling issuance. Do not use a
+   rolling flag flip while an old application can still receive traffic.
+6. Set `MEETING_INVITE_V2_ISSUANCE_ENABLED=true` only on the fully hash-aware
+   fleet. New v2 invitation secrets are never stored: the required legacy
+   `token` column receives an unrelated random compatibility UUID, while only
+   the real secret's digest is persisted.
+7. Confirm an existing v1 link still resolves through its hash and a newly
    created v2 row cannot be redeemed with either its digest or compatibility
    UUID.
+
+### Enable order
+
+For single-instance staging, apply 053, stop the old API, start the new API
+with issuance off, verify v1 redemption, then restart that one API with
+issuance enabled and exercise one controlled v2 invitation. There must never
+be an old API process alongside the enabled process.
+
+For production blue/green, apply 053 first, bring up the green hash-aware
+fleet with issuance off, move traffic, and drain/stop every blue API instance.
+Verify the old revision has zero serving processes before enabling issuance on
+green. New green instances may be restarted with the flag on only after that
+drain gate. Workers do not issue invitation secrets and do not satisfy the API
+drain check.
 
 Existing UUID links remain usable through their hashes until
 `2026-10-31T00:00:00Z`. `MEETING_INVITE_LEGACY_TOKEN_CUTOFF` may shorten but
@@ -75,9 +97,23 @@ early.
 
 Before the separately approved scrub, downgrade revision `053` and return to
 the old application; original v1 UUIDs are still present. Any v2 invitations
-created by the new application use unrelated compatibility UUIDs and must be
-reissued after an application rollback. Existing grants and workspace
-memberships remain intact.
+created by the new application use unrelated compatibility UUIDs. Before an
+application rollback, turn issuance off and check for active v2 bearer grants:
+
+```sql
+SELECT id, session_id, user_id, delivery_state
+FROM session_collaborators
+WHERE token_version = 2
+  AND token_hash IS NOT NULL
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now());
+```
+
+The result must be reviewed. Revoke those v2 invitations and explicitly
+reissue required access through the rollback-compatible application; never
+send replacements automatically. A v2 compatibility UUID is not the bearer
+secret and must not be substituted into a replacement link. Existing direct
+user grants and workspace memberships remain intact.
 
 ```bash
 cd backend

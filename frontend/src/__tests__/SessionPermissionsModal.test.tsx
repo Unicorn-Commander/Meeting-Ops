@@ -174,4 +174,53 @@ describe('SessionPermissionsModal', () => {
     });
     expect(screen.queryByText('rotated-secret-once')).not.toBeInTheDocument();
   });
+
+  it('always clears loading and preserves the load error on an HTTP failure', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) =>
+        key === 'access_token'
+          ? 'test-token'
+          : key === 'meetingops.activeOrg'
+            ? 'magic-unicorn'
+            : null,
+      ),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/auth/me')) return jsonResponse(ME);
+        if (url.endsWith('/permissions')) {
+          return jsonResponse({ detail: 'permission service unavailable' }, 503);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <AuthProvider>
+            <OrgProvider>
+              <SessionPermissionsModal
+                sessionId="42"
+                isOpen
+                onClose={vi.fn()}
+              />
+            </OrgProvider>
+          </AuthProvider>
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      await screen.findByText(/Failed to load permissions \(HTTP 503\)/i),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('Loading permissions…')).not.toBeInTheDocument();
+    });
+  });
 });

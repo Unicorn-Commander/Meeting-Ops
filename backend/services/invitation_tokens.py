@@ -7,14 +7,18 @@ endpoints, or written to the database.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import secrets
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 
 INVITATION_TOKEN_VERSION = 2
 LEGACY_INVITATION_TOKEN_VERSION = 1
+INVITATION_ISSUANCE_UNAVAILABLE = (
+    "Invitation link issuance is temporarily unavailable"
+)
 
 # Legacy UUID links migrated by revision 053 remain usable only during this
 # transition.  An environment value may shorten the window, but cannot extend
@@ -27,6 +31,21 @@ LEGACY_INVITATION_MAX_CUTOFF = datetime(
 def generate_invitation_secret() -> str:
     """Return a URL-safe secret with 256 bits of entropy."""
     return secrets.token_urlsafe(32)
+
+
+def invitation_v2_issuance_enabled() -> bool:
+    """Return whether this process may mint a new v2 bearer secret.
+
+    The default is deliberately off. Operators enable this only after every
+    old API process has drained, so no old process can mistake a compatibility
+    UUID for the real bearer value during a mixed-version rollout.
+    """
+    return (
+        os.getenv("MEETING_INVITE_V2_ISSUANCE_ENABLED", "")
+        .strip()
+        .casefold()
+        in {"1", "true", "yes", "on"}
+    )
 
 
 def hash_invitation_secret(secret: str) -> str:
@@ -77,16 +96,104 @@ def legacy_invitation_is_allowed(
     return current.astimezone(timezone.utc) < cutoff
 
 
-def build_invitation_url(secret: str) -> str:
+def _is_development_environment() -> bool:
+    environment = (
+        os.getenv("ENVIRONMENT", "").strip()
+        or os.getenv("APP_ENV", "").strip()
+    ).casefold()
+    return environment in {"dev", "development", "local", "test"}
+
+
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.rstrip(".").casefold()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def invitation_delivery_url_is_allowed(url: str) -> bool:
+    """Whether an invitation URL is safe to place in outbound email."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        not parsed.hostname
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+    ):
+        return False
+    if parsed.scheme.casefold() == "https":
+        return port is None or 1 <= port <= 65535
+    return (
+        parsed.scheme.casefold() == "http"
+        and _is_development_environment()
+        and _is_loopback_hostname(parsed.hostname)
+        and (port is None or 1 <= port <= 65535)
+    )
+
+
+def _configured_public_base() -> str:
+    configured_base = (
+        os.getenv("MEETING_OPS_PUBLIC_URL", "").strip()
+        or os.getenv("APP_PUBLIC_URL", "").strip()
+        or ""
+    ).rstrip("/")
+    if not configured_base:
+        return ""
+    try:
+        parsed = urlsplit(configured_base)
+    except ValueError:
+        return ""
+    if parsed.query or parsed.fragment:
+        return ""
+    return (
+        configured_base
+        if invitation_delivery_url_is_allowed(configured_base)
+        else ""
+    )
+
+
+def build_invitation_url(
+    secret: str,
+    *,
+    require_public: bool = False,
+) -> str:
     """Build a link whose secret stays in the browser fragment.
 
     URL fragments are not sent in HTTP request lines, avoiding disclosure in
     reverse-proxy access logs.  The SPA posts the secret in a JSON body.
     """
-    base = (
-        os.getenv("MEETING_OPS_PUBLIC_URL", "").strip()
-        or os.getenv("APP_PUBLIC_URL", "").strip()
-        or ""
-    ).rstrip("/")
+    configured_base = _configured_public_base()
     suffix = f"/invite-bootstrap.html#token={quote(secret, safe='')}"
-    return f"{base}{suffix}" if base else suffix
+    candidate = f"{configured_base}{suffix}" if configured_base else suffix
+    if invitation_delivery_url_is_allowed(candidate):
+        return candidate
+    if require_public:
+        raise ValueError("public_url_not_configured")
+    # Manual copy in the authenticated UI may safely resolve a relative URL
+    # against its own origin even when outbound email delivery is disabled.
+    return suffix
+
+
+def build_authenticated_session_url(session_id: str | int) -> str:
+    """Build a validated, bearer-free URL for an already-authorized user."""
+    configured_base = _configured_public_base()
+    suffix = f"/sessions/{quote(str(session_id), safe='')}"
+    candidate = f"{configured_base}{suffix}" if configured_base else suffix
+    if not invitation_delivery_url_is_allowed(candidate):
+        raise ValueError("public_url_not_configured")
+    return candidate
+
+
+def smtp_plaintext_is_allowed(hostname: str) -> bool:
+    """Permit plaintext SMTP only to loopback in an explicit dev/test env."""
+    return _is_development_environment() and _is_loopback_hostname(hostname)
