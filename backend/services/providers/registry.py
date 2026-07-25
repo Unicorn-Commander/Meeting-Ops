@@ -38,8 +38,8 @@ DEFAULT_INFINITY_RERANKER_ENDPOINT = (
     or os.getenv("INFINITY_ENDPOINT")
     or "http://unicorn-infinity-proxy:8086/v1"
 )
-DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "BAAI/bge-m3"
-DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL") or "BAAI/bge-reranker-v2-m3"
+DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL") or "Qwen/Qwen3-Reranker-0.6B"
 
 
 class ProviderRegistry:

@@ -2,7 +2,8 @@
 Semantic Search Service — Hybrid (Dense + Sparse BM25)
 Vector-based meeting search using Qdrant.
 
-Dense embeddings run on the shared Infinity server (BAAI/bge-m3, 1024-dim),
+Dense embeddings run on the shared Infinity server (Qwen3-Embedding-0.6B,
+1024-dim),
 consistent with the rest of the UC suite — NOT a local fastembed model. Sparse
 BM25 vectors stay local (fastembed, cheap). Queries use Reciprocal Rank Fusion
 (RRF) to combine semantic similarity with keyword relevance, and the RAG path
@@ -38,7 +39,7 @@ COLLECTION_NAME = "meeting_transcripts"
 # the UC apps) — NOT a local fastembed model. The vector dimension is PROBED
 # from Infinity at collection-create time so a model swap can't desync the
 # Qdrant collection; DENSE_DIM is only the fallback if the probe fails.
-DENSE_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")  # Infinity, 1024-dim
+DENSE_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")  # Infinity, 1024-dim
 DENSE_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))        # probe fallback only
 SPARSE_MODEL = "Qdrant/bm25"             # BM25 sparse stays local (fastembed, cheap)
 
