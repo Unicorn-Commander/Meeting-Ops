@@ -11,6 +11,12 @@ interface RecentActionItemsProps {
   sessions: DashboardSession[];
   loading: boolean;
   detailsLoading: boolean;
+  /** Dashboard defaults keep this compact; the dedicated workspace expands it. */
+  limit?: number;
+  status?: string;
+  title?: string;
+  description?: string;
+  showViewAll?: boolean;
 }
 
 interface ActionItemRow {
@@ -31,7 +37,7 @@ interface ActionItemRow {
   project_ops_retry_count?: number;
 }
 
-const LIMIT = 10;
+const DEFAULT_LIMIT = 10;
 
 /**
  * Reads from the new /api/action-items endpoint (first-class table).
@@ -47,6 +53,11 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
   sessions,
   loading,
   detailsLoading,
+  limit = DEFAULT_LIMIT,
+  status = 'todo',
+  title = 'Recent action items',
+  description = 'Checkbox marks done here. Open the item to review it in the meeting.',
+  showViewAll = true,
 }) => {
   const { activeOrganization } = useOrg();
   const [rows, setRows] = useState<ActionItemRow[]>([]);
@@ -65,10 +76,9 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
     if (!activeOrganization?.slug) return;
     setFetchState((prev) => (prev === 'ready' ? 'ready' : 'loading'));
     try {
-      const res = await fetch(
-        `${config.apiBaseUrl}/api/action-items?status=todo&limit=${LIMIT}`,
-        { headers: buildHeaders() },
-      );
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (status) query.set('status', status);
+      const res = await fetch(`${config.apiBaseUrl}/api/action-items?${query}`, { headers: buildHeaders() });
       if (!res.ok) {
         setFetchState('error');
         return;
@@ -79,7 +89,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
     } catch {
       setFetchState('error');
     }
-  }, [activeOrganization?.slug, buildHeaders]);
+  }, [activeOrganization?.slug, buildHeaders, limit, status]);
 
   useEffect(() => {
     void fetchRows();
@@ -103,8 +113,8 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
       const tb = b.sessionCreatedAt ? new Date(b.sessionCreatedAt).getTime() : 0;
       return tb - ta;
     });
-    return out.slice(0, LIMIT);
-  }, [fetchState, rows.length, sessions]);
+    return out.slice(0, limit);
+  }, [fetchState, limit, rows.length, sessions]);
 
   const completeItem = useCallback(
     async (id: number) => {
@@ -144,18 +154,20 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
       <header className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">
-            Recent action items
+            {title}
           </h2>
           <p className="mt-1 text-[11px] normal-case tracking-normal text-zinc-500">
-            Checkbox marks done here. Open the item to review it in the meeting.
+            {description}
           </p>
         </div>
-        <Link
-          to="/sessions"
-          className="text-xs font-medium text-fuchsia-300 transition hover:text-fuchsia-200"
-        >
-          View all
-        </Link>
+        {showViewAll && (
+          <Link
+            to="/action-items"
+            className="text-xs font-medium text-fuchsia-300 transition hover:text-fuchsia-200"
+          >
+            View all
+          </Link>
+        )}
       </header>
 
       <div className="divide-y divide-zinc-800/80">
@@ -172,6 +184,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
         {showRows &&
           rows.map((item) => {
             const busy = updatingIds.has(item.id);
+            const isDone = item.status === 'done';
             const lastSynced = formatLifecycleTimestamp(item.project_ops_last_synced_at);
             return (
               <div key={item.id} className="px-4 py-3">
@@ -179,13 +192,15 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                   <button
                     type="button"
                     onClick={() => completeItem(item.id)}
-                    disabled={busy}
+                    disabled={busy || isDone}
                     className="mt-0.5 flex-shrink-0 text-amber-300 transition hover:text-emerald-400 disabled:opacity-40"
-                    title="Mark as done"
-                    aria-label="Mark action item as done"
+                    title={isDone ? 'Completed' : 'Mark as done'}
+                    aria-label={isDone ? 'Action item completed' : 'Mark action item as done'}
                   >
                     {busy ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : isDone ? (
+                      <CheckSquare className="h-4 w-4 text-emerald-400" />
                     ) : (
                       <Square className="h-4 w-4" />
                     )}

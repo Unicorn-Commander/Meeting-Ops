@@ -19,6 +19,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 // graph.
 const LiveRecording = lazy(() => import('./pages/LiveRecording'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const ActionItems = lazy(() => import('./pages/ActionItems'));
 const RAGChat = lazy(() => import('./pages/RAGChat'));
 const DigestsPage = lazy(() => import('./pages/Digests'));
 const KnowledgeGraph = lazy(() => import('./pages/KnowledgeGraph'));
@@ -211,6 +212,7 @@ function SimplifiedNavigation({
     { path: '/record', label: 'Record', icon: '🎙️', primary: true },
     { path: '/dashboard', label: 'Dashboard', icon: '🏠' },
     { path: '/sessions', label: 'Sessions', icon: '📁' },
+    { path: '/action-items', label: 'Action items', icon: '✅' },
     { path: '/import', label: 'Import / Export', icon: FolderUp },
     { path: '/local-sessions', label: 'Local Sessions', icon: Lock },
     { path: '/rag', label: 'AI Chat', icon: '💬' },
@@ -590,6 +592,11 @@ export function AppRouterSimplified() {
       <Route path="/sessions" element={
         <ProtectedRoute>
           <Sessions />
+        </ProtectedRoute>
+      } />
+      <Route path="/action-items" element={
+        <ProtectedRoute>
+          <ActionItems />
         </ProtectedRoute>
       } />
       <Route path="/import" element={
