@@ -19,6 +19,31 @@ from database.database import get_db
 
 logger = logging.getLogger(__name__)
 
+
+_SENSITIVE_SETTING_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+)
+
+
+def _redact_setting_value_for_log(key: str, value: Any) -> Any:
+    """Keep arbitrary admin-managed setting values out of application logs.
+
+    Settings are extensible, so an integration credential can be stored under
+    a key unknown to this module.  The value is still stored and returned to
+    the authorized settings workflow; only diagnostic logs are redacted.
+    """
+    normalized_key = str(key).lower().replace("-", "_")
+    if any(part in normalized_key for part in _SENSITIVE_SETTING_KEY_PARTS):
+        return "[REDACTED]"
+    return value
+
 class SettingsManager:
     """Manages application settings and configuration"""
     
@@ -146,7 +171,10 @@ class SettingsManager:
                     try:
                         display_value = json.loads(setting.value)
                     except json.JSONDecodeError:
-                        logger.warning(f"Could not decode JSON for {setting.key}: {setting.value}")
+                        logger.warning(
+                            "Could not decode JSON setting %s",
+                            setting.key,
+                        )
                         display_value = [] # Default to empty list on error
 
                 result[setting.category][key_name] = {
@@ -205,7 +233,11 @@ class SettingsManager:
             if key in self.cached_settings:
                 del self.cached_settings[key]
             
-            logger.info(f"📝 Updated setting: {key} = {value}")
+            logger.info(
+                "Updated setting: %s = %s",
+                key,
+                _redact_setting_value_for_log(key, value),
+            )
             return True
         except Exception as e:
             logger.error(f"Error updating setting {key}: {e}")

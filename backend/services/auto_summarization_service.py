@@ -76,6 +76,46 @@ def _load_session_transcript(session_id: str) -> str:
     return ""
 
 
+def _persist_final_summary(session_id: str, final_summary: Dict[str, Any]) -> bool:
+    """Persist a final summary on the canonical recording-session row.
+
+    Auto-summarization used to write to a legacy in-memory ``sessions`` map
+    that no longer exists.  That NameError was caught by the broad outer
+    handler in ``generate_final_summary``, making a successfully generated
+    summary silently disappear.  Keep the write adjacent to the canonical
+    transcript read and make the commit result explicit to callers.
+    """
+    try:
+        from database.database import SessionLocal
+        from database.models import RecordingSession
+
+        db = SessionLocal()
+        try:
+            session = (
+                db.query(RecordingSession)
+                .filter(RecordingSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                logger.warning(
+                    "Cannot persist final summary: recording session %s was not found",
+                    session_id,
+                )
+                return False
+
+            session.final_summary = final_summary
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Could not persist final summary for session %s", session_id)
+        return False
+
+
 _SUMMARY_PROMPTS = {
     "executive": (
         "Create an executive summary with:\n"
@@ -555,8 +595,15 @@ class AutoSummarizationService:
                 logger.error(f"Error generating AI final summary: {e}")
                 final_summary["summary"] = "[FINAL SUMMARY] Meeting completed. Full transcript available."
             
-            # Store final summary
-            sessions[session_id]["final_summary"] = final_summary
+            # Store on the canonical RecordingSession row.  Do not report a
+            # completed final summary to callers until it is durable; callers
+            # use the returned payload to update sockets/UI while subsequent
+            # reads use this database field.
+            persisted = await asyncio.to_thread(
+                _persist_final_summary, session_id, final_summary
+            )
+            if not persisted:
+                return None
             
             # Clean up history for this session
             self.summary_history.pop(session_id, None)

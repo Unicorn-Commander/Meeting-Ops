@@ -125,6 +125,37 @@ _patch_json_processors(ARRAY)
 import pytest
 
 
+@pytest.fixture
+def canonical_db_schema():
+    """Prepare canonical ORM tables for focused service tests without FastAPI."""
+    from auth.models import Organization
+    from database.database import SessionLocal, engine
+    from database.models import Base
+    from database.models_rooms import (  # noqa: F401 - registers FK targets
+        ConferenceRoom,
+        RoomAcl,
+        RoomAudioSource,
+        RoomPairingCode,
+    )
+
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        org = db.query(Organization).filter(Organization.slug == "summary-test-org").first()
+        if not org:
+            org = Organization(
+                name="Summary Test Org",
+                slug="summary-test-org",
+                is_active=True,
+            )
+            db.add(org)
+            db.commit()
+            db.refresh(org)
+        yield org.id
+    finally:
+        db.close()
+
+
 def pytest_configure(config):
     """Ensure DATABASE_URL points to test SQLite before any imports."""
     os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
