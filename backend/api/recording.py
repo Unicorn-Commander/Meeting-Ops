@@ -365,6 +365,16 @@ def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) 
         "final_summary": session.final_summary,
         "ai_insights": session.ai_insights,
         "summary": session.summary,
+        "knowledge_graph": {
+            "status": getattr(session, "brigade_sync_status", None) or (
+                "synced" if getattr(session, "brigade_graph_node_id", None) else "pending"
+            ),
+            "synced_at": session.brigade_synced_at.isoformat() if getattr(session, "brigade_synced_at", None) else None,
+            "attempted_at": session.brigade_sync_attempted_at.isoformat() if getattr(session, "brigade_sync_attempted_at", None) else None,
+            "error": getattr(session, "brigade_sync_error", None),
+            "attempt_count": getattr(session, "brigade_sync_attempt_count", 0) or 0,
+            "retryable": (getattr(session, "brigade_sync_status", None) or "pending") in {"pending", "failed"},
+        },
         # True only when a duplicate start() with the same client_session_key
         # was de-duplicated to this already-existing row (see start_always_on).
         "idempotent_reuse": idempotent_reuse,
@@ -2520,6 +2530,39 @@ def _chunk_seq_from_filename(path: Path) -> int | None:
         return int(path.stem)
     except (TypeError, ValueError):
         return None
+
+
+@router.post("/sessions/{session_id}/knowledge-graph/retry")
+async def retry_knowledge_graph_sync(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Explicitly retry the idempotent Brigade projection for one completed meeting.
+
+    This never reprocesses audio or changes the meeting's completion state.  It
+    is deliberately synchronous so the caller gets an honest graph status and
+    error immediately; the underlying Brigade MERGE writes make repeat clicks
+    safe.
+    """
+    session = _find_session(db, session_id, active_org.organization.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status != "completed":
+        raise HTTPException(status_code=409, detail="Knowledge graph sync is available after the meeting completes")
+
+    from services.brigade_writer import write_meeting_to_brigade
+
+    result = await write_meeting_to_brigade(session.id, db, completion_mode="retry")
+    db.refresh(session)
+    payload = _session_payload(session)
+    return {
+        "ok": result.ok,
+        "mode": result.mode,
+        "detail": result.detail,
+        "knowledge_graph": payload["knowledge_graph"],
+    }
 
 
 async def _sha256_of_chunk_files(paths: list[Path]) -> str:

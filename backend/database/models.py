@@ -135,6 +135,13 @@ class RecordingSession(Base):
     brigade_synced_at = Column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Durable write-state for the optional Brigade knowledge-graph projection.
+    # A graph outage must never fail a meeting, but it must be observable and
+    # explicitly retryable rather than looking like an empty graph forever.
+    brigade_sync_status = Column(String(20), nullable=True, index=True)
+    brigade_sync_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    brigade_sync_error = Column(String(500), nullable=True)
+    brigade_sync_attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
     # Durable object-storage (Garage) location for this session's canonical
     # audio (alembic 031). Mirrors the SessionAttachment storage pattern:
     #   audio_storage_backend ∈ 'garage' | 'local' | NULL
@@ -164,6 +171,11 @@ class RecordingSession(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "duration": self.duration,
             "status": self.status,
+            "brigade_sync_status": self.brigade_sync_status,
+            "brigade_synced_at": self.brigade_synced_at.isoformat() if self.brigade_synced_at else None,
+            "brigade_sync_attempted_at": self.brigade_sync_attempted_at.isoformat() if self.brigade_sync_attempted_at else None,
+            "brigade_sync_error": self.brigade_sync_error,
+            "brigade_sync_attempt_count": self.brigade_sync_attempt_count,
             "extra_data": self.extra_data
         }
 

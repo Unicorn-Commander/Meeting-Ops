@@ -217,6 +217,14 @@ interface Session {
   brigade_graph_node_id?: string | null;
   brigade_synced_at?: string | null;
   brigade_synced?: boolean;
+  knowledge_graph?: {
+    status: 'pending' | 'syncing' | 'synced' | 'failed' | 'disabled' | string;
+    synced_at?: string | null;
+    attempted_at?: string | null;
+    error?: string | null;
+    attempt_count?: number;
+    retryable?: boolean;
+  };
   // v3.36 duplicate detection: other org members' copies of this same
   // meeting (overlapping recordings). Optional — older payloads and
   // local-only sessions won't carry it; empty list when none.
@@ -492,6 +500,7 @@ export const SessionDetails: React.FC = () => {
     project_slug: null,
   });
   const [savingProjectLink, setSavingProjectLink] = useState(false);
+  const [retryingKnowledgeGraph, setRetryingKnowledgeGraph] = useState(false);
 
   // TTS state — single-voice "listen to summary" + multi-voice podcast
   const [ttsProvider, setTtsProvider] = useState<{ name: string; supports_podcast: boolean } | null>(null);
@@ -944,6 +953,27 @@ export const SessionDetails: React.FC = () => {
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
     return headers;
+  };
+
+  const retryKnowledgeGraphSync = async () => {
+    const targetSession = String(session?.id || sessionId || '').trim();
+    if (!targetSession || targetSession.startsWith('local-')) return;
+    setRetryingKnowledgeGraph(true);
+    try {
+      const response = await fetch(
+        `${config.apiUrl}/api/recordings/sessions/${encodeURIComponent(targetSession)}/knowledge-graph/retry`,
+        { method: 'POST', headers: participantHeaders() },
+      );
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(formatBackendError(result, response.status, 'Knowledge graph retry failed'));
+      setSession((current) => current ? { ...current, knowledge_graph: result.knowledge_graph, brigade_synced: result.knowledge_graph?.status === 'synced' } : current);
+      if (result.ok) toast.success('Knowledge graph synced.');
+      else toast.error(result.detail || 'Knowledge graph sync did not complete.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Knowledge graph retry failed');
+    } finally {
+      setRetryingKnowledgeGraph(false);
+    }
   };
 
   const refreshProjectOpsLifecycle = async () => {
@@ -2965,7 +2995,7 @@ export const SessionDetails: React.FC = () => {
                 graph routing remains server-side. The embedded viewer lands in
                 Phase 2 of the integration; for now this is a
                 lightweight "open in Brigade" affordance. */}
-            {session.brigade_synced && brigadeIntegrationEnabled && (
+            {(session.knowledge_graph?.status === 'synced' || (!session.knowledge_graph && session.brigade_synced)) && brigadeIntegrationEnabled && (
               <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
                 <div className="flex items-start gap-3">
                   <span className="font-semibold text-indigo-900">
@@ -2982,6 +3012,29 @@ export const SessionDetails: React.FC = () => {
                 >
                   View in Knowledge Graph
                 </a>
+              </div>
+            )}
+            {brigadeIntegrationEnabled && session.knowledge_graph?.status === 'failed' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <span className="font-semibold text-amber-900">Knowledge graph needs a retry.</span>
+                  <span className="ml-2 text-amber-800">
+                    Your meeting is complete; only its graph projection did not finish.
+                  </span>
+                  {session.knowledge_graph.error && (
+                    <p className="mt-1 text-xs text-amber-700 truncate" title={session.knowledge_graph.error}>
+                      {session.knowledge_graph.error}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={retryKnowledgeGraphSync}
+                  disabled={retryingKnowledgeGraph}
+                  className="px-3 py-1.5 bg-amber-700 text-white text-xs font-medium rounded-md hover:bg-amber-800 disabled:opacity-60 whitespace-nowrap"
+                >
+                  {retryingKnowledgeGraph ? 'Retrying…' : 'Retry graph sync'}
+                </button>
               </div>
             )}
             {/* v3.19 upgrade copy (audit §5). When the user doesn't have

@@ -404,6 +404,28 @@ def _stamp_session_synced(
     db.commit()
 
 
+def _set_sync_state(
+    db: Session,
+    session: Any,
+    status: str,
+    *,
+    error: Optional[str] = None,
+    increment_attempt: bool = False,
+) -> None:
+    """Persist graph projection state without making it part of meeting success."""
+    session.brigade_sync_status = status
+    if increment_attempt:
+        session.brigade_sync_attempt_count = (session.brigade_sync_attempt_count or 0) + 1
+        session.brigade_sync_attempted_at = datetime.now(timezone.utc)
+    session.brigade_sync_error = error[:500] if error else None
+    if status == "disabled":
+        # Do not leave a stale graph read link around after an org opts out or
+        # the deployment removes the Brigade configuration.
+        session.brigade_graph_node_id = None
+        session.brigade_synced_at = None
+    db.commit()
+
+
 async def write_meeting_to_brigade(
     session_id: int,
     db: Session,
@@ -433,6 +455,7 @@ async def write_meeting_to_brigade(
     # the writer).
     from database.models import ActionItem, RecordingSession, SpeakerProfile, SpeakerSessionLink
 
+    session: Any = None
     try:
         session = (
             db.query(RecordingSession)
@@ -446,6 +469,10 @@ async def write_meeting_to_brigade(
             return BrigadeWriteResult(
                 ok=False, mode="error", detail="session not found"
             )
+
+        # The meeting can complete while this is writing; the durable status
+        # gives the UI and the retry endpoint an honest state either way.
+        _set_sync_state(db, session, "syncing", increment_attempt=True)
 
         org_id = session.organization_id
         if org_id is None:
@@ -473,7 +500,8 @@ async def write_meeting_to_brigade(
                 org_id,
                 session_id,
             )
-            return BrigadeWriteResult(ok=True, mode="noop")
+            _set_sync_state(db, session, "disabled")
+            return BrigadeWriteResult(ok=True, mode="noop", detail="Brigade integration disabled")
 
         target = _resolve_tenancy(
             org_id,
@@ -503,7 +531,7 @@ async def write_meeting_to_brigade(
             active_client = client
 
         try:
-            return await _write_all(
+            result = await _write_all(
                 db=db,
                 session=session,
                 org_id=org_id,
@@ -511,6 +539,13 @@ async def write_meeting_to_brigade(
                 client=active_client,
                 completion_mode=completion_mode,
             )
+            if result.mode == "noop":
+                _set_sync_state(db, session, "disabled")
+            elif result.ok:
+                _set_sync_state(db, session, "synced")
+            else:
+                _set_sync_state(db, session, "failed", error=result.detail or "Graph write failed")
+            return result
         finally:
             if owned_client:
                 await active_client.aclose()
@@ -523,6 +558,11 @@ async def write_meeting_to_brigade(
             session_id,
             exc,
         )
+        if session is not None:
+            try:
+                _set_sync_state(db, session, "failed", error=str(exc))
+            except Exception:  # noqa: BLE001
+                logger.exception("brigade_writer could not persist failed state session_id=%s", session_id)
         return BrigadeWriteResult(
             ok=False, mode="error", detail=str(exc)[:200]
         )
@@ -550,12 +590,19 @@ async def _write_all(
     meeting_props["tenancy_mode"] = target.mode
     meeting_props["completion_mode"] = completion_mode
 
-    meeting_res = await client.upsert_entity(
+    results: list[BrigadeWriteResult] = []
+
+    async def _write(operation: Any) -> BrigadeWriteResult:
+        result = await operation
+        results.append(result)
+        return result
+
+    meeting_res = await _write(client.upsert_entity(
         name=meeting_name,
         entity_type=ENTITY_TYPE_MEETING,
         properties=meeting_props,
         agent_id=target.agent_id,
-    )
+    ))
     # If the Meeting write fails, we still attempt children so a partial
     # graph is better than nothing. The reconciliation job will pick up
     # the gap by ``brigade_synced_at IS NULL``.
@@ -591,20 +638,20 @@ async def _write_all(
             continue
         seen_speaker_ids.add(speaker.id)
         speaker_name = _speaker_node_name(speaker.id)
-        await client.upsert_entity(
+        await _write(client.upsert_entity(
             name=speaker_name,
             entity_type=ENTITY_TYPE_SPEAKER,
             properties=_build_speaker_properties(speaker, org_id),
             agent_id=target.agent_id,
-        )
-        await client.upsert_edge(
+        ))
+        await _write(client.upsert_edge(
             from_name=meeting_name,
             from_type=ENTITY_TYPE_MEETING,
             relationship=REL_HAS_SPEAKER,
             to_name=speaker_name,
             to_type=ENTITY_TYPE_SPEAKER,
             agent_id=target.agent_id,
-        )
+        ))
 
     # ------------------------------------------------------------------
     # 3. Action items
@@ -618,31 +665,31 @@ async def _write_all(
     for item in action_items:
         owner_speaker_id = _match_owner_to_speaker(item.owner, speaker_profiles)
         action_name = _action_item_node_name(item.id)
-        await client.upsert_entity(
+        await _write(client.upsert_entity(
             name=action_name,
             entity_type=ENTITY_TYPE_ACTION_ITEM,
             properties=_build_action_item_properties(
                 item, org_id, owner_speaker_id
             ),
             agent_id=target.agent_id,
-        )
-        await client.upsert_edge(
+        ))
+        await _write(client.upsert_edge(
             from_name=meeting_name,
             from_type=ENTITY_TYPE_MEETING,
             relationship=REL_HAS_ACTION_ITEM,
             to_name=action_name,
             to_type=ENTITY_TYPE_ACTION_ITEM,
             agent_id=target.agent_id,
-        )
+        ))
         if owner_speaker_id is not None:
-            await client.upsert_edge(
+            await _write(client.upsert_edge(
                 from_name=action_name,
                 from_type=ENTITY_TYPE_ACTION_ITEM,
                 relationship=REL_ASSIGNED_TO,
                 to_name=_speaker_node_name(owner_speaker_id),
                 to_type=ENTITY_TYPE_SPEAKER,
                 agent_id=target.agent_id,
-            )
+            ))
 
     # ------------------------------------------------------------------
     # 4. Topics (LLM-derived from final_summary.bullets)
@@ -651,7 +698,7 @@ async def _write_all(
     topics = _extract_topics(summary)
     for idx, topic in enumerate(topics):
         topic_name = _topic_node_name(session.id, idx)
-        await client.upsert_entity(
+        await _write(client.upsert_entity(
             name=topic_name,
             entity_type=ENTITY_TYPE_TOPIC,
             properties={
@@ -661,15 +708,15 @@ async def _write_all(
                 "org_id": org_id,
             },
             agent_id=target.agent_id,
-        )
-        await client.upsert_edge(
+        ))
+        await _write(client.upsert_edge(
             from_name=meeting_name,
             from_type=ENTITY_TYPE_MEETING,
             relationship=REL_HAS_TOPIC,
             to_name=topic_name,
             to_type=ENTITY_TYPE_TOPIC,
             agent_id=target.agent_id,
-        )
+        ))
 
     # ------------------------------------------------------------------
     # 5. Decisions (LLM-derived from final_summary.decisions)
@@ -680,7 +727,7 @@ async def _write_all(
         decided_by_speaker_id = _match_owner_to_speaker(
             decision.get("decided_by"), speaker_profiles
         )
-        await client.upsert_entity(
+        await _write(client.upsert_entity(
             name=decision_name,
             entity_type=ENTITY_TYPE_DECISION,
             properties={
@@ -691,38 +738,46 @@ async def _write_all(
                 "org_id": org_id,
             },
             agent_id=target.agent_id,
-        )
-        await client.upsert_edge(
+        ))
+        await _write(client.upsert_edge(
             from_name=meeting_name,
             from_type=ENTITY_TYPE_MEETING,
             relationship=REL_HAS_DECISION,
             to_name=decision_name,
             to_type=ENTITY_TYPE_DECISION,
             agent_id=target.agent_id,
-        )
+        ))
         if decided_by_speaker_id is not None:
-            await client.upsert_edge(
+            await _write(client.upsert_edge(
                 from_name=decision_name,
                 from_type=ENTITY_TYPE_DECISION,
                 relationship=REL_DECIDED_BY,
                 to_name=_speaker_node_name(decided_by_speaker_id),
                 to_type=ENTITY_TYPE_SPEAKER,
                 agent_id=target.agent_id,
-            )
+            ))
 
     # ------------------------------------------------------------------
     # 6. Stamp the session as synced. Best-effort — failure here doesn't
     #    invalidate the graph writes; the next reconciliation pass will
     #    re-stamp (the writes themselves are MERGE-idempotent).
     # ------------------------------------------------------------------
+    failures = [result for result in results if not result.ok]
+    if failures:
+        detail = next((result.detail for result in failures if result.detail), "One or more graph writes failed")
+        logger.warning("brigade_writer partial write session_id=%s failures=%d detail=%s", session.id, len(failures), detail)
+        return BrigadeWriteResult(ok=False, mode="error", detail=detail)
+
+    # No-op is a configuration state, not a confirmed graph sync. Do not
+    # retain a stale graph link when an operator disables the integration.
+    if meeting_res.mode == "noop":
+        return BrigadeWriteResult(ok=True, mode="noop", detail="Brigade API is not configured")
+
     try:
         _stamp_session_synced(db, session, meeting_name)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "brigade_writer stamp_synced failed session_id=%s: %s",
-            session.id,
-            exc,
-        )
+        logger.warning("brigade_writer stamp_synced failed session_id=%s: %s", session.id, exc)
+        return BrigadeWriteResult(ok=False, mode="error", detail=f"graph write succeeded but status stamp failed: {exc}")
 
     return BrigadeWriteResult(
         ok=True,

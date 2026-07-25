@@ -482,6 +482,9 @@ def test_writes_meeting_speakers_actions_topics_decisions(client, monkeypatch):
         )
         assert sess.brigade_graph_node_id == f"meeting_ops_meeting_{session_id}"
         assert sess.brigade_synced_at is not None
+        assert sess.brigade_sync_status == "synced"
+        assert sess.brigade_sync_attempt_count == 1
+        assert sess.brigade_sync_error is None
     finally:
         db2.close()
 
@@ -604,6 +607,22 @@ def test_writer_swallows_brigade_errors(client, monkeypatch):
         db.close()
     assert result.ok is False  # error path, but no exception
     assert result.mode == "error"
+
+    # The meeting still completes independently, but the graph failure is
+    # durable and therefore visible/retryable rather than silently looking
+    # like it was never attempted.
+    from database.models import RecordingSession
+
+    db = SessionLocal()
+    try:
+        row = db.query(RecordingSession).filter(RecordingSession.id == session_id).one()
+        assert row.brigade_sync_status == "failed"
+        assert row.brigade_sync_attempt_count == 1
+        assert row.brigade_sync_attempted_at is not None
+        assert "simulated brigade entity failure" in (row.brigade_sync_error or "")
+        assert row.brigade_synced_at is None
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

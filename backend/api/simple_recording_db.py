@@ -1275,6 +1275,16 @@ async def get_session(
                 if getattr(session, "brigade_synced_at", None)
                 else None
             ),
+            "knowledge_graph": {
+                "status": getattr(session, "brigade_sync_status", None) or (
+                    "synced" if getattr(session, "brigade_graph_node_id", None) else "pending"
+                ),
+                "synced_at": session.brigade_synced_at.isoformat() if getattr(session, "brigade_synced_at", None) else None,
+                "attempted_at": session.brigade_sync_attempted_at.isoformat() if getattr(session, "brigade_sync_attempted_at", None) else None,
+                "error": getattr(session, "brigade_sync_error", None),
+                "attempt_count": getattr(session, "brigade_sync_attempt_count", 0) or 0,
+                "retryable": (getattr(session, "brigade_sync_status", None) or "pending") in {"pending", "failed"},
+            },
         }
         
     except HTTPException:
