@@ -1,10 +1,62 @@
 ## [Unreleased]
 
+## [3.58.0] - 2026-07-25
+
+### Added
+- **Contact-Ops / Customer-Ops meeting federation** — meetings can be projected to
+  federated cockpits behind a signed, cursor-paginated read API with per-summary
+  approval gating.
+- **Workspace action items view** — action items are surfaceable across a workspace
+  rather than only per session.
+- **Glitter Mane medical-visit integration surface** — an authenticated
+  machine-to-machine endpoint (`/api/integrations/medical-visits`) that accepts a
+  visit audio upload and reuses the Meeting-Ops STT + diarization pipeline. Gated by
+  JWT audience and an `azp` actor allowlist.
+- **Vector model provenance in Qdrant** — every indexed point now records
+  `dense_embedding_model`, `sparse_embedding_model`, `index_schema_version`,
+  `indexed_at`, and the measured `dense_embedding_dimension`. A collection can retain
+  points across a model change when dimensions happen to match; recording the model
+  beside each point makes that state observable and lets a reindex prove a workspace
+  is homogeneous before search relies on it.
+- **Knowledge-graph sync is observable and retryable** rather than fire-and-forget.
+
 ### Changed
-- Project-Ops action-item integration now uses a workspace-bound Brigade token
-  for proposal submission and read-only lifecycle refresh. Meeting-Ops
-  checkbox changes no longer propagate Task status; Project-Ops remains the
-  sole owner of its Task status.
+- Semantic search now defaults to the Qwen3 embedding and reranker models.
+  Deployments that pin `EMBEDDING_MODEL` / `RERANKER_MODEL` in their environment are
+  unaffected until they are migrated deliberately.
+- Project-Ops action-item integration now uses a workspace-bound Brigade token for
+  proposal submission and read-only lifecycle refresh. Meeting-Ops checkbox changes no
+  longer propagate Task status; Project-Ops remains the sole owner of its Task status.
+- Speaker processing (diarization + embeddings) routes to the dedicated Midboy2 P40;
+  STT remains on the separate Parakeet node. Opt-in so a generic `compose up` cannot
+  silently steal the routing.
+- The pre-record consent prompt has been removed.
+- Unidentified-speaker review flow streamlined.
+- Meeting workflows and white-label reports polished; stale meeting copy and
+  transcript logs removed.
+
+### Fixed
+- Summaries now produce usable meeting briefs and are persisted reliably; settings
+  logs no longer leak values.
+- Invalid reprocess audio is rejected before it reaches GPU work.
+- Summary approval controls align with session access rather than a separate,
+  looser check.
+- Meeting invitation secrets hardened (hashed storage + delivery tracking). v2
+  issuance ships dark behind `MEETING_INVITE_V2_ISSUANCE_ENABLED`; existing v1
+  redemption stays available.
+- Federation approval and projection gaps closed.
+- Project-Ops action lifecycle reconciled.
+
+### Performance
+- Frontend feature runtimes are deferred rather than loaded eagerly.
+
+### Migrations
+- `053_invitation_hashes_delivery`
+- `054_project_ops_action_lifecycle`
+- `055_federation_summary_approval`
+- `056_brigade_sync_observability`
+
+Chain is linear off `052_beta_invite_codes_emailed_at`; forward-only.
 
 ## [3.57.3] - 2026-07-17
 
