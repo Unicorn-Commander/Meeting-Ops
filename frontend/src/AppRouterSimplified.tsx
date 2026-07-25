@@ -1,46 +1,55 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useOrg } from './contexts/OrgContext';
 import { useRecording } from './contexts/RecordingContext';
 import { redirectToLogin } from './utils/loginRedirect';
 import { Login } from './components/Login';
-import LiveRecording from './pages/LiveRecording';
-import Dashboard from './pages/Dashboard';
-import RAGChat from './pages/RAGChat';
-import DigestsPage from './pages/Digests';
-import KnowledgeGraph from './pages/KnowledgeGraph';
-import { Sessions } from './pages/Sessions';
-import { SessionDetails } from './pages/SessionDetails';
-import { SpeakerLibrary } from './pages/SpeakerLibrary';
-import SettingsEnhanced from './pages/SettingsEnhanced';
 import { SharedSessionRedirect } from './components/SharedSessionRedirect';
-import { AgentDashboard } from './pages/admin/AgentDashboard';
-import CompsAdmin from './pages/admin/CompsAdmin';
-import Rooms from './pages/Rooms';
-import RoomSetupWizard from './pages/RoomSetupWizard';
-import RoomDetail from './pages/RoomDetail';
-import Help from './pages/Help';
-import LocalSessions from './pages/LocalSessions';
-import Import from './pages/Import';
-import StreamingTest from './pages/StreamingTest';
-import AdminBulkImport from './pages/AdminBulkImport';
-import Signup from './pages/Signup';
-import Pricing from './pages/Pricing';
-import Landing from './pages/Landing';
-import ForgotPassword from './pages/ForgotPassword';
-import ResetPassword from './pages/ResetPassword';
-import Founding100 from './pages/Founding100';
-import Contact from './pages/Contact';
-import Terms from './pages/Terms';
-import Privacy from './pages/Privacy';
-import AUP from './pages/AUP';
 import LegalFooter from './components/LegalFooter';
 import { useAlwaysOn } from './contexts/AlwaysOnContext';
 import { Menu, X, Circle, Clock, DoorOpen, ShieldCheck, HelpCircle, Lock, FolderUp, ChevronLeft, ChevronRight, LogOut, Rocket } from 'lucide-react';
 import { isAdminRole } from './utils/roles';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
+// Keep the authenticated shell cheap: recording, report, graph and model UI
+// are loaded only when their owning route opens. This matters even though the
+// model runtimes themselves are dynamic imports, because a static route import
+// makes every page component (and its feature dependencies) part of the boot
+// graph.
+const LiveRecording = lazy(() => import('./pages/LiveRecording'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const RAGChat = lazy(() => import('./pages/RAGChat'));
+const DigestsPage = lazy(() => import('./pages/Digests'));
+const KnowledgeGraph = lazy(() => import('./pages/KnowledgeGraph'));
+const Sessions = lazy(() => import('./pages/Sessions').then(({ Sessions }) => ({ default: Sessions })));
+const SessionDetails = lazy(() => import('./pages/SessionDetails').then(({ SessionDetails }) => ({ default: SessionDetails })));
+const SpeakerLibrary = lazy(() => import('./pages/SpeakerLibrary').then(({ SpeakerLibrary }) => ({ default: SpeakerLibrary })));
+const SettingsEnhanced = lazy(() => import('./pages/SettingsEnhanced'));
+const AgentDashboard = lazy(() => import('./pages/admin/AgentDashboard').then(({ AgentDashboard }) => ({ default: AgentDashboard })));
+const CompsAdmin = lazy(() => import('./pages/admin/CompsAdmin'));
+const Rooms = lazy(() => import('./pages/Rooms'));
+const RoomSetupWizard = lazy(() => import('./pages/RoomSetupWizard'));
+const RoomDetail = lazy(() => import('./pages/RoomDetail'));
+const Help = lazy(() => import('./pages/Help'));
+const LocalSessions = lazy(() => import('./pages/LocalSessions'));
+const Import = lazy(() => import('./pages/Import'));
+const StreamingTest = lazy(() => import('./pages/StreamingTest'));
+const AdminBulkImport = lazy(() => import('./pages/AdminBulkImport'));
+const Signup = lazy(() => import('./pages/Signup'));
+const Pricing = lazy(() => import('./pages/Pricing'));
+const Landing = lazy(() => import('./pages/Landing'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const Founding100 = lazy(() => import('./pages/Founding100'));
+const Contact = lazy(() => import('./pages/Contact'));
+const Terms = lazy(() => import('./pages/Terms'));
+const Privacy = lazy(() => import('./pages/Privacy'));
+const AUP = lazy(() => import('./pages/AUP'));
+
+function RouteLoadingFallback() {
+  return <div className="min-h-[12rem] animate-pulse p-6 text-sm text-zinc-500">Loading…</div>;
+}
 
 // Desktop sidebar collapsed-state persistence. Mobile open/close is
 // ephemeral (sidebarOpen), but the desktop collapse preference must
@@ -522,6 +531,7 @@ export function AppRouterSimplified() {
   }
 
   return (
+    <Suspense fallback={<RouteLoadingFallback />}>
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
@@ -708,5 +718,6 @@ export function AppRouterSimplified() {
 
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </Suspense>
   );
 }

@@ -11,7 +11,7 @@ import React, {
 import { config } from '../config';
 import { setRecordingActive } from '../utils/installFetchInterceptor';
 import { useOrg } from './OrgContext';
-import { createVadEngine, type AlwaysOnVadEngine, type VadAudioChunk, type VadStreamOpenResult } from '../utils/vadEngine';
+import type { AlwaysOnVadEngine, VadAudioChunk, VadStreamOpenResult } from '../utils/vadEngine';
 import {
   getAutoPreferUsb,
   getPreferredDeviceId,
@@ -89,6 +89,16 @@ import {
 import { useTierFeatures } from '../hooks/useTierFeatures';
 import { track } from '../utils/posthog';
 
+// vad-web pulls an ONNX runtime. It must not be part of the authenticated
+// shell merely because the recording provider is mounted there.
+let vadEngineModulePromise: Promise<typeof import('../utils/vadEngine')> | null = null;
+
+function loadVadEngineModule(): Promise<typeof import('../utils/vadEngine')> {
+  if (!vadEngineModulePromise) {
+    vadEngineModulePromise = import('../utils/vadEngine');
+  }
+  return vadEngineModulePromise;
+}
 
 // Localstorage key matches PipelineStatusPicker. Read at upload time so the
 // user can toggle Diarization on/off mid-session and the next chunk reflects
@@ -1147,8 +1157,9 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
     return (Date.now() - startedAtRef.current) / 1000;
   }, []);
 
-  const ensureEngine = useCallback(() => {
+  const ensureEngine = useCallback(async () => {
     if (!engineRef.current) {
+      const { createVadEngine } = await loadVadEngineModule();
       engineRef.current = createVadEngine({
         getElapsedSeconds: getElapsed,
         // In-recording silence-split is disabled ENTIRELY by not wiring an
@@ -1602,7 +1613,8 @@ export function AlwaysOnProvider({ children }: { children: ReactNode }) {
 
     try {
       await createSession();
-      await ensureEngine().start();
+      const engine = await ensureEngine();
+      await engine.start();
       // After the VAD engine boots we have an active MediaStream we can
       // share with the full-audio recorder.
       //

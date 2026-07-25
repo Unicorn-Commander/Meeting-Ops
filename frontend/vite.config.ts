@@ -112,5 +112,32 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src")
     }
-  }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep feature-only runtimes out of the bootstrap graph and give the
+        // long-lived vendor code stable cache boundaries. Route components are
+        // lazy in AppRouterSimplified; these names prevent Rollup from folding
+        // their dependencies back into an unrelated page chunk.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('@huggingface/transformers')) return 'transformers-runtime';
+          if (id.includes('onnxruntime-web')) return 'onnx-runtime';
+          if (id.includes('@mlc-ai/web-llm')) return 'web-llm-runtime';
+          if (/(react-force-graph|3d-force-graph|three|d3-|force-graph)/.test(id)) {
+            return 'knowledge-graph-runtime';
+          }
+          if (id.includes('jspdf')) return 'report-runtime';
+          if (id.includes('react-markdown') || id.includes('remark-')) return 'markdown-runtime';
+          if (id.includes('recharts')) return 'charts-runtime';
+          if (id.includes('lucide-react')) return 'icons-runtime';
+          if (id.includes('@radix-ui')) return 'radix-runtime';
+          if (id.includes('react-router') || /node_modules\/react(-dom)?\//.test(id)) {
+            return 'react-runtime';
+          }
+        },
+      },
+    },
+  },
 });

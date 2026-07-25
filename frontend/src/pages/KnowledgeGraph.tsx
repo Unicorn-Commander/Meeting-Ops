@@ -1,10 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { Network, Search, RefreshCw } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
-import BrigadeGraphViewer, {
-  type BrigadeGraphResponse,
-} from '../components/BrigadeGraphViewer';
+import type { BrigadeGraphResponse } from '../components/BrigadeGraphViewer';
+
+// The graph page itself is route-lazy. Keep the WebGL renderer lazy too so
+// opening the picker or an empty graph response never downloads Three.js.
+const BrigadeGraphViewer = lazy(() => import('../components/BrigadeGraphViewer'));
+
+function GraphLoadingFallback() {
+  return (
+    <div className="flex h-[520px] items-center justify-center rounded-lg border border-zinc-800 bg-black/20 text-sm text-zinc-400">
+      Loading interactive graph…
+    </div>
+  );
+}
 
 interface SpeakerRow {
   id: number;
@@ -309,6 +319,7 @@ export default function KnowledgeGraph() {
           )}
 
           {showViewer && (
+            <Suspense fallback={<GraphLoadingFallback />}>
             <BrigadeGraphViewer
               data={graph}
               height={520}
@@ -317,6 +328,7 @@ export default function KnowledgeGraph() {
                 setSelected({ id, display_name: name });
               }}
             />
+            </Suspense>
           )}
         </div>
       )}
