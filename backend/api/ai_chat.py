@@ -604,7 +604,7 @@ async def rag_query(
             reranker = InfinityRerankingProvider(
                 api_key=os.getenv("INFINITY_API_KEY", ""),
                 endpoint=rr_endpoint,
-                model=os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
+                model=os.getenv("RERANKER_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
             )
             results = await reranker.rerank(
                 query=search_query,

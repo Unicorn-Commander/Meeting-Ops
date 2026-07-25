@@ -274,7 +274,8 @@ class SemanticSearchService:
         """Create or recreate the Qdrant collection with hybrid vector support.
 
         The collection uses named vectors:
-        - "dense": 384-dim COSINE (BAAI/bge-small-en-v1.5 semantic embeddings)
+        - "dense": COSINE, dimension probed from the configured embedding
+          provider at runtime (Qwen/Qwen3-Embedding-0.6B = 1024)
         - "sparse": BM25 sparse vectors (keyword matching via fastembed)
 
         If the collection exists but lacks sparse vector config, it is

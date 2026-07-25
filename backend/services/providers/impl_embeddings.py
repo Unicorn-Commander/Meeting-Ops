@@ -11,7 +11,7 @@ DEFAULT_INFINITY_ENDPOINT = "http://unicorn-infinity-proxy:8086/v1"
 
 
 class InfinityProvider:
-    def __init__(self, api_key: str = "", endpoint: str = "", model: str = "BAAI/bge-large-en-v1.5"):
+    def __init__(self, api_key: str = "", endpoint: str = "", model: str = "Qwen/Qwen3-Embedding-0.6B"):
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/") if endpoint else DEFAULT_INFINITY_ENDPOINT
         self.model = model

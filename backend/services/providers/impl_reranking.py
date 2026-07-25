@@ -11,7 +11,7 @@ DEFAULT_INFINITY_RERANK_ENDPOINT = "http://unicorn-infinity-proxy:8086/v1"
 
 
 class InfinityRerankingProvider:
-    def __init__(self, api_key: str = "", endpoint: str = "", model: str = "BAAI/bge-reranker-v2-m3"):
+    def __init__(self, api_key: str = "", endpoint: str = "", model: str = "Qwen/Qwen3-Reranker-0.6B"):
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/") if endpoint else DEFAULT_INFINITY_RERANK_ENDPOINT
         self.model = model
