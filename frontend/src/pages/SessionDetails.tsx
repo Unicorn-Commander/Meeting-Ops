@@ -3053,7 +3053,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Advanced surfaces — Knowledge graph + listen-to-summary
-                podcast + progressive timeline + generated emails — all
+                podcast + progressive timeline — all
                 live behind a single "More" toggle so the Summary tab
                 opens to the answer the user came for, not the kitchen
                 sink. Codex audit flagged these as "advanced surfaces
@@ -3069,8 +3069,7 @@ export const SessionDetails: React.FC = () => {
                   <div>
                     <h2 className="text-base font-semibold text-gray-900">More for this meeting</h2>
                     <p className="text-xs text-gray-500 mt-0.5">
-                      Knowledge graph, listen-to-summary podcast, progressive timeline, and
-                      generated emails.
+                      Knowledge graph, listen-to-summary podcast, and progressive timeline.
                     </p>
                   </div>
                   <ChevronDown

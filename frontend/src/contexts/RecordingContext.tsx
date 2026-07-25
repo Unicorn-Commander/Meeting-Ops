@@ -90,11 +90,9 @@ export const RecordingProvider: React.FC<{ children: ReactNode }> = ({ children 
       );
       
       if (isDuplicate) {
-        console.log('[RecordingContext] Duplicate transcription segment ignored:', segment.text.substring(0, 50));
         return prev;
       }
       
-      console.log('[RecordingContext] Adding new transcription segment:', segment.text.substring(0, 50));
       return [...prev, segment];
     });
   };
