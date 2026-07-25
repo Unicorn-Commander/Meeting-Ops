@@ -168,11 +168,13 @@ describe("SpeakerTagger", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders one row per raw_label and surfaces the auto-match similarity badge", async () => {
+  it("surfaces the auto-match similarity badge when reviewing all voices", async () => {
     installFetch();
     await renderTagger();
 
-    await waitFor(() => expect(screen.getByText("SPEAKER_00")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /All voices \(2\)/i }));
+    expect(await screen.findByText("SPEAKER_00")).toBeInTheDocument();
     expect(screen.getByText("SPEAKER_01")).toBeInTheDocument();
     // 0.81 -> 81%
     expect(screen.getByText("81%")).toBeInTheDocument();
@@ -181,6 +183,47 @@ describe("SpeakerTagger", () => {
     expect(
       fetchCalls.some((call) => call.url.includes("/api/speakers?session_id=42")),
     ).toBe(true);
+  });
+
+  it("starts with an unidentified-first review queue and can reveal all voices", async () => {
+    installFetch();
+    await renderTagger();
+
+    await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
+    expect(screen.getByText(/Needs a name \(1\)/i)).toBeInTheDocument();
+    expect(screen.queryByText("SPEAKER_00")).not.toBeInTheDocument();
+    expect(screen.getByText(/Unidentified voice/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /All voices \(2\)/i }));
+    expect(await screen.findByText("SPEAKER_00")).toBeInTheDocument();
+    expect(screen.getByText(/Suggested identity/i)).toBeInTheDocument();
+  });
+
+  it("filters the review queue by voice label or self-introduction suggestion", async () => {
+    const linksWithSuggestion = [{
+      ...LINKS_BEFORE[1],
+      name_suggestions: [{ name: "Nora", evidence: "Hi, I'm Nora." }],
+    }, LINKS_BEFORE[0]];
+    installFetch();
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+      if (url.endsWith("/api/auth/me")) return jsonResponse(ME);
+      if (url.includes("/api/speakers?session_id=42")) return jsonResponse(SPEAKERS);
+      if (url.match(/\/speaker-links$/)) return jsonResponse(linksWithSuggestion);
+      return jsonResponse({}, 404);
+    });
+
+    await renderTagger();
+    await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("searchbox", { name: /search speaker labels/i }), {
+      target: { value: "Nora" },
+    });
+    expect(screen.getByText(/Showing 1 of 2 voices/i)).toBeInTheDocument();
+    expect(screen.getByText("SPEAKER_01")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /clear speaker search/i }));
+    expect(screen.getByText(/Showing 1 of 2 voices/i)).toBeInTheDocument();
   });
 
   it("PATCHes a manual confirmation when a user picks a speaker for an unmatched label", async () => {

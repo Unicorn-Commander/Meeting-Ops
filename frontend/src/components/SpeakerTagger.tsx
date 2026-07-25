@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Users, Check, X, RefreshCw, AlertCircle, Play } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Users, Check, X, RefreshCw, AlertCircle, Play, Search, CircleHelp } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { showToast } from './Toast';
@@ -104,6 +104,10 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
   // Unchecked by default and reset after a successful send so labeling
   // someone ELSE afterwards can't pollute the user's voiceprint.
   const [isMe, setIsMe] = useState(false);
+  // Start in the smallest, highest-value queue: voices without a human name.
+  // This is local presentation state only; it never changes a speaker link.
+  const [reviewFilter, setReviewFilter] = useState<'unidentified' | 'needs-review' | 'all'>('unidentified');
+  const [searchQuery, setSearchQuery] = useState('');
 
 
   const orgHeaders = (): Record<string, string> => {
@@ -292,6 +296,33 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
     setPendingLinkId(null);
   };
 
+  const unidentifiedCount = links.filter(link => link.speaker_id === null).length;
+  const needsReviewCount = links.filter(link => !link.confirmed).length;
+  const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
+  // If every voice is named, an empty unidentified queue should not look like
+  // a broken screen. Keep the control selected, but transparently show all
+  // voices and explain why in the helper copy below.
+  const effectiveFilter = reviewFilter === 'unidentified' && unidentifiedCount === 0
+    ? 'all'
+    : reviewFilter;
+  const visibleLinks = useMemo(() => links
+    .filter(link => {
+      if (effectiveFilter === 'unidentified' && link.speaker_id !== null) return false;
+      if (effectiveFilter === 'needs-review' && link.confirmed) return false;
+      if (!normalizedSearch) return true;
+      const searchable = [
+        link.raw_label,
+        link.speaker_name || '',
+        ...(link.name_suggestions || []).flatMap(suggestion => [suggestion.name, suggestion.evidence || '']),
+      ].join(' ').toLocaleLowerCase();
+      return searchable.includes(normalizedSearch);
+    })
+    // Even in "All voices", keep unresolved identity work at the top.
+    .sort((a, b) => {
+      const rank = (link: SpeakerLink) => link.speaker_id === null ? 0 : !link.confirmed ? 1 : 2;
+      return rank(a) - rank(b) || a.raw_label.localeCompare(b.raw_label);
+    }), [links, effectiveFilter, normalizedSearch]);
+
   if (loading) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 p-4 text-sm text-gray-500 flex items-center gap-2">
@@ -410,6 +441,59 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
         </p>
       )}
 
+      <div className="mb-3 rounded-lg border border-purple-100 bg-purple-50/60 p-2.5">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-1.5" aria-label="Speaker review filter">
+            {([
+              ['unidentified', `Needs a name (${unidentifiedCount})`],
+              ['needs-review', `Needs review (${needsReviewCount})`],
+              ['all', `All voices (${links.length})`],
+            ] as const).map(([filter, label]) => (
+              <button
+                key={filter}
+                type="button"
+                onClick={() => setReviewFilter(filter)}
+                aria-pressed={reviewFilter === filter}
+                className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-1 ${
+                  reviewFilter === filter
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-purple-800 ring-1 ring-purple-200 hover:bg-purple-100'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <label className="relative block min-w-0 sm:w-64">
+            <span className="sr-only">Search speaker labels and name suggestions</span>
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Find a voice or name…"
+              className="w-full rounded-md border border-purple-200 bg-white py-1.5 pl-8 pr-7 text-xs text-gray-900 placeholder:text-gray-400 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-500 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                aria-label="Clear speaker search"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </label>
+        </div>
+        <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-purple-900">
+          <CircleHelp className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+          {unidentifiedCount > 0
+            ? 'Start with “Needs a name”: listen, then choose an existing person or enroll a new one. Nothing is changed until you select or save.'
+            : 'Every detected voice has a name. Use “Needs review” to confirm suggested matches or “All voices” to revisit a label.'}
+        </p>
+      </div>
+
       {error && (
         <div className="mb-2 text-xs text-red-600 flex items-center gap-1">
           <AlertCircle className="w-3 h-3" />
@@ -427,8 +511,12 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
         <span>This is me — also update my personal voice fingerprint when I label a speaker below</span>
       </label>
 
+      <p className="mb-2 text-xs text-gray-500" aria-live="polite">
+        Showing {visibleLinks.length} of {links.length} voice{links.length === 1 ? '' : 's'}
+        {effectiveFilter === 'unidentified' ? ' that need a name' : ''}.
+      </p>
       <div className="space-y-2">
-        {links.map(link => {
+        {visibleLinks.map(link => {
           const sim = link.similarity ?? null;
           const simBadge = sim !== null ? `${(sim * 100).toFixed(0)}%` : null;
           const isEnrolling = enrollingLinkId === link.id;
@@ -456,8 +544,8 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
             })
             .slice(0, 3);
           return (
-            <div key={link.id} className="rounded-lg border border-gray-200 bg-gray-50/70 p-3">
-            <div className="flex items-center gap-3 text-sm">
+            <div key={link.id} className={`rounded-lg border p-3 ${link.speaker_id === null ? 'border-amber-300 bg-amber-50/60' : link.confirmed ? 'border-gray-200 bg-gray-50/70' : 'border-blue-200 bg-blue-50/50'}`}>
+            <div className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:gap-3">
               <span className="font-mono text-xs text-gray-500 w-24 truncate" title={link.raw_label}>
                 {link.raw_label}
               </span>
@@ -534,7 +622,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
                       updateLink(link, v ? Number(v) : null);
                     }}
                     disabled={pendingLinkId === link.id}
-                    className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50"
+                    className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
                   >
                     <option value="">— Unknown —</option>
                     {speakers.map(s => (
@@ -557,13 +645,22 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
                     </span>
                   )}
                   {!link.confirmed && link.source === 'auto' && !simBadge && link.speaker_id === null && (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700" title="No match found">
-                      no match
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="No matching profile was found">
+                      no match · needs a name
                     </span>
                   )}
                 </>
               )}
             </div>
+            {!isEnrolling && (
+              <p className={`mt-1.5 text-xs ${link.speaker_id === null ? 'text-amber-800' : link.confirmed ? 'text-green-700' : 'text-blue-700'}`}>
+                {link.speaker_id === null
+                  ? 'Unidentified voice — select a known person or choose “Enroll new speaker”.'
+                  : link.confirmed
+                    ? 'Confirmed identity.'
+                    : 'Suggested identity — confirm or correct it after listening.'}
+              </p>
+            )}
             {onPlaySample && representativeSamples.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {representativeSamples.map((sample, index) => {
@@ -591,6 +688,11 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
             </div>
           );
         })}
+        {visibleLinks.length === 0 && (
+          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-center text-sm text-gray-600">
+            No voices match this view. Try clearing the search or choose “All voices”.
+          </div>
+        )}
       </div>
     </div>
   );
