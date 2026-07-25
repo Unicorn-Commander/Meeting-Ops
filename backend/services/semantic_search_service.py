@@ -42,6 +42,7 @@ COLLECTION_NAME = "meeting_transcripts"
 DENSE_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")  # Infinity, 1024-dim
 DENSE_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))        # probe fallback only
 SPARSE_MODEL = "Qdrant/bm25"             # BM25 sparse stays local (fastembed, cheap)
+INDEX_SCHEMA_VERSION = 2
 
 # Infinity embedding endpoint (OpenAI-compatible POST /embeddings). Prefer the
 # embedding-specific endpoint, fall back to the generic one, then the in-cluster
@@ -503,6 +504,23 @@ class SemanticSearchService:
 
         texts_to_embed = []
         payloads = []
+        indexed_at = datetime.now(timezone.utc).isoformat()
+
+        def _payload(values: Dict) -> Dict:
+            """Attach immutable vector provenance to every Qdrant point.
+
+            A collection can retain points through a model change when the
+            dimensions happen to match.  Recording the actual model beside
+            each point makes that state observable and lets reindex jobs prove
+            that a workspace is homogeneous before search relies on it.
+            """
+            return {
+                **values,
+                "dense_embedding_model": DENSE_MODEL,
+                "sparse_embedding_model": SPARSE_MODEL,
+                "index_schema_version": INDEX_SCHEMA_VERSION,
+                "indexed_at": indexed_at,
+            }
 
         # Index transcript chunks
         if transcript and len(transcript.strip()) > 10:
@@ -511,7 +529,7 @@ class SemanticSearchService:
                 chunk_text = chunk_data["text"]
                 chunk_speakers = chunk_data.get("speakers", [])
                 texts_to_embed.append(self._search_text(title, chunk_text))
-                payloads.append({
+                payloads.append(_payload({
                     "session_id": session_id,
                     "title": title or "",
                     "content_type": "transcript",
@@ -521,12 +539,12 @@ class SemanticSearchService:
                     "speakers": chunk_speakers,
                     "created_at": created_at or "",
                     "organization_id": organization_id,
-                })
+                }))
 
         # Index summary as a single point
         if summary and len(summary.strip()) > 10:
             texts_to_embed.append(self._search_text(title, summary))
-            payloads.append({
+            payloads.append(_payload({
                 "session_id": session_id,
                 "title": title or "",
                 "content_type": "summary",
@@ -536,12 +554,12 @@ class SemanticSearchService:
                 "speakers": [],
                 "created_at": created_at or "",
                 "organization_id": organization_id,
-            })
+            }))
 
         # Index title
         if title and len(title.strip()) > 3:
             texts_to_embed.append(self._search_text(title, title))
-            payloads.append({
+            payloads.append(_payload({
                 "session_id": session_id,
                 "title": title,
                 "content_type": "title",
@@ -551,7 +569,7 @@ class SemanticSearchService:
                 "speakers": [],
                 "created_at": created_at or "",
                 "organization_id": organization_id,
-            })
+            }))
 
         if not texts_to_embed:
             logger.debug(f"No content to index for session {session_id}")
@@ -569,6 +587,9 @@ class SemanticSearchService:
 
         points = []
         for i, (dense_emb, payload) in enumerate(zip(dense_embeddings, payloads)):
+            # Keep the measured dimension with the exact point, rather than
+            # trusting a collection-level fallback setting.
+            payload["dense_embedding_dimension"] = len(dense_emb)
             vector_dict = {
                 "dense": dense_emb,
             }
