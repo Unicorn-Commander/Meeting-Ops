@@ -20,8 +20,11 @@ class _DB:
         self.refreshed.append(session)
 
 
-def _session(final_summary=None, summary=None):
+def _session(final_summary=None, summary=None, organization_id=1):
     return SimpleNamespace(
+        id=10,
+        organization_id=organization_id,
+        user_id=None,
         final_summary=final_summary,
         summary=summary,
         federation_summary_approved_at=None,
@@ -80,8 +83,8 @@ async def test_approve_mutation_stales_and_revoke(monkeypatch):
 
     approved = await approval.approve_summary("10", db, user, active_org)
     assert approved.status == "approved"
-    assert approved.approved_by_user_id == 9
     assert approved.can_manage is True
+    assert "approved_by_user_id" not in approved.model_dump()
     assert db.commits == 1
 
     session.final_summary = {"executive": "Changed recap"}
@@ -93,3 +96,19 @@ async def test_approve_mutation_stales_and_revoke(monkeypatch):
     assert revoked.status == "unapproved"
     assert session.federation_summary_approved_digest is None
     assert db.commits == 2
+
+
+def test_cross_org_read_collaborator_manager_cannot_manage(monkeypatch):
+    session = _session({"executive": "Recap"}, organization_id=2)
+    db = _DB()
+    user = SimpleNamespace(id=9, is_superuser=False)
+    active_org = SimpleNamespace(
+        organization=SimpleNamespace(id=1),
+        role_name="manager",
+    )
+
+    monkeypatch.setattr(approval, "has_session_access", lambda *_args: "view")
+    assert approval._out(session, user, active_org, db).can_manage is False
+
+    monkeypatch.setattr(approval, "has_session_access", lambda *_args: "edit")
+    assert approval._out(session, user, active_org, db).can_manage is True
