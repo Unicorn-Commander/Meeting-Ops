@@ -6,6 +6,7 @@ Parakeet STT, diarization, final summaries, and session persistence.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -61,6 +62,24 @@ _brigade_graph_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 RECORDINGS_DIR = Path(os.getenv("RECORDINGS_DIR", "/app/recordings"))
 ALWAYS_ON_DIR = RECORDINGS_DIR / "always_on"
+
+# Browser MediaRecorder normally emits one ~30 second fragment at a time.
+# A duplicated upload loop can therefore turn a short meeting into hours of
+# perfectly decodable audio.  Do not spend STT/diarization GPU time on a
+# clearly impossible assembly just because ffmpeg was able to decode it.
+_AUDIO_PREFLIGHT_MIN_EXPECTED_SECONDS = 60.0
+_AUDIO_PREFLIGHT_MIN_DURATION_EXCESS_SECONDS = 5 * 60.0
+_AUDIO_PREFLIGHT_MAX_DURATION_RATIO = 2.0
+_AUDIO_PREFLIGHT_MAX_DUPLICATE_CHUNK_RATIO = 0.20
+
+
+class AudioPreflightError(RuntimeError):
+    """An assembled recording is unsafe to send to expensive GPU stages."""
+
+    def __init__(self, code: str, message: str, details: dict[str, Any]):
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 class StartAlwaysOnRequest(BaseModel):
@@ -1742,6 +1761,94 @@ async def _reassemble_full_audio(
     return duration_sec, source_codec
 
 
+def _validate_reprocessed_audio(
+    session: RecordingSession,
+    chunks_dir: Path,
+    duration_sec: float,
+) -> dict[str, Any]:
+    """Reject suspicious browser-audio assemblies before GPU work starts.
+
+    This is intentionally narrow: uploads are allowed to be long, and a
+    missing wall-clock estimate is not itself an error.  We only stop an
+    always-on chunk assembly when its evidence is strong enough to indicate a
+    duplicated/corrupt upload: missing chunk indices, substantial exact chunk
+    duplication, or decoded audio far longer than the meeting's own elapsed
+    time.  Call this *before* changing ``audio_file`` or deleting the existing
+    transcript, so a rejected reprocess remains recoverable.
+    """
+    chunks = _list_chunk_files(chunks_dir)
+    details: dict[str, Any] = {
+        "checked_at": _now().isoformat(),
+        "decoded_duration_seconds": round(float(duration_sec or 0.0), 3),
+        "chunk_count": len(chunks),
+    }
+    # This branch is used by uploaded single files and also keeps leaf-stubbed
+    # tests from inventing a false error. Browser capture always has chunks.
+    if not chunks:
+        details["check"] = "skipped_no_chunk_manifest"
+        return details
+
+    indices = [seq for path in chunks if (seq := _chunk_seq_from_filename(path)) is not None]
+    details["chunk_indices"] = indices
+    if indices:
+        expected = list(range(indices[0], indices[-1] + 1))
+        missing = sorted(set(expected) - set(indices))
+        if missing:
+            details["missing_chunks"] = missing[:100]
+            raise AudioPreflightError(
+                "missing_chunks",
+                "Recording audio is incomplete (missing chunk indices). Re-upload the missing audio or use whole-file recovery before reprocessing.",
+                details,
+            )
+
+    # Exact-byte repeats are a reliable signal that a client retry/assembly
+    # loop duplicated real time. Hashing a few-hundred KB MediaRecorder chunk
+    # is cheap compared with even one STT request; only duplicate *extra*
+    # chunks count toward the ratio (one copy of each unique chunk is valid).
+    hashes: list[str] = []
+    for chunk in chunks:
+        digest = hashlib.sha256()
+        with chunk.open("rb") as stream:
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(block)
+        hashes.append(digest.hexdigest())
+    duplicate_count = len(hashes) - len(set(hashes))
+    duplicate_ratio = duplicate_count / len(hashes)
+    details.update({
+        "duplicate_chunk_count": duplicate_count,
+        "duplicate_chunk_ratio": round(duplicate_ratio, 4),
+    })
+    if len(hashes) >= 3 and duplicate_ratio > _AUDIO_PREFLIGHT_MAX_DUPLICATE_CHUNK_RATIO:
+        raise AudioPreflightError(
+            "duplicate_chunks",
+            "Recording audio appears to contain repeated upload chunks. Re-upload the recording or use whole-file recovery before reprocessing.",
+            details,
+        )
+
+    expected_seconds: list[float] = []
+    if float(session.duration or 0.0) >= _AUDIO_PREFLIGHT_MIN_EXPECTED_SECONDS:
+        expected_seconds.append(float(session.duration))
+    started_at, ended_at = _aware(session.started_at), _aware(session.ended_at)
+    if started_at and ended_at:
+        elapsed = (ended_at - started_at).total_seconds()
+        if elapsed >= _AUDIO_PREFLIGHT_MIN_EXPECTED_SECONDS:
+            expected_seconds.append(elapsed)
+    if expected_seconds:
+        expected = max(expected_seconds)
+        details["expected_duration_seconds"] = round(expected, 3)
+        details["duration_ratio"] = round(duration_sec / expected, 3) if expected else None
+        if (
+            duration_sec > expected * _AUDIO_PREFLIGHT_MAX_DURATION_RATIO
+            and duration_sec - expected >= _AUDIO_PREFLIGHT_MIN_DURATION_EXCESS_SECONDS
+        ):
+            raise AudioPreflightError(
+                "duration_mismatch",
+                "Decoded recording is much longer than the meeting duration. Re-upload the original recording or use whole-file recovery before reprocessing.",
+                details,
+            )
+    return details
+
+
 async def _run_session_reprocess(session_pk: int) -> None:
     """Background task that re-runs the full upload pipeline against the
     reassembled session audio.
@@ -1862,6 +1969,11 @@ async def _run_session_reprocess(session_pk: int) -> None:
             # to the per-session directory.
             target_wav = _session_dir(org.slug, canonical_id) / "session.wav"
             duration_sec, source_codec = await _reassemble_full_audio(chunks_dir, target_wav)
+            # Do this before assigning audio_file, adding AudioFile, or touching
+            # transcript rows. A rejected retry must leave the last good
+            # transcript/audio pointer intact and must not consume STT or
+            # diarization capacity.
+            _validate_reprocessed_audio(session, chunks_dir, duration_sec)
             # Point session.audio_file at the reassembled WAV so identify_speakers
             # has an absolute audio path to fall back on if it ever needs to
             # re-extract embeddings (we already plumb per-segment embeddings,
@@ -2261,10 +2373,22 @@ async def _run_session_reprocess(session_pk: int) -> None:
         logger.exception(
             "Reprocess pipeline failed for session_pk=%s", session_pk
         )
+        failure_extra: dict[str, Any] = {}
+        if isinstance(exc, AudioPreflightError):
+            # Structured state makes this actionable to the UI without parsing
+            # an exception string; old transcript fields were intentionally not
+            # touched before the preflight raised.
+            failure_extra["audio_preflight"] = {
+                "status": "failed",
+                "code": exc.code,
+                "message": str(exc),
+                **exc.details,
+            }
         _set_status(
             "failed",
             failed_at=_now().isoformat(),
             error=str(exc)[:500],
+            **failure_extra,
         )
         from services.transient_errors import is_transient_error
         if is_transient_error(exc):

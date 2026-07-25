@@ -22,6 +22,7 @@ the wire contract + side-effects on the FastAPI surface.
 from __future__ import annotations
 
 import uuid as _uuid
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -592,3 +593,82 @@ def test_full_audio_rejects_cross_org_post(client, tmp_path, monkeypatch):
     # We deliberately give the same 404 we give for missing sessions
     # — never leak the cross-org existence signal.
     assert "session not found" in resp.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# 10. Reprocess preflight — reject corrupt/duplicated assembly before GPUs
+# ---------------------------------------------------------------------------
+def test_reprocess_preflight_rejects_implausible_duration_and_keeps_transcript(
+    client, tmp_path, monkeypatch
+):
+    """A 25-minute session decoded as hours must fail before STT/diarization.
+
+    The old browser transcript remains intact so the user can choose whole-file
+    recovery rather than losing the only readable meeting record.
+    """
+    from api import recording
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    import asyncio
+
+    monkeypatch.setattr(recording, "RECORDINGS_DIR", tmp_path)
+    monkeypatch.setattr(recording, "ALWAYS_ON_DIR", tmp_path / "always_on")
+    org_id, org_slug, user_id = _seed_user_and_org("audiocap-preflight-duration")
+    session_pk, session_id = _create_always_on_session(org_id, user_id)
+
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.id == session_pk).one()
+        now = recording._now()
+        session.started_at = now - timedelta(minutes=25)
+        session.ended_at = now
+        session.duration = 25 * 60
+        session.status = "processing"
+        session.transcript_simple = "Keep this existing browser transcript."
+        db.commit()
+    finally:
+        db.close()
+
+    chunks_dir = tmp_path / "always_on" / org_slug / session_id / "full_audio"
+    chunks_dir.mkdir(parents=True)
+    for index in range(3):
+        (chunks_dir / f"{index:06d}.webm").write_bytes(f"unique-{index}".encode())
+
+    async def _fake_reassemble(_chunks_dir, target_wav):
+        target_wav.parent.mkdir(parents=True, exist_ok=True)
+        target_wav.write_bytes(b"RIFF0000WAVE")
+        return 4 * 60 * 60, "webm"
+
+    monkeypatch.setattr(recording, "_reassemble_full_audio", _fake_reassemble)
+    asyncio.run(recording._run_session_reprocess(session_pk))
+
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.id == session_pk).one()
+        audio_state = (session.processing_metadata or {}).get("full_audio") or {}
+        assert session.transcript_simple == "Keep this existing browser transcript."
+        assert audio_state["status"] == "failed"
+        assert audio_state["audio_preflight"]["code"] == "duration_mismatch"
+        assert "whole-file recovery" in audio_state["audio_preflight"]["message"]
+    finally:
+        db.close()
+
+
+def test_reprocess_preflight_rejects_repeated_chunk_loop(tmp_path):
+    """Exact repeated MediaRecorder fragments are a cheap, decisive guard."""
+    from api import recording
+
+    class _Session:
+        duration = 0
+        started_at = None
+        ended_at = None
+
+    chunks_dir = tmp_path / "full_audio"
+    chunks_dir.mkdir()
+    for index, payload in enumerate((b"A", b"A", b"A", b"B", b"C")):
+        (chunks_dir / f"{index:06d}.webm").write_bytes(payload)
+
+    with pytest.raises(recording.AudioPreflightError) as exc_info:
+        recording._validate_reprocessed_audio(_Session(), chunks_dir, 150.0)
+    assert exc_info.value.code == "duplicate_chunks"
+    assert exc_info.value.details["duplicate_chunk_count"] == 2
