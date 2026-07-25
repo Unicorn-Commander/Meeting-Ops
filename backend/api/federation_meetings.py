@@ -37,6 +37,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_
@@ -174,10 +175,14 @@ def _clamp_limit(limit: Optional[int]) -> int:
 
 
 def _participants_public(session: RecordingSession) -> list[dict]:
-    """Project the JSONB participant list to the federation shape.
+    """Project participants to the response-minimized federation shape.
 
-    Each participant -> {contact_id, display_name, email}. contact_id may
-    be null for participants not yet resolved to a Contact-Ops person."""
+    This helper is deliberately shared by the v1 timeline and the older
+    REST/MCP tools.  A caller with ``meetings:read`` must not be able to
+    sidestep the Customer-Ops contract by selecting an older transport: email,
+    speaker biometric metadata, match provenance, and every unknown JSONB key
+    stay in Meeting-Ops.
+    """
     raw = session.participants if isinstance(session.participants, list) else []
     out: list[dict] = []
     for p in raw:
@@ -187,7 +192,6 @@ def _participants_public(session: RecordingSession) -> list[dict]:
             {
                 "contact_id": p.get("contact_id") or None,
                 "display_name": p.get("name") or None,
-                "email": p.get("email") or None,
             }
         )
     return out
@@ -200,13 +204,7 @@ def _participants_timeline(session: RecordingSession) -> list[dict]:
     Contact-Ops, and a timeline does not need a second copy of participant PII.
     """
 
-    return [
-        {
-            "contact_id": participant["contact_id"],
-            "display_name": participant["display_name"],
-        }
-        for participant in _participants_public(session)
-    ]
+    return _participants_public(session)
 
 
 def _structured_transcript_text(value: Any) -> Optional[str]:
@@ -280,40 +278,81 @@ def _contact_filter_any(contact_ids: list[str]):
     return or_(*predicates)
 
 
+def _nonempty_text(value: Any) -> Optional[str]:
+    """Return only an explicit text scalar, never a stringified container."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _legacy_summary_document(value: Any) -> tuple[dict, Optional[str]]:
+    """Parse legacy summary TEXT without widening the approved projection.
+
+    Older rows may contain either plain-text summaries or JSON documents. JSON
+    is parsed first and then subject to the same allowlist as ``final_summary``;
+    it is never forwarded (or stringified) as an opaque blob.
+    """
+
+    if not isinstance(value, str):
+        return {}, None
+    raw = value.strip()
+    if not raw:
+        return {}, None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}, raw
+    return (parsed, None) if isinstance(parsed, dict) else ({}, None)
+
+
 def _summary_projection(session: RecordingSession) -> Optional[dict]:
     final = session.final_summary if isinstance(session.final_summary, dict) else {}
-    raw_body = (
-        final.get("executive")
-        or final.get("summary")
-        or final.get("overview")
-        or session.summary
+    legacy, legacy_text = _legacy_summary_document(getattr(session, "summary", None))
+
+    body = next(
+        (
+            text
+            for value in (
+                final.get("executive"),
+                final.get("summary"),
+                final.get("overview"),
+                legacy.get("executive"),
+                legacy.get("summary"),
+                legacy.get("overview"),
+                legacy_text,
+            )
+            if (text := _nonempty_text(value)) is not None
+        ),
+        None,
     )
-    if isinstance(raw_body, dict):
-        raw_body = (
-            raw_body.get("executive")
-            or raw_body.get("summary")
-            or raw_body.get("overview")
-        )
-    body = str(raw_body).strip() if raw_body else ""
-    key_points = final.get("key_points") or final.get("bullets") or []
+    key_points = final.get("key_points") or final.get("bullets") or legacy.get(
+        "key_points"
+    ) or legacy.get("bullets") or []
     if not isinstance(key_points, list):
         key_points = []
-    key_points = [str(point).strip() for point in key_points if str(point).strip()]
-    raw_decisions = final.get("decisions") or final.get("key_decisions") or []
+    key_points = [
+        text for point in key_points if (text := _nonempty_text(point)) is not None
+    ]
+    raw_decisions = final.get("decisions") or final.get("key_decisions") or legacy.get(
+        "decisions"
+    ) or legacy.get("key_decisions") or []
     if not isinstance(raw_decisions, list):
         raw_decisions = []
     decisions: list[dict] = []
     for decision in raw_decisions:
-        if isinstance(decision, dict):
-            text = decision.get("text") or decision.get("decision")
-        else:
-            text = decision
-        if text and str(text).strip():
-            decisions.append({"text": str(text).strip()})
+        value = (
+            decision.get("text") or decision.get("decision")
+            if isinstance(decision, dict)
+            else decision
+        )
+        if (text := _nonempty_text(value)) is not None:
+            decisions.append({"text": text})
     if not body and not key_points and not decisions:
         return None
     return {
-        "body": body or None,
+        "body": body,
         "key_points": key_points,
         "decisions": decisions,
     }
@@ -374,6 +413,21 @@ def _action_item_counts(db: Session, org_id: int, session_ids: list[int]) -> dic
     return {sid: int(n) for sid, n in rows}
 
 
+def _project_ops_task_id(value: Any) -> Optional[str]:
+    """Return only a canonical Project-Ops UUID, never arbitrary raw payload."""
+
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if len(candidate) != 36:
+        return None
+    try:
+        canonical = str(UUID(candidate))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return canonical if candidate.lower() == canonical else None
+
+
 def _actions_by_session(
     db: Session,
     org_id: int,
@@ -397,15 +451,15 @@ def _actions_by_session(
     out: dict[int, list[dict]] = {}
     for item in rows:
         payload = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+        task_id = _project_ops_task_id(payload.get("po_task_id"))
         out.setdefault(item.session_id, []).append(
             {
                 "id": str(item.id),
                 "text": item.text,
                 "status": _AI_STATUS_MAP.get(item.status, item.status),
                 "assignee_contact_id": None,
-                "assignee_label": item.owner or None,
                 "due_at": _iso(item.due_date),
-                "project_ops_task_id": payload.get("po_task_id"),
+                "project_ops_task_id": task_id,
                 "created_at": _iso(item.created_at),
             }
         )
@@ -510,19 +564,19 @@ def _decode_cursor(
 def list_meetings_for_contact(
     db: Session,
     org_id: int,
-    contact_id: str,
+    contact_ids: list[str],
     *,
     limit: Optional[int] = None,
     cursor: Optional[str] = None,
 ) -> dict:
-    """Meetings where ``contact_id`` was a participant (newest first).
+    """Meetings where any canonical or historical contact id participated.
 
     Keyset pagination on session id (descending); ``cursor`` is the last
     id of the prior page."""
     n = _clamp_limit(limit)
     q = db.query(RecordingSession).filter(
         RecordingSession.organization_id == org_id,
-        _contact_filter(contact_id),
+        _contact_filter_any(contact_ids),
     )
     if cursor:
         try:
@@ -558,15 +612,15 @@ def list_meetings_for_contact(
 
 
 def list_summaries_for_contact(
-    db: Session, org_id: int, contact_id: str, *, limit: Optional[int] = None
+    db: Session, org_id: int, contact_ids: list[str], *, limit: Optional[int] = None
 ) -> list[dict]:
-    """Summaries of meetings where ``contact_id`` was a participant."""
+    """Summaries of meetings where any canonical or historical id participated."""
     n = _clamp_limit(limit)
     rows = (
         db.query(RecordingSession)
         .filter(
             RecordingSession.organization_id == org_id,
-            _contact_filter(contact_id),
+            _contact_filter_any(contact_ids),
             or_(
                 RecordingSession.summary.isnot(None),
                 RecordingSession.final_summary.isnot(None),
@@ -595,20 +649,19 @@ def list_summaries_for_contact(
 
 
 def list_action_items_for_contact(
-    db: Session, org_id: int, contact_id: str, *, limit: Optional[int] = None
+    db: Session, org_id: int, contact_ids: list[str], *, limit: Optional[int] = None
 ) -> list[dict]:
-    """Action items from meetings where ``contact_id`` was a participant.
+    """Action items from meetings where a canonical or historical id participated.
 
-    ``project_ops_task_id`` is whatever the Project-Ops bridge stamped on
-    the item (raw_payload.po_task_id); null when the item was never
-    bridged."""
+    ``project_ops_task_id`` is emitted only when the Project-Ops bridge stamped
+    a canonical UUID on the item; otherwise it is null."""
     n = _clamp_limit(limit)
     session_ids = [
         r.id
         for r in db.query(RecordingSession.id)
         .filter(
             RecordingSession.organization_id == org_id,
-            _contact_filter(contact_id),
+            _contact_filter_any(contact_ids),
         )
         .all()
     ]
@@ -627,6 +680,7 @@ def list_action_items_for_contact(
     out: list[dict] = []
     for it in rows:
         payload = it.raw_payload if isinstance(it.raw_payload, dict) else {}
+        task_id = _project_ops_task_id(payload.get("po_task_id"))
         out.append(
             {
                 "id": it.id,
@@ -637,7 +691,7 @@ def list_action_items_for_contact(
                 # contact_id yet, so this is null until that lands.
                 "assignee_contact_id": None,
                 "due_at": _iso(it.due_date),
-                "project_ops_task_id": payload.get("po_task_id"),
+                "project_ops_task_id": task_id,
                 "created_at": _iso(it.created_at),
             }
         )
@@ -810,7 +864,7 @@ async def rest_meetings(
         list_meetings_for_contact(
             db,
             ctx.org_id,
-            contact_ids[0],
+            contact_ids,
             limit=limit,
             cursor=cursor,
         ),
@@ -830,7 +884,7 @@ async def rest_summaries(
         return _tool_envelope("list_summaries_for_contact", [])
     return _tool_envelope(
         "list_summaries_for_contact",
-        list_summaries_for_contact(db, ctx.org_id, contact_ids[0], limit=limit),
+        list_summaries_for_contact(db, ctx.org_id, contact_ids, limit=limit),
     )
 
 
@@ -847,7 +901,7 @@ async def rest_action_items(
         return _tool_envelope("list_action_items_for_contact", [])
     return _tool_envelope(
         "list_action_items_for_contact",
-        list_action_items_for_contact(db, ctx.org_id, contact_ids[0], limit=limit),
+        list_action_items_for_contact(db, ctx.org_id, contact_ids, limit=limit),
     )
 
 
@@ -998,15 +1052,14 @@ async def _dispatch_tool(
             return {"items": [], "count": 0, "next_cursor": None}
         if name in {"list_summaries_for_contact", "list_action_items_for_contact"}:
             return []
-    lookup_id = contact_ids[0]
     if name == "list_meetings_for_contact":
         return list_meetings_for_contact(
-            db, ctx.org_id, lookup_id, limit=limit, cursor=args.get("cursor")
+            db, ctx.org_id, contact_ids, limit=limit, cursor=args.get("cursor")
         )
     if name == "list_summaries_for_contact":
-        return list_summaries_for_contact(db, ctx.org_id, lookup_id, limit=limit)
+        return list_summaries_for_contact(db, ctx.org_id, contact_ids, limit=limit)
     if name == "list_action_items_for_contact":
-        return list_action_items_for_contact(db, ctx.org_id, lookup_id, limit=limit)
+        return list_action_items_for_contact(db, ctx.org_id, contact_ids, limit=limit)
     raise KeyError(name)
 
 

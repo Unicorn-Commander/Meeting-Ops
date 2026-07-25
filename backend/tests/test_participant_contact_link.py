@@ -7,19 +7,7 @@ from api import sessions_participants as participants
 
 
 @pytest.mark.asyncio
-async def test_manual_link_requires_explicit_confidence_and_basis():
-    with pytest.raises(HTTPException) as exc:
-        await participants._verified_contact_link(
-            contact_id="person-1",
-            confidence=None,
-            basis=None,
-            workspace_id="workspace-1",
-        )
-    assert exc.value.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_manual_link_reconciles_stale_id_before_persist(monkeypatch):
+async def test_manual_link_reconciles_stale_id_and_ignores_forged_provenance(monkeypatch):
     monkeypatch.setattr(
         participants.contact_ops_resolver,
         "is_configured",
@@ -41,13 +29,13 @@ async def test_manual_link_reconciles_stale_id_before_persist(monkeypatch):
     )
     assert await participants._verified_contact_link(
         contact_id="stale",
-        confidence=0.95,
-        basis="exact_name",
+        confidence=1.0,
+        basis="forged_exact_email",
         workspace_id="workspace-1",
     ) == {
         "contact_id": "canonical",
-        "contact_match_confidence": 0.95,
-        "contact_match_basis": "exact_name",
+        "contact_match_confidence": None,
+        "contact_match_basis": "manual_selection",
         "contact_link_source": "manual",
     }
 

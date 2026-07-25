@@ -41,6 +41,8 @@ class ParticipantIn(BaseModel):
     # Contact-Ops person id (federation join key). Stamped when known
     # so the inbound Customer-Ops reads can find meetings by contact.
     contact_id: Optional[str] = Field(default=None, max_length=64)
+    # Deprecated compatibility inputs. The server never persists client-supplied
+    # match evidence for a manual selection; see _verified_contact_link.
     contact_match_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     contact_match_basis: Optional[str] = Field(default=None, max_length=40)
 
@@ -129,13 +131,16 @@ async def _verified_contact_link(
     basis: Optional[str],
     workspace_id: str,
 ) -> dict:
-    """Validate/reconcile a manual Contact-Ops link before persistence."""
+    """Validate/reconcile a manual Contact-Ops link before persistence.
 
-    if confidence is None or not basis:
-        raise HTTPException(
-            status_code=422,
-            detail="Manual Contact-Ops links require explicit match confidence and basis",
-        )
+    ``confidence`` and ``basis`` are deliberately ignored. They are supplied
+    by a browser search result and must not become integrity-bearing provenance
+    just because a caller can forge a PATCH body. The Contact-Ops canonical
+    resolution below remains the only trust decision; the resulting link is
+    labelled as a manual selection.
+    """
+
+    _ = confidence, basis
     if not workspace_id:
         raise HTTPException(
             status_code=409,
@@ -163,8 +168,8 @@ async def _verified_contact_link(
         )
     return {
         "contact_id": str(canonical),
-        "contact_match_confidence": float(confidence),
-        "contact_match_basis": basis.strip(),
+        "contact_match_confidence": None,
+        "contact_match_basis": "manual_selection",
         "contact_link_source": "manual",
     }
 

@@ -30,9 +30,14 @@ class SummaryApprovalOut(BaseModel):
     status: str
     approved_at: Optional[datetime] = None
     approved_by_user_id: Optional[int] = None
+    can_manage: bool
 
 
-def _out(session) -> SummaryApprovalOut:
+def _out(
+    session,
+    current_user: User,
+    active_org: ActiveOrganization,
+) -> SummaryApprovalOut:
     status, _payload = approved_summary_payload(session)
     return SummaryApprovalOut(
         status=status,
@@ -46,6 +51,7 @@ def _out(session) -> SummaryApprovalOut:
             if status == "approved"
             else None
         ),
+        can_manage=_can_edit(session, current_user, active_org),
     )
 
 
@@ -62,7 +68,7 @@ async def get_summary_approval(
         session_id,
         current_user,
     )
-    return _out(session)
+    return _out(session, current_user, active_org)
 
 
 @router.put("", response_model=SummaryApprovalOut)
@@ -95,7 +101,7 @@ async def approve_summary(
     session.federation_summary_approved_by_user_id = current_user.id
     db.commit()
     db.refresh(session)
-    return _out(session)
+    return _out(session, current_user, active_org)
 
 
 @router.delete("", response_model=SummaryApprovalOut)
@@ -122,4 +128,4 @@ async def revoke_summary_approval(
     session.federation_summary_approved_by_user_id = None
     db.commit()
     db.refresh(session)
-    return _out(session)
+    return _out(session, current_user, active_org)

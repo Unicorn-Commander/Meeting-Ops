@@ -248,7 +248,7 @@ async def test_dispatch_routes_each_tool(monkeypatch):
     calls = {}
 
     async def resolved(_ctx, contact_id):
-        return [contact_id]
+        return [f"canonical-{contact_id}", f"alias-{contact_id}"]
 
     monkeypatch.setattr(fm, "_resolved_contact_ids", resolved)
     monkeypatch.setattr(
@@ -266,11 +266,47 @@ async def test_dispatch_routes_each_tool(monkeypatch):
     await fm._dispatch_tool(object(), ctx, "list_meetings_for_contact", {"contact_id": "c1", "limit": 5})
     await fm._dispatch_tool(object(), ctx, "list_summaries_for_contact", {"contact_id": "c2"})
     await fm._dispatch_tool(object(), ctx, "list_action_items_for_contact", {"contact_id": "c3"})
-    assert calls["m"][0] == 7 and calls["m"][1] == "c1"
-    assert calls["s"][1] == "c2"
-    assert calls["a"][1] == "c3"
+    assert calls["m"][0] == 7 and calls["m"][1] == ["canonical-c1", "alias-c1"]
+    assert calls["s"][1] == ["canonical-c2", "alias-c2"]
+    assert calls["a"][1] == ["canonical-c3", "alias-c3"]
     with pytest.raises(KeyError):
         await fm._dispatch_tool(object(), ctx, "nope", {"contact_id": "x"})
+
+
+@pytest.mark.asyncio
+async def test_legacy_rest_and_mcp_use_all_resolved_ids_and_minimized_shape(monkeypatch):
+    ctx = fm.FederationContext(org_id=7, workspace_id="w", sub="s", scopes={fm.READ_SCOPE})
+    seen: list[list[str]] = []
+
+    async def resolved(_ctx, _contact_id):
+        return ["canonical", "merged-alias"]
+
+    def meetings(_db, _org, contact_ids, **_kwargs):
+        seen.append(contact_ids)
+        return {
+            "items": [
+                {
+                    "participants": [
+                        {"contact_id": "canonical", "display_name": "Ada"}
+                    ]
+                }
+            ],
+            "count": 1,
+            "next_cursor": None,
+        }
+
+    monkeypatch.setattr(fm, "_resolved_contact_ids", resolved)
+    monkeypatch.setattr(fm, "list_meetings_for_contact", meetings)
+    rest = await fm.rest_meetings("requested", ctx=ctx, db=object())
+    mcp = await fm._dispatch_tool(
+        object(), ctx, "list_meetings_for_contact", {"contact_id": "requested"}
+    )
+    assert seen == [["canonical", "merged-alias"], ["canonical", "merged-alias"]]
+    assert rest["meetings"] == mcp["items"]
+    serialized = __import__("json").dumps({"rest": rest, "mcp": mcp})
+    assert "email" not in serialized
+    assert "embedding" not in serialized
+    assert "voice" not in serialized
 
 
 def test_rpc_envelope_helpers():
@@ -282,7 +318,7 @@ def test_rpc_envelope_helpers():
 # ── serialization helpers ──────────────────────────────────────────────
 
 
-def test_participants_public_projection():
+def test_participants_public_projection_is_minimized_for_legacy_and_v1():
     class _S:
         participants = [
             {"id": "1", "name": "Alice", "email": "a@x.com", "contact_id": "co-1"},
@@ -292,9 +328,71 @@ def test_participants_public_projection():
 
     out = fm._participants_public(_S())
     assert out == [
-        {"contact_id": "co-1", "display_name": "Alice", "email": "a@x.com"},
-        {"contact_id": None, "display_name": "Bob", "email": None},
+        {"contact_id": "co-1", "display_name": "Alice"},
+        {"contact_id": None, "display_name": "Bob"},
     ]
+    serialized = __import__("json").dumps(out)
+    assert "email" not in serialized
+
+
+def test_summary_projection_allowlists_text_and_parses_legacy_json():
+    class _S:
+        final_summary = {
+            "executive": {"email": "leak@example.com", "embedding": [1, 2]},
+            "bullets": ["Safe point", {"voice_fingerprint": "never"}],
+            "decisions": [
+                {"text": "Safe decision"},
+                {"decision": {"email": "leak@example.com"}},
+            ],
+        }
+        summary = '{"overview":"Legacy safe body","embedding":[1],"speaker":{"voice":"x"}}'
+
+    assert fm._summary_projection(_S()) == {
+        "body": "Legacy safe body",
+        "key_points": ["Safe point"],
+        "decisions": [{"text": "Safe decision"}],
+    }
+
+    _S.summary = '{"email":"leak@example.com","embedding":[1]}'
+    _S.final_summary = {"executive": {"nested": "not text"}}
+    assert fm._summary_projection(_S()) is None
+
+
+def test_action_projection_drops_free_text_owner_and_non_uuid_task_payload():
+    class _Action:
+        id = 1
+        session_id = 10
+        text = "Send the proposal"
+        status = "todo"
+        owner = "owner@example.com"
+        due_date = None
+        created_at = None
+        raw_payload = {"po_task_id": "leak@example.com"}
+
+    class _Query:
+        def filter(self, *_criteria):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def all(self):
+            return [_Action()]
+
+    class _DB:
+        def query(self, _model):
+            return _Query()
+
+    action = fm._actions_by_session(_DB(), 1, [10])[10][0]
+    assert action["assignee_contact_id"] is None
+    assert "assignee_label" not in action
+    assert action["project_ops_task_id"] is None
+    assert "owner@example.com" not in __import__("json").dumps(action)
+
+    _Action.raw_payload = {"po_task_id": "7d9c21de-7e4a-4fb2-a3d2-c55d33f59631"}
+    assert fm._actions_by_session(_DB(), 1, [10])[10][0]["project_ops_task_id"] == (
+        "7d9c21de-7e4a-4fb2-a3d2-c55d33f59631"
+    )
 
 
 def test_clamp_limit():

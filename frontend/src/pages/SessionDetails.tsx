@@ -39,6 +39,7 @@ import MobileSessionDetails from '../components/MobileSessionDetails';
 import SessionAttachments from '../components/SessionAttachments';
 import SessionDetailsTabs, { type SessionDetailsTab } from '../components/SessionDetailsTabs';
 import { UpgradeBanner } from '../components/UpgradeBanner';
+import { FederationSummaryApproval } from '../components/FederationSummaryApproval';
 import { config, appendWsToken } from '../config';
 import { showConfirm } from '../utils/notifications';
 import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
@@ -1160,8 +1161,6 @@ export const SessionDetails: React.FC = () => {
           person
             ? {
                 contact_id: person.person_id,
-                contact_match_confidence: person.match_confidence,
-                contact_match_basis: person.match_basis,
               }
             : { contact_id: null },
         ),
@@ -2042,10 +2041,16 @@ export const SessionDetails: React.FC = () => {
   const audioSrc = session.audio_file
     ? getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)
     : null;
+  const summaryApprovalVersion = JSON.stringify([
+    session.final_summary ?? null,
+    session.summary ?? null,
+  ]);
 
   const mobileProps = {
     session,
     sessionId,
+    summaryApprovalHeaders: participantHeaders(),
+    summaryApprovalVersion,
     segments,
     speakers,
     transcriptText,
@@ -2084,6 +2089,15 @@ export const SessionDetails: React.FC = () => {
     editParticipantRole, setEditParticipantRole,
     startEditParticipant, cancelEditParticipant, saveEditParticipant,
     addParticipant, deleteParticipant,
+    contactSearchParticipantId,
+    contactSearchQuery,
+    setContactSearchQuery,
+    contactSearchResults,
+    contactSearchLoading,
+    contactSearchAmbiguous,
+    openContactSearch,
+    closeContactSearch,
+    stampParticipantContact,
     actionItems,
     actionUpdatingIds,
     newActionText, setNewActionText,
@@ -3026,7 +3040,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* AI Summary Section — Summary tab */}
-            {activeTab === 'summary' && (session.final_summary || session.summary || session.progressive_summaries?.length || session.transcript) && (
+            {activeTab === 'summary' && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
@@ -3078,6 +3092,12 @@ export const SessionDetails: React.FC = () => {
                     )}
                   </span>
                 </h2>
+                <FederationSummaryApproval
+                  apiUrl={config.apiUrl}
+                  sessionId={String(session.id || sessionId)}
+                  headers={participantHeaders()}
+                  summaryVersion={summaryApprovalVersion}
+                />
                 
                 {/* Use final_summary first, then fall back to legacy summary field */}
                 {(session.final_summary || session.summary) ? (
@@ -3896,10 +3916,9 @@ export const SessionDetails: React.FC = () => {
                             <p className="mt-1 inline-flex max-w-full items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
                               <Check className="h-3 w-3 shrink-0" />
                               <span className="truncate">
-                                Contact-Ops linked
-                                {typeof p.contact_match_confidence === 'number'
-                                  ? ` · ${Math.round(p.contact_match_confidence * 100)}%`
-                                  : ''}
+                                {p.contact_link_source === 'manual'
+                                  ? 'Contact-Ops · Manually linked'
+                                  : 'Contact-Ops linked'}
                               </span>
                             </p>
                           )}

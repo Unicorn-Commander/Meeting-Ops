@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MoreVertical, X, Check, Edit2, RefreshCw, Mail, Share2,
   FileText, FileAudio, Brain, Users, Sparkles, Calendar, Clock, Zap, Loader2,
-  Trash2, Tag as TagIcon, Search, ChevronDown, Mic,
+  Trash2, Tag as TagIcon, Search, ChevronDown, Mic, Link2,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,6 +11,7 @@ import AudioPlayer from './AudioPlayer';
 import { SpeakerLabelEditor } from './SpeakerLabelEditor';
 import { SpeakerTimeline } from './SpeakerTimeline';
 import { TagChip } from './TagChip';
+import { FederationSummaryApproval } from './FederationSummaryApproval';
 import { Briefcase, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
 import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
@@ -36,6 +37,18 @@ interface Participant {
   name: string;
   email?: string | null;
   role?: string | null;
+  contact_id?: string | null;
+  contact_match_confidence?: number | null;
+  contact_match_basis?: string | null;
+  contact_link_source?: string | null;
+}
+
+interface ContactOpsPerson {
+  person_id: string;
+  display_name: string;
+  email?: string | null;
+  match_confidence: number;
+  match_basis: string;
 }
 
 interface ActionItem {
@@ -83,6 +96,8 @@ interface Props {
   // Session + derived
   session: any;
   sessionId?: string;
+  summaryApprovalHeaders: HeadersInit;
+  summaryApprovalVersion: string;
   segments: TranscriptionSegment[];
   speakers: string[];
   transcriptText: string;
@@ -140,6 +155,15 @@ interface Props {
   saveEditParticipant: () => void;
   addParticipant: () => void;
   deleteParticipant: (id: string) => void;
+  contactSearchParticipantId: string | null;
+  contactSearchQuery: string;
+  setContactSearchQuery: (s: string) => void;
+  contactSearchResults: ContactOpsPerson[];
+  contactSearchLoading: boolean;
+  contactSearchAmbiguous: boolean;
+  openContactSearch: (participant: Participant) => void;
+  closeContactSearch: () => void;
+  stampParticipantContact: (participantId: string, person: ContactOpsPerson | null) => void;
 
   // Action items (first-class table, see api/action_items.py)
   actionItems: ActionItem[];
@@ -198,7 +222,7 @@ const PALETTE = [
 
 export default function MobileSessionDetails(props: Props) {
   const {
-    session, sessionId, segments, speakers, transcriptText, hasTranscript,
+    session, sessionId, summaryApprovalHeaders, summaryApprovalVersion, segments, speakers, transcriptText, hasTranscript,
     selectedSpeaker, setSelectedSpeaker, searchTerm, setSearchTerm,
     audioRef, audioSrc, currentTime, setCurrentTime,
     speakerLinks, orgSpeakers, onSpeakerChanged,
@@ -215,6 +239,9 @@ export default function MobileSessionDetails(props: Props) {
     editParticipantRole, setEditParticipantRole,
     startEditParticipant, cancelEditParticipant, saveEditParticipant,
     addParticipant, deleteParticipant,
+    contactSearchParticipantId, contactSearchQuery, setContactSearchQuery,
+    contactSearchResults, contactSearchLoading, contactSearchAmbiguous,
+    openContactSearch, closeContactSearch, stampParticipantContact,
     actionItems,
     actionUpdatingIds,
     newActionText, setNewActionText,
@@ -507,6 +534,9 @@ export default function MobileSessionDetails(props: Props) {
             summaryDecisions={summaryDecisions}
             hasAnySummary={hasAnySummary}
             status={session?.status}
+            sessionIdStr={String(session?.id || sessionId || '')}
+            summaryApprovalHeaders={summaryApprovalHeaders}
+            summaryApprovalVersion={summaryApprovalVersion}
             actionItems={actionItems}
             actionUpdatingIds={actionUpdatingIds}
             newActionText={newActionText}
@@ -610,6 +640,15 @@ export default function MobileSessionDetails(props: Props) {
             startEditParticipant={startEditParticipant} cancelEditParticipant={cancelEditParticipant}
             saveEditParticipant={saveEditParticipant} addParticipant={addParticipant}
             deleteParticipant={deleteParticipant}
+            contactSearchParticipantId={contactSearchParticipantId}
+            contactSearchQuery={contactSearchQuery}
+            setContactSearchQuery={setContactSearchQuery}
+            contactSearchResults={contactSearchResults}
+            contactSearchLoading={contactSearchLoading}
+            contactSearchAmbiguous={contactSearchAmbiguous}
+            openContactSearch={openContactSearch}
+            closeContactSearch={closeContactSearch}
+            stampParticipantContact={stampParticipantContact}
             tags={tags} newTag={newTag} setNewTag={setNewTag} tagBusy={tagBusy} tagError={tagError}
             addTag={addTag} removeTag={removeTag} setTagError={setTagError}
           />
@@ -737,6 +776,7 @@ function SectionCard({ title, icon: Icon, children, className }: {
 
 function SummaryTab({
   insightsLoading, summaryExec, summaryBullets, summaryActions, summaryDecisions, hasAnySummary, status,
+  sessionIdStr, summaryApprovalHeaders, summaryApprovalVersion,
   actionItems,
   actionUpdatingIds,
   newActionText, setNewActionText,
@@ -756,6 +796,9 @@ function SummaryTab({
   summaryDecisions: any[];
   hasAnySummary: boolean;
   status?: string;
+  sessionIdStr: string;
+  summaryApprovalHeaders: HeadersInit;
+  summaryApprovalVersion: string;
   actionItems: ActionItem[];
   actionUpdatingIds: Set<number>;
   newActionText: string;
@@ -784,31 +827,46 @@ function SummaryTab({
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
   }, [actionItems, targetActionItemId]);
+  const approvalControl = (
+    <FederationSummaryApproval
+      apiUrl={config.apiUrl}
+      sessionId={sessionIdStr}
+      headers={summaryApprovalHeaders}
+      summaryVersion={summaryApprovalVersion}
+    />
+  );
   // hasAnySummary includes the empty-state case for the LLM summary
   // sections. Action items live in their own table so we want to show
   // the panel even if the summary text hasn't generated yet (e.g. the
   // user is manually adding items first).
   if (!actionItemsOnly && !hasAnySummary && !hasPersistedActions && insightsLoading) {
     return (
-      <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 flex items-center justify-center gap-3">
-        <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
-        <span className="text-sm text-zinc-400">Loading summary…</span>
+      <div className="space-y-3">
+        {approvalControl}
+        <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 flex items-center justify-center gap-3">
+          <Loader2 className="w-4 h-4 text-fuchsia-400 animate-spin" />
+          <span className="text-sm text-zinc-400">Loading summary…</span>
+        </div>
       </div>
     );
   }
 
   if (!actionItemsOnly && !hasAnySummary && !hasPersistedActions) {
     return (
-      <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400">
-        {status === 'processing'
-          ? 'Generating summary… check back in a moment.'
-          : 'No summary available yet. Re-process this recording to generate one.'}
+      <div className="space-y-3">
+        {approvalControl}
+        <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400">
+          {status === 'processing'
+            ? 'Generating summary… check back in a moment.'
+            : 'No summary available yet. Re-process this recording to generate one.'}
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      {!actionItemsOnly && approvalControl}
       {!actionItemsOnly && summaryExec && (
         <SectionCard title="Summary" icon={Sparkles}>
           <div className="prose prose-invert prose-sm max-w-none text-zinc-200 leading-relaxed text-sm session-md">
@@ -1451,6 +1509,15 @@ function PeopleTagsTab(props: {
   saveEditParticipant: () => void;
   addParticipant: () => void;
   deleteParticipant: (id: string) => void;
+  contactSearchParticipantId: string | null;
+  contactSearchQuery: string;
+  setContactSearchQuery: (s: string) => void;
+  contactSearchResults: ContactOpsPerson[];
+  contactSearchLoading: boolean;
+  contactSearchAmbiguous: boolean;
+  openContactSearch: (participant: Participant) => void;
+  closeContactSearch: () => void;
+  stampParticipantContact: (participantId: string, person: ContactOpsPerson | null) => void;
   tags: string[];
   newTag: string;
   setNewTag: (s: string) => void;
@@ -1472,6 +1539,9 @@ function PeopleTagsTab(props: {
     editParticipantRole, setEditParticipantRole,
     startEditParticipant, cancelEditParticipant, saveEditParticipant,
     addParticipant, deleteParticipant,
+    contactSearchParticipantId, contactSearchQuery, setContactSearchQuery,
+    contactSearchResults, contactSearchLoading, contactSearchAmbiguous,
+    openContactSearch, closeContactSearch, stampParticipantContact,
     tags, newTag, setNewTag, tagBusy, tagError, addTag, removeTag, setTagError,
   } = props;
 
@@ -1580,8 +1650,76 @@ function PeopleTagsTab(props: {
                         )}
                       </div>
                       {p.email && <p className="truncate text-xs text-zinc-500">{p.email}</p>}
+                      {p.contact_id && (
+                        <p className="mt-1 text-xs font-medium text-emerald-300">
+                          Contact-Ops: Manually linked
+                        </p>
+                      )}
+                      {contactSearchParticipantId === p.id && (
+                        <div className="mt-2 space-y-2">
+                          <div className="relative">
+                            <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-zinc-500" />
+                            <input
+                              type="text"
+                              value={contactSearchQuery}
+                              onChange={(e) => setContactSearchQuery(e.target.value)}
+                              placeholder="Search Contact-Ops"
+                              className="w-full rounded border border-zinc-700 bg-zinc-900 py-1 pl-7 pr-2 text-sm text-zinc-100"
+                            />
+                          </div>
+                          {contactSearchLoading && <p className="text-xs text-zinc-400">Searching…</p>}
+                          {contactSearchAmbiguous && (
+                            <p className="rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+                              Multiple results match. Choose a person manually; no link is selected automatically.
+                            </p>
+                          )}
+                          {!contactSearchLoading && contactSearchQuery.trim().length >= 2 && contactSearchResults.length === 0 && (
+                            <p className="text-xs text-zinc-400">No matches</p>
+                          )}
+                          {contactSearchResults.map((person) => (
+                            <button
+                              key={person.person_id}
+                              type="button"
+                              onClick={() => stampParticipantContact(p.id, person)}
+                              disabled={participantBusy}
+                              className="block w-full rounded border border-zinc-700 px-2 py-1.5 text-left text-sm text-zinc-100 active:bg-zinc-800 disabled:opacity-50"
+                            >
+                              <span className="block truncate font-medium">{person.display_name}</span>
+                              <span className="block text-xs text-zinc-400">Choose manually</span>
+                            </button>
+                          ))}
+                          <div className="flex gap-2">
+                            {p.contact_id && (
+                              <button
+                                type="button"
+                                onClick={() => stampParticipantContact(p.id, null)}
+                                disabled={participantBusy}
+                                className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+                              >
+                                Clear link
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={closeContactSearch}
+                              disabled={participantBusy}
+                              className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+                            >
+                              Done
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="flex shrink-0 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => openContactSearch(p)}
+                        className="rounded p-1.5 text-emerald-300 active:bg-emerald-500/20"
+                        aria-label="Tag Contact-Ops person"
+                      >
+                        <Link2 className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         type="button"
                         onClick={() => startEditParticipant(p)}
