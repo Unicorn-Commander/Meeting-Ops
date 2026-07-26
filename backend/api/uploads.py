@@ -13,6 +13,8 @@ import uuid
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+from sqlalchemy import Text
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -76,6 +78,11 @@ class UploadStartResponse(BaseModel):
 class UploadFinalizeResponse(BaseModel):
     job_id: str
     session_id: Optional[int] = None
+    # Set when this audio is byte-identical to an already-completed session in
+    # the same org. The client should send the user to `session_id` rather than
+    # showing progress; re-POST finalize with force=true to process anyway.
+    is_duplicate: bool = False
+    duplicate_message: Optional[str] = None
 
 
 class UploadStatusResponse(BaseModel):
@@ -548,9 +555,61 @@ async def upload_chunk(
     return {"received_chunks": job.chunks_received, "total_chunks": job.total_chunks}
 
 
+async def _sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """SHA-256 of a file, off the event loop.
+
+    Chunked so a multi-GB upload does not materialise in memory, and run in a
+    thread so hashing does not stall the API worker.
+    """
+
+    def _digest() -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            while True:
+                block = fh.read(chunk_size)
+                if not block:
+                    break
+                h.update(block)
+        return h.hexdigest()
+
+    return await asyncio.to_thread(_digest)
+
+
+def _find_completed_session_by_sha256(
+    db: Session, organization_id: int, sha256_hex: str
+) -> Optional[RecordingSession]:
+    """Existing COMPLETED session in this org holding byte-identical audio.
+
+    Org-scoped on purpose, matching the bulk-import path: two orgs may
+    legitimately upload the same audio (a podcast guest sharing with a host)
+    and that must not leak across tenants.
+
+    Only `completed` sessions count. A failed or still-processing session is
+    NOT a duplicate -- returning one would strand the user on a broken record
+    instead of letting them re-run it.
+
+    Matched with a LIKE on the JSON-serialised column so this works on both
+    Postgres JSONB and the SQLite test fixture, mirroring bulk_import_queue.
+    The 64-char hex makes false positives effectively impossible.
+    """
+    needle = f'%"audio_sha256": "{sha256_hex}"%'
+    return (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.organization_id == organization_id,
+            RecordingSession.status == "completed",
+            RecordingSession.processing_metadata.isnot(None),
+            RecordingSession.processing_metadata.cast(Text).like(needle),
+        )
+        .order_by(RecordingSession.id.desc())
+        .first()
+    )
+
+
 @router.post("/{upload_id}/finalize", response_model=UploadFinalizeResponse)
 async def finalize_upload(
     upload_id: str,
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
@@ -575,6 +634,37 @@ async def finalize_upload(
     actual_size = final_path.stat().st_size
     if actual_size != job.total_size:
         raise HTTPException(status_code=400, detail=f"Size mismatch: expected {job.total_size}, got {actual_size}.")
+
+    # ---- SHA-256 + de-dupe, BEFORE any GPU work is queued ----
+    # Only for `transcribe` (new session). `attach` deliberately binds audio to
+    # a caller-chosen session, so a byte-identical file is the expected input
+    # there and must not be intercepted.
+    sha256_hex = await _sha256_file(final_path)
+    job.audio_sha256 = sha256_hex
+    if job.action == "transcribe" and not force:
+        existing = _find_completed_session_by_sha256(
+            db, active_org.organization.id, sha256_hex
+        )
+        if existing is not None:
+            job.session_id = existing.id
+            job.stage = "completed"
+            job.progress_pct = 100
+            job.error_message = None
+            db.commit()
+            await ws_manager.broadcast(upload_id, _status_payload(job))
+            logger.info(
+                "upload %s is a duplicate of session %s (sha256=%s) - skipped processing",
+                upload_id, existing.id, sha256_hex[:12],
+            )
+            return UploadFinalizeResponse(
+                job_id=upload_id,
+                session_id=existing.id,
+                is_duplicate=True,
+                duplicate_message=(
+                    "This recording is already in your library. "
+                    "Re-send with force=true to transcribe it again anyway."
+                ),
+            )
 
     # Both transcribe (new session) and attach (existing session) flow through
     # the same processing pipeline; run_upload_pipeline branches on job.action
@@ -1325,6 +1415,9 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         source_type="upload",
         processing_metadata={
             "upload_id": str(job.upload_id),
+            # Same key the bulk-import path writes, so one de-dupe lookup
+            # covers sessions created by either path.
+            "audio_sha256": job.audio_sha256,
             "original_filename": job.filename,
             "content_type": job.content_type,
             "filename_parse": {

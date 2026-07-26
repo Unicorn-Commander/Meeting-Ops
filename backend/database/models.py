@@ -629,6 +629,10 @@ class UploadJob(Base):
     # services/transcription_options.py. Renders as JSONB on Postgres
     # (per 011_upload_transcription_options) and JSON on SQLite test fixtures.
     transcription_options = Column(_JsonB(), nullable=True)
+    # SHA-256 of the assembled upload, computed once at finalize. Used to
+    # skip re-transcribing byte-identical audio, and stamped into the
+    # resulting session processing_metadata so later uploads can match it.
+    audio_sha256 = Column(String(64), nullable=True, index=True)
     # Browser-reported File.lastModified (the only "file date" the web exposes —
     # there is no OS creation date over HTTP). Fed into the meeting-provenance
     # "recorded at" estimate so an upload defaults its meeting_date to when the
