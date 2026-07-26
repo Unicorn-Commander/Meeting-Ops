@@ -647,8 +647,15 @@ async def finalize_upload(
         )
         if existing is not None:
             job.session_id = existing.id
-            job.stage = "completed"
+            # "done" is the terminal UploadJob stage the frontend watches for
+            # (see the pipeline's completion block). "completed" is the
+            # RecordingSession status -- a different field on a different table.
+            # Setting it here left the UI spinning on a stage that never occurs.
+            job.stage = "done"
             job.progress_pct = 100
+            job.last_completed_stage = "done"
+            job.job_completed_at = datetime.now(timezone.utc)
+            job.updated_at = datetime.now(timezone.utc)
             job.error_message = None
             db.commit()
             await ws_manager.broadcast(upload_id, _status_payload(job))
