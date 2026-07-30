@@ -21,7 +21,6 @@ import numpy as np
 from services.settings_manager import settings_manager
 from services.stt_model_manager import stt_model_manager
 
-from npu_runtime import NPURuntime
 from services.performance_metrics_service import performance_metrics_service
 
 logger = logging.getLogger(__name__)
@@ -109,61 +108,14 @@ class TranscriptionService:
             # Fall back to basic ONNX model
             self._initialize_fallback_model()
     
-    def _initialize_fallback_model(self):
-        """Initialize basic ONNX fallback model"""
-        try:
-            # First try NPU transcriber
-            try:
-                from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-                self.current_engine = ONNXWhisperNPUTranscriber()
-                if self.current_engine.initialize(model_size="base"):
-                    self.current_model_id = "whisper-base"
-                    self.is_ready = True
-                    logger.info("✅ Fallback ONNX NPU transcriber initialized")
-                    return
-            except Exception as npu_error:
-                logger.warning(f"NPU transcriber failed: {npu_error}")
-            
-            # Fall back to CPU ONNX
-            try:
-                from cpu_onnx_transcriber import get_cpu_transcriber
-                self.current_engine = get_cpu_transcriber("base")
-                if self.current_engine.is_ready:
-                    self.current_model_id = "whisper-base-cpu"
-                    self.is_ready = True
-                    logger.info("✅ CPU ONNX transcriber initialized")
-                    return
-            except Exception as cpu_error:
-                logger.warning(f"CPU ONNX transcriber failed: {cpu_error}")
-            
-            # Final fallback to hybrid transcriber
-            from hybrid_transcriber import get_hybrid_transcriber
-            self.current_engine = get_hybrid_transcriber("base")
-            self.current_model_id = "whisper-hybrid"
-            self.is_ready = True
-            logger.info("✅ Hybrid transcriber initialized as final fallback")
-        except Exception as e:
-            logger.error(f"Failed to initialize fallback model: {e}")
-    
-    def _initialize_npu_runtime(self):
-        """Initialize custom NPURuntime"""
-        try:
-            engine = NPURuntime(device_path='/dev/accel/accel0')
-            if engine.open_device():
-                # Load whisper model (will use downloaded ONNX models)
-                if engine.load_model("whisper-base"):
-                    logger.info("✅ NPURuntime engine initialized and model loaded")
-                    return engine
-                else:
-                    logger.error("❌ Failed to load Whisper model in NPURuntime")
-                    return None
-            else:
-                logger.error("❌ Failed to open NPU device")
-                return None
-        except Exception as e:
-            logger.error(f"Failed to initialize NPURuntime: {e}")
-            return None
-    
+    def _initialize_fallback_model(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
+        return None
+
+    def _initialize_npu_runtime(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
+        return None
+
     def switch_model(self, model_id: str) -> bool:
         """Switch to a different STT model"""
         try:
@@ -229,100 +181,34 @@ class TranscriptionService:
             logger.error(f"Error switching to model {model_id}: {e}")
             return False
     
-    def _initialize_npu_whisper(self, model_id: str):
-        """Initialize NPU-accelerated Whisper model"""
-        # Delegate to _initialize_whisperx_npu to avoid duplicate initialization
-        return self._initialize_whisperx_npu()
-    
-    def _initialize_whisperx_unified(self):
-        """Initialize WhisperX unified transcription + diarization"""
-        try:
-            from npu_optimization.whisperx_npu_engine_real import WhisperXNPUEngine
-            engine = WhisperXNPUEngine()
-            if engine.initialize():
-                logger.info("✅ WhisperX NPU Unified engine initialized")
-                return engine
-        except ImportError:
-            logger.warning("WhisperX NPU engine not available, falling back to ONNX")
-            return self._initialize_onnx_npu()
-        except Exception as e:
-            logger.error(f"Failed to initialize WhisperX unified: {e}")
+    def _initialize_npu_whisper(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
-    def _initialize_whisperx_npu(self):
-        """Initialize WhisperX NPU transcription only"""
-        try:
-            from stt_engine.whisperx_npu_engine_real import WhisperXNPUEngine
-            engine = WhisperXNPUEngine()
-            # Log only once when actually successfully initialized
-            if not hasattr(self, '_npu_initialized'):
-                logger.info("✅ WhisperX NPU engine initialized")
-                self._npu_initialized = True
-            return engine
-        except ImportError:
-            logger.warning("WhisperX NPU engine not available, falling back to ONNX")
-            return self._initialize_onnx_npu()
-        except Exception as e:
-            logger.error(f"Failed to initialize WhisperX NPU: {e}")
+
+    def _initialize_whisperx_unified(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
-    def _initialize_onnx_npu(self):
-        """Initialize ONNX NPU transcriber"""
-        try:
-            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-            engine = ONNXWhisperNPUTranscriber()
-            if engine.initialize(model_size="base"):
-                logger.info("✅ ONNX NPU transcriber initialized")
-                return engine
-        except Exception as e:
-            logger.error(f"Failed to initialize ONNX NPU: {e}")
+
+    def _initialize_whisperx_npu(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
-    def _initialize_diarization_npu(self):
-        """Initialize NPU speaker diarization"""
-        try:
-            from stt_engine.speaker_diarization import SpeakerDiarizer
-            engine = SpeakerDiarizer()
-            if engine.initialize():
-                logger.info("✅ NPU diarization engine initialized")
-                return engine
-        except Exception as e:
-            logger.error(f"Failed to initialize diarization NPU: {e}")
+
+    def _initialize_onnx_npu(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
-    def _initialize_onnx_cpu(self, model_id: str):
-        """Initialize ONNX CPU transcriber"""
-        try:
-            from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-            engine = ONNXWhisperNPUTranscriber()
-            
-            # Map model ID to size
-            model_size_map = {
-                "whisper-base": "base",
-                "whisper-small": "small", 
-                "whisper-medium": "medium"
-            }
-            model_size = model_size_map.get(model_id, "base")
-            
-            if engine.initialize(model_size=model_size):
-                logger.info(f"✅ ONNX CPU transcriber initialized ({model_size})")
-                return engine
-        except Exception as e:
-            logger.error(f"Failed to initialize ONNX CPU {model_id}: {e}")
+
+    def _initialize_diarization_npu(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
-    def _initialize_pyannote(self):
-        """Initialize Pyannote speaker diarization"""
-        try:
-            from stt_engine.speaker_diarization import SpeakerDiarizer
-            engine = SpeakerDiarizer(use_pyannote=True)
-            if engine.initialize():
-                logger.info("✅ Pyannote diarization engine initialized")
-                return engine
-        except Exception as e:
-            logger.error(f"Failed to initialize Pyannote: {e}")
+
+    def _initialize_onnx_cpu(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
         return None
-    
+
+    def _initialize_pyannote(self, *args, **kwargs):
+        """Removed with the NPU/appliance modules (see Meeting-Ops-UC1)."""
+        return None
+
     def process_audio_chunk(self, audio_data: bytes, session_id: Optional[str] = None) -> Optional[TranscriptionResult]:
         """Process audio chunk and return transcription"""
         # Use working transcriber if available
