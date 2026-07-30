@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-import uuid
 import hashlib
 import json
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth.config import auth_config
-from auth.dependencies import (
-    get_current_organization,
-    get_current_user,
-    require_permission,
-)
-from auth.models import User
-from auth.organization import ActiveOrganization
+from auth.models import Organization, PersonalAccessToken, User, UserOrganization
+from auth.organization import ActiveOrganization, normalize_org_slug
+from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat_record
+from auth.utils import check_permission
 from database.database import get_db
 from database.models import RecordingSession, Transcription
 
@@ -35,6 +33,16 @@ class StableTranscriptLine(BaseModel):
     is_final: bool = True
     segment_id: Optional[str] = Field(default=None, max_length=256)
     source: Literal["local_mic", "agent_stt", "agent", "unknown"] = "unknown"
+    identity_verification: Literal[
+        "stable_room_member", "stable_known_agent"
+    ] = "stable_room_member"
+    identity_verified: Literal[True] = True
+    content_verification: Literal[
+        "client_caption",
+        "agent_stt",
+        "agent_generated_caption",
+        "unverified",
+    ] = "unverified"
 
 
 class StableTranscriptIngest(BaseModel):
@@ -101,6 +109,114 @@ def _stored_payload_sha256(row: RecordingSession) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+@dataclass
+class StableIngestPrincipal:
+    user: User
+    token: PersonalAccessToken
+    active_org: ActiveOrganization
+
+
+def require_stable_ingest_principal(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> StableIngestPrincipal:
+    """Authenticate one org-bound Stable integration PAT.
+
+    JWTs, browser cookies, forward-auth identity, and legacy API keys are
+    intentionally not considered by this machine-to-machine endpoint.
+    """
+    authorization = request.headers.get("Authorization") or ""
+    scheme, _, plaintext = authorization.partition(" ")
+    plaintext = plaintext.strip()
+    if (
+        scheme.lower() != "bearer"
+        or not plaintext
+        or not plaintext.startswith(PAT_PREFIX)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A Stable integration PAT is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = resolve_pat_record(db, plaintext=plaintext)
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or revoked integration PAT",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if token.scope != "stable.transcript.ingest" or token.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="PAT is not authorized for Stable transcript ingestion",
+        )
+
+    raw_slug = request.headers.get("X-MeetingOps-Org")
+    if not raw_slug or not raw_slug.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-MeetingOps-Org header is required",
+        )
+    try:
+        slug = normalize_org_slug(raw_slug)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-MeetingOps-Org header is invalid",
+        )
+
+    organization = (
+        db.query(Organization)
+        .filter(
+            Organization.slug == slug,
+            Organization.is_active.is_(True),
+        )
+        .first()
+    )
+    if organization is None:
+        # Do not reveal inactive organizations or any additional tenant facts.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+    if token.organization_id != organization.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="PAT is not authorized for this organization",
+        )
+
+    current_user = token.user
+    membership = (
+        db.query(UserOrganization)
+        .filter(
+            UserOrganization.user_id == current_user.id,
+            UserOrganization.organization_id == organization.id,
+        )
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized for this organization",
+        )
+
+    role = "superuser" if current_user.is_superuser else membership.role
+    if not check_permission(role, "session.create"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to create sessions in this organization",
+        )
+    return StableIngestPrincipal(
+        user=current_user,
+        token=token,
+        active_org=ActiveOrganization(
+            organization=organization,
+            membership=membership,
+            role=role,
+        ),
+    )
+
+
 @router.post(
     "/ingest",
     response_model=StableTranscriptIngestResponse,
@@ -110,15 +226,13 @@ async def ingest_stable_transcript(
     body: StableTranscriptIngest,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    active_org: ActiveOrganization = Depends(get_current_organization),
-    _allowed: User = Depends(require_permission("session.create")),
+    principal: StableIngestPrincipal = Depends(require_stable_ingest_principal),
 ) -> StableTranscriptIngestResponse:
     """Create one completed Meeting-Ops session per Stable export.
 
-    Authentication accepts the existing Meeting-Ops PAT bearer convention.
-    The PAT/user and ``X-MeetingOps-Org`` resolve the organization; clients
-    cannot select an organization in the JSON body.
+    Authentication accepts only an unexpired ``stable.transcript.ingest`` PAT
+    bound to the exact organization in ``X-MeetingOps-Org``. Browser identity,
+    generic user PATs, JWTs, cookies, and legacy API keys are not accepted.
     """
     if idempotency_key and idempotency_key != body.export_id:
         raise HTTPException(
@@ -131,7 +245,8 @@ async def ingest_stable_transcript(
             detail="line_count does not match lines",
         )
 
-    org_id = active_org.organization.id
+    current_user = principal.user
+    org_id = principal.active_org.organization.id
     payload_sha256 = _payload_sha256(body)
     existing = (
         db.query(RecordingSession)
@@ -189,6 +304,10 @@ async def ingest_stable_transcript(
             "speaker": speaker,
             "participant_id": line.participant_id,
             "source": line.source,
+            "confidence": None,
+            "identity_verification": line.identity_verification,
+            "identity_verified": line.identity_verified,
+            "content_verification": line.content_verification,
             **({"segment_id": line.segment_id} if line.segment_id else {}),
         }
         segments.append(segment)
@@ -204,6 +323,17 @@ async def ingest_stable_transcript(
         "exporter": body.exporter,
         "metadata": body.metadata,
         "payload_sha256": payload_sha256,
+        "ingest_principal": {
+            "user_id": current_user.id,
+            "pat_id": principal.token.id,
+            "scope": principal.token.scope,
+            "organization_id": principal.token.organization_id,
+        },
+        "verification": {
+            "speaker_identity": "stable_server_authorized",
+            "transcript_text": "unverified",
+            "acoustic_confidence": "not_provided",
+        },
     }
     row = RecordingSession(
         session_id=session_uuid,
@@ -226,7 +356,10 @@ async def ingest_stable_transcript(
             "speakers": speakers,
             "source": body.source,
         },
-        speaker_count=len(speakers),
+        # Display names are not identities: two people may share one. Tenant
+        # analytics and diarization cardinality therefore count stable,
+        # server-authorized participant IDs.
+        speaker_count=len(participants_by_id),
         user_id=current_user.id,
         organization_id=org_id,
         participants=list(participants_by_id.values()),
@@ -248,7 +381,7 @@ async def ingest_stable_transcript(
                     speaker=segment["speaker"],
                     start_time=segment["start"],
                     end_time=segment["end"],
-                    confidence=1.0,
+                    confidence=None,
                 )
             )
         db.add_all(transcript_rows)

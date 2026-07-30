@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import Optional
 from sqlalchemy import (
     BigInteger,
     Column,
@@ -194,6 +193,19 @@ class PersonalAccessToken(Base):
     name = Column(String(100), nullable=False)
     token_hash = Column(String(64), nullable=False, index=True)
     token_prefix = Column(String(12), nullable=False)
+    scope = Column(String(64), nullable=False, default="user")
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    rotated_from_id = Column(
+        Integer,
+        ForeignKey("personal_access_tokens.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     last_used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     revoked_at = Column(DateTime, nullable=True)

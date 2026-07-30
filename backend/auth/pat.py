@@ -44,14 +44,47 @@ def _clean_name(name: str) -> str:
     return cleaned
 
 
-def create_pat(db: Session, *, user: User, name: str) -> tuple[PersonalAccessToken, str]:
+def _build_pat(
+    *,
+    user: User,
+    name: str,
+    scope: str = "user",
+    organization_id: int | None = None,
+    expires_at: datetime | None = None,
+    rotated_from_id: int | None = None,
+) -> tuple[PersonalAccessToken, str]:
     plaintext = _generate_plaintext()
     model = PersonalAccessToken(
         user_id=user.id,
         name=_clean_name(name),
         token_hash=hash_pat(plaintext),
         token_prefix=plaintext[:TOKEN_PREFIX_DISPLAY_CHARS],
+        scope=scope,
+        organization_id=organization_id,
+        expires_at=expires_at,
+        rotated_from_id=rotated_from_id,
         created_at=_now(),
+    )
+    return model, plaintext
+
+
+def create_pat(
+    db: Session,
+    *,
+    user: User,
+    name: str,
+    scope: str = "user",
+    organization_id: int | None = None,
+    expires_at: datetime | None = None,
+    rotated_from_id: int | None = None,
+) -> tuple[PersonalAccessToken, str]:
+    model, plaintext = _build_pat(
+        user=user,
+        name=name,
+        scope=scope,
+        organization_id=organization_id,
+        expires_at=expires_at,
+        rotated_from_id=rotated_from_id,
     )
     db.add(model)
     db.commit()
@@ -59,7 +92,35 @@ def create_pat(db: Session, *, user: User, name: str) -> tuple[PersonalAccessTok
     return model, plaintext
 
 
-def resolve_pat(db: Session, *, plaintext: str) -> Optional[User]:
+def rotate_pat_atomically(
+    db: Session,
+    *,
+    old: PersonalAccessToken,
+    user: User,
+    expires_at: datetime | None,
+) -> tuple[PersonalAccessToken, str]:
+    """Mint the replacement and revoke the predecessor in one transaction."""
+    model, plaintext = _build_pat(
+        user=user,
+        name=old.name,
+        scope=old.scope,
+        organization_id=old.organization_id,
+        expires_at=expires_at,
+        rotated_from_id=old.id,
+    )
+    db.add(model)
+    old.revoked_at = _now()
+    db.commit()
+    db.refresh(model)
+    return model, plaintext
+
+
+def resolve_pat_record(
+    db: Session,
+    *,
+    plaintext: str,
+    update_last_used: bool = True,
+) -> Optional[PersonalAccessToken]:
     if not plaintext or not plaintext.startswith(TOKEN_PREFIX):
         return None
 
@@ -74,13 +135,31 @@ def resolve_pat(db: Session, *, plaintext: str) -> Optional[User]:
     )
     if not row:
         return None
+    expires_at = row.expires_at
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= _now():
+            return None
     user = row.user
     if not user or not user.is_active:
         return None
-    row.last_used_at = _now()
-    db.commit()
-    db.refresh(user)
-    return user
+    if update_last_used:
+        row.last_used_at = _now()
+        db.commit()
+        db.refresh(row)
+    return row
+
+
+def resolve_pat(db: Session, *, plaintext: str) -> Optional[User]:
+    row = resolve_pat_record(db, plaintext=plaintext)
+    # Generic application and MCP authentication accepts only user-scoped
+    # credentials. Integration PATs are capability tokens and must be resolved
+    # explicitly by their owning endpoint (Stable ingest calls
+    # ``resolve_pat_record`` and checks its exact scope + org binding).
+    if row is None or row.scope != "user":
+        return None
+    return row.user
 
 
 def revoke_pat(db: Session, *, user: User, pat_id: int) -> bool:
