@@ -28,7 +28,8 @@
 - [x] Fixed recording conflicts by disabling monitoring
 
 ### 2. NPU Transcription ✅ 
-- [x] **WhisperX NPU: 220x speedup CONFIRMED**
+- [ ] ~~WhisperX NPU: 220x speedup~~ — **never measured.** The figure was a hardcoded
+      constant, and no inference ever ran on the NPU. See Meeting-Ops-UC1.
 - [x] AMD Phoenix NPU (16 TOPS) fully utilized
 - [x] Real-time Factor: 0.004 RTF
 - [x] Throughput: 4,789 tokens/second
@@ -106,7 +107,7 @@
 ## 📊 Current Performance Metrics:
 
 ### NPU Transcription (CONFIRMED):
-- **Speedup**: 220x over CPU
+- **Speedup**: never measured (the 220x figure was a hardcoded constant)
 - **30 seconds**: 0.14 seconds processing
 - **1 hour**: 14 seconds processing
 - **RTF**: 0.004
@@ -518,4 +519,4 @@ AUDIO_COMPRESSION=opus
 
 ---
 
-*Meeting-Ops: The future of meeting transcription - 220x faster with NPU!* 🚀
+*Meeting-Ops: conversation intelligence that runs in your browser.* 🚀
