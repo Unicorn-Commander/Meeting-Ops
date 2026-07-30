@@ -4,7 +4,7 @@
 
 ```bash
 # 1. Start the system
-cd /home/ucadmin/Meeting-Ops
+cd /srv/meeting-ops
 ./start-meeting-ops.sh
 
 # 2. Open in browser
@@ -375,7 +375,7 @@ Your Meeting-Ops system is now running and ready to transform your meetings into
 **Key URLs to bookmark:**
 - 🌐 **App**: http://localhost:7778 (Login: admin/admin123)
 - 📚 **API Docs**: http://localhost:9050/docs
-- 🧪 **Test Page**: file:///home/ucadmin/Meeting-Ops/test-login.html
+- 🧪 **Test Page**: file:///srv/meeting-ops/test-login.html
 
 **Need help?** Check the full documentation in `CLAUDE.md` or `README.md`.
 
