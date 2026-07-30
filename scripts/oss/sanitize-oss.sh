@@ -24,6 +24,9 @@ echo
 # configs pinned to bigboy / midboy1 / the UC VPS.
 DROP_PATHS=(
   deploy
+  # Release tooling stays private: the scrub map necessarily contains every literal it
+  # removes, so publishing it re-leaks exactly what it exists to remove.
+  scripts/oss
 )
 # Unreferenced dev-era captures; not audited for customer data, and nothing links them.
 DROP_FILES=(
@@ -92,8 +95,14 @@ PATHS = {
 }
 
 files = subprocess.run(["git","ls-files"],capture_output=True,text=True).stdout.split()
+# Never rewrite this script. It previously scrubbed its OWN map into a useless
+# {"x": "x"} table, and bash reads a script incrementally so self-modification can
+# also break the running shell mid-execution.
+SELF = {"scripts/oss/sanitize-oss.sh"}
 changed = 0
 for fp in files:
+    if fp in SELF:
+        continue
     p = pathlib.Path(fp)
     if not p.is_file():
         continue
