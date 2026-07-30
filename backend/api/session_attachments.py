@@ -557,7 +557,14 @@ async def attachment_counts(
             sa_func.count(SessionAttachment.id).label("n"),
         )
         .filter(
-            SessionAttachment.organization_id == session.organization_id
+            # CTX-FIX attachment_counts 2026-07-28: this read `session.organization_id`,
+            # but `session` is never defined here -- the body was copy-pasted from the
+            # per-session handlers (which do `session = _resolve_session(...)` first) and
+            # that line was dropped. This is a LIST endpoint with no session_id, so the
+            # correct scope is the caller's active org. Every call raised
+            # NameError -> 500 (1588 on dogfood, 1662 on prod in a week), so the
+            # Sessions-list paperclip icon never worked.
+            SessionAttachment.organization_id == active_org.organization.id
         )
         .group_by(SessionAttachment.session_id)
         .all()

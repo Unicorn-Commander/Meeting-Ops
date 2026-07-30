@@ -275,3 +275,29 @@ Workflow:
 4. Push branch + tag: `git push origin main && git push origin vX.Y.Z`.
 
 Tags ship to canonical Forgejo: `git.unicorncommander.ai/UnicornCommander/UC-Meeting-Ops`.
+
+## Inference / GPU routing (verified 2026-07-28)
+
+Canonical map: **`/home/muut/UC-Cloud-production/docs/gpu-fleet-map.md`** (bigboy).
+Read it before assuming which card runs what — several aliases are misleading.
+
+**Priority routing, not load-balancing.** litellm runs `routing_strategy: least-busy`,
+which **ignores `weight:`**. Priority is expressed as a *single-member pool* plus
+`litellm_settings.fallbacks`:
+
+- **Long context (131k)** — `qwen3.6-35b-a3b` / `-64k` / `-long`
+  → bigboy **3090** → `qwen3.6-35b-a3b-ha` (legacy1 P40 :8091, 131k) → cloud
+- **Batch (32k × 3)** — `qwen3.6-35b`
+  → **legacy1** card1 :8092 → `qwen3.6-35b-p40` (midboy2) → cloud
+
+⚠️ **Alias traps**
+- `qwen3.6-35b-p40` is midboy2's **32k × 3** node, NOT long-context. The 131k P40 is `qwen3.6-35b-a3b-ha`.
+- `qwen3.6-35b-midboy1` actually points at **bigboy's** RTX 6000.
+- "64k" in `qwen3.6-35b-64k` is a legacy name; both members are 131k-capable.
+
+⚠️ **Verify advertised context against reality.** The gateway was over-advertising
+`model_info.max_tokens` (e.g. `qwen3.6-35b-p40` claimed 131072 while serving 32768),
+so callers sized prompts off a lie and silently overflowed. Audit with:
+`GET :4000/v1/model/info` → `max_tokens` vs each backend's `GET <api_base>/props`
+→ `n_ctx` ÷ parallel count. A deployment with **no** `max_tokens` inherits and is
+just as dangerous as a wrong one.
