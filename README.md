@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/release-v3.57.3-8b5cf6)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v3.58.0-8b5cf6)](./CHANGELOG.md)
 [![App Store](https://img.shields.io/badge/App_Store-iPhone_·_iPad_·_Mac-0d84ff?logo=apple&logoColor=white)](https://apps.apple.com/us/app/meeting-ops/id6780018348)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776ab?logo=python&logoColor=white)](https://python.org)
 [![React 19](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev)
@@ -17,7 +17,7 @@
 [![Browser-first](https://img.shields.io/badge/inference-browser--first-ac162c)](#-browser-first-by-design)
 [![No third-party AI](https://img.shields.io/badge/3rd--party_AI-none-16a34a)](#-privacy-ownership--control)
 [![Open source](https://img.shields.io/badge/source-open-3b82f6)](LICENSE)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue)](LICENSE)
 
 *Part of the [Unicorn Commander](https://git.unicorncommander.ai) suite.*
 
@@ -252,7 +252,7 @@ GET   /health                                           # health + router status
 
 ## 🗺️ Status & roadmap
 
-**Live on prod (`meeting-ops.unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.57.x:**
+**Live on prod (`meeting-ops.unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.58.x:**
 
 - ✅ Browser-first capture + server completion pass · privacy mode
 - ✅ **Chunked local-only full pass** — in privacy mode, stopping runs a full Parakeet re-transcription *in the browser* in ~5-minute silence-aligned windows with live progress; the page stays responsive, and every window sits inside the model's long-form envelope (long meetings get *more* accurate, not less)
@@ -283,4 +283,9 @@ GET   /health                                           # health + router status
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The AGPL's network-copyleft terms mean that if you run a modified Meeting-Ops as a
+network service, you must offer your users the corresponding source. A **commercial
+license** is available for organizations that cannot meet those terms — contact
+<licensing@unicorncommander.ai>.
