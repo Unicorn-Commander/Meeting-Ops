@@ -1,6 +1,8 @@
 """
-Real Whisper Transcription Service - NPU Accelerated
-Actual transcription using NPU-accelerated WhisperX with 220x speedup
+LEGACY Whisper transcription service (UC-1 appliance line).
+
+Not the live path: this product transcribes with Parakeet (browser + server).
+The "220x speedup" previously claimed here was a hardcoded constant, never measured.
 """
 
 import logging
@@ -37,7 +39,7 @@ class RealWhisperService:
                     self.npu_engine = WhisperXNPUEngineReal(model_size=self.model_name)
                     self.is_initialized = True
                     logger.info(f"✅ NPU WhisperX model '{self.model_name}' loaded successfully")
-                    logger.info("⚡ NPU acceleration enabled - 220x speedup expected")
+                    logger.info("NPU engine loaded (legacy appliance path; no measured speedup)")
                     return True
                 except Exception as e:
                     logger.warning(f"NPU engine failed to load: {e}")
@@ -81,7 +83,7 @@ class RealWhisperService:
             
             # Transcribe with NPU WhisperX
             if self.use_npu:
-                # Use NPU engine for 220x speedup
+                # Use the legacy NPU engine (appliance line)
                 result = self.npu_engine.transcribe_file(audio_path, diarize=diarize)
             else:
                 # Use CPU WhisperX
@@ -187,7 +189,7 @@ class RealWhisperService:
         return {
             "npu_available": self.use_npu,
             "model": self.model_name,
-            "acceleration_factor": "220x" if self.use_npu else "1x",
+            "acceleration_factor": None,  # never measured; do not report a figure
             "status": "npu_accelerated" if self.use_npu else "cpu_fallback",
             "engine": "WhisperX + MLIR-AIE2" if self.use_npu else "WhisperX CPU"
         }

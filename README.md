@@ -150,6 +150,42 @@ Meeting-Ops doesn't just split a meeting into "Speaker 1 / Speaker 2." It builds
 
 ---
 
+## 🔗 Works with the rest of the suite
+
+Meeting-Ops isn't an island — a meeting is where customer history and project work
+*originate*. Two federations ship today, and both are governed rather than automatic.
+
+### 👥 Contact-Ops / Customer-Ops — meetings become customer history
+
+Meetings are projected into federated cockpits behind a **signed, cursor-paginated read
+API**, with **per-summary approval gating** so nothing lands on a customer record until a
+human releases it. Speaker profiles link to Contact-Ops people, so a named voice carries
+its real identity, photo, and company into every past and future meeting.
+
+<sub>`backend/api/federation_meetings.py` · `api/federation_summary_approval.py` · `services/contact_ops_resolver.py` · migrations `041`, `055`</sub>
+
+### 📋 Project-Ops — action items become tracked work
+
+Extracted action items are submitted to Project-Ops as **task proposals** over a
+workspace-bound token. Project-Ops stays the **sole owner of task status** — ticking a box
+in Meeting-Ops never overwrites it. Auto-push is **opt-in per org**
+(`auto_push_action_items`, default **off**); until you enable it, extraction and in-app
+display are unchanged. A failed push stamps the session so a backfill can find it, and
+finalize never raises.
+
+<sub>`services/projectops_writer.py` · `projectops_lifecycle.py` · `scripts/backfill_action_items_to_projectops.py` · migration `054`</sub>
+
+### 🩺 Machine-to-machine intake
+
+`/api/integrations/medical-visits` accepts a visit audio upload and reuses the same STT +
+diarization pipeline, gated by JWT audience and an `azp` actor allowlist — the pattern any
+suite app can follow to hand Meeting-Ops audio and get structured output back.
+
+> **Design rule:** Meeting-Ops proposes, the owning app disposes. It never mutates another
+> app's records without an approval step, and it never claims ownership of their state.
+
+---
+
 ## 🧱 The stack (what actually runs)
 
 | Job | Live (browser) | Completion pass (server) |

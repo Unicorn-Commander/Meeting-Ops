@@ -1,6 +1,11 @@
 """
-Real WhisperX NPU Engine with Hardware Acceleration
-Uses actual AMD Phoenix NPU for 220x+ speedup
+LEGACY — UC-1 hardware-appliance NPU engine. Not used by this product.
+
+This product is browser-first: live inference runs in the user's browser and the
+completion pass runs server-side on Parakeet. Kept only so the legacy model ids in
+stt_model_manager still import. The performance figures previously stated here
+("220x+ speedup") were never measured -- they were hardcoded constants.
+See Meeting-Ops-UC1 for the appliance line.
 """
 
 import numpy as np
@@ -42,15 +47,14 @@ class WhisperXNPUEngineReal:
         self.total_audio_processed = 0.0
         self.npu_binary_generated = False
         
-        # NPU performance metrics (real measured values)
+        # No performance figures are reported here. The previous values
+        # (speedup_factor=220, rtf=0.004, throughput=4789) were hardcoded
+        # constants that were never measured on hardware.
         self.npu_metrics = {
             "enabled": False,
-            "speedup_factor": 220,  # Minimum guaranteed speedup
-            "rtf": 0.004,  # Real-time factor (0.175s for 522.3s = 0.0003)
             "device": "AMD Phoenix NPU (16 TOPS INT8)",
             "hw_version": "AIE v1.1",
-            "throughput_tokens_per_sec": 4789,
-            "model": "whisper-base (INT8 quantized)"
+            "measured": False,
         }
         
         # Initialize NPU
