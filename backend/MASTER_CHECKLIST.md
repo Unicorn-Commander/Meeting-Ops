@@ -128,7 +128,7 @@
 ### Start Everything:
 ```bash
 # Backend with transcription-first mode
-cd /home/ucadmin/Meeting-Ops/backend
+cd /srv/meeting-ops/backend
 ./start-backend.sh
 
 # Frontend
