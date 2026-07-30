@@ -428,6 +428,10 @@ _load_router(app, "integrations_org", "api.integrations_org")
 _load_router(app, "digests", "api.digests")
 _load_router(app, "agent_actions", "api.agent_actions")
 _load_router(app, "personal_access_tokens", "api.personal_access_tokens")
+# Durable inbound transcript federation from Unicorn Stable. PAT auth, normal
+# org selection, and session.create RBAC apply; the endpoint never trusts a
+# tenant identifier from the request body.
+_load_router(app, "stable_ingest", "api.stable_ingest", required=True)
 
 # === PUBLIC LANDING PAGE (invite-only beta) ===
 # Single endpoint /api/landing/invite-request, no auth, rate-limited per-IP.

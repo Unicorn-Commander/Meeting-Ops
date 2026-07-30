@@ -1,5 +1,5 @@
 """Database models for Meeting-Ops"""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Date, Time, Text, Float, Boolean, JSON, ForeignKey, Index, func, event
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Date, Time, Text, Float, Boolean, JSON, ForeignKey, Index, UniqueConstraint, func, event
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB, CITEXT, ARRAY
 from datetime import datetime, timezone
@@ -36,6 +36,12 @@ class RecordingSession(Base):
     # @> containment lookups from the list filter. Declared here so
     # autogenerate doesn't try to drop it.
     __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "external_source",
+            "external_id",
+            name="uq_recording_sessions_org_external_source_id",
+        ),
         Index(
             "ix_recording_sessions_tags_gin",
             "tags",
@@ -92,6 +98,12 @@ class RecordingSession(Base):
     # Satellite device fields
     source_device_id = Column(String(100), nullable=True)  # Which satellite recorded this
     source_type = Column(String(50), default="local_mic")  # "local_mic", "satellite_stream", "satellite_upload", "satellite_transcript", "companion_app"
+    # Idempotent inbound-federation identity. NULL for native Meeting-Ops
+    # sessions; Stable writes ("unicorn-stable", export_id). The org is part of
+    # the uniqueness boundary so two tenants can safely use the same upstream
+    # identifier without seeing or overwriting one another.
+    external_source = Column(String(50), nullable=True)
+    external_id = Column(String(128), nullable=True)
     room_name = Column(String(200), nullable=True)  # Physical room name
     # NOT NULL on Postgres per 004_multi_org_scoping.
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
