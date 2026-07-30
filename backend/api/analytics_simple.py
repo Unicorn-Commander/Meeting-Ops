@@ -361,7 +361,16 @@ async def get_performance_metrics(
     active_org: ActiveOrganization = Depends(get_current_organization),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Get real NPU and system performance metrics"""
+    """Throughput metrics derived from this org's completed sessions.
+
+    Only values actually computed from the database are returned. This endpoint
+    previously reported a hardcoded NPU block (`speedup_factor: 220`,
+    `real_time_factor: 0.0045`, `tokens_per_second: 4789`) annotated as "measured" —
+    none of it was measured, and this product has no NPU: live inference runs in the
+    user's browser and the completion pass runs on the server. Per-stage processing
+    timings are not instrumented yet, so no latency or real-time-factor is reported
+    rather than inventing one.
+    """
     try:
         # Get recent completed sessions for performance analysis
         recent_sessions = db.query(DBRecordingSession).filter(
@@ -369,27 +378,24 @@ async def get_performance_metrics(
             DBRecordingSession.created_at >= datetime.now(timezone.utc) - timedelta(days=7),
             DBRecordingSession.status == "completed"
         ).all()
-        
+
         # Calculate real processing metrics
         total_duration = sum(s.duration or 0 for s in recent_sessions)
         avg_duration = total_duration / len(recent_sessions) if recent_sessions else 0
-        
-        # NPU performance metrics (these are actual measured values from the system)
-        npu_metrics = {
-            "enabled": True,
-            "real_time_factor": 0.0045,  # Actual measured RTF
-            "tokens_per_second": 4789,   # Actual measured throughput
-            "speedup_factor": 220,       # 220x speedup vs CPU (measured)
-            "processing_time_1_hour": 16.2,  # Seconds to process 1 hour (measured)
-            "sessions_processed": len(recent_sessions),
-            "avg_session_duration": round(avg_duration, 2)
-        }
-        
+
         return {
-            "npu": npu_metrics,
+            "window_days": 7,
+            "sessions_processed": len(recent_sessions),
+            "total_audio_seconds": round(total_duration, 2),
+            "avg_session_duration": round(avg_duration, 2),
+            "pipeline": {
+                "live_inference": "browser",   # Parakeet 0.6B INT8 (onnxruntime-web)
+                "completion_pass": "server",   # Parakeet 1.1B + pyannote
+            },
+            "processing_latency_instrumented": False,
             "generated_at": datetime.now(timezone.utc).isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get performance metrics: {e}")
         raise HTTPException(status_code=500, detail="Failed to get performance metrics")
