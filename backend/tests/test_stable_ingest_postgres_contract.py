@@ -1,11 +1,27 @@
 """PostgreSQL schema contract for the Stable transcript import mode."""
 
+import ast
 import os
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
 
-from api.stable_ingest import STABLE_INGEST_SESSION_MODE
+
+def _configured_stable_ingest_mode() -> str:
+    """Read the module constant without importing app/ORM state at collection."""
+
+    source = Path(__file__).parents[1] / "api" / "stable_ingest.py"
+    tree = ast.parse(source.read_text())
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "STABLE_INGEST_SESSION_MODE"
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("STABLE_INGEST_SESSION_MODE is not a literal module constant")
 
 
 def test_stable_ingest_mode_is_accepted_by_postgres_schema():
@@ -16,6 +32,7 @@ def test_stable_ingest_mode_is_accepted_by_postgres_schema():
     actual constraint rather than silently losing CHECK coverage.
     """
 
+    mode = _configured_stable_ingest_mode()
     url = os.getenv("MEETING_OPS_POSTGRES_CONTRACT_URL")
     if not url:
         pytest.skip("MEETING_OPS_POSTGRES_CONTRACT_URL is required for this contract")
@@ -35,4 +52,4 @@ def test_stable_ingest_mode_is_accepted_by_postgres_schema():
     finally:
         engine.dispose()
 
-    assert f"'{STABLE_INGEST_SESSION_MODE}'" in definition
+    assert f"'{mode}'" in definition
