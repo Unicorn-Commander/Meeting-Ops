@@ -341,7 +341,10 @@ async def ingest_stable_transcript(
         title=body.label or f"Stable call · {body.room_name}",
         description=f"Transcript imported from Unicorn Stable room {body.room_name}.",
         status="completed",
-        mode="federated",
+        # Imported transcripts use the existing upload pipeline mode. Stable
+        # provenance remains explicit in source_type/external_source; using a
+        # new ad-hoc mode would violate ck_recording_sessions_mode in Postgres.
+        mode="upload",
         created_at=_utc(body.exported_at),
         started_at=started,
         ended_at=ended,

@@ -321,6 +321,8 @@ def test_ingest_creates_speaker_owned_session_and_is_idempotent(client):
         assert row.external_source == "unicorn-stable"
         assert row.organization_id is not None
         assert row.status == "completed"
+        assert row.mode == "upload"
+        assert row.source_type == "stable"
         assert row.speaker_count == 2
         assert row.transcript_diarized["speakers"] == ["Aaron", "Shafen"]
         assert [s["speaker"] for s in row.transcript_diarized["segments"]] == [
