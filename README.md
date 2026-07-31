@@ -87,6 +87,10 @@ Full-text + hybrid semantic search across every meeting. Cross-meeting RAG ("sum
 |:--:|:--:|:--:|
 | ![](./meeting-ops-live-recording.png) | ![](./meeting-ops-aichat.png) | ![](./meeting-ops-sessionmanager.png) |
 
+| Meeting summary, actions & Project-Ops handoff | Speaker intelligence — identify, confirm, and see who spoke |
+|:--:|:--:|
+| ![](./frontend/public/screenshots/session-summary.png) | ![](./frontend/public/screenshots/speakers.png) |
+
 </div>
 
 ---
