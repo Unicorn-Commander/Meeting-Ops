@@ -150,7 +150,13 @@ if [ -n "$(git ls-files deploy/ 2>/dev/null)" ]; then
 else
   echo "   ok:   deploy/ tree removed"
 fi
-check "PII screenshots"                '(speakers|session-summary|knowledge-graph)\.png'
+# knowledge-graph.png renders a person's whole cross-meeting neighbourhood, so it
+# cannot be captured without including people who have not consented. speakers.png and
+# session-summary.png WERE blocked here for the same reason; they were re-captured in
+# PR #23 against a meeting whose only two participants both consented, so they are
+# allowed again. This rule is a filename guard, not a content check — if any of these
+# views is re-captured, review the image before relaxing anything.
+check "unconsentable screenshots"     'knowledge-graph\.png'
 check "high-signal secret formats"     '(sk-[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
 check "known CF tokens"                'cfut_[A-Za-z0-9]{20,}'
 # Assertive fabricated-performance claims. Correction/historical text is allowed;
