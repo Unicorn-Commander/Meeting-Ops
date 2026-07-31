@@ -174,7 +174,11 @@ class TranscriptionService:
                 logger.info(f"✅ Successfully switched to {model_info['name']}")
                 return True
             else:
-                logger.error(f"Failed to initialize {model_id}")
+                # The legacy NPU/appliance engines were removed from this product
+                # (they live in Meeting-Ops-UC1), so these ids are never loadable
+                # here. That is expected, not an error — logging it at ERROR made
+                # every boot look like a failure.
+                logger.debug("Legacy engine %s is not available in this build", model_id)
                 return False
                 
         except Exception as e:
