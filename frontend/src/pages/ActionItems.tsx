@@ -16,7 +16,7 @@ export default function ActionItems() {
           </div>
           <h1 className="mt-2 text-2xl font-semibold text-white">All action items</h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-400">
-            Review work captured across every meeting, mark it complete, or open its source meeting for context and Project-Ops status.
+            Work captured across every meeting. Hand an item to Project-Ops to track it there — Project-Ops owns its status, not Meeting-Ops — or dismiss it.
           </p>
         </div>
         <Link
@@ -33,7 +33,7 @@ export default function ActionItems() {
         limit={200}
         status=""
         title="All action items"
-        description="Includes open and completed items. Open an item for meeting context, ownership, and Project-Ops lifecycle details."
+        description="Send an item to Project-Ops to track it, or dismiss it. Open an item for meeting context, ownership, and Project-Ops lifecycle details."
         showViewAll={false}
       />
     </div>
