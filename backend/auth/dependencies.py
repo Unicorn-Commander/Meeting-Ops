@@ -32,6 +32,65 @@ def _first_email(*candidates: Optional[str]) -> Optional[str]:
     return None
 
 
+def _looks_like_email(value: Optional[str]) -> bool:
+    return bool(value) and "@" in value
+
+
+def _display_name_from_claims(claims: dict) -> Optional[str]:
+    """Best human display name out of a set of OIDC claims.
+
+    Prefers the composite ``name``, then ``given_name``/``family_name``.
+    Deliberately REFUSES an email-shaped value: preferred_username in this
+    realm is the email, and letting it through is exactly how every SSO
+    user ended up greeted by their own email address.
+    """
+    if not isinstance(claims, dict):
+        return None
+    name = claims.get("name")
+    if isinstance(name, str) and name.strip() and not _looks_like_email(name):
+        return name.strip()
+    parts = [
+        claims.get("given_name") if isinstance(claims.get("given_name"), str) else "",
+        claims.get("family_name") if isinstance(claims.get("family_name"), str) else "",
+    ]
+    joined = " ".join(p.strip() for p in parts if p and p.strip()).strip()
+    if joined and not _looks_like_email(joined):
+        return joined
+    return None
+
+
+def _sso_display_name(request: Request) -> Optional[str]:
+    """Display name for an oauth2-proxy forward-auth request.
+
+    oauth2-proxy's ``--set-xauthrequest`` header set carries the email, the
+    preferred_username and the groups — but NO display name. With
+    ``--set-authorization-header`` it also REPLACES the Authorization header
+    with the Keycloak id_token, which (scope ``profile``) does carry ``name``
+    / ``given_name`` / ``family_name``.
+
+    The claims are read WITHOUT signature verification, and that is safe here
+    for two reasons: (1) this is only ever called from the branch already
+    gated by ``forward_auth_trusted``, so the request provably crossed
+    Traefik + oauth2-proxy and the proxy overwrote whatever Authorization the
+    client sent; (2) the value is used ONLY as a cosmetic display name, never
+    to authenticate, authorize, or select the account. Identity still comes
+    exclusively from the trusted forward-auth headers.
+    """
+    raw = request.headers.get("Authorization") or ""
+    if not raw.lower().startswith("bearer "):
+        return None
+    token = raw.split(" ", 1)[1].strip()
+    if not token or token.startswith(PAT_PREFIX):
+        return None
+    try:
+        import jwt as pyjwt
+
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+    except Exception:
+        return None
+    return _display_name_from_claims(claims)
+
+
 def _get_sso_groups(request: Request) -> list[str]:
     raw_groups = (
         request.headers.get("X-Auth-Request-Groups")
@@ -91,12 +150,21 @@ async def get_current_user_optional(
         sso_groups = _get_sso_groups(request)
         request.state.sso_groups = sso_groups
         is_admin = is_global_admin(sso_groups)
+        # full_name is the DISPLAY name, not the login. sso_username here is
+        # Keycloak's preferred_username, which in the uchub realm IS the email
+        # — passing it straight through is what made every dashboard greet the
+        # user with "Welcome back, aaron@magicunicorn.tech". Pull the real name
+        # off the proxy-supplied id_token and fall back to None (never an
+        # email) so the stored name is left alone rather than clobbered.
+        sso_full_name = _sso_display_name(request)
+        if not sso_full_name and not _looks_like_email(sso_username):
+            sso_full_name = sso_username
         try:
             user = AuthService.get_or_create_sso_user(
                 db,
                 email=sso_email,
                 username=sso_username,
-                full_name=sso_username,
+                full_name=sso_full_name,
                 is_superuser=is_admin,
                 groups=sso_groups,
             )
@@ -154,8 +222,7 @@ async def get_current_user_optional(
                         db,
                         email=kc_email,
                         username=kc_claims.get("preferred_username"),
-                        full_name=kc_claims.get("name")
-                        or kc_claims.get("preferred_username"),
+                        full_name=_display_name_from_claims(kc_claims),
                         is_superuser=is_global_admin(kc_groups),
                         groups=kc_groups,
                     )
