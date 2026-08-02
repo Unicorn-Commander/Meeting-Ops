@@ -10,6 +10,12 @@ venv-py313/
 env/
 ENV/
 .env
+.env.*
+!.env.example
+!**/.env.example
+!**/.env.*.example
+!.env.transcription
+!**/.env.transcription
 
 # Virtual environments
 .venv/
