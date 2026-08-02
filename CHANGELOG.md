@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Fixed
+- **MCP tools now read the response shapes the REST API actually returns.** The tool
+  layer renders backend JSON, so endpoint envelopes are a contract, and three had
+  drifted out from under it. `list_meetings` read a `sessions` key on a payload that
+  has been `{"items": [...], "has_more": ...}` since the list endpoint moved to cursor
+  pagination, so it answered "No recording sessions found." for every caller while the
+  backend returned a full page (issue #9 — the cross-org flag added in #10 was correct
+  and reaches the query; the result was discarded on the way back). Its `status` and
+  `offset` arguments were sent as query params the endpoint does not accept and are now
+  applied client-side instead of silently ignored. `get_analytics` read the session
+  counters as top-level keys when `/api/analytics/summary` nests them under
+  `session_stats`, printing "Total sessions: 0" beside a fully populated speaker list
+  derived from those same sessions; speaker and duration-trend rows read the wrong field
+  names and rendered as zeros. `search_meetings` checked the semantic endpoint for a bare
+  list when it returns `{"results": [...]}`, so it silently degraded to keyword-only
+  search on every query. New `backend/tests/test_mcp_tool_response_contracts.py` pins each
+  tool against the payload literals its endpoint produces.
+
 ## [3.58.0] - 2026-07-25
 
 ### Added
