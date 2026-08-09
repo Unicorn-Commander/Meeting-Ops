@@ -41,6 +41,38 @@ DEFAULT_INFINITY_RERANKER_ENDPOINT = (
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL") or "Qwen/Qwen3-Reranker-0.6B"
 
+# STT provider names that decode ENGLISH ONLY. Parakeet's `language` request
+# param is cosmetic — the service echoes it back while decoding English
+# regardless, so French in => confidently-garbled English-ish text out
+# (measured 2026-08-09: 58% WER at reported confidence 0.97 on a French clip
+# that whisper multilingual medium transcribes at 4.2% WER). The gateway
+# route ("openai"/"gateway"/"litellm", model_group `parakeet`) wraps the same
+# parakeet service, so it is English-only too.
+_ENGLISH_ONLY_STT_PROVIDERS = (
+    "parakeet", "nemo", "parakeet-tdt", "openai", "gateway", "litellm",
+)
+
+
+def _normalize_language(value: Optional[str]) -> Optional[str]:
+    """Lowercase/strip a language tag; None for empty/absent values."""
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    return v or None
+
+
+def is_non_english_language(value: Optional[str]) -> bool:
+    """True when ``value`` explicitly names a non-English language.
+
+    ``None``/``""``/``"auto"`` and any English tag (``en``, ``en-US``,
+    ``en_GB``…) return False — those keep the default (English) STT routing.
+    """
+    v = _normalize_language(value)
+    if v is None:
+        return False
+    primary = v.replace("_", "-").split("-", 1)[0].strip()
+    return primary not in ("", "en", "auto")
+
 
 class ProviderRegistry:
     def __init__(self, db: Session):
@@ -261,6 +293,7 @@ class ProviderRegistry:
         *,
         provider_override: Optional[str] = None,
         model_override: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> Any:
         """Resolve the org's configured STT provider.
 
@@ -277,6 +310,26 @@ class ProviderRegistry:
         provider_override / model_override here so a single recording can
         route through Whisper while the org default stays Parakeet (or
         vice versa).
+
+        ``language`` (2026-08-09, language-aware routing): the upload's
+        explicit language hint. When it names a non-English language and the
+        caller did NOT explicitly pick an engine for this upload, the
+        English-only providers (parakeet + the gateway shim that wraps it)
+        are rerouted to the multilingual whisper endpoint (WHISPER_SERVER_URL)
+        — parakeet garbles non-English audio while echoing the requested
+        language back with high confidence, which is silent data corruption.
+        Precedence:
+
+            1. per-upload ``provider_override``      (always honored as-is)
+            2. explicit non-English ``language``      (per-call arg, else the
+               org stt row's ``overrides["language"]``) => whisper
+            3. org Provider Settings row
+            4. STT_DEFAULT_PROVIDER env (default parakeet)
+
+        With no whisper endpoint configured, case 2 raises instead of
+        silently transcribing garbage. English/auto/absent language changes
+        nothing. ``model_override`` is ignored on the rerouted path (it names
+        a model for the engine the org would have used, not for whisper).
         """
         # Default to Parakeet: it runs ~3x faster than whisper-large-v3-turbo
         # on the same hardware, returns word-level timestamps natively
@@ -292,6 +345,42 @@ class ProviderRegistry:
         ).lower()
         endpoint_override = settings.get("endpoint_url") or ""
         model = model_override or settings.get("model_name") or ""
+
+        # Language-aware rerouting (precedence rule 2 above). The org-level
+        # default language lives on the stt settings row as
+        # overrides={"language": "fr"}; a per-call language wins over it.
+        org_overrides = settings.get("overrides") or {}
+        effective_language = _normalize_language(language) or _normalize_language(
+            org_overrides.get("language") if isinstance(org_overrides, dict) else None
+        )
+        if (
+            provider_override is None
+            and provider_name in _ENGLISH_ONLY_STT_PROVIDERS
+            and is_non_english_language(effective_language)
+        ):
+            whisper_url = (os.getenv("WHISPER_SERVER_URL") or "").strip()
+            if not whisper_url:
+                # Fail LOUD instead of silently garbling: without a
+                # multilingual endpoint, parakeet would return confident
+                # nonsense for this audio — the exact failure mode this
+                # routing exists to stop. The pipeline surfaces this message
+                # on the upload job.
+                raise RuntimeError(
+                    f"Transcription in '{effective_language}' was requested, but no "
+                    "multilingual STT endpoint is configured (WHISPER_SERVER_URL is "
+                    "unset and the default STT engine is English-only). Configure a "
+                    "whisper endpoint or remove the language override."
+                )
+            from .impl_stt import LocalWhisperProvider
+            logger.info(
+                "STT language routing: language=%s => multilingual whisper at %s "
+                "(org=%s; default provider '%s' is English-only)",
+                effective_language, whisper_url, org_id, provider_name,
+            )
+            return LocalWhisperProvider(
+                endpoint=whisper_url,
+                model=os.getenv("WHISPER_MODEL_NAME") or "whisper.cpp-multilingual",
+            )
 
         # Route STT through the OpenAI-compatible gateway (model 'parakeet' →
         # the midboy1 parakeet-openai-shim) — single-endpoint, metered,
@@ -322,12 +411,17 @@ class ProviderRegistry:
             )
 
         from .impl_stt import LocalWhisperProvider
-        endpoint = endpoint_override or os.getenv(
-            "WHISPER_SERVER_URL", "http://meet-whisper:8178"
+        # `or`-chain (not getenv default) because the compose files export
+        # WHISPER_SERVER_URL as an EMPTY string when unset, and "" must not
+        # shadow the container-name fallback.
+        endpoint = (
+            endpoint_override
+            or (os.getenv("WHISPER_SERVER_URL") or "").strip()
+            or "http://meet-whisper:8178"
         )
         return LocalWhisperProvider(
             endpoint=endpoint,
-            model=model or "whisper.cpp-large-v3-turbo",
+            model=model or os.getenv("WHISPER_MODEL_NAME") or "whisper.cpp-large-v3-turbo",
         )
 
     def get_tts(self, org_id: int) -> Any:

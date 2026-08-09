@@ -28,9 +28,11 @@ PROJECTOPS_LIFECYCLE_SOURCE = (
 )
 
 # Names whose absence on the worker breaks the reprocess pipeline.
+# WHISPER added 2026-08-09: the worker runs the same _transcribe_audio path,
+# so a language-routed (non-English) reprocess needs WHISPER_SERVER_URL too.
 SERVICE_VAR_RE = re.compile(
     r"^(PARAKEET|SORTFORMER|SPEAKER|EMBEDDING|INFINITY|RERANKER|LLM_MODEL|"
-    r"MEETING_OPS_LLM|MEETING_OPS_SUMMARIZER|OPENAI|LLAMA|QDRANT|GARAGE)"
+    r"MEETING_OPS_LLM|MEETING_OPS_SUMMARIZER|OPENAI|LLAMA|QDRANT|GARAGE|WHISPER)"
 )
 
 

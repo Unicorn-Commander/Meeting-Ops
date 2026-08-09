@@ -1074,7 +1074,11 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 db,
                 provider_override=opts.stt_provider,
                 model_override=opts.stt_model,
-                language=opts.language or "en",
+                # Raw (None when unset) — an explicit non-English value makes
+                # get_stt() reroute to the multilingual whisper endpoint;
+                # coercing to "en" here would erase that signal and keep
+                # non-English uploads on English-only parakeet (silent garble).
+                language=opts.language,
             )
         except BaseException:
             # STT failed — cancel the concurrent diarize task so it doesn't
@@ -1291,6 +1295,10 @@ async def run_upload_pipeline(upload_id: str) -> None:
             flag_modified(session, "processing_metadata")
             db.commit()
 
+        # A successful uploads-path run is this session's newest truth —
+        # advance any stale reprocess failure flags so the red "Reprocess
+        # failed" banner can't outlive a healthy re-run (see helper).
+        _advance_stale_reprocess_flags(session)
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
         job.stage = "done"
@@ -1501,6 +1509,49 @@ async def _resolve_session_for_job(db: Session, job: UploadJob, audio_path: Path
     return await _create_upload_session(db, job, audio_path)
 
 
+def _advance_stale_reprocess_flags(session: RecordingSession) -> bool:
+    """Advance stale full-audio reprocess failure flags after a successful run.
+
+    The always-on reprocess path (api/recording.py ``_set_status``) records a
+    failure as BOTH ``processing_metadata.reprocess_status = "failed"`` and
+    ``processing_metadata.full_audio.{status,error,failed_at}``. The uploads
+    reprocess path (POST /api/uploads/sessions/{id}/reprocess) re-transcribes
+    through THIS pipeline but historically completed without touching those
+    flags — so SessionDetails kept rendering the red "Reprocess failed" banner
+    (keyed on ``reprocess_status === 'failed'``) over a session whose latest
+    run was 100% healthy, and no number of successful re-runs could ever clear
+    it. A successful pipeline completion is the session's newest truth, so
+    advance the stale flags to the terminal ``"complete"`` (the same terminal
+    value workers/reprocess_workers.py's recovery scan checks for).
+
+    Only ADVANCES existing non-terminal states — sessions that never had a
+    reprocess keep their metadata untouched, and an already-"complete" state
+    is left alone. Returns True when metadata changed; caller commits.
+    """
+    metadata = dict(session.processing_metadata or {})
+    changed = False
+    if metadata.get("reprocess_status") not in (None, "complete"):
+        metadata["reprocess_status"] = "complete"
+        changed = True
+    full_audio = metadata.get("full_audio")
+    if isinstance(full_audio, dict) and (
+        full_audio.get("status") not in (None, "complete")
+        or "error" in full_audio
+        or "failed_at" in full_audio
+    ):
+        full_audio = dict(full_audio)
+        full_audio["status"] = "complete"
+        full_audio.pop("error", None)
+        full_audio.pop("failed_at", None)
+        full_audio["updated_at"] = datetime.now(timezone.utc).isoformat()
+        metadata["full_audio"] = full_audio
+        changed = True
+    if changed:
+        session.processing_metadata = metadata
+        flag_modified(session, "processing_metadata")
+    return changed
+
+
 async def _transcribe_audio(
     audio_path: Path,
     org_id: int,
@@ -1508,7 +1559,7 @@ async def _transcribe_audio(
     *,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
-    language: str = "en",
+    language: Optional[str] = None,
 ) -> dict[str, Any]:
     """Transcribe via the configured STT provider (Whisper or Parakeet).
 
@@ -1516,6 +1567,13 @@ async def _transcribe_audio(
     through ProviderRegistry; per-upload overrides win over the org's
     saved Provider Settings so a single recording can route through
     Parakeet while the org default stays Whisper (or vice versa).
+
+    ``language`` must stay None when the caller has no EXPLICIT hint —
+    get_stt() reroutes explicit non-English uploads to the multilingual
+    whisper endpoint (parakeet is English-only and silently garbles
+    anything else), and an "en" default here would mask that signal.
+    Passing "en" explicitly (the live-chunks + always-on paths do) keeps
+    today's parakeet routing bit-for-bit.
     """
     from services.providers.registry import get_provider_registry
     from services.transcription_options import normalized_provider_name, TranscriptionOptions
@@ -1527,8 +1585,9 @@ async def _transcribe_audio(
         org_id,
         provider_override=norm_provider,
         model_override=model_override,
+        language=language,
     )
-    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language), timeout=1800)
+    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language or "en"), timeout=1800)
     if not result or not result.get("segments"):
         # Surface the provider's real reason (STT "audio too long" / 500 /
         # timeout, carried on result["error"]) instead of a generic message,
