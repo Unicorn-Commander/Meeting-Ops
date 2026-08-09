@@ -175,18 +175,31 @@ def is_configured() -> bool:
 
 
 def _legacy_pro_price_ids() -> tuple[str, ...]:
-    """Legacy Stripe price IDs for pre-v3.23.0 Pro subscribers ($12/mo, $120/yr).
+    """Retired Stripe price IDs that must still resolve to the Pro tier
+    ($12/mo, $120/yr from pre-v3.23.0, and $15/mo, $150/yr retired 2026-08-08).
 
     Kept alive so existing subscribers whose Stripe subscription is tied
     to the old price IDs continue to resolve as `pro` in the webhook
     (Stripe charges them at the original $12 / $120 forever until cancel
     — there's no code-level grandfathering, just a "don't unmap these
-    price IDs" promise). New signups go through STRIPE_PRO_PRICE_ID
-    which the env points at the new $20 price.
+    price IDs" promise). New signups go through STRIPE_PRO_PRICE_ID,
+    which the env now points at the $22/mo price
+    (price_1U2LVNDzk9HqAZnHVvaNigJ0), with $216/yr on
+    STRIPE_PRO_ANNUAL_PRICE_ID (price_1U2LVrDzk9HqAZnH4dL6Oypc).
     """
     return (
         "price_1TcbE0Dzk9HqAZnHO3cv6mWN",  # legacy Pro $12/mo
         "price_1TdcTfDzk9HqAZnHl979Vv0M",  # legacy Pro $120/yr
+        # 2026-08-08 reprice ($15/$150 -> $22/$216). These two WERE the live
+        # standing Pro prices until today and are now archived in Stripe. No
+        # subscription was ever created against them (the account has had zero
+        # subscriptions, ever), so this entry protects nobody who exists today.
+        # It is here because the cost of being wrong is asymmetric: an unmapped
+        # price resolves to 'free' in price_id_to_tier, which would silently
+        # DOWNGRADE a paying customer on a webhook. Keeping a retired price in
+        # this tuple costs nothing and cannot upgrade anyone who did not pay.
+        "price_1TonlODzk9HqAZnHqA8Y7d7L",  # retired Pro $15/mo
+        "price_1TonlODzk9HqAZnHPmVQGCGO",  # retired Pro $150/yr
     )
 
 
@@ -206,9 +219,13 @@ def price_id_to_tier(price_id: Optional[str]) -> str:
     Aaron's pricing decisions (locked 2026-05-29, v3.23.0 5-tier matrix
     landed 2026-06-02):
       Free        = $0,            browser-only
-      Basic       = $7.99 / $79,   server text storage + sync + AI Chat + search (NO audio upload)
-      Pro         = $20 / $200,    Meeting-Ops full server feature set incl. canonical_reprocess
-      Suite       = $35 / $350,    Pro + uc_suite_entitlement (Pro on Project-Ops + Contact-Ops via Brigade fed.)
+      Basic       = RETIRED 2026-08-08. Stripe prices archived, env vars blanked.
+                    No UI ever reached it and $7.99 undercut the positioning.
+      Pro         = $22 / $216,    Meeting-Ops full server feature set incl. canonical_reprocess
+                    (repriced 2026-08-08 from $15 / $150; the $20 / $200 pair in
+                    the old note was never charged to anyone and is archived)
+      Suite       = checkout CLOSED. STRIPE_SUITE_PRICE_ID/_ANNUAL_ are blank;
+                    the superseded $35 / $350 pair is not sold from this app.
       Enterprise  = custom,        on-prem + BYOK + retention controls + HIPAA
 
     Legacy Pro price IDs ($12/mo + $120/yr) AND the legacy Suite $25 ID
