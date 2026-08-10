@@ -91,24 +91,14 @@ class LocalWhisperProvider:
                     resp = await client.post(f"{self.endpoint}/inference", files=files, data=data)
         except httpx.TimeoutException:
             logger.error("Whisper timeout transcribing %s (timeout=%ss)", audio_path, timeout)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Transcription timed out after {timeout:.0f}s — the recording may be too long for the current limit.",
-            )
+            return _empty_result(self.model, language or "en")
         except Exception as exc:  # noqa: BLE001
             logger.error("Whisper client error: %s", exc)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Could not reach the transcription service: {exc}",
-            )
+            return _empty_result(self.model, language or "en")
 
         if resp.status_code != 200:
-            detail = (resp.text or "").strip()[:300]
-            logger.error("Whisper returned %s: %s", resp.status_code, detail)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Transcription service error {resp.status_code}: {detail}",
-            )
+            logger.error("Whisper returned %s: %s", resp.status_code, resp.text[:200])
+            return _empty_result(self.model, language or "en")
 
         result = resp.json()
         segments: list[dict[str, Any]] = []

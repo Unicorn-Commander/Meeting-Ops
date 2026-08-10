@@ -1074,11 +1074,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
                 db,
                 provider_override=opts.stt_provider,
                 model_override=opts.stt_model,
-                # Raw (None when unset) — an explicit non-English value makes
-                # get_stt() reroute to the multilingual whisper endpoint;
-                # coercing to "en" here would erase that signal and keep
-                # non-English uploads on English-only parakeet (silent garble).
-                language=opts.language,
+                language=opts.language or "en",
             )
         except BaseException:
             # STT failed — cancel the concurrent diarize task so it doesn't
@@ -1559,7 +1555,7 @@ async def _transcribe_audio(
     *,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
-    language: Optional[str] = None,
+    language: str = "en",
 ) -> dict[str, Any]:
     """Transcribe via the configured STT provider (Whisper or Parakeet).
 
@@ -1567,13 +1563,6 @@ async def _transcribe_audio(
     through ProviderRegistry; per-upload overrides win over the org's
     saved Provider Settings so a single recording can route through
     Parakeet while the org default stays Whisper (or vice versa).
-
-    ``language`` must stay None when the caller has no EXPLICIT hint —
-    get_stt() reroutes explicit non-English uploads to the multilingual
-    whisper endpoint (parakeet is English-only and silently garbles
-    anything else), and an "en" default here would mask that signal.
-    Passing "en" explicitly (the live-chunks + always-on paths do) keeps
-    today's parakeet routing bit-for-bit.
     """
     from services.providers.registry import get_provider_registry
     from services.transcription_options import normalized_provider_name, TranscriptionOptions
@@ -1585,9 +1574,8 @@ async def _transcribe_audio(
         org_id,
         provider_override=norm_provider,
         model_override=model_override,
-        language=language,
     )
-    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language or "en"), timeout=1800)
+    result = await asyncio.wait_for(stt.transcribe(str(audio_path), language=language), timeout=1800)
     if not result or not result.get("segments"):
         # Surface the provider's real reason (STT "audio too long" / 500 /
         # timeout, carried on result["error"]) instead of a generic message,
