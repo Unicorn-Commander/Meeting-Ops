@@ -187,14 +187,28 @@ async def search_meetings(query: str, limit: int = 5) -> str:
             "/api/simple/recording-sessions/semantic-search",
             params={"q": query, "limit": limit},
         )
-        if data and isinstance(data, list) and len(data) > 0:
-            lines = [f"Found {len(data)} meetings matching '{query}':\n"]
-            for i, item in enumerate(data, 1):
-                title = item.get("title", "Untitled")
-                score = item.get("score", 0)
-                snippet = item.get("snippet", "")[:200]
-                sid = item.get("session_id", "")
-                created = item.get("created_at", "")[:10]
+        # The semantic endpoint returns a DICT:
+        #   {"query": ..., "results": [...], "count": N}
+        # A bare list is kept as a fallback for older/alternate shapes.
+        if isinstance(data, dict):
+            sem_results = data.get("results") or []
+        elif isinstance(data, list):
+            sem_results = data
+        else:
+            sem_results = []
+
+        if sem_results:
+            lines = [f"Found {len(sem_results)} meetings matching '{query}':\n"]
+            for i, item in enumerate(sem_results, 1):
+                title = item.get("title") or "Untitled"
+                # score may be absent or None -> never let :.3f blow up
+                try:
+                    score = float(item.get("score") or 0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                snippet = str(item.get("snippet") or "")[:200]
+                sid = item.get("session_id") or ""
+                created = str(item.get("created_at") or "")[:10]
                 lines.append(
                     f"{i}. **{title}** (score: {score:.3f})\n"
                     f"   Session ID: {sid}\n"
@@ -288,8 +302,17 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
 
     data = await _api("get", "/api/simple/recording-sessions", params=params)
 
-    sessions = data if isinstance(data, list) else data.get("sessions", [])
-    total = data.get("total", len(sessions)) if isinstance(data, dict) else len(sessions)
+    # The backend returns {"items": [...], "has_more": ..., "next_cursor": ...}.
+    # "sessions" and a bare list are kept as fallbacks for alternate shapes.
+    if isinstance(data, list):
+        sessions = data
+        total = len(sessions)
+    elif isinstance(data, dict):
+        sessions = data.get("items") or data.get("sessions") or []
+        total = data.get("total", len(sessions))
+    else:
+        sessions = []
+        total = 0
 
     if not sessions:
         return "No recording sessions found."
