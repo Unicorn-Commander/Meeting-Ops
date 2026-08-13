@@ -307,17 +307,32 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
     if isinstance(data, list):
         sessions = data
         total = len(sessions)
+        has_more = False
     elif isinstance(data, dict):
         sessions = data.get("items") or data.get("sessions") or []
-        total = data.get("total", len(sessions))
+        # This endpoint paginates with has_more/next_cursor and does NOT
+        # return a "total" — don't invent one, or the caller reads
+        # "Showing 5 of 5" and concludes there are only 5 meetings.
+        total = data.get("total")
+        has_more = bool(data.get("has_more"))
     else:
         sessions = []
-        total = 0
+        total = None
+        has_more = False
 
     if not sessions:
         return "No recording sessions found."
 
-    lines = [f"Showing {len(sessions)} of {total} sessions:\n"]
+    if total is not None:
+        header = f"Showing {len(sessions)} of {total} sessions:"
+    elif has_more:
+        header = (
+            f"Showing {len(sessions)} sessions "
+            f"(more available — raise limit or page with offset):"
+        )
+    else:
+        header = f"Showing {len(sessions)} sessions:"
+    lines = [header + "\n"]
     for s in sessions:
         title = s.get("title") or s.get("name", "Untitled")
         sid = s.get("session_id") or str(s.get("id", ""))
