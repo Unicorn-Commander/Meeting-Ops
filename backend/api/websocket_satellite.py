@@ -52,7 +52,8 @@ RECONNECTION_WINDOW = 60
 # Recordings directory
 RECORDINGS_DIR = os.environ.get(
     "RECORDINGS_DIR",
-    "/home/ucadmin/UC-Meeting-Ops/backend/recordings"
+    # default beside this backend, not an absolute path from one machine
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "recordings"),
 )
 
 # Track active satellite streaming sessions for reconnection

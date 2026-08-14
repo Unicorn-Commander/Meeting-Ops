@@ -26,8 +26,14 @@ from models.system_settings import (
 
 logger = logging.getLogger(__name__)
 
-# Settings file location
-SETTINGS_FILE = Path("/home/ucadmin/Meeting-Ops/backend/config/system_settings.json")
+# Settings file location. Env-overridable; defaults beside this backend rather than
+# an absolute path from one machine (this ran mkdir() on /home/ucadmin at import).
+SETTINGS_FILE = Path(
+    os.getenv(
+        "SYSTEM_SETTINGS_FILE",
+        str(Path(__file__).resolve().parents[1] / "config" / "system_settings.json"),
+    )
+)
 SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 

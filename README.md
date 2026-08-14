@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/release-v3.57.3-8b5cf6)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/release-v3.58.0-8b5cf6)](./CHANGELOG.md)
 [![App Store](https://img.shields.io/badge/App_Store-iPhone_·_iPad_·_Mac-0d84ff?logo=apple&logoColor=white)](https://apps.apple.com/us/app/meeting-ops/id6780018348)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776ab?logo=python&logoColor=white)](https://python.org)
 [![React 19](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev)
@@ -17,7 +17,7 @@
 [![Browser-first](https://img.shields.io/badge/inference-browser--first-ac162c)](#-browser-first-by-design)
 [![No third-party AI](https://img.shields.io/badge/3rd--party_AI-none-16a34a)](#-privacy-ownership--control)
 [![Open source](https://img.shields.io/badge/source-open-3b82f6)](LICENSE)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue)](LICENSE)
 
 *Part of the [Unicorn Commander](https://git.unicorncommander.ai) suite.*
 
@@ -87,6 +87,10 @@ Full-text + hybrid semantic search across every meeting. Cross-meeting RAG ("sum
 |:--:|:--:|:--:|
 | ![](./meeting-ops-live-recording.png) | ![](./meeting-ops-aichat.png) | ![](./meeting-ops-sessionmanager.png) |
 
+| Meeting summary, actions & Project-Ops handoff | Speaker intelligence — identify, confirm, and see who spoke |
+|:--:|:--:|
+| ![](./frontend/public/screenshots/session-summary.png) | ![](./frontend/public/screenshots/speakers.png) |
+
 </div>
 
 ---
@@ -147,6 +151,42 @@ Meeting-Ops doesn't just split a meeting into "Speaker 1 / Speaker 2." It builds
 - **Run it your way.** Our hosted cloud (zero setup), your own private cloud, or a fully **air-gapped on-prem** appliance. The strictest buyers get complete data residency; everyone else gets one-click hosting.
 - **Open source.** Auditable end to end — no black box, no lock-in. Verify the privacy claims yourself, or fork it and run the whole stack.
 - **SSO-native + hardened.** Forward-auth trust boundary, per-workspace billing, WebSocket handshake auth, HTTP security headers, per-room retention controls.
+
+---
+
+## 🔗 Works with the rest of the suite
+
+Meeting-Ops isn't an island — a meeting is where customer history and project work
+*originate*. Two federations ship today, and both are governed rather than automatic.
+
+### 👥 Contact-Ops / Customer-Ops — meetings become customer history
+
+Meetings are projected into federated cockpits behind a **signed, cursor-paginated read
+API**, with **per-summary approval gating** so nothing lands on a customer record until a
+human releases it. Speaker profiles link to Contact-Ops people, so a named voice carries
+its real identity, photo, and company into every past and future meeting.
+
+<sub>`backend/api/federation_meetings.py` · `api/federation_summary_approval.py` · `services/contact_ops_resolver.py` · migrations `041`, `055`</sub>
+
+### 📋 Project-Ops — action items become tracked work
+
+Extracted action items are submitted to Project-Ops as **task proposals** over a
+workspace-bound token. Project-Ops stays the **sole owner of task status** — ticking a box
+in Meeting-Ops never overwrites it. Auto-push is **opt-in per org**
+(`auto_push_action_items`, default **off**); until you enable it, extraction and in-app
+display are unchanged. A failed push stamps the session so a backfill can find it, and
+finalize never raises.
+
+<sub>`services/projectops_writer.py` · `projectops_lifecycle.py` · `scripts/backfill_action_items_to_projectops.py` · migration `054`</sub>
+
+### 🩺 Machine-to-machine intake
+
+`/api/integrations/medical-visits` accepts a visit audio upload and reuses the same STT +
+diarization pipeline, gated by JWT audience and an `azp` actor allowlist — the pattern any
+suite app can follow to hand Meeting-Ops audio and get structured output back.
+
+> **Design rule:** Meeting-Ops proposes, the owning app disposes. It never mutates another
+> app's records without an approval step, and it never claims ownership of their state.
 
 ---
 
@@ -252,7 +292,7 @@ GET   /health                                           # health + router status
 
 ## 🗺️ Status & roadmap
 
-**Live on prod (`meeting-ops.unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.57.x:**
+**Live on prod (`meeting-ops.unicorncommander.ai`) + dogfood (`magicunicorn.dev`) — v3.58.x:**
 
 - ✅ Browser-first capture + server completion pass · privacy mode
 - ✅ **Chunked local-only full pass** — in privacy mode, stopping runs a full Parakeet re-transcription *in the browser* in ~5-minute silence-aligned windows with live progress; the page stays responsive, and every window sits inside the model's long-form envelope (long meetings get *more* accurate, not less)
@@ -283,4 +323,9 @@ GET   /health                                           # health + router status
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The AGPL's network-copyleft terms mean that if you run a modified Meeting-Ops as a
+network service, you must offer your users the corresponding source. A **commercial
+license** is available for organizations that cannot meet those terms — contact
+<licensing@unicorncommander.ai>.

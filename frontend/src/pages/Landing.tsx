@@ -63,8 +63,6 @@ import { beginProCheckout, hasStoredAuthToken } from '../utils/checkout';
 import {
   PRO_MONTHLY_PRICE_DISPLAY,
   PRO_MONTHLY_PRICE_WITH_PERIOD,
-  PRO_LIST_PRICE_DISPLAY,
-  PRO_LAUNCH_DISCOUNT_PCT,
 } from '../constants/pricing';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
@@ -971,8 +969,9 @@ export const Landing: React.FC = () => {
               <span className="text-zinc-600">·</span>
               <span className="text-sm text-zinc-300">
                 Add server intelligence for{' '}
-                <span className="font-mono text-zinc-500 line-through">$20</span>{' '}
-                <span className="font-semibold text-gold-300">$15/mo</span>
+                <span className="font-semibold text-gold-300">
+                  {PRO_MONTHLY_PRICE_WITH_PERIOD}
+                </span>
               </span>
               <span className="text-sm text-zinc-500 transition group-hover:text-gold-300">
                 See pricing →
@@ -1399,17 +1398,11 @@ export const Landing: React.FC = () => {
                     Studio-quality output and an AI that knows your whole library.
                   </p>
                   <div className="mt-5 flex items-end gap-2">
-                    <span className="pb-1 font-display text-2xl font-medium text-zinc-500 line-through decoration-zinc-600">
-                      {PRO_LIST_PRICE_DISPLAY}
-                    </span>
                     <span className="font-display text-5xl font-semibold tabular-nums text-white">
                       {PRO_MONTHLY_PRICE_DISPLAY}
                     </span>
                     <span className="pb-1 text-sm text-zinc-500">/month</span>
                   </div>
-                  <p className="mt-1 text-xs font-semibold text-gold-400">
-                    Launch pricing — {PRO_LAUNCH_DISCOUNT_PCT}% off
-                  </p>
                   <ul className="mt-6 space-y-3 text-sm text-zinc-200">
                     {[
                       'Everything in Free',

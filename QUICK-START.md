@@ -4,7 +4,7 @@
 
 ```bash
 # 1. Start the system
-cd /home/ucadmin/Meeting-Ops
+cd /srv/meeting-ops
 ./start-meeting-ops.sh
 
 # 2. Open in browser
@@ -19,9 +19,9 @@ cd /home/ucadmin/Meeting-Ops
 
 ## 🎯 What You Get
 
-**Meeting-Ops** is an AI-powered meeting transcription appliance with:
-- ⚡ **220x faster** transcription (NPU accelerated)
-- 🎙️ **Real-time transcription** with speaker detection
+**Meeting-Ops** is an AI-powered meeting transcription platform with:
+- ⚡ **Live transcription in the browser** (Parakeet 0.6B INT8 via WebGPU/WASM — no per-minute server cost)
+- 🎙️ **Server completion pass** at meeting end (Parakeet 1.1B + pyannote diarization)
 - 🤖 **Live AI analysis** during meetings
 - 📝 **Smart meeting notes** and summaries
 - 🔐 **Secure authentication** system
@@ -53,7 +53,7 @@ cd Meeting-Ops
 
 ### 2. Start All Services
 ```bash
-# This starts everything: backend, frontend, database, NPU
+# This starts everything: backend, frontend, database
 ./start-meeting-ops.sh
 ```
 
@@ -63,7 +63,6 @@ cd Meeting-Ops
 ✅ Docker services started
 ✅ Backend running on port 9050
 ✅ Frontend running on port 7778
-✅ NPU acceleration enabled
 ✅ All systems ready!
 ```
 
@@ -166,23 +165,27 @@ aplay test.wav
 
 ---
 
-## 🧠 NPU Acceleration
+## 🧠 Where inference actually runs
 
-### Check NPU Status
+Meeting-Ops is **browser-first**. There is no NPU in this product — the per-minute
+work happens on the user's own device, and the server does one pass per finished
+meeting.
+
+| Stage | Where | Model |
+|---|---|---|
+| Live transcript | Browser (WebGPU/WASM) | Parakeet 0.6B INT8 via `onnxruntime-web` |
+| Live summary | Browser | small on-device LLM (transformers.js / web-llm) |
+| Completion pass | Server, once at meeting end | Parakeet 1.1B |
+| Diarization | Server | pyannote + `wespeaker` embeddings |
+| Summary / actions | Server | Qwen 3.6 35B-A3B via LiteLLM |
+
+### Check the pipeline
 ```bash
-# Check NPU device
-ls /dev/accel/
-# Should show: accel0 (or similar)
-
-# Check NPU in application
-curl http://localhost:9050/api/status | jq '.npu'
+curl http://localhost:9050/api/health | jq
 ```
 
-### NPU Performance
-- **220x speedup** over CPU-only transcription
-- **0.0045 RTF** - processes 1 hour in 16.2 seconds
-- **4,789 tokens/second** throughput
-- **Whisper Large-v3** with INT8 optimization
+> **Note:** the NPU-accelerated Whisper path belongs to the separate **UC-1 hardware
+> appliance** line (`Meeting-Ops-UC1`), not to this codebase.
 
 ---
 
@@ -238,7 +241,7 @@ tail -f frontend/frontend.log
 curl http://localhost:9050/api/status
 
 # Should return:
-# {"status": "healthy", "npu": {"status": "available"}, ...}
+# {"status": "healthy", ...}
 ```
 
 ---
@@ -269,7 +272,7 @@ curl http://localhost:9050/api/status
 - While recording, check the dashboard
 - View real-time metrics:
   - Recording duration
-  - NPU performance
+  - Live transcription status
   - System resources
 
 ---
@@ -284,8 +287,7 @@ nano backend/.env
 # Key settings:
 DATABASE_URL=postgresql://meetingops:REMOVED@localhost:5432/meeting_sessions
 JWT_SECRET_KEY=super-secret-jwt-key-for-meeting-ops-change-in-production
-NPU_ENABLED=true
-WHISPER_MODEL=large-v3
+STT_MODEL=parakeet-1.1b
 ```
 
 ### Frontend Settings
@@ -324,13 +326,6 @@ curl http://localhost:9050/api/status
 curl -X POST "http://localhost:9050/api/auth/login" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "username=admin&password=admin123"
-```
-
-#### "NPU not available"
-```bash
-# Check NPU device
-ls /dev/accel/
-# Install NPU drivers if missing: sudo apt install amd-npu-driver
 ```
 
 #### "No audio devices"
@@ -380,7 +375,7 @@ Your Meeting-Ops system is now running and ready to transform your meetings into
 **Key URLs to bookmark:**
 - 🌐 **App**: http://localhost:7778 (Login: admin/admin123)
 - 📚 **API Docs**: http://localhost:9050/docs
-- 🧪 **Test Page**: file:///home/ucadmin/Meeting-Ops/test-login.html
+- 🧪 **Test Page**: file:///srv/meeting-ops/test-login.html
 
 **Need help?** Check the full documentation in `CLAUDE.md` or `README.md`.
 

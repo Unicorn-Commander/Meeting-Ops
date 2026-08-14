@@ -350,7 +350,6 @@ class WhisperXNPUService:
             "npu_available": self.npu_available,
             "device": self.npu_device if self.npu_available else None,
             "model": self.model_name,
-            "acceleration_factor": "200x" if self.npu_available else "1x",
             "status": "active" if self.npu_available else "cpu_fallback"
         }
 

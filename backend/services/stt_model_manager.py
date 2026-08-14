@@ -20,10 +20,10 @@ class STTModelManager:
     NPU_MODELS = {
         "whisperx-npu-unified": {
             "name": "WhisperX NPU Unified (Recommended)",
-            "description": "Unified transcription + diarization with NPU acceleration (220x-7866x speedup)",
+            "description": "LEGACY (UC-1 appliance line) — NPU path, not used by this product",
             "size": "512MB",
-            "speed": "7866x realtime",
-            "accuracy": "State-of-the-art (98%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "whisperx-npu-unified",
             "quantization": "int8",
             "languages": ["en", "multi"],
@@ -33,8 +33,8 @@ class STTModelManager:
             "name": "WhisperX NPU Transcription",
             "description": "NPU-accelerated transcription with MLIR-AIE2 kernels",
             "size": "384MB",
-            "speed": "220x realtime",
-            "accuracy": "Excellent (96%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "whisperx-npu",
             "quantization": "int8",
             "languages": ["en", "multi"],
@@ -44,8 +44,8 @@ class STTModelManager:
             "name": "Whisper ONNX NPU",
             "description": "ONNX Runtime with INT8 quantization for NPU",
             "size": "256MB",
-            "speed": "150x realtime",
-            "accuracy": "Very good (95%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "whisper-onnx-npu",
             "quantization": "int8",
             "languages": ["en", "multi"],
@@ -55,8 +55,8 @@ class STTModelManager:
             "name": "NPU Speaker Diarization",
             "description": "NPU-accelerated speaker identification with TitanNet embeddings",
             "size": "768MB",
-            "speed": "50x realtime",
-            "accuracy": "Very good (94%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "diarization-npu",
             "quantization": "int8",
             "languages": ["en", "multi"],
@@ -66,8 +66,8 @@ class STTModelManager:
             "name": "Whisper Base (CPU)",
             "description": "Standard Whisper model running on CPU",
             "size": "1024MB",
-            "speed": "1x realtime",
-            "accuracy": "Good (94%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "openai/whisper-base",
             "quantization": "fp32",
             "languages": ["en", "multi"],
@@ -77,8 +77,8 @@ class STTModelManager:
             "name": "Whisper Small (CPU)",
             "description": "Larger Whisper model with better accuracy",
             "size": "2048MB",
-            "speed": "0.8x realtime",
-            "accuracy": "Very good (95%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "openai/whisper-small",
             "quantization": "fp32",
             "languages": ["en", "multi"],
@@ -88,8 +88,8 @@ class STTModelManager:
             "name": "Whisper Medium (CPU)",
             "description": "High-accuracy Whisper model for production use",
             "size": "4096MB",
-            "speed": "0.6x realtime",
-            "accuracy": "Excellent (96%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "openai/whisper-medium",
             "quantization": "fp32",
             "languages": ["en", "multi"],
@@ -99,8 +99,8 @@ class STTModelManager:
             "name": "Pyannote Speaker Diarization",
             "description": "GPU-accelerated speaker diarization (requires HuggingFace token)",
             "size": "1536MB",
-            "speed": "5x realtime",
-            "accuracy": "Good (92%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "pyannote/speaker-diarization-3.1",
             "quantization": "fp32",
             "languages": ["en", "multi"],
@@ -108,10 +108,10 @@ class STTModelManager:
         },
         "npu-runtime": {
             "name": "Custom NPU Runtime",
-            "description": "Direct hardware access NPU runtime (30x speedup)",
+            "description": "LEGACY (UC-1 appliance line) — NPU path, not used by this product",
             "size": "256MB",
-            "speed": "30x realtime",
-            "accuracy": "Excellent (96%)",
+            "speed": "unmeasured",
+            "accuracy": "unmeasured",
             "source": "custom-npu-runtime",
             "quantization": "int8",
             "languages": ["en", "multi"],
@@ -148,122 +148,14 @@ class STTModelManager:
         return models
     
     def _check_model_availability(self, model_id: str) -> bool:
-        """Check if a specific model is available"""
-        try:
-            if model_id == "whisperx-npu-unified":
-                # Check if WhisperX NPU engine is available
-                try:
-                    from npu_optimization.whisperx_npu_engine import WhisperXNPUEngine
-                    return True
-                except ImportError:
-                    return False
-            
-            elif model_id == "whisperx-npu":
-                # Check if WhisperX NPU engine is available
-                try:
-                    from npu_optimization.whisperx_npu_engine import WhisperXNPUEngine
-                    return True
-                except ImportError:
-                    return False
-            
-            elif model_id == "whisper-onnx-npu":
-                # Check if ONNX NPU transcriber is available
-                try:
-                    from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-                    return True
-                except ImportError:
-                    return False
-            
-            elif model_id == "diarization-npu":
-                # Check if NPU diarization is available
-                try:
-                    from stt_engine.speaker_diarization import SpeakerDiarizer
-                    return True
-                except ImportError:
-                    return False
-            
-            elif model_id in ["whisper-base", "whisper-small", "whisper-medium"]:
-                # Check if basic ONNX transcriber is available
-                try:
-                    from stt_engine.whisper_npu_transcriber import ONNXWhisperNPUTranscriber
-                    return True
-                except ImportError:
-                    return False
-            
-            elif model_id == "pyannote-diarization":
-                # Check if pyannote is available
-                try:
-                    from stt_engine.speaker_diarization import SpeakerDiarizer
-                    # Also check for HuggingFace token
-                    import os
-                    return bool(os.getenv("HUGGINGFACE_TOKEN"))
-                except ImportError:
-                    return False
-            
-            elif model_id == "npu-runtime":
-                # Check if custom NPU runtime is available
-                try:
-                    from npu_runtime import NPURuntime
-                    import os
-                    # Check if NPU device exists
-                    return os.path.exists('/dev/accel/accel0')
-                except ImportError:
-                    return False
-            
-            return False
-            
-        except Exception as e:
-            logger.warning(f"Error checking availability for {model_id}: {e}")
-            return False
-    
-    async def download_model(self, model_id: str, progress_callback=None) -> Dict[str, Any]:
-        """Download and optimize a model for NPU"""
-        if model_id not in self.NPU_MODELS:
-            return {"success": False, "error": "Unknown model"}
-        
-        model_info = self.NPU_MODELS[model_id]
-        model_path = self.models_dir / model_id
-        
-        try:
-            # Create model directory
-            model_path.mkdir(exist_ok=True)
-            
-            # Download ONNX model from Hugging Face
-            if progress_callback:
-                await progress_callback({"status": "downloading", "progress": 0})
-            
-            # For actual implementation, we'd download the ONNX models
-            # For now, we'll create a marker file
-            marker_file = model_path / "model_info.json"
-            with open(marker_file, 'w') as f:
-                json.dump({
-                    "model_id": model_id,
-                    "info": model_info,
-                    "downloaded_at": str(datetime.now()),
-                    "optimized_for_npu": True
-                }, f, indent=2)
-            
-            # In real implementation, we would:
-            # 1. Download ONNX models from HuggingFace
-            # 2. Apply NPU-specific quantization
-            # 3. Optimize graph for AIE2 operations
-            # 4. Generate NPU kernels
-            
-            if progress_callback:
-                await progress_callback({"status": "optimizing", "progress": 50})
-            
-            # Simulate optimization steps
-            await asyncio.sleep(1)  # Simulate processing
-            
-            if progress_callback:
-                await progress_callback({"status": "complete", "progress": 100})
-            
-            return {"success": True, "model": model_id}
-            
-        except Exception as e:
-            logger.error(f"Error downloading model {model_id}: {e}")
-            return {"success": False, "error": str(e)}
-    
+        """Availability check for the legacy NPU/appliance engines.
+
+        Those modules were removed from this product (they live in Meeting-Ops-UC1),
+        so none of these model ids are loadable here. Live STT runs in the browser
+        and, for the completion pass, on Parakeet.
+        """
+        return False
+
     def delete_model(self, model_id: str) -> Dict[str, Any]:
         """Delete a downloaded model"""
         if model_id not in self.NPU_MODELS:

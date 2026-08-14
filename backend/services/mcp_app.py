@@ -129,6 +129,36 @@ def _fmt(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _unwrap_list_payload(data: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Normalize a backend list payload into ``(rows, has_more)``.
+
+    The REST endpoints these tools call do NOT agree on an envelope, and
+    the shapes have drifted underneath us before:
+
+    * ``GET /api/simple/recording-sessions`` returns the cursor-paginated
+      envelope ``{"items": [...], "next_cursor": ..., "has_more": bool}``
+      (it returned a bare JSON list until the pagination work in 3214f92).
+    * ``GET /api/simple/recording-sessions/semantic-search`` returns
+      ``{"query": ..., "results": [...], "count": n}``.
+    * ``GET /api/simple/recording-sessions/search`` returns a bare list.
+    * ``GET /api/analytics/duration-trends`` returns ``{"trends": [...]}``.
+
+    Guessing a single key here is how ``list_meetings`` silently reported
+    "no sessions" for every caller while the backend was returning a full
+    page (see issue #9). Accept every shape we know about, and degrade to
+    an empty page rather than raising when we meet one we don't.
+    """
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)], False
+    if isinstance(data, dict):
+        for key in ("items", "results", "sessions", "trends"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows = [row for row in value if isinstance(row, dict)]
+                return rows, bool(data.get("has_more"))
+    return [], False
+
+
 async def _propose(action: str, payload: dict[str, Any]) -> str:
     data = await _api(
         "post",
@@ -187,28 +217,30 @@ async def search_meetings(query: str, limit: int = 5) -> str:
             "/api/simple/recording-sessions/semantic-search",
             params={"q": query, "limit": limit},
         )
-        # The semantic endpoint returns a DICT:
-        #   {"query": ..., "results": [...], "count": N}
-        # A bare list is kept as a fallback for older/alternate shapes.
-        if isinstance(data, dict):
-            sem_results = data.get("results") or []
-        elif isinstance(data, list):
-            sem_results = data
-        else:
-            sem_results = []
-
-        if sem_results:
-            lines = [f"Found {len(sem_results)} meetings matching '{query}':\n"]
-            for i, item in enumerate(sem_results, 1):
+        # The endpoint answers with {"query", "results", "count"} — never a
+        # bare list — so the old `isinstance(data, list)` guard was always
+        # False and this tool silently degraded to keyword-only search for
+        # every caller. Unwrap properly; an empty result set still falls
+        # through to the keyword path below, which is the intended safety net
+        # when Qdrant has nothing indexed or the tier gate refuses.
+        hits, _ = _unwrap_list_payload(data)
+        if hits:
+            lines = [f"Found {len(hits)} meetings matching '{query}':\n"]
+            for i, item in enumerate(hits, 1):
+                # A JSON null in any of these is not a missing key, so the
+                # "default" argument never fires: .get(k, d) returns None and
+                # the format below raises (None:.3f) or slices None. The whole
+                # block sits inside `except Exception: pass`, so the failure is
+                # invisible -- semantic results are silently discarded and the
+                # tool degrades to keyword-only search that still looks healthy.
                 title = item.get("title") or "Untitled"
-                # score may be absent or None -> never let :.3f blow up
                 try:
                     score = float(item.get("score") or 0)
                 except (TypeError, ValueError):
                     score = 0.0
-                snippet = str(item.get("snippet") or "")[:200]
+                snippet = (item.get("snippet") or "")[:200]
                 sid = item.get("session_id") or ""
-                created = str(item.get("created_at") or "")[:10]
+                created = (item.get("created_at") or "")[:10]
                 lines.append(
                     f"{i}. **{title}** (score: {score:.3f})\n"
                     f"   Session ID: {sid}\n"
@@ -225,10 +257,7 @@ async def search_meetings(query: str, limit: int = 5) -> str:
         params={"q": query, "limit": limit},
     )
 
-    if not data:
-        return f"No meetings found matching '{query}'."
-
-    results = data if isinstance(data, list) else data.get("results", [])
+    results, _ = _unwrap_list_payload(data)
     if not results:
         return f"No meetings found matching '{query}'."
 
@@ -296,43 +325,46 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
         offset: Pagination offset (default 0)
     """
     limit = max(1, min(100, limit))
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if status:
-        params["status"] = status
+    offset = max(0, offset)
+    # Headless/MCP callers carry no X-MeetingOps-Org selector (only the web
+    # workspace-switcher sends that header), so the backend would otherwise
+    # scope to a single fallback active org — often the magic-unicorn platform
+    # default — and return nothing for users whose sessions live in their own
+    # orgs. Request the caller's full membership set instead: a member-scoped,
+    # privacy-safe path already supported by list_sessions. See issue #9.
+    #
+    # ``status`` and ``offset`` are applied HERE, not on the wire: the list
+    # endpoint takes neither (it is cursor-paginated and has no status
+    # filter), so sending them was a silent no-op that made both documented
+    # arguments lie to the caller. Over-fetch one page and slice locally.
+    # The endpoint caps a page at 200 rows, so deep offsets are out of reach
+    # without real cursor support — that's a follow-up, not a regression.
+    fetch_limit = min(200, offset + limit)
+    params: dict[str, Any] = {
+        "limit": fetch_limit,
+        "include_all_my_orgs": True,
+    }
 
     data = await _api("get", "/api/simple/recording-sessions", params=params)
 
-    # The backend returns {"items": [...], "has_more": ..., "next_cursor": ...}.
-    # "sessions" and a bare list are kept as fallbacks for alternate shapes.
-    if isinstance(data, list):
-        sessions = data
-        total = len(sessions)
-        has_more = False
-    elif isinstance(data, dict):
-        sessions = data.get("items") or data.get("sessions") or []
-        # This endpoint paginates with has_more/next_cursor and does NOT
-        # return a "total" — don't invent one, or the caller reads
-        # "Showing 5 of 5" and concludes there are only 5 meetings.
-        total = data.get("total")
-        has_more = bool(data.get("has_more"))
-    else:
-        sessions = []
-        total = None
-        has_more = False
+    sessions, has_more = _unwrap_list_payload(data)
+    if status:
+        wanted = status.strip().lower()
+        sessions = [
+            s for s in sessions if str(s.get("status", "")).strip().lower() == wanted
+        ]
+    if offset:
+        has_more = has_more or len(sessions) > offset + limit
+        sessions = sessions[offset:]
+    if len(sessions) > limit:
+        has_more = True
+        sessions = sessions[:limit]
 
     if not sessions:
         return "No recording sessions found."
 
-    if total is not None:
-        header = f"Showing {len(sessions)} of {total} sessions:"
-    elif has_more:
-        header = (
-            f"Showing {len(sessions)} sessions "
-            f"(more available — raise limit or page with offset):"
-        )
-    else:
-        header = f"Showing {len(sessions)} sessions:"
-    lines = [header + "\n"]
+    more = " (more available)" if has_more else ""
+    lines = [f"Showing {len(sessions)} sessions{more}:\n"]
     for s in sessions:
         title = s.get("title") or s.get("name", "Untitled")
         sid = s.get("session_id") or str(s.get("id", ""))
@@ -340,10 +372,15 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
         created = str(s.get("created_at", ""))[:16]
         duration = s.get("duration")
         dur_str = f"{int(duration // 60)}m {int(duration % 60)}s" if duration else "N/A"
-        has_transcript = "Yes" if s.get("has_transcript") or s.get("transcript_simple") else "No"
+        # The list payload defers every transcript column for speed, so the
+        # old "Transcript: Yes/No" line read "No" on every row regardless of
+        # reality. Show the workspace instead — it IS on the payload, and with
+        # include_all_my_orgs a page now spans several of them.
+        org = s.get("organization_name") or ""
+        org_str = f" | Org: {org}" if org else ""
         lines.append(
             f"- **{title}** [{status_val}]\n"
-            f"  ID: {sid} | Date: {created} | Duration: {dur_str} | Transcript: {has_transcript}"
+            f"  ID: {sid} | Date: {created} | Duration: {dur_str}{org_str}"
         )
     return "\n".join(lines)
 
@@ -530,9 +567,19 @@ async def get_analytics(time_range: str = "month") -> str:
 
     lines = [f"# Meeting Analytics ({time_range})\n"]
 
-    total = data.get("total_sessions", 0)
-    avg_duration = data.get("average_duration", 0)
-    total_duration = data.get("total_duration", 0)
+    # /api/analytics/summary nests the counters under "session_stats" and
+    # keeps "speaking_time" at the top level. Reading them all as top-level
+    # keys is why this tool printed "Total sessions: 0" next to a fully
+    # populated Top Speakers list — the speakers are derived from the very
+    # sessions the count claimed did not exist. Fall back to the flat keys so
+    # an older backend still renders.
+    stats = data.get("session_stats")
+    if not isinstance(stats, dict):
+        stats = {}
+
+    total = stats.get("total_sessions", data.get("total_sessions", 0)) or 0
+    avg_duration = stats.get("average_duration", data.get("average_duration", 0)) or 0
+    total_duration = stats.get("total_duration", data.get("total_duration", 0)) or 0
 
     lines.append(f"**Total sessions:** {total}")
     if avg_duration:
@@ -546,23 +593,30 @@ async def get_analytics(time_range: str = "month") -> str:
         lines.append("\n## Top Speakers")
         for sp in speakers[:10]:
             name = sp.get("speaker", "Unknown")
-            talk_time = sp.get("total_time", 0)
-            seg_count = sp.get("segment_count", 0)
+            # Endpoint emits "duration" / "segments"; the older flat names are
+            # kept as fallbacks. Without this every speaker rendered 0m 0s.
+            talk_time = sp.get("duration", sp.get("total_time", 0)) or 0
+            seg_count = sp.get("segments", sp.get("segment_count", 0)) or 0
             mins = int(talk_time // 60)
             secs = int(talk_time % 60)
             lines.append(f"- **{name}**: {mins}m {secs}s ({seg_count} segments)")
 
     try:
-        trends = await _api("get", "/api/analytics/duration-trends")
-        if trends:
-            trend_data = trends if isinstance(trends, list) else trends.get("trends", [])
-            if trend_data:
-                lines.append("\n## Recent Duration Trends")
-                for t in trend_data[-7:]:
-                    date = str(t.get("date", ""))[:10]
-                    count = t.get("count", 0)
-                    avg = t.get("avg_duration", 0)
-                    lines.append(f"- {date}: {count} sessions, avg {int(avg // 60)}m")
+        trends = await _api(
+            "get",
+            "/api/analytics/duration-trends",
+            params={"time_range": time_range},
+        )
+        trend_data, _ = _unwrap_list_payload(trends)
+        if trend_data:
+            lines.append("\n## Recent Duration Trends")
+            for t in trend_data[-7:]:
+                # Buckets are keyed "period"/"sessions", not "date"/"count",
+                # so every bucket used to print as ": 0 sessions".
+                bucket = str(t.get("period") or t.get("date") or "")[:10]
+                count = t.get("sessions", t.get("count", 0)) or 0
+                avg = t.get("avg_duration", 0) or 0
+                lines.append(f"- {bucket}: {count} sessions, avg {int(avg // 60)}m")
     except Exception:
         pass
 

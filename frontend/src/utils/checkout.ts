@@ -49,23 +49,30 @@ export function hasStoredAuthToken(): boolean {
  *
  * `source` is an analytics label for where the click came from
  * (e.g. 'upgrade_banner', 'pricing_page', 'settings_billing', 'landing').
+ *
+ * `cycle` picks the Stripe price the SERVER resolves: 'monthly' → $22/mo,
+ * 'annual' → $216/yr. It defaults to 'monthly' so every existing caller keeps
+ * its current behaviour unchanged. The frontend still never sees a price ID.
  */
-export async function beginProCheckout(source: string): Promise<void> {
+export async function beginProCheckout(
+  source: string,
+  cycle: 'monthly' | 'annual' = 'monthly',
+): Promise<void> {
   // Stash the chosen plan/cycle so App.tsx can fire `subscription_started`
   // when Stripe redirects back to `#/sessions?upgrade=success`. Matches the
   // contract App.tsx + posthog.ts already expect (PENDING_CHECKOUT_KEY).
   try {
     window.sessionStorage.setItem(
       PENDING_CHECKOUT_KEY,
-      JSON.stringify({ plan: 'pro', billing_cycle: 'monthly' }),
+      JSON.stringify({ plan: 'pro', billing_cycle: cycle }),
     );
   } catch {
     /* sessionStorage disabled — only affects post-purchase analytics attribution */
   }
-  track('checkout_started', { plan: 'pro', billing_cycle: 'monthly', source });
+  track('checkout_started', { plan: 'pro', billing_cycle: cycle, source });
 
   try {
-    await startCheckout('pro'); // redirects to Stripe on success
+    await startCheckout('pro', cycle); // redirects to Stripe on success
   } catch (err) {
     if (err instanceof BillingUnavailableError) {
       showToast.info(

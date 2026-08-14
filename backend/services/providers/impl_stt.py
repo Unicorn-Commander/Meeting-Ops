@@ -19,6 +19,7 @@ Return type is a normalized dict matching `services.whisper_server_client`:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional
@@ -28,6 +29,111 @@ import httpx
 from .protocols import STTProvider  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+# Retry policy for the STT hop. Mirrors the transient/permanent split in
+# ``services.transient_errors.is_transient_error`` (timeouts, network errors,
+# 429, and 5xx are transient) and the bounded-backoff shape already used by
+# ``services.projectops_client``. Kept env-tunable so an operator can widen or
+# disable it without a redeploy.
+STT_MAX_ATTEMPTS = max(1, _env_int("STT_MAX_ATTEMPTS", 3))
+STT_INITIAL_BACKOFF_SECONDS = _env_float("STT_INITIAL_BACKOFF_SECONDS", 2.0)
+STT_BACKOFF_MULTIPLIER = _env_float("STT_BACKOFF_MULTIPLIER", 3.0)
+STT_MAX_BACKOFF_SECONDS = _env_float("STT_MAX_BACKOFF_SECONDS", 30.0)
+
+
+def _is_transient_status(status_code: int) -> bool:
+    """True when the STT service's response warrants another attempt.
+
+    429 and 5xx mean "the service could not serve this right now"; 4xx (other
+    than 429) means "this request will never succeed" — e.g. audio too long —
+    and must fail fast so the user sees the real reason immediately.
+    """
+    return status_code == 429 or status_code >= 500
+
+
+async def _post_audio_with_retry(
+    *,
+    url: str,
+    audio_path: str,
+    file_field: str,
+    timeout: float,
+    label: str,
+    content_type: str = "audio/wav",
+    params: Optional[dict] = None,
+    data: Optional[dict] = None,
+    headers: Optional[dict] = None,
+) -> tuple[Optional[httpx.Response], Optional[str]]:
+    """POST an audio file, retrying transient failures with backoff.
+
+    Returns ``(response, error)``. Exactly one is non-None: a response that is
+    either a 2xx or a permanent (non-retryable) status, or an error string
+    describing the final transient failure after the attempt budget is spent.
+
+    The file handle is re-opened per attempt — httpx consumes the stream on
+    send, so a retry that reused it would upload zero bytes.
+    """
+    backoff = STT_INITIAL_BACKOFF_SECONDS
+    last_error: str = f"{label} failed before any attempt was made"
+
+    for attempt in range(1, STT_MAX_ATTEMPTS + 1):
+        try:
+            with open(audio_path, "rb") as f:
+                files = {file_field: (os.path.basename(audio_path), f, content_type)}
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        url, files=files, params=params, data=data, headers=headers
+                    )
+        except httpx.TimeoutException:
+            last_error = (
+                f"Transcription timed out after {timeout:.0f}s — "
+                "the recording may be too long for the current limit."
+            )
+            logger.error(
+                "%s timeout transcribing %s (timeout=%ss, attempt %s/%s)",
+                label, audio_path, timeout, attempt, STT_MAX_ATTEMPTS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"Could not reach the transcription service: {exc}"
+            logger.error(
+                "%s client error (attempt %s/%s): %s",
+                label, attempt, STT_MAX_ATTEMPTS, exc,
+            )
+        else:
+            if resp.status_code == 200 or not _is_transient_status(resp.status_code):
+                # Success, or a permanent failure the caller must surface as-is.
+                return resp, None
+            detail = (resp.text or "").strip()[:300]
+            last_error = f"Transcription service error {resp.status_code}: {detail}"
+            logger.error(
+                "%s returned %s (attempt %s/%s): %s",
+                label, resp.status_code, attempt, STT_MAX_ATTEMPTS, detail,
+            )
+
+        if attempt < STT_MAX_ATTEMPTS:
+            logger.info("%s retrying in %.1fs", label, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(STT_MAX_BACKOFF_SECONDS, backoff * STT_BACKOFF_MULTIPLIER)
+
+    logger.error(
+        "%s exhausted %s attempt(s) transcribing %s; giving up",
+        label, STT_MAX_ATTEMPTS, audio_path,
+    )
+    return None, last_error
 
 
 def _http_timeout_for_path(file_path: str, base: float = 120.0, per_mb: float = 20.0) -> float:
@@ -79,26 +185,27 @@ class LocalWhisperProvider:
             return _empty_result(self.model, language or "en")
 
         timeout = _http_timeout_for_path(audio_path)
-        try:
-            with open(audio_path, "rb") as f:
-                files = {"file": (os.path.basename(audio_path), f, "audio/wav")}
-                data = {
-                    "response_format": "verbose_json",
-                    "language": language or "en",
-                    "temperature": "0.0",
-                }
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(f"{self.endpoint}/inference", files=files, data=data)
-        except httpx.TimeoutException:
-            logger.error("Whisper timeout transcribing %s (timeout=%ss)", audio_path, timeout)
-            return _empty_result(self.model, language or "en")
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Whisper client error: %s", exc)
-            return _empty_result(self.model, language or "en")
+        resp, error = await _post_audio_with_retry(
+            url=f"{self.endpoint}/inference",
+            audio_path=audio_path,
+            file_field="file",
+            timeout=timeout,
+            label="Whisper",
+            data={
+                "response_format": "verbose_json",
+                "language": language or "en",
+                "temperature": "0.0",
+            },
+        )
+        if resp is None:
+            return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
             logger.error("Whisper returned %s: %s", resp.status_code, resp.text[:200])
-            return _empty_result(self.model, language or "en")
+            return _empty_result(
+                self.model, language or "en",
+                error=f"Transcription service error {resp.status_code}: {(resp.text or '').strip()[:300]}",
+            )
 
         result = resp.json()
         segments: list[dict[str, Any]] = []
@@ -155,27 +262,16 @@ class LocalParakeetProvider:
             "language": language or "en",
             "return_word_timestamps": "true" if self.return_word_timestamps else "false",
         }
-        try:
-            with open(audio_path, "rb") as f:
-                files = {"audio": (os.path.basename(audio_path), f, "audio/wav")}
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        f"{self.endpoint}/transcribe",
-                        files=files,
-                        params=params,
-                    )
-        except httpx.TimeoutException:
-            logger.error("Parakeet timeout transcribing %s (timeout=%ss)", audio_path, timeout)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Transcription timed out after {timeout:.0f}s — the recording may be too long for the current limit.",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Parakeet client error: %s", exc)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Could not reach the transcription service: {exc}",
-            )
+        resp, error = await _post_audio_with_retry(
+            url=f"{self.endpoint}/transcribe",
+            audio_path=audio_path,
+            file_field="audio",
+            timeout=timeout,
+            label="Parakeet",
+            params=params,
+        )
+        if resp is None:
+            return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
             detail = (resp.text or "").strip()[:300]
@@ -269,28 +365,17 @@ class OpenAITranscriptionProvider:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        try:
-            with open(audio_path, "rb") as f:
-                files = {"file": (os.path.basename(audio_path), f, "audio/wav")}
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        f"{self.endpoint}/audio/transcriptions",
-                        files=files,
-                        data=data,
-                        headers=headers,
-                    )
-        except httpx.TimeoutException:
-            logger.error("Gateway STT timeout transcribing %s (timeout=%ss)", audio_path, timeout)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Transcription timed out after {timeout:.0f}s — the recording may be too long for the current limit.",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Gateway STT client error: %s", exc)
-            return _empty_result(
-                self.model, language or "en",
-                error=f"Could not reach the transcription service: {exc}",
-            )
+        resp, error = await _post_audio_with_retry(
+            url=f"{self.endpoint}/audio/transcriptions",
+            audio_path=audio_path,
+            file_field="file",
+            timeout=timeout,
+            label="Gateway STT",
+            data=data,
+            headers=headers or None,
+        )
+        if resp is None:
+            return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
             detail = (resp.text or "").strip()[:300]

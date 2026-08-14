@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowRight, Check, ExternalLink, Sparkles } from 'lucide-react';
 import { track } from '../utils/posthog';
@@ -11,8 +11,10 @@ import {
 import {
   PRO_MONTHLY_PRICE_DISPLAY,
   PRO_MONTHLY_PRICE_WITH_PERIOD,
-  PRO_LIST_PRICE_DISPLAY,
-  PRO_LAUNCH_DISCOUNT_PCT,
+  PRO_ANNUAL_PRICE_DISPLAY,
+  PRO_ANNUAL_PRICE_WITH_PERIOD,
+  PRO_ANNUAL_PRICE_PER_MONTH_WITH_PERIOD,
+  PRO_ANNUAL_SAVING_DISPLAY,
 } from '../constants/pricing';
 import LegalFooter from '../components/LegalFooter';
 
@@ -21,11 +23,23 @@ import LegalFooter from '../components/LegalFooter';
  * Unicorn Commander storefront; it now renders a real Free vs Pro view whose
  * Pro CTA drives the LIVE in-app checkout:
  *   - anonymous visitor  → /signup?intent=pro (Stripe Checkout requires auth)
- *   - signed-in, non-Pro → beginProCheckout('pro') → Stripe Checkout
+ *   - signed-in, non-Pro → beginProCheckout('pricing_page', cycle) → Stripe Checkout
  *   - signed-in, Pro     → manageSubscription() → Stripe Billing Portal
  *
  * All Pro pricing copy is single-sourced from constants/pricing.ts. The amount
  * actually charged is resolved server-side by the backend checkout endpoint.
+ *
+ * BILLING CYCLE (added 2026-08-08 with the $22 / $216 reprice)
+ * The annual price used to exist in Stripe and in the backend resolver
+ * (billing_cycle='annual' → STRIPE_PRO_ANNUAL_PRICE_ID) with NO UI able to
+ * reach it, so the app could not advertise it: an advertised price a customer
+ * cannot buy is the same defect as a wrong one. The toggle below closes that
+ * gap, so $216/yr is now both shown and buyable from the same control.
+ *
+ * The saving is COMPUTED in constants/pricing.ts from the two real prices
+ * ($22 x 12 = $264, minus $216 = $48). It is not a struck-through list price
+ * and there is no anchor: nobody has ever been charged any Meeting-Ops price,
+ * so a "was/now" here would be a fabricated discount.
  */
 
 const FREE_FEATURES = [
@@ -47,6 +61,8 @@ export const Pricing: React.FC = () => {
   const navigate = useNavigate();
   const { isAuthenticated, tier } = useAuth();
   const isPro = isAuthenticated && isPaidTier(tier);
+  const [cycle, setCycle] = useState<'monthly' | 'annual'>('monthly');
+  const annual = cycle === 'annual';
 
   useEffect(() => {
     track('pricing_viewed', { authenticated: isAuthenticated, tier: tier ?? 'anonymous' });
@@ -55,6 +71,10 @@ export const Pricing: React.FC = () => {
   const handlePro = () => {
     if (!isAuthenticated) {
       // Checkout needs a JWT — send anonymous visitors to signup first.
+      // The cycle is deliberately NOT passed: Signup treats ?intent=pro as
+      // presentational only and nothing resumes checkout afterwards, so a
+      // ?cycle= param would be a promise no code keeps. The signed-in user
+      // picks the cycle again here, on the control that actually drives it.
       navigate('/signup?intent=pro');
       return;
     }
@@ -62,7 +82,7 @@ export const Pricing: React.FC = () => {
       void manageSubscription();
       return;
     }
-    void beginProCheckout('pricing_page');
+    void beginProCheckout('pricing_page', cycle);
   };
 
   const proCtaLabel = !isAuthenticated
@@ -113,7 +133,43 @@ export const Pricing: React.FC = () => {
             </p>
           </div>
 
-          <div className="mx-auto mt-12 grid max-w-3xl gap-6 md:grid-cols-2">
+          {/* Billing-cycle toggle. Drives BOTH the number shown and the price
+              the server resolves, so the two can never disagree. */}
+          <div className="mt-8 flex justify-center">
+            <div
+              role="radiogroup"
+              aria-label="Billing cycle"
+              className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.03] p-1"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!annual}
+                onClick={() => setCycle('monthly')}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                  !annual ? 'bg-white/10 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Monthly
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={annual}
+                onClick={() => setCycle('annual')}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                  annual ? 'bg-white/10 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Annual
+                <span className="ml-1.5 text-xs font-normal text-fuchsia-300">
+                  save {PRO_ANNUAL_SAVING_DISPLAY}/yr
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div className="mx-auto mt-8 grid max-w-3xl gap-6 md:grid-cols-2">
             {/* Free */}
             <div className="flex h-full flex-col rounded-3xl border border-white/10 bg-white/[0.03] p-8">
               <h2 className="text-xl font-semibold text-white">Free</h2>
@@ -161,16 +217,17 @@ export const Pricing: React.FC = () => {
                 Studio-quality output and an AI that knows your whole library.
               </p>
               <div className="mt-5 flex items-end gap-2">
-                <span className="pb-1 text-2xl font-medium text-zinc-500 line-through decoration-zinc-600">
-                  {PRO_LIST_PRICE_DISPLAY}
-                </span>
                 <span className="text-5xl font-semibold tabular-nums text-white">
-                  {PRO_MONTHLY_PRICE_DISPLAY}
+                  {annual ? PRO_ANNUAL_PRICE_DISPLAY : PRO_MONTHLY_PRICE_DISPLAY}
                 </span>
-                <span className="pb-1 text-sm text-zinc-500">/month</span>
+                <span className="pb-1 text-sm text-zinc-500">
+                  {annual ? '/year' : '/month'}
+                </span>
               </div>
-              <p className="mt-1 text-xs font-semibold text-fuchsia-300">
-                Launch pricing — {PRO_LAUNCH_DISCOUNT_PCT}% off
+              <p className="mt-2 text-sm text-zinc-400">
+                {annual
+                  ? `Billed once a year. That works out to ${PRO_ANNUAL_PRICE_PER_MONTH_WITH_PERIOD}, ${PRO_ANNUAL_SAVING_DISPLAY} less than twelve months at ${PRO_MONTHLY_PRICE_WITH_PERIOD}.`
+                  : `Billed monthly. Paying yearly instead is ${PRO_ANNUAL_PRICE_WITH_PERIOD}, which is ${PRO_ANNUAL_SAVING_DISPLAY} less over the same twelve months.`}
               </p>
               <ul className="mt-6 space-y-3 text-sm text-zinc-200">
                 {PRO_FEATURES.map((f) => (
@@ -198,7 +255,9 @@ export const Pricing: React.FC = () => {
                   <Link to="/terms" className="text-fuchsia-300 underline-offset-4 hover:underline">
                     refund policy
                   </Link>
-                  . {PRO_MONTHLY_PRICE_WITH_PERIOD}, cancel anytime.
+                  .{' '}
+                  {annual ? PRO_ANNUAL_PRICE_WITH_PERIOD : PRO_MONTHLY_PRICE_WITH_PERIOD}, cancel
+                  anytime.
                 </p>
               </div>
             </div>

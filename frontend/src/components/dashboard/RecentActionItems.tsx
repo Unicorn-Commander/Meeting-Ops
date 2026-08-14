@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckSquare, Square, User, Loader2 } from 'lucide-react';
+import { Send, RotateCcw, X, User, Loader2, CheckCircle2 } from 'lucide-react';
 import { config } from '../../config';
 import { useOrg } from '../../contexts/OrgContext';
 import type { DashboardSession } from '../../pages/Dashboard';
@@ -46,8 +46,14 @@ const DEFAULT_LIMIT = 10;
  * empty list while we still see action-item-bearing JSON on recent
  * sessions — that's the window between deploy and the backfill
  * migration running, OR for sessions whose summary predates the
- * persist_action_items wiring. Clicking the checkbox PATCHes the row
- * to status='done' and optimistically drops it from the visible list.
+ * persist_action_items wiring.
+ *
+ * Meeting-Ops does NOT own action-item completion — Project-Ops does. The row's
+ * primary control therefore reflects its Project-Ops lifecycle state: unsent items
+ * offer "Send to Project-Ops" (POST .../project-ops/requeue), failed ones offer a
+ * retry, and once an item is linked its status is read-only here because Project-Ops
+ * is the sole owner of it. "Dismiss" deletes an item that should not be tracked at
+ * all, which is honest in a way that silently marking it "done" here was not.
  */
 export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
   sessions,
@@ -56,7 +62,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
   limit = DEFAULT_LIMIT,
   status = 'todo',
   title = 'Recent action items',
-  description = 'Checkbox marks done here. Open the item to review it in the meeting.',
+  description = 'Send an item to Project-Ops to track it. Open the item to review it in the meeting.',
   showViewAll = true,
 }) => {
   const { activeOrganization } = useOrg();
@@ -116,19 +122,45 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
     return out.slice(0, limit);
   }, [fetchState, limit, rows.length, sessions]);
 
-  const completeItem = useCallback(
+  /** Hand one item to Project-Ops. The backend owns the lifecycle from here. */
+  const sendToProjectOps = useCallback(
+    async (id: number) => {
+      setUpdatingIds((prev) => new Set(prev).add(id));
+      try {
+        const res = await fetch(
+          `${config.apiBaseUrl}/api/action-items/${id}/project-ops/requeue`,
+          { method: 'POST', headers: buildHeaders() },
+        );
+        if (res.ok) {
+          const updated = (await res.json()) as ActionItemRow;
+          setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...updated } : r)));
+        } else {
+          await fetchRows();
+        }
+      } catch {
+        await fetchRows();
+      } finally {
+        setUpdatingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [buildHeaders, fetchRows],
+  );
+
+  /** Drop an item that should not be tracked anywhere. */
+  const dismissItem = useCallback(
     async (id: number) => {
       setUpdatingIds((prev) => new Set(prev).add(id));
       setRows((prev) => prev.filter((r) => r.id !== id));
       try {
         const res = await fetch(`${config.apiBaseUrl}/api/action-items/${id}`, {
-          method: 'PATCH',
+          method: 'DELETE',
           headers: buildHeaders(),
-          body: JSON.stringify({ status: 'done' }),
         });
-        if (!res.ok) {
-          await fetchRows();
-        }
+        if (!res.ok) await fetchRows();
       } catch {
         await fetchRows();
       } finally {
@@ -184,27 +216,56 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
         {showRows &&
           rows.map((item) => {
             const busy = updatingIds.has(item.id);
-            const isDone = item.status === 'done';
+            const state = item.project_ops_link_state || 'local_only';
+            const canSend = state === 'local_only' || state === 'sync_failed';
+            const isLinked = state === 'approved_linked';
             const lastSynced = formatLifecycleTimestamp(item.project_ops_last_synced_at);
             return (
               <div key={item.id} className="px-4 py-3">
                 <div className="flex items-start gap-3">
-                  <button
-                    type="button"
-                    onClick={() => completeItem(item.id)}
-                    disabled={busy || isDone}
-                    className="mt-0.5 flex-shrink-0 text-amber-300 transition hover:text-emerald-400 disabled:opacity-40"
-                    title={isDone ? 'Completed' : 'Mark as done'}
-                    aria-label={isDone ? 'Action item completed' : 'Mark action item as done'}
-                  >
-                    {busy ? (
+                  {/* Project-Ops owns the lifecycle. Unsent items can be handed over;
+                      once linked, the status shown here is read-only. */}
+                  {busy ? (
+                    <span className="mt-0.5 flex-shrink-0 text-zinc-400">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : isDone ? (
-                      <CheckSquare className="h-4 w-4 text-emerald-400" />
-                    ) : (
-                      <Square className="h-4 w-4" />
-                    )}
-                  </button>
+                    </span>
+                  ) : canSend ? (
+                    <button
+                      type="button"
+                      onClick={() => sendToProjectOps(item.id)}
+                      className="mt-0.5 flex-shrink-0 text-indigo-300 transition hover:text-indigo-200"
+                      title={
+                        state === 'sync_failed'
+                          ? item.project_ops_sync_error
+                            ? `Retry — last error: ${item.project_ops_sync_error}`
+                            : 'Retry sending to Project-Ops'
+                          : 'Send to Project-Ops'
+                      }
+                      aria-label={
+                        state === 'sync_failed'
+                          ? 'Retry sending this action item to Project-Ops'
+                          : 'Send this action item to Project-Ops'
+                      }
+                    >
+                      {state === 'sync_failed' ? (
+                        <RotateCcw className="h-4 w-4" />
+                      ) : (
+                        <Send className="h-4 w-4" />
+                      )}
+                    </button>
+                  ) : (
+                    <span
+                      className={`mt-0.5 flex-shrink-0 ${isLinked ? 'text-emerald-400' : 'text-zinc-500'}`}
+                      title={
+                        isLinked
+                          ? 'Tracked in Project-Ops — status is owned there'
+                          : 'Sent to Project-Ops, awaiting triage'
+                      }
+                      aria-label={isLinked ? 'Tracked in Project-Ops' : 'Awaiting Project-Ops triage'}
+                    >
+                      <CheckCircle2 className="h-4 w-4" />
+                    </span>
+                  )}
                   <div className="min-w-0 flex-1">
                     <Link
                       to={`/sessions/${item.session_key}?tab=action_items&actionItem=${item.id}`}
@@ -270,6 +331,17 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
                         )}
                     </div>
                   </div>
+                    {!busy && (
+                      <button
+                        type="button"
+                        onClick={() => dismissItem(item.id)}
+                        className="mt-0.5 flex-shrink-0 text-zinc-600 transition hover:text-rose-300"
+                        title="Dismiss — remove this action item entirely"
+                        aria-label="Dismiss this action item"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                 </div>
               </div>
             );
@@ -279,7 +351,7 @@ export const RecentActionItems: React.FC<RecentActionItemsProps> = ({
           fallbackItems.map((item, idx) => (
             <div key={`fallback-${item.sessionId}-${idx}`} className="px-4 py-3 opacity-90">
               <div className="flex items-start gap-3">
-                <CheckSquare className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
+                <Send className="mt-0.5 h-4 w-4 flex-shrink-0 text-zinc-600" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <Link
                     to={`/sessions/${item.sessionId}?tab=action_items`}
