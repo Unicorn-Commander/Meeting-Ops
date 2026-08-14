@@ -401,6 +401,11 @@ def test_same_export_id_is_independent_across_organizations(client):
 
     body = _payload()
     body["export_id"] = "stable-cross-org-export"
+    # Its own room: _payload() describes one specific call, and other tests in
+    # this module already ingest it. Sessions now coalesce per (org, room,
+    # call window), so reusing that room here would fold this export into the
+    # earlier test's meeting instead of exercising cross-org isolation.
+    body["room_id"] = "0f4f6a2e-1c3d-4f5a-9b21-6c8d0e2a7f10"
     default_headers = _pat_headers(client)
     default_headers["Idempotency-Key"] = body["export_id"]
     first = client.post(
