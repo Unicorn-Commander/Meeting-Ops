@@ -19,6 +19,7 @@ from database.models import RecordingSession
 from models.unified_agent import UnifiedMeetingAgent
 from services.progressive_interval_manager import progressive_interval_manager, ProgressiveConfig
 from services.providers import get_provider_registry
+from services.summarization_lease import summarization_lease
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +212,30 @@ class UnifiedAgentService:
             return None
 
     async def start_meeting_analysis(self, session_id: str, websocket_callback=None) -> bool:
-        """Start progressive meeting analysis for a session"""
+        """Start progressive meeting analysis for a session.
+
+        Returns False both when this meeting is already being analysed and when
+        the start genuinely failed. Callers that want to fall back to another
+        summarizer must first check whether the session is already covered
+        (`session_id in active_sessions`, or `summarization_lease.is_held`) —
+        otherwise "somebody already has it" turns into "start a second one",
+        which is the exact duplicate this guard exists to prevent.
+        """
         if session_id in self.active_sessions:
             logger.warning(f"Meeting analysis already active for session {session_id}")
             return False
 
+        # Cross-process backstop, taken before the awaits below. The
+        # active_sessions check above only sees this process, and every viewer
+        # who connected in the same instant is already past it.
+        if not await summarization_lease.acquire(session_id, on_lost=self._lease_lost):
+            logger.warning(
+                f"Meeting analysis for session {session_id} is already running "
+                f"(this process or another); not starting a second run"
+            )
+            return False
+
+        db_session = None
         try:
             db_session = get_db_session()
 
@@ -260,10 +280,31 @@ class UnifiedAgentService:
 
         except Exception as e:
             logger.error(f"Failed to start meeting analysis: {e}")
+            # Never strand the lease on a run that did not start — it would
+            # block every later attempt on this meeting until it expired.
+            await summarization_lease.release(session_id)
             return False
         finally:
             if db_session:
                 db_session.close()
+
+    async def _lease_lost(self, session_id: str) -> None:
+        """Another process took this meeting over — stop billing alongside it."""
+        logger.error(
+            f"Meeting-analysis lease for session {session_id} was taken over; "
+            f"stopping the local run"
+        )
+        task = self.monitoring_tasks.pop(session_id, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # Dropping the session entry is what actually ends the loop; do it
+        # last so a still-running tick sees a consistent view.
+        self.active_sessions.pop(session_id, None)
+        progressive_interval_manager.cleanup_session(session_id)
 
     async def stop_meeting_analysis(self, session_id: str) -> Optional[Dict]:
         """Stop meeting analysis and generate final summary"""
@@ -292,6 +333,9 @@ class UnifiedAgentService:
             # Clean up
             del self.active_sessions[session_id]
             progressive_interval_manager.cleanup_session(session_id)
+            # Release only what we started: release() is holder-scoped, so a
+            # lease held elsewhere is untouched.
+            await summarization_lease.release(session_id)
 
             logger.info(f"Stopped meeting analysis for session {session_id}")
             logger.info(f"  Generated {session_info.get('summary_count', 0)} progressive summaries")
@@ -306,6 +350,11 @@ class UnifiedAgentService:
 
         except Exception as e:
             logger.error(f"Error stopping meeting analysis: {e}")
+            # The monitoring task is already cancelled by this point, so there
+            # is no run left to protect. Holding the lease here would keep it
+            # heartbeating forever behind a dead run and lock every process out
+            # of this meeting permanently.
+            await summarization_lease.release(session_id)
             return None
 
     async def _monitoring_loop(self, session_id: str):

@@ -17,6 +17,7 @@ import json
 
 from services.system_service import SystemService
 from services.providers import get_provider_registry
+from services.summarization_lease import summarization_lease
 
 logger = logging.getLogger(__name__)
 
@@ -275,42 +276,75 @@ class AutoSummarizationService:
                 resolves org_id from the RecordingSession row, falling back to
                 the legacy unified LLM service if neither is available.
         """
-        # Check if already running for this session
+        # Fast path: this process is already running it.
         if session_id in self.active_tasks:
             logger.warning(f"Auto-summarization already running for session {session_id}")
             return
 
-        # Cache the org id (or resolve it lazily later)
-        if organization_id is not None:
-            self.session_org_id[session_id] = organization_id
-        else:
-            self.session_org_id[session_id] = await asyncio.to_thread(_resolve_org_id, session_id)
+        # Correctness backstop: another *process* may be running it. Taken
+        # before the org lookup below, because that lookup awaits — and every
+        # viewer who connected in the same instant is sitting right here,
+        # already past the active_tasks check, waiting to be let through.
+        if not await summarization_lease.acquire(session_id, on_lost=self._lease_lost):
+            logger.warning(
+                f"Auto-summarization for session {session_id} is already running "
+                f"(this process or another); not starting a second run"
+            )
+            return
 
-        # Create and store the task
-        task = asyncio.create_task(
-            self._summarization_loop(session_id, websocket_callback)
-        )
-        self.active_tasks[session_id] = task
+        try:
+            # Cache the org id (or resolve it lazily later)
+            if organization_id is not None:
+                self.session_org_id[session_id] = organization_id
+            else:
+                self.session_org_id[session_id] = await asyncio.to_thread(_resolve_org_id, session_id)
+
+            # Create and store the task
+            task = asyncio.create_task(
+                self._summarization_loop(session_id, websocket_callback)
+            )
+            self.active_tasks[session_id] = task
+        except Exception:
+            # Never strand the lease on a run that did not start.
+            await summarization_lease.release(session_id)
+            raise
+
         logger.info(
             f"Started auto-summarization for session {session_id} "
             f"(org_id={self.session_org_id.get(session_id)})"
         )
-        
+
+    async def _cancel_local_run(self, session_id: str) -> None:
+        """Tear down this process's summarization task. Leaves the lease alone."""
+        task = self.active_tasks.pop(session_id, None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Clean up tracking data
+        self.last_summary_time.pop(session_id, None)
+        self.last_transcript_length.pop(session_id, None)
+        self.session_org_id.pop(session_id, None)
+
+    async def _lease_lost(self, session_id: str) -> None:
+        """Another process took this meeting over — stop billing alongside it."""
+        logger.error(
+            f"Auto-summarization lease for session {session_id} was taken over; "
+            f"stopping the local run"
+        )
+        await self._cancel_local_run(session_id)
+
     async def stop_auto_summarization(self, session_id: str) -> None:
         """Stop automatic summarization for a session"""
         if session_id in self.active_tasks:
-            task = self.active_tasks[session_id]
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            del self.active_tasks[session_id]
-
-            # Clean up tracking data
-            self.last_summary_time.pop(session_id, None)
-            self.last_transcript_length.pop(session_id, None)
-            self.session_org_id.pop(session_id, None)
+            await self._cancel_local_run(session_id)
+            # Release only what we started: release() is holder-scoped, so a
+            # lease held by the unified agent (or another process) is untouched.
+            await summarization_lease.release(session_id)
 
             logger.info(f"Stopped auto-summarization for session {session_id}")
     
@@ -403,8 +437,11 @@ class AutoSummarizationService:
             raise
         except Exception as e:
             logger.error(f"Error in summarization loop for session {session_id}: {e}")
-            # Clean up on error
+            # Clean up on error. Hand the lease back too — a crashed loop that
+            # kept its lease would block every later attempt on this meeting
+            # until the lease expired.
             self.active_tasks.pop(session_id, None)
+            await summarization_lease.release(session_id)
     
     async def _generate_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
