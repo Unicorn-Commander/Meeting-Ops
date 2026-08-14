@@ -38,7 +38,6 @@ from services.session_visibility import (
     VISIBILITY_PARTICIPANTS,
     user_is_participant,
     visibility_for_org_id,
-    visible_session_clause,
 )
 from services.invitation_tokens import (
     INVITATION_TOKEN_VERSION,

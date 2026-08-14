@@ -52,6 +52,9 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from auth.models import Organization
+from database.models import RecordingSession, SessionCollaborator
+
 logger = logging.getLogger(__name__)
 
 # Setting key on organizations.settings (a JSON column that already exists).
@@ -128,8 +131,6 @@ def visibility_for_org_id(db: Session, organization_id: Optional[int]) -> str:
     """
     if organization_id is None:
         return default_session_visibility()
-    from auth.models import Organization
-
     return visibility_for_organization(db.get(Organization, organization_id))
 
 
@@ -205,98 +206,55 @@ def user_is_participant(session: Any, user: Any) -> bool:
     return email in participant_emails(session)
 
 
-def _is_postgres(db: Session) -> bool:
-    bind = db.get_bind() if db is not None else None
-    return bind is not None and bind.dialect.name == "postgresql"
+def participant_session_ids(
+    db: Session,
+    organization_id: Optional[int],
+    user: Any,
+) -> list[int]:
+    """Ids of sessions in this org whose roster names ``user``.
 
+    Evaluated in Python, over one org-scoped query, deliberately.
 
-def _roster_entries(db: Session):
-    """The roster expanded to one row per entry, correlated to the session.
+    The alternative is a roster predicate in SQL, which needs a table-valued
+    function to expand the JSONB array (``json_each`` /
+    ``jsonb_array_elements``).  Every correlated and uncorrelated form of that
+    was found to leak the function into the enclosing query's FROM once the
+    clause is OR'd into a larger WHERE — SQLAlchemy renders ``FROM
+    recording_sessions, recording_sessions``, which silently matches EVERY row
+    (a cartesian product) on Postgres and raises "ambiguous column name" on
+    SQLite.  A predicate whose correctness depends on what else happens to be
+    in the query is the wrong shape for an access-control check.
 
-    ``joins_implicitly`` keeps this a lateral over ``participants``; the
-    ``correlate`` at each call site is what stops the planner re-adding
-    recording_sessions to the subquery FROM (which would be a cartesian
-    product matching every row whenever ANY row matched).
+    Doing it here also makes divergence impossible: the list and the detail
+    view call the same :func:`user_is_participant`, so a meeting can never be
+    readable but unlistable (or worse, listable but unreadable).
+
+    The cost is one scan of the organization's sessions per list request, and
+    only when that organization has opted into ``participants`` visibility —
+    the default returns before reaching this.  That is fine at current sizes
+    and is the known ceiling: the way to raise it is to stamp ``user_id``
+    onto roster entries at write time everywhere and index that, at which
+    point this becomes an indexed lookup.
     """
-    from sqlalchemy import func
-
-    from database.models import RecordingSession
-
-    expand = func.jsonb_array_elements if _is_postgres(db) else func.json_each
-    return expand(RecordingSession.participants).table_valued(
-        "value", joins_implicitly=True
+    if organization_id is None:
+        return []
+    rows = (
+        db.query(RecordingSession.id, RecordingSession.participants)
+        .filter(RecordingSession.organization_id == organization_id)
+        .all()
     )
 
+    class _Roster:
+        __slots__ = ("participants",)
 
-def _roster_user_id_clause(db: Session, user_id: int):
-    """Some roster entry carries this Meeting-Ops user id.
+        def __init__(self, participants):
+            self.participants = participants
 
-    Postgres uses JSONB containment so the GIN index from alembic 041 does
-    the work — the same index-assisted pattern ``api.federation_meetings``
-    uses. This is the fast path, and the one server-stamped identities take.
-    """
-    from sqlalchemy import func, literal, select
-
-    from database.models import RecordingSession
-
-    if _is_postgres(db):
-        return RecordingSession.participants.contains([{"user_id": user_id}])
-    entries = _roster_entries(db)
-    return (
-        select(literal(1))
-        .select_from(entries)
-        .where(func.json_extract(entries.c.value, "$.user_id") == user_id)
-        .correlate(RecordingSession)
-        .exists()
-    )
-
-
-def _roster_email_clause(db: Session, email: str):
-    """Some roster entry names this address, compared case-insensitively.
-
-    Addresses are stored exactly as whoever typed them, so this cannot be
-    JSONB containment: ``@>`` is an exact match, and it would silently miss
-    ``Bob@Example.com`` for ``bob@example.com``.  Matching the raw and folded
-    spellings instead would still miss every other casing, and the detail
-    check in :func:`user_is_participant` folds — so the list would quietly
-    hide a meeting the session page happily opens.  Correctness wins over the
-    index here; the indexed path is the ``user_id`` stamp above.
-    """
-    from sqlalchemy import func, literal, select
-
-    from database.models import RecordingSession
-
-    entries = _roster_entries(db)
-    if _is_postgres(db):
-        stored = entries.c.value.op("->>")(literal("email"))
-    else:
-        stored = func.json_extract(entries.c.value, "$.email")
-    return (
-        select(literal(1))
-        .select_from(entries)
-        .where(func.lower(stored) == email)
-        .correlate(RecordingSession)
-        .exists()
-    )
-
-
-def participant_match_clause(db: Session, user: Any):
-    """A SQL predicate selecting sessions whose roster names ``user``.
-
-    Mirrors :func:`user_is_participant` for list queries.  Returns None when
-    the user has no usable identity at all.
-    """
-    predicates = []
-    user_id = getattr(user, "id", None)
-    if isinstance(user_id, int):
-        predicates.append(_roster_user_id_clause(db, user_id))
-    if getattr(user, "is_verified", False):
-        email = normalize_identity_email(getattr(user, "email", None))
-        if email:
-            predicates.append(_roster_email_clause(db, email))
-    if not predicates:
-        return None
-    return or_(*predicates)
+    return [
+        row_id
+        for row_id, participants in rows
+        if user_is_participant(_Roster(participants), user)
+    ]
 
 
 def visible_session_clause(
@@ -314,8 +272,6 @@ def visible_session_clause(
     Callers must still apply their own ``organization_id`` filter; this only
     narrows within a tenant.
     """
-    from database.models import RecordingSession
-
     if getattr(user, "is_superuser", False):
         return None
     if visibility_for_org_id(db, organization_id) != VISIBILITY_PARTICIPANTS:
@@ -327,9 +283,9 @@ def visible_session_clause(
     user_id = getattr(user, "id", None)
     if isinstance(user_id, int):
         predicates.append(RecordingSession.user_id == user_id)
-    participant_clause = participant_match_clause(db, user)
-    if participant_clause is not None:
-        predicates.append(participant_clause)
+    roster_ids = participant_session_ids(db, organization_id, user)
+    if roster_ids:
+        predicates.append(RecordingSession.id.in_(roster_ids))
 
     collaborator_clause = _collaborator_clause(user)
     if collaborator_clause is not None:
@@ -350,8 +306,6 @@ def _collaborator_clause(user: Any):
     from datetime import datetime, timezone
 
     from sqlalchemy import select
-
-    from database.models import RecordingSession, SessionCollaborator
 
     user_id = getattr(user, "id", None)
     if not isinstance(user_id, int):
