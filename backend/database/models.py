@@ -1146,3 +1146,34 @@ class SupportRequest(Base):
         Index("ix_support_requests_created_at", "created_at"),
         Index("ix_support_requests_email", "email"),
     )
+
+
+class SummarizationLease(Base):
+    """Cross-process "one live summarizer per meeting" lease.
+
+    The live-summary websocket is opened per viewer and asks the summarizer to
+    start on connect, so N people watching one meeting is N start calls. The
+    summarizers collapse those with an in-process dict, which is only correct
+    while the backend is a single process — add `--workers` or a replica and
+    the same transcript gets summarized (and billed) N times.
+
+    One row per meeting currently being summarized, deleted when the run
+    stops. A row whose `expires_at` is in the past belongs to a holder that
+    died without releasing, and any process may take it over.
+
+    `session_id` is NOT a foreign key on purpose: callers key this service
+    with both `RecordingSession.session_id` (a uuid string) and
+    `str(RecordingSession.id)` (the integer PK as text), so the key space is
+    wider than either column.
+
+    Written and read only by `services.summarization_lease`; times are naive
+    UTC (see that module for why).
+    """
+
+    __tablename__ = "summarization_leases"
+
+    session_id = Column(String(100), primary_key=True)
+    holder = Column(String(200), nullable=False)
+    acquired_at = Column(DateTime, nullable=False)
+    heartbeat_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)

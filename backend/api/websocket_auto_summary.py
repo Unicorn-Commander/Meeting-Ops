@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from services.whisperx_npu_service import whisperx_service
 from services.auto_summarization_service import auto_summarization_service
 from services.unified_agent_service import unified_agent_service
+from services.summarization_lease import summarization_lease
 from services.system_service import SystemService
 from services.websocket_registry import websocket_registry
 from auth.dependencies import get_current_user, get_current_organization
@@ -30,6 +31,20 @@ router = APIRouter()
 active_connections: Dict[str, Set[WebSocket]] = {}
 # Track word counts for each session
 session_word_counts: Dict[str, int] = {}
+
+
+async def _session_already_summarizing(session_id: str) -> bool:
+    """Is some summarizer — here or in another backend process — on this meeting?
+
+    Checked before falling back from one summarizer to the other. The two
+    in-process dicts answer for this process; the lease answers for every
+    other one (a second uvicorn worker, a replica, a worker container).
+    """
+    if session_id in unified_agent_service.active_sessions:
+        return True
+    if session_id in auto_summarization_service.active_tasks:
+        return True
+    return await summarization_lease.is_held(session_id)
 
 
 async def broadcast_progressive_summary(session_id: str, summary_data: Dict):
@@ -132,13 +147,26 @@ async def websocket_with_auto_summary(websocket: WebSocket, session_id: str):
                     "mode": "progressive",
                     "message": "Progressive AI summarization enabled"
                 })
+            elif await _session_already_summarizing(session_id):
+                # start_meeting_analysis returns False for two very different
+                # reasons: "somebody is already summarizing this meeting" and
+                # "the start failed". Falling back on the first one is how the
+                # SECOND viewer of a meeting used to start the legacy
+                # summarizer alongside the unified one already running — two
+                # summarizers, two LLM bills, one transcript. Attach instead.
+                await websocket.send_json({
+                    "type": "progressive_summary_status",
+                    "enabled": True,
+                    "mode": "progressive",
+                    "message": "Progressive AI summarization already running for this meeting"
+                })
             else:
                 # Fallback to legacy auto-summarization
                 await auto_summarization_service.start_auto_summarization(
                     session_id,
                     websocket_callback=send_summary_update
                 )
-                
+
                 # Send legacy status
                 await websocket.send_json({
                     "type": "auto_summary_status",
