@@ -227,11 +227,20 @@ async def search_meetings(query: str, limit: int = 5) -> str:
         if hits:
             lines = [f"Found {len(hits)} meetings matching '{query}':\n"]
             for i, item in enumerate(hits, 1):
-                title = item.get("title", "Untitled")
-                score = item.get("score", 0)
-                snippet = item.get("snippet", "")[:200]
-                sid = item.get("session_id", "")
-                created = item.get("created_at", "")[:10]
+                # A JSON null in any of these is not a missing key, so the
+                # "default" argument never fires: .get(k, d) returns None and
+                # the format below raises (None:.3f) or slices None. The whole
+                # block sits inside `except Exception: pass`, so the failure is
+                # invisible -- semantic results are silently discarded and the
+                # tool degrades to keyword-only search that still looks healthy.
+                title = item.get("title") or "Untitled"
+                try:
+                    score = float(item.get("score") or 0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                snippet = (item.get("snippet") or "")[:200]
+                sid = item.get("session_id") or ""
+                created = (item.get("created_at") or "")[:10]
                 lines.append(
                     f"{i}. **{title}** (score: {score:.3f})\n"
                     f"   Session ID: {sid}\n"
