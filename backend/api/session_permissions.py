@@ -33,6 +33,13 @@ from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import RecordingSession as DBRecordingSession
 from database.models import SessionCollaborator
+from services.session_visibility import (
+    ADMIN_ROLES,
+    VISIBILITY_PARTICIPANTS,
+    user_is_participant,
+    visibility_for_org_id,
+    visible_session_clause,
+)
 from services.invitation_tokens import (
     INVITATION_TOKEN_VERSION,
     INVITATION_ISSUANCE_UNAVAILABLE,
@@ -239,12 +246,21 @@ def has_session_access(
 ) -> Literal["denied", "view", "comment", "edit"]:
     """Decide what level of access `user` has to a recording session.
 
-    Resolution order (first match wins):
+    Resolution order (first match wins) under the default ``organization``
+    visibility, which is unchanged from before participant identity existed:
       1. Org admin / manager / member of the session's org -> "edit"
       2. Org viewer of the session's org                  -> "view"
-      3. Project member (via cross-app lookup, stubbed)   -> "edit"
-      4. session_collaborators row for this user          -> row.access_level
-      5. (else)                                           -> "denied"
+      3. A participant of this meeting                    -> "view"
+      4. Project member (via cross-app lookup, stubbed)   -> "edit"
+      5. session_collaborators row for this user          -> row.access_level
+      6. (else)                                           -> "denied"
+
+    When the owning organization sets ``session_visibility`` to
+    ``participants`` (see services.session_visibility), steps 1 and 2 no
+    longer apply to plain members and viewers. Org owners/admins/managers
+    keep blanket access so a tenant remains administrable, and the person
+    who created the session keeps it. Everyone else must be named on the
+    meeting or hold an explicit grant.
 
     Superusers always get "edit".
 
@@ -267,21 +283,39 @@ def has_session_access(
     if getattr(user, "is_superuser", False):
         return "edit"
 
-    # 1+2: org membership
     role = _user_org_role(db, user, session.organization_id)
-    if role in ("admin", "manager", "member", "user"):
-        # "user" is the legacy role name in user_organizations.role;
-        # treat it equivalent to "member" for session access.
-        return "edit"
-    if role == "viewer":
+    org_wide = (
+        visibility_for_org_id(db, session.organization_id)
+        != VISIBILITY_PARTICIPANTS
+    )
+
+    # 1+2: org membership. Under "participants" this narrows to the roles
+    # that administer the tenant, plus the session's own creator.
+    if org_wide:
+        if role in ("admin", "manager", "member", "user"):
+            # "user" is the legacy role name in user_organizations.role;
+            # treat it equivalent to "member" for session access.
+            return "edit"
+        if role == "viewer":
+            return "view"
+    else:
+        if role in ADMIN_ROLES:
+            return "edit"
+        if role is not None and session.user_id and session.user_id == user.id:
+            return "edit"
+
+    # 3: the people who were actually in the meeting. Consulted only for a
+    # member of the owning org, so a roster entry can widen access within a
+    # tenant but never across one.
+    if role is not None and user_is_participant(session, user):
         return "view"
 
-    # 3: project membership (stubbed)
+    # 4: project membership (stubbed)
     if session.project_app and session.project_id:
         if _is_project_member(db, user, session.project_app, session.project_id):
             return "edit"
 
-    # 4: explicit collaborator row
+    # 5: explicit collaborator row
     collaborator = (
         db.query(SessionCollaborator)
         .filter(
@@ -316,7 +350,9 @@ def resolve_session_for_user(
     """Canonical session resolver for session-scoped endpoints.
 
     1. Strict lookup inside the caller's ACTIVE org (uuid session_id column,
-       then integer pk) — org members keep exactly the access they had.
+       then integer pk) — org members keep exactly the access they had,
+       unless that org has narrowed `session_visibility` to "participants",
+       in which case the same has_session_access gate applies in-org too.
     2. Cross-org fallback: resolve by id alone, then gate on
        has_session_access >= min_level ("view" for reads, "edit" for
        mutations). Covers personal-org sessions viewed while active in
@@ -340,7 +376,14 @@ def resolve_session_for_user(
         if pk is not None:
             session = q.filter(DBRecordingSession.id == pk).first()
     if session:
-        return session
+        if visibility_for_org_id(db, session.organization_id) != (
+            VISIBILITY_PARTICIPANTS
+        ):
+            return session
+        level = has_session_access(session.id, user, db)
+        if _ACCESS_RANK.get(level, 0) >= _ACCESS_RANK.get(min_level, 1):
+            return session
+        return None
 
     candidate = _get_session_by_str_id(db, str(session_id))
     if not candidate:
