@@ -124,4 +124,10 @@ audioop-lts; python_version >= "3.13"
 # (mcp/meeting_ops_mcp.py) and the hosted streamable-HTTP endpoint at
 # /mcp (backend/api/mcp_http.py). 1.2 is the first version that ships
 # the streamable-HTTP transport; 1.10+ pins the modern Context API.
-mcp>=1.10
+# <2: mcp 2.0.0 deleted mcp/server/fastmcp/ (renamed to mcp.server.mcpserver).
+# services/mcp_app.py imports `from mcp.server.fastmcp import FastMCP` at module
+# scope. main.py loads api.mcp_http inside a try/except, so an unbounded resolve
+# does NOT crash the backend — it silently drops the hosted /mcp surface into
+# failed_routers and every external client (Claude Desktop, Cursor, Cline) stops
+# working with a healthy-looking app.
+mcp>=1.10,<2
