@@ -386,7 +386,13 @@ class AuthService:
             if not user.is_verified:
                 user.is_verified = True
                 updated = True
-            if full_name and user.full_name != full_name:
+            # Never let an email-shaped value become the display name, and
+            # never clobber a real stored name with one. Callers used to pass
+            # Keycloak's preferred_username (== the email in this realm)
+            # straight through, which overwrote a good full_name on EVERY
+            # login — so fixing it at the caller alone would silently regress
+            # the moment another call site does the same thing.
+            if full_name and "@" not in full_name and user.full_name != full_name:
                 user.full_name = full_name
                 updated = True
             if updated:
@@ -412,7 +418,7 @@ class AuthService:
             email=email,
             username=candidate,
             hashed_password=get_password_hash(_secrets.token_urlsafe(48)),
-            full_name=full_name or candidate,
+            full_name=(full_name if full_name and "@" not in full_name else candidate),
             is_active=True,
             is_verified=True,
             is_superuser=is_superuser,
