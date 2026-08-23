@@ -2,7 +2,18 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { SpeakerTimeline } from '../components/SpeakerTimeline';
 
-describe('SpeakerTimeline filter', () => {
+/**
+ * Include-filter semantics (per spec-d7f6f353):
+ *   - empty selection => every speaker's bars are shown
+ *   - clicking a name => SELECTS that speaker to SHOW; only selected
+ *                        speakers' bars render, the rest are hidden
+ *   - multi-select    => several speakers can be shown at once
+ *   - "All"           => clears the selection, showing everyone again
+ *
+ * Segment bars are buttons whose title is "<speaker>: <start> → <end>",
+ * so their presence/absence is the ground truth for what is shown.
+ */
+describe('SpeakerTimeline include filter', () => {
   const segments = [
     { start: 0, end: 10, speaker: 'Alice' },
     { start: 10, end: 20, speaker: 'Bob' },
@@ -11,74 +22,71 @@ describe('SpeakerTimeline filter', () => {
 
   const speakers = ['Alice', 'Bob', 'Charlie'];
 
-  it('toggles a speaker and hides their bars', () => {
+  const ALICE_BAR = 'Alice: 0:00 → 0:10';
+  const BOB_BAR = 'Bob: 0:10 → 0:20';
+  const CHARLIE_BAR = 'Charlie: 0:20 → 0:30';
+
+  const renderTimeline = () =>
     render(
-      <SpeakerTimeline
-        duration={30}
-        segments={segments}
-        speakers={speakers}
-      />
+      <SpeakerTimeline duration={30} segments={segments} speakers={speakers} />
     );
 
-    // Initially all bars are visible
-    expect(screen.getByTitle('Alice: 0:00 → 0:10')).toBeInTheDocument();
-    expect(screen.getByTitle('Bob: 0:10 → 0:20')).toBeInTheDocument();
-    expect(screen.getByTitle('Charlie: 0:20 → 0:30')).toBeInTheDocument();
+  it("shows every speaker's bars initially (empty selection = all)", () => {
+    renderTimeline();
 
-    // Click Alice to toggle
-    fireEvent.click(screen.getByText('Alice'));
+    expect(screen.getByTitle(ALICE_BAR)).toBeInTheDocument();
+    expect(screen.getByTitle(BOB_BAR)).toBeInTheDocument();
+    expect(screen.getByTitle(CHARLIE_BAR)).toBeInTheDocument();
 
-    // Alice's bar should be hidden, others visible
-    expect(screen.queryByTitle('Alice: 0:00 → 0:10')).not.toBeInTheDocument();
-    expect(screen.getByTitle('Bob: 0:10 → 0:20')).toBeInTheDocument();
-    expect(screen.getByTitle('Charlie: 0:20 → 0:30')).toBeInTheDocument();
-    
-    // Alice's button should be dimmed
-    const aliceButton = screen.getByText('Alice');
-    expect(aliceButton).toHaveClass('opacity-40');
+    // No filter active yet, so the "All" reset control is not shown.
+    expect(screen.queryByText('All')).not.toBeInTheDocument();
   });
 
-  it('shows bars for multiple selected speakers', () => {
-    render(
-      <SpeakerTimeline
-        duration={30}
-        segments={segments}
-        speakers={speakers}
-      />
-    );
+  it("clicking a speaker shows only that speaker's bars", () => {
+    renderTimeline();
 
-    // Toggle Alice and Bob
+    fireEvent.click(screen.getByText('Alice'));
+
+    // Only Alice remains; Bob and Charlie are filtered out.
+    expect(screen.getByTitle(ALICE_BAR)).toBeInTheDocument();
+    expect(screen.queryByTitle(BOB_BAR)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(CHARLIE_BAR)).not.toBeInTheDocument();
+
+    // Pressed state tracks the selection; unselected names stay togglable.
+    expect(screen.getByText('Alice')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Bob')).toHaveAttribute('aria-pressed', 'false');
+
+    // A filter is active, so the "All" reset control appears.
+    expect(screen.getByText('All')).toBeInTheDocument();
+  });
+
+  it("selecting a second speaker shows both selected speakers' bars", () => {
+    renderTimeline();
+
     fireEvent.click(screen.getByText('Alice'));
     fireEvent.click(screen.getByText('Bob'));
 
-    // Alice and Bob bars hidden, Charlie visible
-    expect(screen.queryByTitle('Alice: 0:00 → 0:10')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Bob: 0:10 → 0:20')).not.toBeInTheDocument();
-    expect(screen.getByTitle('Charlie: 0:20 → 0:30')).toBeInTheDocument();
+    // Alice and Bob are both shown; Charlie stays hidden.
+    expect(screen.getByTitle(ALICE_BAR)).toBeInTheDocument();
+    expect(screen.getByTitle(BOB_BAR)).toBeInTheDocument();
+    expect(screen.queryByTitle(CHARLIE_BAR)).not.toBeInTheDocument();
   });
 
-  it('resets filter with All button', () => {
-    render(
-      <SpeakerTimeline
-        duration={30}
-        segments={segments}
-        speakers={speakers}
-      />
-    );
+  it('the All button resets the filter to show everyone', () => {
+    renderTimeline();
 
-    // Toggle Alice
+    // Narrow to Alice first, proving the filter is engaged.
     fireEvent.click(screen.getByText('Alice'));
-    expect(screen.queryByTitle('Alice: 0:00 → 0:10')).not.toBeInTheDocument();
+    expect(screen.queryByTitle(BOB_BAR)).not.toBeInTheDocument();
 
-    // Click All
     fireEvent.click(screen.getByText('All'));
 
-    // All bars visible again
-    expect(screen.getByTitle('Alice: 0:00 → 0:10')).toBeInTheDocument();
-    expect(screen.getByTitle('Bob: 0:10 → 0:20')).toBeInTheDocument();
-    expect(screen.getByTitle('Charlie: 0:20 → 0:30')).toBeInTheDocument();
-    
-    // All button should be gone
+    // Everyone is back...
+    expect(screen.getByTitle(ALICE_BAR)).toBeInTheDocument();
+    expect(screen.getByTitle(BOB_BAR)).toBeInTheDocument();
+    expect(screen.getByTitle(CHARLIE_BAR)).toBeInTheDocument();
+
+    // ...and, with an empty selection again, the reset control is gone.
     expect(screen.queryByText('All')).not.toBeInTheDocument();
   });
 });

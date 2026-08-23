@@ -132,7 +132,14 @@ export const SpeakerTimeline: React.FC<Props> = ({
                 {speaker}
               </button>
               <div className="relative flex-1 h-4 bg-gray-200 rounded overflow-hidden">
-                {bars.map((b, i) => {
+                {/*
+                  Include-filter gate: an empty selection shows every speaker;
+                  once one or more speakers are selected, only their bars render.
+                  The row itself stays mounted (dimmed name button + empty track)
+                  so color assignment is positional and does not shift, and the
+                  speaker can be toggled back on.
+                */}
+                {isSelected && bars.map((b, i) => {
                 const left = (Math.max(0, b.start) / totalDuration) * 100;
                 const width = Math.max(
                   0.2,  // 0.2% min so very short turns are still visible
