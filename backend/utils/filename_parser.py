@@ -25,6 +25,21 @@ Patterns, in priority order:
        Title 3-15-2024.ext
    Confidence 0.7.
 
+4b. Day-month-year with a spelled month, anywhere in the stem (the shape
+   the iPhone call recorder / Notes exports actually produce):
+       Call with Rohan Mehta 25Jun2026.ext
+       Call with Adam Park 8aug2026.ext
+       Rocky Aaron 27MAR2026.ext
+       Standup 23 Jun 2026.ext / 23-Jun-2026 / 8 August 2026
+   Case-insensitive, 1-2 digit day, 3-letter or full month, 4-digit year,
+   optional space/-/_/. separators. Confidence 0.7 (filename tier).
+
+4c. Month-day-year with a spelled month; "June 8_ 2026" is macOS escaping
+   the comma in "June 8, 2026":
+       8175 Challenger - June 8_ 2026 - New Home Orientation.ext
+       Review June 8, 2026.ext / Sept 3 2026
+   Confidence 0.7.
+
 5. ISO date anywhere in the basename, no positional contract:
        Anything-with-2024-03-15-buried-inside.ext
    Confidence 0.5.
@@ -33,8 +48,9 @@ No match → confidence 0.0, title = best-effort stem cleanup.
 
 The parser is the single source of truth for both the upload pipeline
 and the /api/recordings/parse-filename endpoint. The TypeScript twin in
-frontend/src/utils/filenameParser.ts mirrors the same five patterns so
-the client preview matches what the server stores.
+frontend/src/utils/filenameParser.ts mirrors patterns 1-5 so the client
+preview matches what the server stores; 4b/4c are server-side only so far
+(the preview may show no date where the server will set one).
 """
 
 from __future__ import annotations
@@ -86,6 +102,53 @@ _PATTERN_US_DATE_SUFFIX = re.compile(
     r"(?P<month>\d{1,2})[-/](?P<day>\d{1,2})[-/](?P<year>\d{2}|\d{4})"
     r"$"
 )
+
+# Patterns 4b/4c: spelled-out month. The word is captured loosely and then
+# validated against _MONTHS, so "Mar" inside "Marketing" never matches.
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+# Pattern 4b: D[sep]Mon[sep]YYYY anywhere in the stem — 25Jun2026, 8aug2026,
+# 27MAR2026, 23 Jun 2026, 23-Jun-2026, 8 August 2026.
+_PATTERN_DMY_TEXT_MONTH = re.compile(
+    r"(?<![A-Za-z0-9])(?P<day>\d{1,2})[ \-_.]?(?P<mon>[A-Za-z]{3,9})[ \-_.]?(?P<year>\d{4})(?![0-9])"
+)
+
+# Pattern 4c: Mon[sep]D[,_.]?[sep]YYYY — June 8, 2026 / June 8_ 2026 /
+# Jun 8 2026 / Sept 3rd 2026. A separator between month and day is required
+# so "Khan54645"-style tails never read as a date.
+_PATTERN_MDY_TEXT_MONTH = re.compile(
+    r"(?<![A-Za-z0-9])(?P<mon>[A-Za-z]{3,9})[ \-_.]+(?P<day>\d{1,2})(?:st|nd|rd|th)?"
+    r"[,_.]?[ \-_]*(?P<year>\d{4})(?![0-9])",
+    re.IGNORECASE,
+)
+
+
+def _spelled_month_date(stem: str) -> tuple[Optional[date], list[tuple[int, int]]]:
+    """First valid spelled-month date in *stem* (4b before 4c), plus every
+    matched span so the title can be recovered without the date tokens."""
+    found: Optional[date] = None
+    spans: list[tuple[int, int]] = []
+    for pattern in (_PATTERN_DMY_TEXT_MONTH, _PATTERN_MDY_TEXT_MONTH):
+        for m in pattern.finditer(stem):
+            month = _MONTHS.get(m.group("mon").lower())
+            if month is None:
+                continue
+            year = int(m.group("year"))
+            if not 1970 <= year <= 2100:
+                continue
+            d = _safe_date(year, month, int(m.group("day")))
+            if d is None:
+                continue
+            spans.append(m.span())
+            if found is None:
+                found = d
+    return found, spans
+
 
 # Pattern 5: ISO date anywhere in the basename.
 _PATTERN_ISO_ANYWHERE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -216,6 +279,25 @@ def parse_filename(filename: str) -> ParsedFilename:
                 confidence=0.7,
             )
 
+    spelled, spans = _spelled_month_date(stem)
+    if spelled is not None:
+        # Strip every matched date token out of the stem to recover a title.
+        pieces, cursor = [], 0
+        for start, end in sorted(spans):
+            pieces.append(stem[cursor:start])
+            cursor = end
+        pieces.append(stem[cursor:])
+        without_date = " ".join(p.strip(" -_.,") for p in pieces if p.strip(" -_.,"))
+        title = _normalize_title(without_date) or _normalize_title(stem)
+        return ParsedFilename(
+            title=title,
+            meeting_date=spelled,
+            meeting_time=None,
+            source="generic",
+            raw_filename=raw,
+            confidence=0.7,
+        )
+
     m = _PATTERN_ISO_ANYWHERE.search(stem)
     if m:
         d = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -284,6 +366,10 @@ if __name__ == "__main__":
         # Pattern 4 — US date suffix.
         "Jane Smith - 3-15-24.txt",
         "Quarterly review 3-15-2024.txt",
+        # Pattern 4b/4c — spelled month (iPhone call recorder exports).
+        "Call with Rohan Mehta 25Jun2026.m4a",
+        "Call with Adam Park 8aug2026.m4a",
+        "8175 Challenger - June 8_ 2026 - New Home Orientation - Tyler.m4a",
         # Pattern 5 — ISO date buried.
         "zoom_2024-03-15_recording.mp4",
         # No match.

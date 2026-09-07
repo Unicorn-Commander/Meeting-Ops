@@ -224,3 +224,71 @@ def test_returns_parsed_filename_instance():
     for f in [None, "", "noext", "noext.m4a", "2024-13-99 bad.m4a"]:
         p = parse_filename(f or "")
         assert isinstance(p, ParsedFilename)
+
+
+# ---------------------------------------------------------------------------
+# Patterns 4b / 4c: spelled-out month (iPhone call recorder / Notes exports).
+# Real filenames from Aaron's 2026-09 upload batch.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename,exp_date,exp_title",
+    [
+        ("Call with Rohan Mehta 25Jun2026.m4a", date(2026, 6, 25), "Call with Rohan Mehta"),
+        ("Call with Adam Park 8aug2026.m4a", date(2026, 8, 8), "Call with Adam Park"),
+        ("Call with Rocky Doe 23Jun2026.m4a", date(2026, 6, 23), "Call with Rocky Doe"),
+        ("Rocky Aaron 27MAR2026.m4a 27Mar2026.m4a", date(2026, 3, 27), "Rocky Aaron m4a"),
+        (
+            "Call with Shafen Khan 25Aug2026 Costmetics Manufacturer.m4a",
+            date(2026, 8, 25),
+            "Call with Shafen Khan Costmetics Manufacturer",
+        ),
+        (
+            "8175 Challenger - June 8_ 2026 - New Home Orientation - Tyler.m4a",
+            date(2026, 6, 8),
+            "8175 Challenger New Home Orientation - Tyler",
+        ),
+        ("Standup 23 Jun 2026.m4a", date(2026, 6, 23), "Standup"),
+        ("Standup 23-Jun-2026.m4a", date(2026, 6, 23), "Standup"),
+        ("Board meeting 8 August 2026.m4a", date(2026, 8, 8), "Board meeting"),
+        ("Review June 8, 2026.m4a", date(2026, 6, 8), "Review"),
+        ("Review Sept 3rd 2026.m4a", date(2026, 9, 3), "Review"),
+        ("Kickoff DECEMBER 31 2025.m4a", date(2025, 12, 31), "Kickoff"),
+    ],
+)
+def test_spelled_month_dates(filename, exp_date, exp_title):
+    p = parse_filename(filename)
+    assert p.meeting_date == exp_date
+    assert p.meeting_time is None
+    assert p.confidence == 0.7
+    assert p.source == "generic"
+    assert p.title == exp_title
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Call with Shafen Khan54645.m4a",   # digits glued to a name, no month
+        "Call with Shafen Khan342.m4a",
+        "Call with Tom Kim1.m4a",
+        "Call with Shafen Khan 2.m4a",
+        "Marketing 2026 plan.m4a",         # "Mar" inside a word, no day
+        "Call with Nate Ellison as.m4a",
+        "Why unicorn brigade.m4a",
+    ],
+)
+def test_spelled_month_does_not_misfire(filename):
+    p = parse_filename(filename)
+    assert p.meeting_date is None
+    assert p.confidence == 0.0
+
+
+def test_spelled_month_loses_to_iso_prefix():
+    p = parse_filename("2024-03-15 - Jane 25Jun2026.m4a")
+    assert p.meeting_date == date(2024, 3, 15)
+    assert p.confidence == 0.9
+
+
+def test_spelled_month_invalid_day_is_ignored():
+    p = parse_filename("Call 31Jun2026.m4a")
+    assert p.meeting_date is None

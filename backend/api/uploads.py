@@ -1030,7 +1030,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
         from services.transcription_options import coerce_options
         opts = coerce_options(job.transcription_options)
 
-        session = await _resolve_session_for_job(db, job, audio_path)
+        session = await _resolve_session_for_job(db, job, audio_path, source_path=source_path)
 
         # --- Kick off diarization CONCURRENTLY with transcription. STT
         # (Parakeet) and diarization (pyannote) read the same audio
@@ -1384,6 +1384,29 @@ def started_at_from_recorded(recorded: Optional[dict], server_now: datetime) -> 
     return dt
 
 
+def provenance_probe_path(audio_path: Optional[Path], source_path: Optional[Path]) -> Optional[Path]:
+    """The file whose container tags carry the recording timestamp.
+
+    The pipeline transcribes an ffmpeg-extracted 16 kHz WAV (``audio_path``),
+    and ffmpeg writes that WAV with NO container tags — so probing it for
+    ``creation_time`` always came back empty and every upload fell through to
+    the browser mtime (= "now"). The tag lives on the ORIGINAL upload
+    (``source_path``). Prefer that whenever it is still on disk and non-empty;
+    fall back to the WAV (recovery / reprocess runs where the original was
+    evicted) so the ledger is never worse than before.
+    """
+    for candidate in (source_path, audio_path):
+        if not candidate:
+            continue
+        try:
+            p = Path(candidate)
+            if p.is_file() and p.stat().st_size > 0:
+                return p
+        except OSError:
+            continue
+    return Path(audio_path) if audio_path else None
+
+
 def ended_at_from_started(session: RecordingSession) -> Optional[datetime]:
     """ended_at = started_at + duration for uploaded recordings (the audio is
     the whole meeting). None when either input is missing."""
@@ -1396,7 +1419,9 @@ def ended_at_from_started(session: RecordingSession) -> Optional[datetime]:
     return started + timedelta(seconds=float(duration))
 
 
-async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
+async def _create_upload_session(
+    db: Session, job: UploadJob, audio_path: Path, source_path: Optional[Path] = None,
+) -> RecordingSession:
     # Run the shared filename parser. Pattern 1 (notes__/downloads__ Mac
     # Notes + Voice Memos export) gives us title + meeting_date +
     # meeting_time + source in one shot; patterns 2-5 cover generic ISO /
@@ -1429,8 +1454,10 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         build_meeting_provenance,
         recorded_date_time,
     )
+    # Probe the ORIGINAL upload for container tags; the extracted WAV has none.
+    probe_path = provenance_probe_path(audio_path, source_path)
     provenance = build_meeting_provenance(
-        audio_path=audio_path,
+        audio_path=probe_path,
         original_filename=job.filename,
         filename_date=parsed.meeting_date,
         filename_time=parsed.meeting_time,
@@ -1480,6 +1507,7 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
                 "matched_title": parsed.title,
             },
             "meeting_provenance": provenance,
+            "provenance_probe_file": probe_path.name if probe_path else None,
         },
     )
     db.add(session)
@@ -1541,11 +1569,16 @@ def _persist_upload_audio_to_garage(db: Session, session: RecordingSession, audi
         logger.warning("Garage persist failed for upload session=%s: %s", session.id, exc)
 
 
-async def _resolve_session_for_job(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
-    """Branch on job.action: attach reuses the target session, transcribe creates a new one."""
+async def _resolve_session_for_job(
+    db: Session, job: UploadJob, audio_path: Path, source_path: Optional[Path] = None,
+) -> RecordingSession:
+    """Branch on job.action: attach reuses the target session, transcribe creates a new one.
+
+    ``source_path`` is the original uploaded file (kept for its container tags);
+    ``audio_path`` is the extracted WAV the pipeline actually transcribes."""
     if job.action == "attach":
         return await _attach_to_existing_session(db, job, audio_path)
-    return await _create_upload_session(db, job, audio_path)
+    return await _create_upload_session(db, job, audio_path, source_path=source_path)
 
 
 def _advance_stale_reprocess_flags(session: RecordingSession) -> bool:
