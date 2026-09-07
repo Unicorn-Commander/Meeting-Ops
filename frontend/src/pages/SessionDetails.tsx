@@ -57,6 +57,8 @@ import { useOrg } from '../contexts/OrgContext';
 import { useUploads } from '../contexts/UploadsContext';
 import { useTierFeatures } from '../hooks/useTierFeatures';
 import ConfirmModal from '../components/ConfirmModal';
+import { CombinedBadge, PartOfLinks } from '../components/CombinedMeetingBadges';
+import { Layers } from 'lucide-react';
 
 /**
  * Normalize a backend error body into a user-readable string.
@@ -229,6 +231,23 @@ interface Session {
   // meeting (overlapping recordings). Optional — older payloads and
   // local-only sessions won't carry it; empty list when none.
   related_sessions?: RelatedSession[];
+  /** Combined meeting (docs/COMBINED-MEETINGS-CONTRACT.md): this row links
+   *  to its parts in time order and owns only the unified summary /
+   *  insights / action items. No audio, no transcript of its own. */
+  is_combined?: boolean;
+  /** Present only when is_combined. */
+  parts?: CombinedPart[];
+  /** Combined meetings this session is a part of (may be empty). */
+  part_of?: Array<{ id: number | string; name: string }>;
+}
+
+/** One part of a combined meeting. */
+interface CombinedPart {
+  id: number | string;
+  name: string;
+  started_at?: string | null;
+  duration?: number | null;
+  status?: string;
 }
 
 /** Another user's copy of the same meeting (duplicate detection, v3.36). */
@@ -362,6 +381,8 @@ export const SessionDetails: React.FC = () => {
   const [moveOrgTarget, setMoveOrgTarget] = useState<{ id: number; name: string; slug: string } | null>(null);
   const [movingOrg, setMovingOrg] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  // Combined meetings: "Re-run summary" re-enqueues the unified summary job.
+  const [rerunningCombined, setRerunningCombined] = useState(false);
   // Brigade Phase 2: collapsed by default so the Three.js bundle isn't
   // fetched until the user opens the section. SessionDetails is the
   // primary landing page for completed meetings; many users won't ever
@@ -1699,6 +1720,29 @@ export const SessionDetails: React.FC = () => {
     }
   };
 
+  const rerunCombinedSummary = async () => {
+    if (!session?.is_combined) return;
+    setRerunningCombined(true);
+    try {
+      const id = session.id || sessionId;
+      const res = await fetch(`${config.apiUrl}/api/sessions/${id}/combine/rerun`, {
+        method: 'POST',
+        headers: participantHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(formatBackendError(body, res.status, 'Re-run failed'));
+      }
+      // Status flips back to processing; the existing poll picks up the result.
+      await fetchSession();
+      toast.success('Unified summary re-run queued — this page refreshes when it finishes.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Re-run failed.');
+    } finally {
+      setRerunningCombined(false);
+    }
+  };
+
   const runReprocess = async () => {
     if (!session) return;
     setReprocessing(true);
@@ -2224,6 +2268,20 @@ export const SessionDetails: React.FC = () => {
                 {!editingTitle && session.title && session.name && session.name !== session.title && (
                   <p className="text-sm text-gray-500 mt-1">Original: {session.name}</p>
                 )}
+                {(session.is_combined || (session.part_of?.length ?? 0) > 0) && (
+                  <div className="flex items-center flex-wrap gap-2 mt-1.5">
+                    {session.is_combined && (
+                      <CombinedBadge
+                        partsCount={session.parts?.length ?? 0}
+                        className="px-2 py-0.5 text-xs"
+                        tone="light"
+                      />
+                    )}
+                    {(session.part_of?.length ?? 0) > 0 && (
+                      <PartOfLinks partOf={session.part_of!} tone="light" />
+                    )}
+                  </div>
+                )}
                 {/* Per-session tags. Removable chips + inline add. */}
                 <div className="flex items-center flex-wrap gap-1.5 mt-2">
                   {[...tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).map((tag) => (
@@ -2466,7 +2524,7 @@ export const SessionDetails: React.FC = () => {
               ) : (
                 <>
               {/* Upload Audio Button */}
-              {!session.audio_file && (
+              {!session.audio_file && !session.is_combined && (
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={uploading}
@@ -2541,7 +2599,18 @@ export const SessionDetails: React.FC = () => {
                   count, summary template etc. without re-uploading.
                   Hidden for local-only sessions (no audio file leaves the
                   device, no server pipeline to re-run). */}
-              {session.audio_file && !session.is_local && (
+              {session.is_combined && (
+                <button
+                  onClick={() => { void rerunCombinedSummary(); }}
+                  disabled={rerunningCombined || session.status === 'processing'}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                  title="Regenerate the unified summary, insights and action items from the parts' current transcripts"
+                >
+                  <RefreshCw className={`w-4 h-4 ${rerunningCombined ? 'animate-spin' : ''}`} />
+                  Re-run summary
+                </button>
+              )}
+              {session.audio_file && !session.is_local && !session.is_combined && (
                 <button
                   onClick={() => {
                     setReprocessOpts(DEFAULT_TRANSCRIPTION_OPTIONS);
@@ -2751,6 +2820,51 @@ export const SessionDetails: React.FC = () => {
         {/* Free-tier upgrade banner. Hidden for paid/superuser tiers and
             self-dismissible for 7 days. See components/UpgradeBanner.tsx. */}
         <UpgradeBanner />
+        {/* Combined meeting: the parts, in the order the unified summary
+            reads them. Audio + transcript live on each part. */}
+        {session.is_combined && (
+          <div className="bg-white rounded-lg shadow-sm p-4 mb-6" data-testid="combined-parts">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                <Layers className="w-4 h-4 text-sky-600" />
+                Parts ({session.parts?.length ?? 0})
+              </h2>
+              <p className="text-xs text-gray-500">
+                Combined meeting — open a part for audio and transcript.
+              </p>
+            </div>
+            <ol className="mt-3 divide-y divide-gray-100">
+              {(session.parts ?? []).map((part, index) => (
+                <li key={String(part.id)} className="flex items-center gap-3 py-2 text-sm">
+                  <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sky-100 text-xs font-semibold text-sky-800">
+                    {index + 1}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/sessions/${part.id}`)}
+                    className="min-w-0 flex-1 truncate text-left font-medium text-purple-700 hover:text-purple-900 hover:underline"
+                    title={`Open ${part.name}`}
+                  >
+                    {part.name}
+                  </button>
+                  <span className="hidden sm:inline-flex items-center gap-1 text-xs text-gray-500">
+                    <Calendar className="w-3.5 h-3.5" />
+                    {part.started_at ? new Date(part.started_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs text-gray-500 tabular-nums">
+                    <Clock className="w-3.5 h-3.5" />
+                    {part.duration ? formatTime(part.duration) : '—'}
+                  </span>
+                  {part.status && part.status !== 'completed' && (
+                    <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs text-amber-800">
+                      {part.status}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
         {/* v3.36 duplicate detection: another org member also recorded this
             same meeting. Surfaced as a dismissible info banner (dismiss is
             component-state only — no persistence) with a link to each
@@ -2800,7 +2914,16 @@ export const SessionDetails: React.FC = () => {
 
             {/* Dedicated identity workspace: sample playback and assignment
                 live here rather than inside the reading-focused transcript. */}
-            {activeTab === 'speakers' && (
+            {(activeTab === 'speakers' || activeTab === 'transcript') && session.is_combined && (
+              <div
+                className="rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 flex items-center gap-2"
+                data-testid="combined-tab-note"
+              >
+                <Layers className="w-4 h-4 text-sky-600 flex-shrink-0" />
+                Combined meeting — open a part for audio and transcript.
+              </div>
+            )}
+            {activeTab === 'speakers' && !session.is_combined && (
               <div className="space-y-4">
                 <div className="rounded-lg border border-purple-200 bg-gradient-to-br from-purple-50 to-indigo-50 p-5">
                   <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
@@ -3572,7 +3695,7 @@ export const SessionDetails: React.FC = () => {
                 on its own panel. The full set of navigation tools inside
                 (speaker timeline, filter chips, inline rename,
                 click-to-seek) is preserved. */}
-            {activeTab === 'transcript' && (
+            {activeTab === 'transcript' && !session.is_combined && (
             <>
             <div className="bg-white rounded-lg shadow-sm p-6 flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: '480px' }}>
               <div className="flex items-center justify-between mb-4 flex-shrink-0">
