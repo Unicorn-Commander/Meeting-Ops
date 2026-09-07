@@ -385,6 +385,25 @@ def _scoped_session_query(db: Session, organization_id: int):
     )
 
 
+def _visible_clause(
+    db: Session,
+    organization_id: int,
+    user: Optional[User],
+    role: Optional[str],
+):
+    """Per-org narrowing for list queries, or None when nothing narrows.
+
+    Returns None under the default ``organization`` visibility, so the shape
+    of every existing list query is untouched unless an org opts in. See
+    services.session_visibility.
+    """
+    if user is None:
+        return None
+    from services.session_visibility import visible_session_clause
+
+    return visible_session_clause(db, organization_id, user, role)
+
+
 def _participants_payload(session: DBRecordingSession) -> List[dict]:
     """Coerce the JSONB column into a clean response list. Tolerates legacy
     NULLs and stray non-list values without 500ing the caller."""
@@ -578,11 +597,31 @@ def _get_session_for_org(
     "view" for read endpoints, "edit" for mutations. The strict same-org
     path is unaffected — org members keep exactly the access they had.
     """
+    from api.session_permissions import has_session_access
+    from services.session_visibility import (
+        VISIBILITY_PARTICIPANTS,
+        visibility_for_org_id,
+    )
+
+    _RANK = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
+
+    def _gate(found: Optional[DBRecordingSession]) -> Optional[DBRecordingSession]:
+        """In-org hit. Unchanged unless this org narrowed visibility, in
+        which case a member who was not in the meeting is refused here too."""
+        if found is None or user is None:
+            return found
+        if visibility_for_org_id(db, found.organization_id) != VISIBILITY_PARTICIPANTS:
+            return found
+        level = has_session_access(found.id, user, db)
+        if _RANK.get(level, 0) >= _RANK.get(min_level, 1):
+            return found
+        return None
+
     session = _scoped_session_query(db, organization_id).filter(
         DBRecordingSession.session_id == session_id
     ).first()
     if session:
-        return session
+        return _gate(session)
 
     try:
         int_id = int(session_id)
@@ -594,18 +633,17 @@ def _get_session_for_org(
             DBRecordingSession.id == int_id
         ).first()
         if session:
-            return session
+            return _gate(session)
 
     if user is None:
         return None
 
-    from api.session_permissions import _get_session_by_str_id, has_session_access
+    from api.session_permissions import _get_session_by_str_id
 
     candidate = _get_session_by_str_id(db, str(session_id))
     if not candidate:
         return None
     level = has_session_access(candidate.id, user, db)
-    _RANK = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
     if _RANK.get(level, 0) >= _RANK.get(min_level, 1):
         return candidate
     return None
@@ -764,20 +802,35 @@ async def list_sessions(
         # default. (Previously a superuser's "all orgs" view returned every
         # session in the system, so the platform owner saw every tenant's private
         # meetings on the default view — removed.)
-        org_ids = [
-            row.organization_id
-            for row in db.query(UserOrganization.organization_id)
+        memberships = (
+            db.query(UserOrganization.organization_id, UserOrganization.role)
             .filter(UserOrganization.user_id == current_user.id)
             .all()
-        ]
-        if not org_ids:
+        )
+        if not memberships:
             query = db.query(DBRecordingSession).filter(False)
         else:
-            query = db.query(DBRecordingSession).filter(
-                DBRecordingSession.organization_id.in_(org_ids)
-            )
+            # Each org answers "who may see a meeting?" for itself, so the
+            # scope is a union of per-org predicates rather than one IN list.
+            # An org on the default setting contributes its whole set.
+            per_org = []
+            for org_id, role in memberships:
+                clause = _visible_clause(db, org_id, current_user, role)
+                org_match = DBRecordingSession.organization_id == org_id
+                per_org.append(
+                    org_match if clause is None else and_(org_match, clause)
+                )
+            query = db.query(DBRecordingSession).filter(or_(*per_org))
     else:
         query = _scoped_session_query(db, active_org.organization.id)
+        clause = _visible_clause(
+            db,
+            active_org.organization.id,
+            current_user,
+            active_org.role_name,
+        )
+        if clause is not None:
+            query = query.filter(clause)
     query = query.options(
         defer(DBRecordingSession.transcript),
         defer(DBRecordingSession.transcript_simple),
@@ -949,8 +1002,8 @@ async def search_sessions(
     Returns matching sessions with a snippet of the matching text."""
     
     search_term = f"%{q}%"
-    
-    sessions = _scoped_session_query(db, active_org.organization.id).filter(
+
+    search_query = _scoped_session_query(db, active_org.organization.id).filter(
         or_(
             DBRecordingSession.name.ilike(search_term),
             DBRecordingSession.title.ilike(search_term),
@@ -958,7 +1011,18 @@ async def search_sessions(
             DBRecordingSession.transcript.ilike(search_term),
             DBRecordingSession.transcript_simple.ilike(search_term),
         )
-    ).order_by(desc(DBRecordingSession.created_at)).limit(limit).all()
+    )
+    # Search must not become a side channel around the list's visibility.
+    visible = _visible_clause(
+        db, active_org.organization.id, current_user, active_org.role_name
+    )
+    if visible is not None:
+        search_query = search_query.filter(visible)
+    sessions = (
+        search_query.order_by(desc(DBRecordingSession.created_at))
+        .limit(limit)
+        .all()
+    )
     
     results = []
     for session in sessions:

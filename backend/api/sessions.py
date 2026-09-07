@@ -29,13 +29,20 @@ async def list_sessions(
     limit: int = Query(100, ge=1, le=1000)
 ):
     """List all recording sessions"""
-    sessions = (
-        db.query(RecordingSession)
-        .filter(RecordingSession.organization_id == active_org.organization.id)
-        .offset(skip)
-        .limit(limit)
-        .all()
+    from services.session_visibility import visible_session_clause
+
+    query = db.query(RecordingSession).filter(
+        RecordingSession.organization_id == active_org.organization.id
     )
+    # None under the default org-wide visibility, so this list is unchanged
+    # unless the org narrowed it — in which case titles must not leak here
+    # either. See services.session_visibility.
+    visible = visible_session_clause(
+        db, active_org.organization.id, current_user, active_org.role_name
+    )
+    if visible is not None:
+        query = query.filter(visible)
+    sessions = query.offset(skip).limit(limit).all()
     return [
         {
             "id": str(session.id),

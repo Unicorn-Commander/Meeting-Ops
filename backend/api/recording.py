@@ -240,15 +240,51 @@ def _session_dir(org_slug: str, session_id: str) -> Path:
     return ALWAYS_ON_DIR / org_slug / session_id
 
 
-def _find_session(db: Session, session_id: str, org_id: int) -> Optional[RecordingSession]:
+_FIND_SESSION_RANK = {"denied": 0, "view": 1, "comment": 2, "edit": 3}
+
+
+def _find_session(
+    db: Session,
+    session_id: str,
+    org_id: int,
+    user=None,
+    min_level: str = "edit",
+) -> Optional[RecordingSession]:
+    """Org-scoped session lookup for the always-on recording endpoints.
+
+    ``user`` is optional only so internal callers that genuinely have no
+    caller identity keep working; every HTTP endpoint passes ``current_user``
+    so that an org which narrowed ``session_visibility`` to "participants"
+    is enforced here too, not just on the read paths in
+    ``api.session_permissions``. Under the default setting this is exactly
+    the org filter it has always been.
+
+    ``min_level`` defaults to "edit" because all but one of these endpoints
+    mutate or finalize a recording. Read-only callers pass "view" so a
+    participant can still read what they are entitled to.
+    """
     query = db.query(RecordingSession).filter(RecordingSession.organization_id == org_id)
     session = query.filter(RecordingSession.session_id == session_id).first()
-    if session:
+    if session is None:
+        try:
+            session = query.filter(RecordingSession.id == int(session_id)).first()
+        except (TypeError, ValueError):
+            return None
+    if session is None or user is None:
         return session
-    try:
-        return query.filter(RecordingSession.id == int(session_id)).first()
-    except (TypeError, ValueError):
-        return None
+
+    from api.session_permissions import has_session_access
+    from services.session_visibility import (
+        VISIBILITY_PARTICIPANTS,
+        visibility_for_org_id,
+    )
+
+    if visibility_for_org_id(db, session.organization_id) != VISIBILITY_PARTICIPANTS:
+        return session
+    level = has_session_access(session.id, user, db)
+    if _FIND_SESSION_RANK.get(level, 0) >= _FIND_SESSION_RANK.get(min_level, 3):
+        return session
+    return None
 
 
 def _find_session_by_id(db: Session, session_id: str) -> Optional[RecordingSession]:
@@ -789,7 +825,7 @@ async def upload_always_on_chunk(
             raise HTTPException(status_code=403, detail="Inactive user")
         current_user = caller
         active_org = resolve_active_organization(db, request, current_user)
-        session = _find_session(db, session_id, active_org.organization.id)
+        session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
@@ -907,7 +943,7 @@ async def append_client_text_chunk(
             raise HTTPException(status_code=403, detail="Inactive user")
         current_user = caller
         active_org = resolve_active_organization(db, request, current_user)
-        session = _find_session(db, session_id, active_org.organization.id)
+        session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
@@ -1011,7 +1047,7 @@ async def finalize_always_on_session(
     fired (best-effort).
     """
     gate_feature_for_caller(current_user, "canonical_reprocess", active_org)  # v3.0.0 tier gate: paid-tier server processing
-    session = _find_session(db, session_id, active_org.organization.id)
+    session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     if getattr(session, "mode", "upload") != "always_on":
@@ -1133,7 +1169,7 @@ async def finalize_always_on_session(
         db.refresh(session)
     except Exception as exc:
         db.rollback()
-        session = _find_session(db, session_id, active_org.organization.id)
+        session = _find_session(db, session_id, active_org.organization.id, current_user)
         if session:
             session.status = "completed"
             session.summary = json.dumps({
@@ -1240,7 +1276,7 @@ async def discard_always_on_session(
     deletable. Returns 404 for missing or cross-org session ids so we
     don't leak existence.
     """
-    session = _find_session(db, session_id, active_org.organization.id)
+    session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
 
@@ -1452,7 +1488,10 @@ async def list_summary_slices(
     render the same chronological stack the auto-triggered + manual
     paths both append onto.
     """
-    session = _find_session(db, session_id, active_org.organization.id)
+    # Read-only: a participant may read the summary stack for their meeting.
+    session = _find_session(
+        db, session_id, active_org.organization.id, current_user, min_level="view"
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     # Heartbeat. Since v3.26.9 an in-progress always-on recording buffers audio
@@ -1492,7 +1531,7 @@ async def create_summary_slice(
     slice; 503 when the LLM provider fails.
     """
     gate_feature_for_caller(current_user, "qwen36_summary", active_org)  # v3.29.0 moat fix: "Summarize now" runs the server LLM
-    session = _find_session(db, session_id, active_org.organization.id)
+    session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     transcript = (session.transcript_simple or "").strip()
@@ -1610,7 +1649,7 @@ async def append_audio_chunk(
             raise HTTPException(status_code=403, detail="Inactive user")
         current_user = caller
         active_org = resolve_active_organization(db, request, current_user)
-        session = _find_session(db, session_id, active_org.organization.id)
+        session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative
@@ -2546,7 +2585,7 @@ async def retry_knowledge_graph_sync(
     error immediately; the underlying Brigade MERGE writes make repeat clicks
     safe.
     """
-    session = _find_session(db, session_id, active_org.organization.id)
+    session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status != "completed":
@@ -2625,7 +2664,7 @@ async def finalize_audio(
     context we can flip this to dual-auth like /audio-chunks.
     """
     gate_feature_for_caller(current_user, "canonical_reprocess", active_org)  # v3.0.0 tier gate: paid-tier server processing
-    session = _find_session(db, session_id, active_org.organization.id)
+    session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     if getattr(session, "mode", "upload") != "always_on":
@@ -2804,7 +2843,7 @@ async def post_full_audio(
             raise HTTPException(status_code=403, detail="Inactive user")
         current_user = caller
         active_org = resolve_active_organization(db, request, current_user)
-        session = _find_session(db, session_id, active_org.organization.id)
+        session = _find_session(db, session_id, active_org.organization.id, current_user)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     # v3.0.0 tier gate (billing-1): paid-tier server processing, authoritative

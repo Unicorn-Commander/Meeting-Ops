@@ -42,6 +42,17 @@ class RecordingSession(Base):
             "external_id",
             name="uq_recording_sessions_org_external_source_id",
         ),
+        # The identity of the MEETING, as opposed to external_id which is the
+        # identity of one export of it. Stable sends one export per
+        # participant browser, each with that browser's own clock in the
+        # payload, so external_id cannot collapse a call into one session.
+        # NULLs are distinct in Postgres, so the 900+ rows that predate this
+        # column do not collide. See api.stable_ingest.
+        UniqueConstraint(
+            "organization_id",
+            "meeting_key",
+            name="uq_recording_sessions_org_meeting_key",
+        ),
         Index(
             "ix_recording_sessions_tags_gin",
             "tags",
@@ -104,6 +115,14 @@ class RecordingSession(Base):
     # identifier without seeing or overwriting one another.
     external_source = Column(String(50), nullable=True)
     external_id = Column(String(128), nullable=True)
+    # Which MEETING this row is, independent of which export created it. One
+    # call produces one meeting_key no matter how many participants export it.
+    # NULL for every session that does not come from an upstream call.
+    meeting_key = Column(String(200), nullable=True)
+    # The upstream room this call happened in (Stable's room UUID). Persistent
+    # across calls, so it identifies the room, never the call — the call is
+    # room + time window. Indexed because the coalescing lookup filters on it.
+    external_room_id = Column(String(128), nullable=True, index=True)
     room_name = Column(String(200), nullable=True)  # Physical room name
     # NOT NULL on Postgres per 004_multi_org_scoping.
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
@@ -1160,3 +1179,34 @@ class SupportRequest(Base):
         Index("ix_support_requests_created_at", "created_at"),
         Index("ix_support_requests_email", "email"),
     )
+
+
+class SummarizationLease(Base):
+    """Cross-process "one live summarizer per meeting" lease.
+
+    The live-summary websocket is opened per viewer and asks the summarizer to
+    start on connect, so N people watching one meeting is N start calls. The
+    summarizers collapse those with an in-process dict, which is only correct
+    while the backend is a single process — add `--workers` or a replica and
+    the same transcript gets summarized (and billed) N times.
+
+    One row per meeting currently being summarized, deleted when the run
+    stops. A row whose `expires_at` is in the past belongs to a holder that
+    died without releasing, and any process may take it over.
+
+    `session_id` is NOT a foreign key on purpose: callers key this service
+    with both `RecordingSession.session_id` (a uuid string) and
+    `str(RecordingSession.id)` (the integer PK as text), so the key space is
+    wider than either column.
+
+    Written and read only by `services.summarization_lease`; times are naive
+    UTC (see that module for why).
+    """
+
+    __tablename__ = "summarization_leases"
+
+    session_id = Column(String(100), primary_key=True)
+    holder = Column(String(200), nullable=False)
+    acquired_at = Column(DateTime, nullable=False)
+    heartbeat_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 
 interface TimelineSegment {
   start: number;
@@ -59,6 +59,7 @@ export const SpeakerTimeline: React.FC<Props> = ({
   currentTime,
   onSeek,
 }) => {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const totalDuration = Math.max(duration, 0.001);
 
   // Group segments by speaker for rendering, ordered to match `speakers`.
@@ -76,6 +77,24 @@ export const SpeakerTimeline: React.FC<Props> = ({
     }));
   }, [segments, speakers]);
 
+  const toggleSpeaker = (speaker: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(speaker)) {
+        next.delete(speaker);
+      } else {
+        next.add(speaker);
+      }
+      return next;
+    });
+  };
+
+  const resetFilter = () => {
+    setSelected(new Set());
+  };
+
+  const isFiltered = selected.size > 0;
+
   if (!speakers.length || totalDuration < 1) return null;
 
   return (
@@ -84,20 +103,43 @@ export const SpeakerTimeline: React.FC<Props> = ({
         <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
           Speaker timeline
         </span>
-        <span className="text-xs text-gray-400">{formatTime(totalDuration)} total</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400">{formatTime(totalDuration)} total</span>
+          {isFiltered && (
+            <button
+              type="button"
+              onClick={resetFilter}
+              className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              All
+            </button>
+          )}
+        </div>
       </div>
       <div className="space-y-1.5">
-        {grouped.map(({ speaker, color, bars }) => (
-          <div key={speaker} className="flex items-center gap-2">
-            <span
-              className="text-[11px] font-medium truncate w-24 text-right"
-              style={{ color }}
-              title={speaker}
-            >
-              {speaker}
-            </span>
-            <div className="relative flex-1 h-4 bg-gray-200 rounded overflow-hidden">
-              {bars.map((b, i) => {
+        {grouped.map(({ speaker, color, bars }) => {
+          const isSelected = selected.size === 0 || selected.has(speaker);
+          return (
+            <div key={speaker} className={`flex items-center gap-2 ${!isSelected ? 'opacity-40' : ''}`}>
+              <button
+                type="button"
+                onClick={() => toggleSpeaker(speaker)}
+                className="text-[11px] font-medium truncate w-24 text-right hover:underline focus:outline-none"
+                style={{ color }}
+                title={speaker}
+                aria-pressed={selected.has(speaker)}
+              >
+                {speaker}
+              </button>
+              <div className="relative flex-1 h-4 bg-gray-200 rounded overflow-hidden">
+                {/*
+                  Include-filter gate: an empty selection shows every speaker;
+                  once one or more speakers are selected, only their bars render.
+                  The row itself stays mounted (dimmed name button + empty track)
+                  so color assignment is positional and does not shift, and the
+                  speaker can be toggled back on.
+                */}
+                {isSelected && bars.map((b, i) => {
                 const left = (Math.max(0, b.start) / totalDuration) * 100;
                 const width = Math.max(
                   0.2,  // 0.2% min so very short turns are still visible
@@ -115,18 +157,19 @@ export const SpeakerTimeline: React.FC<Props> = ({
                       backgroundColor: color,
                     }}
                   />
-                );
-              })}
-              {/* Playhead marker */}
-              {typeof currentTime === 'number' && currentTime > 0 && (
-                <div
-                  className="absolute top-0 h-full w-0.5 bg-black/70 pointer-events-none"
-                  style={{ left: `${(currentTime / totalDuration) * 100}%` }}
-                />
-              )}
+                  );
+                })}
+                {/* Playhead marker */}
+                {typeof currentTime === 'number' && currentTime > 0 && (
+                  <div
+                    className="absolute top-0 h-full w-0.5 bg-black/70 pointer-events-none"
+                    style={{ left: `${(currentTime / totalDuration) * 100}%` }}
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
