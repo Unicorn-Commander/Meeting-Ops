@@ -79,6 +79,7 @@ async def combine_sessions_job(
 
     from database.database import SessionLocal
     from database.models import RecordingSession
+    import auth.models  # noqa: F401 — registers organizations/users on Base.metadata (FK target of recording_sessions); without it the first flush in a fresh worker raises NoReferencedTableError
     from services import session_combine as sc
 
     db = SessionLocal()
