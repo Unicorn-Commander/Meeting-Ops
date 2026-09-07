@@ -856,7 +856,10 @@ class SemanticSearchService:
         """
         from database.models import RecordingSession
         sessions = db_session.query(RecordingSession).filter(
-            RecordingSession.status.in_(["completed", "failed"])
+            RecordingSession.status.in_(["completed", "failed"]),
+            # Combined meetings duplicate their parts' text — the parts are
+            # already indexed (docs/COMBINED-MEETINGS-CONTRACT.md).
+            RecordingSession.is_combined.is_(False),
         ).all()
         if organization_id is not None:
             sessions = [s for s in sessions if s.organization_id == organization_id]

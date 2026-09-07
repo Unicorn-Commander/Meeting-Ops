@@ -36,6 +36,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import and_, or_
+
 logger = logging.getLogger(__name__)
 
 
@@ -574,7 +576,18 @@ def mark_abandoned_processing_sessions(*, dry_run: bool = False) -> dict[str, An
             db.query(RecordingSession)
             .filter(
                 RecordingSession.status == "processing",
-                RecordingSession.created_at < cutoff,
+                or_(
+                    # Combined meetings carry created_at = earliest part start
+                    # (weeks old by design) — their "stuck" clock is updated_at.
+                    and_(
+                        RecordingSession.is_combined.is_(True),
+                        RecordingSession.updated_at < cutoff,
+                    ),
+                    and_(
+                        RecordingSession.is_combined.is_(False),
+                        RecordingSession.created_at < cutoff,
+                    ),
+                ),
             )
             .order_by(RecordingSession.id)
             .limit(cap + 1)
@@ -783,6 +796,9 @@ def redrive_stuck_summary_sessions(*, dry_run: bool = False) -> dict[str, Any]:
             .filter(
                 RecordingSession.status == "processing",
                 RecordingSession.updated_at < cooldown_cutoff,
+                # Combined meetings never carry needs_summary and must not be
+                # pushed through finalize (Brigade + Project-Ops fan-out).
+                RecordingSession.is_combined.is_(False),
             )
             .order_by(RecordingSession.id)
             .limit(cap + 1)
