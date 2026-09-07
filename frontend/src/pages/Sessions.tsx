@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Grid, List, SortAsc, SortDesc,
   Upload, FolderOpen, Star, Archive, MessageSquare, X, Loader2,
   ArrowUp, ArrowDown, ArrowUpDown, Briefcase, AlertTriangle,
-  Lock as LockIcon, Paperclip, RefreshCw,
+  Lock as LockIcon, Paperclip, RefreshCw, Layers,
 } from 'lucide-react';
 import { SessionCreator } from '../components/SessionCreator';
 import { SkeletonSessionGrid } from '../components/Skeleton';
@@ -34,6 +34,8 @@ import {
 } from '../services/localSessionStore';
 import { showToast } from '../components/Toast';
 import { showConfirm } from '../utils/notifications';
+import CombineSessionsDialog, { type CombinePart } from '../components/CombineSessionsDialog';
+import { CombinedBadge, PartOfLinks } from '../components/CombinedMeetingBadges';
 
 interface Participant {
   id: string;
@@ -93,6 +95,13 @@ interface Session {
     reprocess_status?: 'queued' | 'in_progress' | 'complete' | 'failed' | 'skipped' | null;
     [key: string]: unknown;
   };
+  /** Combined meeting: links to its parts and owns only a unified summary.
+   *  Parts keep their own audio + transcript. (docs/COMBINED-MEETINGS-CONTRACT.md) */
+  is_combined?: boolean;
+  /** Number of parts when is_combined; 0 otherwise. */
+  parts_count?: number;
+  /** Combined meetings this session belongs to (may be empty). */
+  part_of?: Array<{ id: number | string; name: string }>;
 }
 
 interface OrgTagSummary {
@@ -673,6 +682,12 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                         {getStatusLabel(session.status)}
                       </span>
                       <ReprocessingBadge session={session} className="ml-1 px-2 py-0.5" />
+                      {session.is_combined && (
+                        <CombinedBadge partsCount={session.parts_count ?? 0} className="ml-1 px-2 py-0.5 text-xs" />
+                      )}
+                      {(session.part_of?.length ?? 0) > 0 && (
+                        <PartOfLinks partOf={session.part_of!} className="mt-1" />
+                      )}
                     </td>
                     <td className="px-4 py-3 align-middle text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
@@ -741,6 +756,8 @@ interface BulkAction {
   variant?: 'default' | 'danger';
   disabled?: boolean;
   busy?: boolean;
+  /** Native tooltip — used to say why an action is disabled. */
+  title?: string;
 }
 
 interface BulkActionsToolbarProps {
@@ -777,6 +794,7 @@ const BulkActionsToolbar: React.FC<BulkActionsToolbarProps> = ({
             type="button"
             onClick={action.onClick}
             disabled={action.disabled || action.busy}
+            title={action.title}
             className={
               action.variant === 'danger'
                 ? 'inline-flex items-center gap-2 rounded-lg border border-red-600/50 bg-red-600/20 px-3 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-600/30 disabled:cursor-not-allowed disabled:opacity-50'
@@ -920,6 +938,10 @@ export const Sessions: React.FC = () => {
   // the toolbar buttons so the user can't double-fire it.
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkExporting, setBulkExporting] = useState(false);
+  // Combine selected → one combined meeting with a unified summary.
+  const [combineOpen, setCombineOpen] = useState(false);
+  const [combining, setCombining] = useState(false);
+  const [combineError, setCombineError] = useState<string | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<string>('all');
   const [folderMutationBusy, setFolderMutationBusy] = useState(false);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
@@ -1552,6 +1574,85 @@ export const Sessions: React.FC = () => {
       setBulkDeleting(false);
     }
   }, [activeOrganization?.slug, selectedSessionIds, setSessions]);
+
+  // Combine. The selected server sessions become the parts of ONE new
+  // combined meeting (audio + transcripts stay on the parts; the new row
+  // owns a unified summary). POST /api/sessions/combine, then jump to it.
+  const combineParts = useMemo<CombinePart[]>(() => {
+    const byId = new Map(sessions.map((s) => [s.id, s] as const));
+    return selectedSessionIds
+      .map((id) => byId.get(id))
+      .filter((s): s is Session => Boolean(s))
+      .map((s) => ({
+        id: s.id,
+        name: s.name || s.title || `Session ${s.id}`,
+        // The list payload carries no started_at; meeting_date/time is the
+        // "when it happened" pair (upload time as a fallback). The server
+        // re-orders by started_at anyway — this is the preview order.
+        startedAt: s.meeting_date
+          ? `${s.meeting_date}T${s.meeting_time || '00:00:00'}`
+          : s.created_at || null,
+        duration: s.duration ?? null,
+      }));
+  }, [selectedSessionIds, sessions]);
+
+  const combineBlockedReason = useMemo<string | null>(() => {
+    if (selectedSessionIds.length < 2) return 'Select at least 2 recordings to combine';
+    const selected = new Set(selectedSessionIds);
+    const picked = sessions.filter((s) => selected.has(s.id));
+    if (picked.some((s) => s.is_local || isLocalSessionId(s.id))) {
+      return 'Local-only sessions can’t be combined';
+    }
+    if (picked.some((s) => s.is_combined)) {
+      return 'A combined meeting can’t be a part of another one';
+    }
+    if (picked.length < 2) return 'Some selected sessions aren’t loaded — clear and reselect';
+    return null;
+  }, [selectedSessionIds, sessions]);
+
+  const combineSelected = useCallback(async (name: string, orderedIds: string[]) => {
+    if (orderedIds.length < 2) return;
+    setCombining(true);
+    setCombineError(null);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('access_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
+
+      const res = await fetch(`${config.apiBaseUrl}/api/sessions/combine`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_ids: orderedIds, name: name.trim() || null }),
+      });
+      if (!res.ok) {
+        let detail = `${res.status} ${res.statusText}`;
+        try {
+          const errBody = await res.json();
+          const d = errBody?.detail;
+          if (typeof d === 'string') detail = d;
+          else if (d && typeof d === 'object') detail = d.message || JSON.stringify(d);
+        } catch { /* non-JSON error body */ }
+        throw new Error(detail);
+      }
+      const data = await res.json().catch(() => ({}));
+      const newId = data?.id;
+      setCombineOpen(false);
+      clearSessionSelection();
+      showToast.success('Combined meeting created — the unified summary is being generated.');
+      if (newId !== undefined && newId !== null) {
+        navigate(`/sessions/${newId}`);
+      } else {
+        void fetchSessions({ showSpinner: false });
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Combine failed. Please try again.';
+      setCombineError(msg);
+      showToast.error(`Combine failed: ${msg}`);
+    } finally {
+      setCombining(false);
+    }
+  }, [activeOrganization?.slug, clearSessionSelection, navigate]);
 
   // Bulk export. Local-only (IndexedDB) sessions have no server-side record
   // to bundle, so they're skipped — only server ids are POSTed to
@@ -2773,6 +2874,12 @@ export const Sessions: React.FC = () => {
                         {getStatusLabel(session.status)}
                       </span>
                       <ReprocessingBadge session={session} className="px-2 py-1" />
+                      {session.is_combined && (
+                        <CombinedBadge partsCount={session.parts_count ?? 0} className="px-2 py-1 text-xs" />
+                      )}
+                      {(session.part_of?.length ?? 0) > 0 && (
+                        <PartOfLinks partOf={session.part_of!} />
+                      )}
                       {session.summary && (
                         <span className="px-2 py-1 bg-purple-500/20 text-purple-300 text-xs rounded border border-purple-500/30">
                           AI Summary
@@ -2967,6 +3074,16 @@ export const Sessions: React.FC = () => {
               busy: bulkExporting,
             },
             {
+              key: 'combine',
+              label: `Combine ${selectedSessionIds.length} selected`,
+              icon: <Layers className="h-4 w-4" />,
+              onClick: () => { setCombineError(null); setCombineOpen(true); },
+              disabled: combining || bulkDeleting || bulkExporting || combineBlockedReason !== null,
+              busy: combining,
+              title: combineBlockedReason
+                ?? 'Create one combined meeting with a unified summary over the selected recordings',
+            },
+            {
               key: 'delete',
               label: bulkDeleting
                 ? 'Deleting…'
@@ -2978,6 +3095,14 @@ export const Sessions: React.FC = () => {
               busy: bulkDeleting,
             },
           ]}
+        />
+        <CombineSessionsDialog
+          open={combineOpen}
+          parts={combineParts}
+          busy={combining}
+          error={combineError}
+          onConfirm={(name, orderedIds) => { void combineSelected(name, orderedIds); }}
+          onCancel={() => { if (!combining) setCombineOpen(false); }}
         />
       </div>
 
