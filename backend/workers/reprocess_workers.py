@@ -325,6 +325,10 @@ async def recover_reprocess_jobs() -> None:
                 .filter(
                     RecordingSession.status == "processing",
                     RecordingSession.updated_at >= cutoff,
+                    # Combined meetings have no audio; re-driving them through
+                    # the reprocess pipeline only produces FileNotFoundError.
+                    # Their job is combine_sessions_job (rerun endpoint).
+                    RecordingSession.is_combined.is_(False),
                 )
                 .order_by(RecordingSession.id.desc())
                 .limit(200)
@@ -334,6 +338,8 @@ async def recover_reprocess_jobs() -> None:
             for s in rows:
                 md = s.processing_metadata or {}
                 if md.get("reprocess_status") == "complete":
+                    continue
+                if getattr(s, "is_combined", False):
                     continue
                 try:
                     # force=True clears the stale in-flight lock the crashed
