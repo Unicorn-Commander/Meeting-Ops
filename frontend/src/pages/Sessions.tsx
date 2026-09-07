@@ -222,9 +222,9 @@ function normalizeTagSummaries(payload: unknown): OrgTagSummary[] {
 function readDateBasis(): DateBasis {
   try {
     const v = localStorage.getItem(DATE_BASIS_KEY);
-    return v === 'meeting' ? 'meeting' : 'upload';
+    return v === 'upload' ? 'upload' : 'meeting';
   } catch {
-    return 'upload';
+    return 'meeting';
   }
 }
 

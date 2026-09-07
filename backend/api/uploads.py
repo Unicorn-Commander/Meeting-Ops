@@ -1359,6 +1359,43 @@ async def _extract_audio(source_path: Path, audio_path: Path, upload_id: str, db
         raise RuntimeError("Audio extraction failed: " + "".join(stderr)[-500:])
 
 
+def started_at_from_recorded(recorded: Optional[dict], server_now: datetime) -> datetime:
+    """Pick the session's started_at from the provenance "recorded_at" signal.
+
+    Uses the estimate (audio creation_time > filename date > client mtime >
+    file mtime) unless it is the upload-time floor, unparseable, in the
+    future, or absurdly old (pre-2000 = a zeroed container tag). Returns a
+    tz-aware UTC datetime; never raises.
+    """
+    if not recorded or recorded.get("source") == "upload_time":
+        return server_now
+    try:
+        from services.meeting_provenance import parse_iso
+        dt = parse_iso(str(recorded.get("value") or ""))
+    except Exception:
+        dt = None
+    if dt is None:
+        return server_now
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = server_now if server_now.tzinfo else server_now.replace(tzinfo=timezone.utc)
+    if dt > now + timedelta(minutes=5) or dt.year < 2000:
+        return server_now
+    return dt
+
+
+def ended_at_from_started(session: RecordingSession) -> Optional[datetime]:
+    """ended_at = started_at + duration for uploaded recordings (the audio is
+    the whole meeting). None when either input is missing."""
+    started = getattr(session, "started_at", None)
+    duration = getattr(session, "duration", None)
+    if not started or not duration or duration <= 0:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return started + timedelta(seconds=float(duration))
+
+
 async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) -> RecordingSession:
     # Run the shared filename parser. Pattern 1 (notes__/downloads__ Mac
     # Notes + Voice Memos export) gives us title + meeting_date +
@@ -1409,6 +1446,12 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         meeting_date = rec_d
         meeting_time = meeting_time or rec_t
 
+    # started_at = when the recording actually began (the meeting's own
+    # timeline: list ordering, ended_at, "when it happened"). created_at
+    # stays the ingest time on purpose (see above). Falls back to ingest
+    # when the only signal is the upload itself or the value is implausible.
+    started_at = started_at_from_recorded(recorded, server_now)
+
     session = RecordingSession(
         session_id=str(uuid.uuid4()),
         name=title,
@@ -1416,7 +1459,7 @@ async def _create_upload_session(db: Session, job: UploadJob, audio_path: Path) 
         description=f"Uploaded from {job.filename}",
         meeting_type="upload",
         created_at=server_now,
-        started_at=server_now,
+        started_at=started_at,
         meeting_date=meeting_date,
         meeting_time=meeting_time,
         status="processing",
@@ -1972,6 +2015,10 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     session.transcript = json.dumps(result)
     audio_duration = result.get("audio_duration") or max((float(s.get("end", 0)) for s in segments), default=0)
     session.duration = float(audio_duration or 0)
+    if getattr(session, "source_type", None) == "upload":
+        ended = ended_at_from_started(session)
+        if ended is not None:
+            session.ended_at = ended
     db.query(Transcription).filter(Transcription.session_id == session.id).delete()
     for segment in segments:
         text = (segment.get("text") or "").strip()
