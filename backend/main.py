@@ -352,6 +352,11 @@ _load_router(
 # Knowledge Graph — cross-meeting person-centric subgraph (absolute paths).
 _load_router(app, "knowledge_graph", "api.knowledge_graph")
 _load_router(app, "sessions", "api.sessions", prefix="/api", required=True)
+# Combined meetings (docs/COMBINED-MEETINGS-CONTRACT.md): absolute-path router
+# in the same module — POST /api/sessions/combine + /{id}/combine/rerun.
+# Loaded here, before the speakers/tts routers that also live under
+# /api/sessions/{session_id}/…, so route matching is unambiguous.
+_load_router(app, "session_combine", "api.sessions", router_attr="combine_router", required=True)
 # Per-meeting permissions (collaborators + magic-link share). Two
 # routers in one module: `router` carries the auth'd per-session
 # endpoints, `public_router` exposes the anonymous token-resolve.

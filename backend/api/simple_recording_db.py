@@ -157,6 +157,30 @@ class SessionResponse(BaseModel):
     # side (two people can even record the SAME call), so cards/details
     # show whose copy this is.
     recorded_by: Optional[str] = None
+    # Combined meetings (docs/COMBINED-MEETINGS-CONTRACT.md): a summary-only
+    # row linked to its parts. `part_of` lists the combined meetings THIS
+    # session belongs to (wire ids + names) so the list can badge members.
+    is_combined: bool = False
+    parts_count: int = 0
+    part_of: List[dict] = []
+
+
+def _combine_detail_fields(db: Session, session: DBRecordingSession) -> dict:
+    """Combined-meeting fields for the detail payload (`is_combined`,
+    `part_of`, and `parts` when combined). Never raises — the detail page
+    must not 500 because of this affordance."""
+    try:
+        from services.session_combine import detail_fields
+        return detail_fields(db, session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "combined-meeting fields failed for session %s: %s",
+            getattr(session, "id", "?"), exc,
+        )
+        return {
+            "is_combined": bool(getattr(session, "is_combined", False)),
+            "part_of": [],
+        }
 
 
 def _recorded_by_name(db: Session, user_id: Optional[int]) -> Optional[str]:
@@ -845,6 +869,11 @@ async def list_sessions(
     # _speakers_by_session_batch). Keyed by session.id.
     speakers_by_session = _speakers_by_session_batch(db, sessions)
 
+    # Combined meetings: is_combined / parts_count / part_of for the whole
+    # page in two batched queries (same no-N+1 pattern as the speakers).
+    from services.session_combine import combine_meta_batch
+    combine_meta = combine_meta_batch(db, sessions)
+
     # Provenance: one batch query for the recorders' display names (same
     # no-N+1 pattern as org_names_by_id above).
     recorder_names_by_user_id: dict[int, str] = {}
@@ -886,6 +915,9 @@ async def list_sessions(
                 if session.user_id is not None
                 else None
             ),
+            is_combined=combine_meta.get(session.id, {}).get("is_combined", False),
+            parts_count=combine_meta.get(session.id, {}).get("parts_count", 0),
+            part_of=combine_meta.get(session.id, {}).get("part_of", []),
         ))
 
     return {
@@ -1261,6 +1293,9 @@ async def get_session(
             # promoted by services.action_items_extractor. Status-aware so
             # the UI can flip done/doing/cancelled and have it stick.
             "action_items": _action_items_payload(db, session),
+            # Combined meetings: `is_combined`, `part_of`, and (combined rows
+            # only) the ordered `parts` list.
+            **_combine_detail_fields(db, session),
             # Brigade integration Phase 1: surfaces the per-session
             # Brigade graph deep-link to the frontend so SessionDetails
             # can render the "View in Brigade graph" affordance only
@@ -2410,6 +2445,21 @@ def _delete_session_record(
         ).delete(synchronize_session=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Chat-history purge failed for session {session_id}: {exc}")
+
+    # Combined meetings: drop the link rows on BOTH sides explicitly
+    # (Postgres cascades via the FKs, SQLite in tests does not). Deleting a
+    # combined row leaves its parts alone; deleting a part leaves the
+    # combined row with one part fewer.
+    try:
+        from database.models import SessionGroupMember
+        db.query(SessionGroupMember).filter(
+            or_(
+                SessionGroupMember.combined_session_id == session.id,
+                SessionGroupMember.member_session_id == session.id,
+            )
+        ).delete(synchronize_session=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Combined-meeting link cleanup failed for session {session_id}: {exc}")
 
     # Delete session
     db.delete(session)
