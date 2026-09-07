@@ -426,6 +426,166 @@ def _segments_for_label(session: RecordingSession, raw_label: str) -> list[dict]
     return out
 
 
+def _ordered_speakers(segments: list[dict]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for seg in segments:
+        s = seg.get("speaker", "Unknown")
+        if s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    return ordered
+
+
+def _cluster_current_labels(
+    db: Session,
+    session: RecordingSession,
+    link: SpeakerSessionLink,
+    previous_speaker_id: Optional[int] = None,
+) -> set[str]:
+    """Every label string the cluster behind ``link`` currently carries in
+    STORED text: the diarizer code, whatever the stored segments say for that
+    code (finalize writes "Speaker N"; identify writes the auto profile's
+    handle, e.g. "Speaker 3F97"), and the profile the link pointed at BEFORE
+    this change. A name is dropped when it is not this cluster's alone —
+    another link on the session still uses that profile, or another cluster's
+    segments carry the same name — because rows and prose are matched by
+    string. Rows carry no raw_label, so this set is how they are found.
+    """
+    raw = (link.raw_label or "").strip()
+    labels: set[str] = {raw}
+    other_names: set[str] = set()
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
+    for seg in diarized.get("segments") or []:
+        seg_raw = (seg.get("raw_label") or "").strip()
+        spk = (seg.get("speaker") or "").strip()
+        if not spk:
+            continue
+        if seg_raw == raw or (not seg_raw and spk == raw):
+            labels.add(spk)
+        else:
+            other_names.add(spk)
+    if previous_speaker_id and previous_speaker_id != link.speaker_id:
+        still_used = (
+            db.query(SpeakerSessionLink)
+            .filter(
+                SpeakerSessionLink.session_id == session.id,
+                SpeakerSessionLink.speaker_id == previous_speaker_id,
+                SpeakerSessionLink.id != link.id,
+            )
+            .first()
+        )
+        if still_used is None:
+            prev = db.query(SpeakerProfile).filter(SpeakerProfile.id == previous_speaker_id).first()
+            if prev is not None and (prev.display_name or "").strip():
+                labels.add(prev.display_name.strip())
+    return {l for l in labels if l and l not in other_names}
+
+
+def _relabel_cluster(
+    db: Session,
+    session: RecordingSession,
+    link: SpeakerSessionLink,
+    old_labels: set[str],
+    new_name: str,
+) -> dict:
+    """Rewrite one speaker cluster's label everywhere it is STORED:
+    transcriptions rows, transcript_diarized segments (+ the speakers list)
+    and the LLM summary / insights prose. Returns counts; caller commits.
+
+    Why: the per-path code this replaces matched rows and prose on the
+    diarizer code only (``SPEAKER_00``). After finalize the rows and the
+    summary carry the NORMALIZED or auto-profile name ("Speaker 3F97"), so
+    naming the cluster was a silent no-op for both (session 934, 2026-09-07).
+    Segments are matched by raw_label; rows by label (``old_labels``) or by
+    dominant time-overlap with this cluster's segments (rows have no
+    raw_label, and their times come from the same diarization); prose by
+    word-bounded replace of ``old_labels``. Any change also drops
+    ``summary_input_hash`` so the queued refresh really regenerates instead
+    of short-circuiting on the old input.
+    """
+    from bisect import bisect_left, bisect_right
+    from sqlalchemy.orm.attributes import flag_modified
+
+    raw = (link.raw_label or "").strip()
+    new_name = (new_name or "").strip()
+    counts = {"rows": 0, "segments": 0, "summary": False, "hash_reset": False}
+    if not raw or not new_name:
+        return counts
+
+    # 1) segments — by raw_label.
+    spans: list[tuple[float, float, bool]] = []   # (start, end, is_this_cluster)
+    other_names: set[str] = set()
+    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else None
+    if diarized is not None:
+        new_segments = []
+        for seg in diarized.get("segments") or []:
+            seg_raw = (seg.get("raw_label") or "").strip()
+            spk = (seg.get("speaker") or "").strip()
+            mine = seg_raw == raw or (not seg_raw and spk == raw)
+            spans.append((float(seg.get("start") or 0), float(seg.get("end") or 0), mine))
+            if mine:
+                if spk != new_name:
+                    counts["segments"] += 1
+                new_segments.append({**seg, "raw_label": seg_raw or raw, "speaker": new_name})
+            else:
+                if spk:
+                    other_names.add(spk)
+                new_segments.append(seg)
+        if counts["segments"]:
+            diarized["segments"] = new_segments
+            if "speakers" in diarized:
+                diarized["speakers"] = _ordered_speakers(new_segments)
+            session.transcript_diarized = diarized
+            flag_modified(session, "transcript_diarized")
+
+    # A name another cluster currently carries is never a match key.
+    olds = {
+        l.strip() for l in (old_labels or ())
+        if l and l.strip() and l.strip() != new_name and l.strip() not in other_names
+    }
+
+    # 2) rows — by label, else by dominant time-overlap with this cluster.
+    spans.sort(key=lambda s: s[0])
+    starts = [s[0] for s in spans]
+    max_len = max((s[1] - s[0] for s in spans), default=0.0)
+    rows = db.query(Transcription).filter(Transcription.session_id == session.id).all()
+    for row in rows:
+        cur = (row.speaker or "").strip()
+        if cur == new_name:
+            continue
+        rename = cur in olds
+        if not rename and spans:
+            r0, r1 = float(row.start_time or 0), float(row.end_time or 0)
+            mine_ov = other_ov = 0.0
+            lo = bisect_left(starts, r0 - max_len)
+            hi = bisect_right(starts, r1)
+            for s0, s1, mine in spans[lo:hi]:
+                ov = max(0.0, min(r1, s1) - max(r0, s0))
+                if ov <= 0:
+                    continue
+                if mine:
+                    mine_ov += ov
+                else:
+                    other_ov += ov
+            rename = mine_ov > 0 and mine_ov > other_ov
+        if rename:
+            row.speaker = new_name
+            counts["rows"] += 1
+
+    # 3) summary / insights prose.
+    counts["summary"] = bool(olds) and _propagate_speaker_rename(session, sorted(olds), new_name)
+
+    # 4) make the queued refresh really re-run the LLM.
+    if counts["rows"] or counts["segments"] or counts["summary"]:
+        md = dict(session.processing_metadata or {})
+        if md.pop("summary_input_hash", None) is not None:
+            session.processing_metadata = md
+            flag_modified(session, "processing_metadata")
+            counts["hash_reset"] = True
+    return counts
+
+
 def _apply_is_me_claim(speaker: SpeakerProfile, current_user: User) -> None:
     """is_me assertion: bind this SpeakerProfile to the caller's account.
 
@@ -1284,6 +1444,7 @@ async def update_speaker_link(
     )
     if not link:
         raise HTTPException(status_code=404, detail="Speaker link not found")
+    previous_speaker_id = link.speaker_id
 
     if payload.speaker_id:
         # Session-scoped: the speaker must live in the SESSION's org (the
@@ -1355,42 +1516,42 @@ async def update_speaker_link(
                 session.id, exc,
             )
 
-    # Rewrite the diarized transcript so the SessionDetails page picks up
-    # the new label without an extra API roundtrip.
-    diarized = session.transcript_diarized or {}
-    if isinstance(diarized, dict):
-        new_name: Optional[str] = None
-        if link.speaker_id:
-            sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
-            if sp:
-                new_name = sp.display_name
-        new_segments = []
-        for seg in diarized.get("segments", []):
-            label_now = seg.get("speaker", "")
-            raw = seg.get("raw_label", label_now)
-            if raw == link.raw_label:
-                new_seg = {**seg, "raw_label": raw, "speaker": new_name or raw}
-            else:
-                new_seg = seg
-            new_segments.append(new_seg)
-        diarized["segments"] = new_segments
-        if "speakers" in diarized:
-            seen, ordered = set(), []
-            for seg in new_segments:
-                s = seg.get("speaker", "Unknown")
-                if s not in seen:
-                    seen.add(s)
-                    ordered.append(s)
-            diarized["speakers"] = ordered
-        session.transcript_diarized = diarized
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(session, "transcript_diarized")
-
-    # If we just assigned a speaker, propagate the rename into summary text.
+    new_name: Optional[str] = None
     if link.speaker_id:
         sp = db.query(SpeakerProfile).filter(SpeakerProfile.id == link.speaker_id).first()
         if sp:
-            _propagate_speaker_rename(session, [link.raw_label], sp.display_name)
+            new_name = sp.display_name
+
+    if new_name:
+        # Rewrite the cluster's label everywhere it is STORED — transcript
+        # rows, diarized segments, summary prose — matching on every label the
+        # cluster currently carries, not just the diarizer code (which is a
+        # silent no-op after finalize; see _relabel_cluster).
+        old_labels = _cluster_current_labels(db, session, link, previous_speaker_id)
+        relabel = _relabel_cluster(db, session, link, old_labels, new_name)
+        logger.info(
+            "speaker link %s: %s -> %r on session %s: rows=%s segments=%s summary=%s hash_reset=%s",
+            link.id, sorted(old_labels), new_name, session.id,
+            relabel["rows"], relabel["segments"], relabel["summary"], relabel["hash_reset"],
+        )
+    else:
+        # Unassign: segments fall back to the diarizer code so the SessionDetails
+        # page stops showing the old name (rows are resynced by the next finalize).
+        diarized = session.transcript_diarized or {}
+        if isinstance(diarized, dict):
+            new_segments = []
+            for seg in diarized.get("segments", []):
+                label_now = seg.get("speaker", "")
+                raw = seg.get("raw_label", label_now)
+                new_segments.append(
+                    {**seg, "raw_label": raw, "speaker": raw} if raw == link.raw_label else seg
+                )
+            diarized["segments"] = new_segments
+            if "speakers" in diarized:
+                diarized["speakers"] = _ordered_speakers(new_segments)
+            session.transcript_diarized = diarized
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(session, "transcript_diarized")
 
     db.commit()
     db.refresh(link)
@@ -1507,6 +1668,7 @@ async def create_speaker_for_link(
         _apply_is_me_claim(speaker, current_user)
 
     # Link + confirm (user-asserted match).
+    _previous_speaker_id = link.speaker_id
     link.speaker_id = speaker.id
     link.source = "manual"
     link.confirmed = True
@@ -1541,40 +1703,13 @@ async def create_speaker_for_link(
             session.id, exc,
         )
 
-    # Rewrite transcript_diarized.segments so the SessionDetails view shows
-    # the new name everywhere this raw_label appears (mirrors /enroll step 6).
-    diarized = session.transcript_diarized if isinstance(session.transcript_diarized, dict) else {}
-    if isinstance(diarized, dict):
-        for seg in diarized.get("segments", []):
-            raw = seg.get("raw_label") or seg.get("speaker") or ""
-            if raw == link.raw_label:
-                seg["raw_label"] = raw
-                seg["speaker"] = speaker.display_name
-        if "speakers" in diarized:
-            seen, ordered = set(), []
-            for seg in diarized.get("segments", []):
-                s = seg.get("speaker", "Unknown")
-                if s not in seen:
-                    seen.add(s)
-                    ordered.append(s)
-            diarized["speakers"] = ordered
-        session.transcript_diarized = diarized
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(session, "transcript_diarized")
-
-    # Update Transcription rows carrying this raw_label (mirrors /enroll step 7).
-    rows = (
-        db.query(Transcription)
-        .filter(
-            Transcription.session_id == session.id,
-            Transcription.speaker == link.raw_label,
-        )
-        .all()
+    # Rewrite the cluster everywhere it is stored (segments, rows, summary),
+    # matching on every label it currently carries — see _relabel_cluster.
+    _relabel_cluster(
+        db, session, link,
+        _cluster_current_labels(db, session, link, _previous_speaker_id),
+        speaker.display_name,
     )
-    for row in rows:
-        row.speaker = speaker.display_name
-
-    _propagate_speaker_rename(session, [link.raw_label], speaker.display_name)
     db.commit()
     db.refresh(link)
     logger.info(
@@ -2161,46 +2296,23 @@ async def enroll_speaker_from_session(
     )
 
     # 5) Confirm the speaker_session_link.
+    _previous_speaker_id = link.speaker_id
     link.speaker_id = speaker.id
     link.source = "manual"
     link.confirmed = True
     link.confirmed_by_user_id = current_user.id
     link.similarity = 1.0  # user-asserted match
 
-    # 6) Rewrite transcript_diarized.segments so the speaker label is
-    # the display_name everywhere this raw_label appears.
-    if isinstance(diarized, dict):
-        for seg in diarized.get("segments", []):
-            raw = seg.get("raw_label") or seg.get("speaker") or ""
-            if raw == link.raw_label:
-                seg["raw_label"] = raw
-                seg["speaker"] = speaker.display_name
-        if "speakers" in diarized:
-            seen, ordered = set(), []
-            for seg in diarized.get("segments", []):
-                s = seg.get("speaker", "Unknown")
-                if s not in seen:
-                    seen.add(s)
-                    ordered.append(s)
-            diarized["speakers"] = ordered
+    # 6+7) Rewrite the cluster everywhere it is stored (segments, rows,
+    # summary), matching on every label it currently carries — see
+    # _relabel_cluster.
+    if isinstance(diarized, dict) and session.transcript_diarized is not diarized:
         session.transcript_diarized = diarized
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(session, "transcript_diarized")
-
-    # 7) Also update Transcription rows with this raw_label so the list
-    # view picks up the display name.
-    rows = (
-        db.query(Transcription)
-        .filter(
-            Transcription.session_id == session.id,
-            Transcription.speaker == link.raw_label,
-        )
-        .all()
+    _relabel_cluster(
+        db, session, link,
+        _cluster_current_labels(db, session, link, _previous_speaker_id),
+        speaker.display_name,
     )
-    for row in rows:
-        row.speaker = speaker.display_name
-
-    _propagate_speaker_rename(session, [link.raw_label], speaker.display_name)
     db.commit()
     db.refresh(link)
     logger.info(
