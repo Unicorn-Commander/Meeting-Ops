@@ -172,6 +172,11 @@ class RecordingSession(Base):
     # worker was enqueued, a newer job is processing the row and we
     # skip side effects to avoid double-writes.
     processing_job_id = Column(String(64), nullable=True, index=True)
+    # Combined meetings (docs/COMBINED-MEETINGS-CONTRACT.md, alembic 060):
+    # True for a summary-only row whose transcript is the ordered
+    # concatenation of its parts (session_group_members). It has no audio
+    # and no `transcriptions` rows of its own; the parts stay untouched.
+    is_combined = Column(Boolean, nullable=False, default=False, server_default="false")
 
     def to_dict(self):
         return {
@@ -222,6 +227,34 @@ Index(
     RecordingSession.created_at.desc(),
     RecordingSession.id.desc(),
 )
+
+
+class SessionGroupMember(Base):
+    """Ordered membership of a part session in a COMBINED session.
+
+    Combined meetings (docs/COMBINED-MEETINGS-CONTRACT.md) never merge audio:
+    the combined row owns only a unified summary / insights / action items
+    and points at its parts here, in time order. Both FKs cascade so deleting
+    either side only removes the link row — the other session survives.
+    """
+    __tablename__ = "session_group_members"
+    __table_args__ = (
+        Index("ix_session_group_members_member", "member_session_id"),
+    )
+
+    combined_session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    member_session_id = Column(
+        Integer,
+        ForeignKey("recording_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False)
 
 
 class SessionCollaborator(Base):

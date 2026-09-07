@@ -105,6 +105,16 @@ def build_attributed_transcript(
         text = (seg.get("text") or "").strip()
         if not text:
             continue
+        if seg.get("kind") == "marker":
+            # Combined meetings: a part boundary rendered as a bare line — no
+            # speaker prefix, never counted as a participant, and it closes
+            # the current speaker turn so attribution can't bleed across
+            # recordings (services/session_combine.py builds these).
+            _flush()
+            cur_speaker = None
+            cur_parts = []
+            lines.append(text)
+            continue
         raw = (seg.get("speaker") or "").strip()
         display = label_map.get(raw, raw) or "Speaker"
         if display not in speakers:

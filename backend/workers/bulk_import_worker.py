@@ -155,6 +155,7 @@ from workers.tts_workers import (  # noqa: E402
     render_tts_summary_job,
     render_tts_podcast_job,
 )
+from workers.combine_workers import combine_sessions_job  # noqa: E402
 
 
 class WorkerSettings:
@@ -168,6 +169,7 @@ class WorkerSettings:
         render_tts_summary_job,
         render_tts_podcast_job,
         reprocess_session_job,
+        combine_sessions_job,
     ]
     # Daily local-disk retention (Garage cutover housekeeping). 04:30 UTC is a
     # low-traffic window; the task is read-mostly + best-effort.
@@ -202,6 +204,7 @@ class InteractiveWorkerSettings:
         render_tts_summary_job,
         render_tts_podcast_job,
         reprocess_session_job,
+        combine_sessions_job,
     ]
     max_jobs = max(1, int(os.getenv("ARQ_INTERACTIVE_WORKERS", "2")))
     redis_settings = WorkerSettings.redis_settings
