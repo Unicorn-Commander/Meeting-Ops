@@ -1,0 +1,6 @@
+# Opt-in IMAGE-ONLY override. Requires Compose >=2.24.4. No cutover authorized.
+# Append to the existing host compose chain; keep all env, mounts and placement.
+services:
+  parakeet-openai-shim:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim@sha256:04bbdf2e0e21c523361addb04ac9e27e8720e25bd1e90501212022daedf017f0
+    build: !reset null

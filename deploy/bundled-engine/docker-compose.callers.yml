@@ -1,0 +1,9 @@
+# Append with the bundled-engine fragment to docker-compose.dev.yml.
+# Production/bigboy callers keep their existing remote URLs and networks.
+services:
+  backend:
+    environment:
+      PARAKEET_SERVER_URL: http://parakeet-svc:8881
+      PARAKEET_STREAM_URL: http://parakeet-stream-svc:8895
+      SPEAKER_SVC_URL: http://speaker-svc:8889
+    networks: [amanuensis-local]

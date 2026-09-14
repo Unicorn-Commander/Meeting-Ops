@@ -1,0 +1,49 @@
+# Declarative appliance/OSS engine placement; no GPU reservation or published ports.
+# All implementation and image ownership remains in Unicorn-Amanuensis.
+services:
+  parakeet-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-svc@sha256:cd579274246a18b864451386f146204057407d15c521bce7602b9c67221a0b22
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HF_HOME: /models/hf
+      NEMO_CACHE_DIR: /models/nemo
+      TORCH_HOME: /models/torch
+  parakeet-stream-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-stream-svc@sha256:326ce1857b6d49e89fea7cc22f81e096bd4201b08da85406fb5c603629466f9c
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HF_HOME: /models/hf
+      NEMO_CACHE_DIR: /models/nemo
+      TORCH_HOME: /models/torch
+  speaker-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/speaker-svc@sha256:053d485bb24e3fb06c71d11ac3bc0191c4dad8b491efd5e35d2ae5e757700a90
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      SPEAKER_EMBEDDER_DEVICE: cpu
+      PYANNOTE_DIARIZER_DEVICE: cpu
+      SPEAKER_EAGER_LOAD_EMBEDDER: "false"
+      SPEAKER_EAGER_LOAD_DIARIZER: "false"
+  parakeet-openai-shim:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim@sha256:04bbdf2e0e21c523361addb04ac9e27e8720e25bd1e90501212022daedf017f0
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    environment:
+      PARAKEET_URL: http://parakeet-svc:8881
+      SHIM_PORT: "8011"
+      METERED_REPORT_URL: ${METERED_REPORT_URL:-}
+      FEDERATION_KEY: ${FEDERATION_KEY:-}
+networks:
+  amanuensis-local: {}
+volumes:
+  amanuensis-models: {}
