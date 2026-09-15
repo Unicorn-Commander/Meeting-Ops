@@ -209,6 +209,7 @@ def _clear_projectops_env(monkeypatch):
         "PROJECTOPS_KC_CLIENT_ID",
         "PROJECTOPS_KC_CLIENT_SECRET",
         "PROJECTOPS_AUTO_PUSH_ACTION_ITEMS",
+        "PROJECTOPS_WRITE_PATH",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -1264,3 +1265,170 @@ def test_triage_fails_closed_when_federation_token_unavailable(
         "workspace-bound federation token is unavailable" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# 21-24. Write-path switch (PROJECTOPS_WRITE_PATH)
+#
+# ``write_action_items_to_projectops`` selects the legacy direct /tasks path
+# or the federation /triage/ingest path via the PROJECTOPS_WRITE_PATH env var
+# (default "direct"). These pin the default-unchanged contract and the
+# deploy-time flip + rollback behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_write_path_defaults_to_direct(client, monkeypatch):
+    """Default (unset) PROJECTOPS_WRITE_PATH keeps today's direct path:
+    create_task per item and the po_task_id / po_project_number / po_synced_at
+    stamps are all preserved."""
+    from services.projectops_writer import (
+        projectops_write_path,
+        WRITE_PATH_DIRECT,
+        write_action_items_to_projectops,
+    )
+    from database.database import SessionLocal
+
+    monkeypatch.delenv("PROJECTOPS_WRITE_PATH", raising=False)
+    assert projectops_write_path() == WRITE_PATH_DIRECT
+
+    org_id, session_id = _seed(
+        org_settings={"projectops_default_project_number": "P-00055"}
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            write_action_items_to_projectops(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    assert result.created == 3
+    assert len(stub.created) == 3
+    assert stub.submitted == []
+    for it in _items_for_session(session_id):
+        rp = it.raw_payload or {}
+        assert rp.get("po_task_id")
+        assert rp.get("po_project_number") == "P-00055"
+        assert rp.get("po_synced_at", "").endswith("Z")
+
+
+def test_write_path_triage_delegates_to_federation_ingest(client, monkeypatch):
+    """PROJECTOPS_WRITE_PATH=triage routes the bridge through the federation
+    ingest path: submit_candidate_action_items with the Brigade-exchanged
+    meeting-ops bearer, no create_task, and triage stamps (no po_task_id until
+    a human approves in Project-Ops)."""
+    from services.projectops_writer import (
+        projectops_write_path,
+        WRITE_PATH_TRIAGE,
+        write_action_items_to_projectops,
+    )
+    from database.database import SessionLocal
+
+    monkeypatch.setenv("PROJECTOPS_WRITE_PATH", "triage")
+    assert projectops_write_path() == WRITE_PATH_TRIAGE
+
+    asked = _patch_federation_token(monkeypatch, returns="fed-flip-token")
+
+    org_id, session_id = _seed(workspace_id="ws-flip-1")
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            write_action_items_to_projectops(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert result.mode == "live"
+    assert stub.created == []
+    assert len(stub.submitted) == 1
+    assert stub.submitted[0]["bearer_override"] == "fed-flip-token"
+    assert asked == ["ws-flip-1"]
+    for it in _items_for_session(session_id):
+        rp = it.raw_payload or {}
+        assert rp.get("po_triage_submitted_at", "").endswith("Z")
+        assert rp.get("po_task_id") is None
+        assert it.project_ops_link_state == "proposed"
+
+
+def test_write_path_invalid_falls_back_to_direct(client, monkeypatch):
+    """An unrecognised PROJECTOPS_WRITE_PATH never selects an untested path;
+    it falls back to the direct default."""
+    from services.projectops_writer import (
+        projectops_write_path,
+        WRITE_PATH_DIRECT,
+        write_action_items_to_projectops,
+    )
+    from database.database import SessionLocal
+
+    monkeypatch.setenv("PROJECTOPS_WRITE_PATH", "bogus")
+    assert projectops_write_path() == WRITE_PATH_DIRECT
+
+    org_id, session_id = _seed(
+        org_settings={"projectops_default_project_number": "P-00055"}
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            write_action_items_to_projectops(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.mode == "live"
+    assert len(stub.created) == 3
+    assert stub.submitted == []
+
+
+def test_write_path_triage_skips_direct_bridged_items(client, monkeypatch):
+    """Idempotency stamps survive the flip: an item already carrying po_task_id
+    (direct-bridged) is not re-filed into triage when the path switches."""
+    from services.projectops_writer import write_action_items_to_projectops
+    from database.database import SessionLocal
+
+    monkeypatch.setenv("PROJECTOPS_WRITE_PATH", "triage")
+
+    org_id, session_id = _seed(
+        items=[
+            {
+                "text": "Already a PO task",
+                "owner": "Alice",
+                "raw_payload": {
+                    "po_task_id": "task-X",
+                    "po_project_number": "P-00055",
+                },
+            },
+            {"text": "Fresh item", "owner": "Bob"},
+        ],
+    )
+    stub = _FakeProjectOpsClient()
+
+    db = SessionLocal()
+    try:
+        result = _run(
+            write_action_items_to_projectops(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert len(stub.submitted) == 1
+    cands = stub.submitted[0]["items"]
+    assert len(cands) == 1
+    assert cands[0]["text"] == "Fresh item"

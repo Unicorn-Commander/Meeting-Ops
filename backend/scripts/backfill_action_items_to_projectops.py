@@ -10,6 +10,11 @@ Safe + idempotent: the writer never raises, never duplicates (the
 ``action_items.raw_payload.po_task_id`` stamp is the idempotency key), and
 no-ops cleanly when PROJECTOPS_API_KEY is unset. Re-running is harmless.
 
+Write path: this script calls ``write_action_items_to_projectops``, which
+selects the legacy direct ``/tasks`` path or the federation ``/triage/ingest``
+path via the ``PROJECTOPS_WRITE_PATH`` env var (``direct`` default; ``triage``
+to flip before L2/L2c). See docs/runbooks/project-ops-bridge-path-flip.md.
+
 Usage (inside meet-backend):
     # Wire an org's default target project first (v1 DB-only config path):
     python3 scripts/backfill_action_items_to_projectops.py --set-default-project 1=P-00055

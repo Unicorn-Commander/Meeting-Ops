@@ -24,6 +24,10 @@ for the *meeting side* is ``action_items``; for the *task side* it's PO.
 Idempotency: legacy direct links remain readable from ``raw_payload``. The
 propose/review lifecycle uses explicit ActionItem linkage columns.
 
+Write-path switch: ``write_action_items_to_projectops`` selects the direct
+legacy ``/tasks`` path or the federation ``/triage/ingest`` path via the
+``PROJECTOPS_WRITE_PATH`` env var (``direct`` default; ``triage`` to flip).
+
 Failure posture: the writer NEVER raises into the recording pipeline.
 Every exception is logged + swallowed (top-level catch). The legacy direct-task
 writer is a no-op without its own Project-Ops credential. The triage writer
@@ -34,6 +38,7 @@ exchange is unavailable; it does not require a second Project-Ops credential.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -72,6 +77,37 @@ PROJECT_APP_PROJECTOPS = "project-ops"
 # Defaults for created tasks (per spec).
 DEFAULT_TASK_PRIORITY = "MEDIUM"
 DEFAULT_TASK_TYPE = "OTHER"
+
+# Write-path selection (L2/L2c migration flag). The legacy DIRECT path
+# (``create_task`` -> ``POST /tasks``) mints a Keycloak ``project-ops``
+# service-account token (``azp=project-ops``). After Project-Ops' L2c
+# machine-token classification that token is a MACHINE actor ``project-ops``
+# and the human-role ``/tasks`` route stops accepting it (see the L2c builder
+# report, follow-up "which azp the Meeting-Ops bridge uses today"). The
+# FEDERATION ingest path (``submit_candidate_action_items`` ->
+# ``POST /triage/ingest``) instead carries a Brigade-exchanged ``meeting-ops``
+# token (``act.client_id=meeting-ops``, allow-listed) and is the intended
+# successor. This setting selects the path ``write_action_items_to_projectops``
+# uses; the default ``direct`` preserves today's behaviour so the flip can be
+# made at deploy time right before L2/L2c goes live, then rolled back with a
+# single env change if needed.
+PROJECTOPS_WRITE_PATH_ENV = "PROJECTOPS_WRITE_PATH"
+WRITE_PATH_DIRECT = "direct"
+WRITE_PATH_TRIAGE = "triage"
+_VALID_WRITE_PATHS = {WRITE_PATH_DIRECT, WRITE_PATH_TRIAGE}
+
+
+def projectops_write_path() -> str:
+    """Resolve the Project-Ops bridge write path.
+
+    Reads ``PROJECTOPS_WRITE_PATH`` at call time (so a deploy-time flip needs
+    no code change and tests can drive it via the env). Returns ``"direct"``
+    (default) or ``"triage"``; any unrecognised value falls back to
+    ``"direct"`` so a typo can never silently select an untested path.
+    """
+    raw = os.getenv(PROJECTOPS_WRITE_PATH_ENV, WRITE_PATH_DIRECT).strip().lower()
+    return raw if raw in _VALID_WRITE_PATHS else WRITE_PATH_DIRECT
+
 
 @dataclass(frozen=True)
 class ProjectOpsWriteResult:
@@ -359,7 +395,13 @@ async def write_action_items_to_projectops(
     completion_mode: str = "reprocess",
     client: Optional[Any] = None,
 ) -> ProjectOpsWriteResult:
-    """Create Project-Ops tasks for this session's un-synced action items.
+    """Bridge this session's un-synced action items to Project-Ops.
+
+    Write-path switch (L2/L2c migration): when ``PROJECTOPS_WRITE_PATH=triage``
+    this delegates to ``submit_action_items_to_triage`` (the federation ingest
+    path, ``POST /triage/ingest`` as the allow-listed ``meeting-ops`` actor via
+    ``projectops_token.py``). The default ``PROJECTOPS_WRITE_PATH=direct``
+    keeps the legacy direct path (``create_task`` -> ``POST /tasks``) below.
 
     Args:
         db: caller-provided SQLAlchemy session (we don't open our own so
@@ -371,6 +413,24 @@ async def write_action_items_to_projectops(
 
     Returns ProjectOpsWriteResult. Never raises.
     """
+    # L2/L2c bridge-path switch: route through the federation ingest path
+    # (Brigade-exchanged meeting-ops token) when the deploy flag says so. The
+    # triage writer re-checks its own gates (integration enabled, auto-push
+    # opt-in, workspace_id, federation token) and never raises, so the direct
+    # path's contract is preserved across the delegation.
+    if projectops_write_path() == WRITE_PATH_TRIAGE:
+        logger.info(
+            "projectops_writer path=triage session=%s — delegating to the "
+            "federation ingest path (meeting-ops actor)",
+            session_pk,
+        )
+        return await submit_action_items_to_triage(
+            db=db,
+            session_pk=session_pk,
+            completion_mode=completion_mode,
+            client=client,
+        )
+
     # Lazy imports keep projectops_client / models off the import path
     # until this is actually called.
     from services.projectops_client import ProjectOpsClient, ProjectOpsClientError
@@ -884,6 +944,10 @@ __all__ = [
     "get_org_default_project_number",
     "set_org_default_project_number",
     "ProjectOpsWriteResult",
+    "projectops_write_path",
+    "PROJECTOPS_WRITE_PATH_ENV",
+    "WRITE_PATH_DIRECT",
+    "WRITE_PATH_TRIAGE",
     "ORG_DEFAULT_SETTING_KEY",
     "SESSION_OVERRIDE_KEY",
     "TRIAGE_SOURCE_TYPE",
