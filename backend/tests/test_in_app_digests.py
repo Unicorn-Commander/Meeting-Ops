@@ -212,3 +212,109 @@ def test_history_pagination_validation_and_free_cached_read(client, cohort):
     for query in ['cursor=bad', 'from=not-a-date', 'from=2026-08-01&to=2026-07-01']:
         assert client.get(f'/api/digests/history?{query}', headers=cohort['headers']).status_code == 400
     assert client.get('/api/digests/history?period=year', headers=cohort['headers']).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_cap_prioritizes_unstored_orgs_and_dry_run_has_no_writes(cohort, monkeypatch):
+    from workers.weekly_digest_workers import store_scheduled_digests
+    from database.database import SessionLocal
+    from database.models import MeetingDigest
+    monkeypatch.setenv('WEEKLY_DIGEST_MAX_ORGS_PER_PASS', '1')
+    dry = await store_scheduled_digests('day', date_str='2026-08-12', dry_run=True)
+    assert dry['orgs_processed'] == 1
+    cohort['llm'].chat.assert_not_awaited()
+    cohort['sender'].assert_not_called()
+    for _ in range(2):
+        result = await store_scheduled_digests('day', date_str='2026-08-12')
+        assert result['orgs_considered'] == 1 and result['generated'] == 1
+    with SessionLocal() as db:
+        assert db.query(MeetingDigest).filter(MeetingDigest.organization_id.in_([cohort['org'], cohort['other']])).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_paid_gate_and_period_flag(cohort, monkeypatch):
+    from auth.models import User, Organization
+    from database.database import SessionLocal
+    from workers.weekly_digest_workers import store_scheduled_digests
+    with SessionLocal() as db:
+        for oid in (cohort['org'], cohort['other']):
+            db.get(Organization, oid).plan = 'free'
+        for uid in (cohort['user'], cohort['second'], cohort['other_user']):
+            db.get(User, uid).tier = 'free'
+        db.commit()
+    result = await store_scheduled_digests('day', date_str='2026-08-12')
+    assert result['orgs_considered'] == 0
+    cohort['llm'].chat.assert_not_awaited()
+    monkeypatch.setenv('DAILY_DIGEST_ENABLED', 'false')
+    assert await store_scheduled_digests('day') == {'enabled': False}
+
+
+@pytest.mark.asyncio
+async def test_detail_drops_sources_moved_to_another_org_and_legacy_api_stays_compatible(client, cohort):
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    from auth.models import User, Organization
+    from workers.weekly_digest_workers import store_scheduled_digests
+    await store_scheduled_digests('day', date_str='2026-08-12')
+    with SessionLocal() as db:
+        db.get(RecordingSession, cohort['sid']).organization_id = cohort['other']
+        db.get(User, cohort['user']).tier = 'free'
+        db.get(Organization, cohort['org']).plan = 'free'
+        db.commit()
+    cached = client.get('/api/digests?period=day&date=2026-08-12', headers=cohort['headers'])
+    assert cached.status_code == 200
+    assert set(cached.json()) == {'id', 'period', 'date', 'project_id', 'content', 'meeting_count', 'cached'}
+    assert cached.json()['cached'] is True
+    detail = client.get(f"/api/digests/history/{cached.json()['id']}", headers=cohort['headers']).json()
+    assert detail['source_meetings'] == [] and detail['sources_recorded']
+    assert client.get('/api/digests?period=day&date=2026-08-12&force=true', headers=cohort['headers']).status_code == 403
+
+
+def test_additive_migration_preserves_rows_defaults_off_and_unique_recipient_window():
+    import importlib.util
+    from pathlib import Path
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy.exc import IntegrityError
+    path = Path(__file__).parents[1] / 'alembic/versions/063_in_app_digests.py'
+    spec = importlib.util.spec_from_file_location('digest_migration', path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine('sqlite://')
+    with engine.begin() as conn:
+        conn.execute(sa.text('CREATE TABLE users (id INTEGER PRIMARY KEY)'))
+        conn.execute(sa.text('CREATE TABLE organizations (id INTEGER PRIMARY KEY)'))
+        conn.execute(sa.text('CREATE TABLE meeting_digest (id INTEGER PRIMARY KEY, content TEXT, emailed_at DATETIME)'))
+        conn.execute(sa.text('INSERT INTO users VALUES (1)'))
+        conn.execute(sa.text('INSERT INTO organizations VALUES (1)'))
+        conn.execute(sa.text("INSERT INTO meeting_digest VALUES (1, 'Legacy digest', '2026-08-01')"))
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+        assert tuple(conn.execute(sa.text('SELECT email_daily_digest, email_weekly_digest FROM users')).one()) == (0, 0)
+        assert tuple(conn.execute(sa.text('SELECT content, source_meeting_ids, generated_at FROM meeting_digest')).one()) == ('Legacy digest', None, None)
+        statement = sa.text("INSERT INTO digest_delivery (digest_id, organization_id, user_id, period, date, claimed_at) VALUES (1, 1, 1, 'day', '2026-08-01', '2026-08-02')")
+        conn.execute(statement)
+        with pytest.raises(IntegrityError):
+            conn.execute(statement)
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.downgrade()
+        assert conn.execute(sa.text('SELECT content FROM meeting_digest')).scalar() == 'Legacy digest'
+        assert 'digest_delivery' not in sa.inspect(conn).get_table_names()
+
+
+@pytest.mark.parametrize('strict', [False, True])
+def test_email_transport_error_is_only_raised_for_claimed_digest_delivery(monkeypatch, strict):
+    from auth import email
+    import httpx
+    monkeypatch.setattr(email, '_postmark_token', lambda: 'test-only-placeholder')
+    monkeypatch.setattr(email, '_postmark_sender', lambda: 'test@example.com')
+    transport = MagicMock()
+    transport.__enter__.return_value = transport
+    transport.post.side_effect = httpx.ReadTimeout('unknown delivery outcome')
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: transport)
+    if strict:
+        with pytest.raises(httpx.ReadTimeout):
+            email._send('test@example.com', 'Digest', 'body', 'body', raise_on_transport_error=True)
+    else:
+        assert email._send('test@example.com', 'Auth', 'body', 'body') is False

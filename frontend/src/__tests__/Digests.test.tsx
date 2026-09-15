@@ -61,6 +61,8 @@ let fetchCalls: FetchCall[];
 let digestQueue: Array<unknown | "error">;
 let historyItems: unknown[];
 let historyStatus: number;
+let preferencePatchStatus: number;
+let generationStatus: number;
 let preferences = { email_daily_digest: false, email_weekly_digest: false, organization_email_enabled: true };
 const HISTORY_FIXTURE = { id: 91, period: 'day', date: '2026-05-01', meeting_count: 2, generated_at: '2026-05-02T13:00:00Z', emailed_to_you: true };
 
@@ -69,6 +71,8 @@ function installFetch(initialDigests: Array<unknown | "error"> = [DIGEST_FIXTURE
   fetchCalls = [];
   historyItems = [];
   historyStatus = 200;
+  preferencePatchStatus = 200;
+  generationStatus = 200;
   preferences = { email_daily_digest: false, email_weekly_digest: false, organization_email_enabled: true };
   digestQueue = [...initialDigests];
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -79,7 +83,10 @@ function installFetch(initialDigests: Array<unknown | "error"> = [DIGEST_FIXTURE
       return jsonResponse(ME_PAYLOAD);
     }
     if (url.includes('/api/digests/preferences')) {
-      if (init?.method === 'PATCH') preferences = { ...preferences, ...JSON.parse(init.body as string) };
+      if (init?.method === 'PATCH') {
+        if (preferencePatchStatus !== 200) return jsonResponse({}, preferencePatchStatus);
+        preferences = { ...preferences, ...JSON.parse(init.body as string) };
+      }
       return jsonResponse(preferences);
     }
     if (url.includes('/api/digests/history/91')) {
@@ -96,7 +103,7 @@ function installFetch(initialDigests: Array<unknown | "error"> = [DIGEST_FIXTURE
       if (next === "error") {
         return jsonResponse({ detail: "bad request" }, 500);
       }
-      return jsonResponse(next);
+      return jsonResponse(next, generationStatus);
     }
     return jsonResponse({}, 404);
   });
@@ -149,6 +156,7 @@ describe("Digests", () => {
     historyItems = [HISTORY_FIXTURE];
     await renderDigests();
     expect(screen.getByRole('tab', { name: 'Daily' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: 'Daily' }));
     fireEvent.click(await screen.findByRole('button', { name: /2026-05-01.*2 meetings/i }));
     expect(await screen.findByText('Selected stored digest.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Product planning' })).toHaveAttribute('href', '/sessions/meeting-1');
@@ -186,6 +194,27 @@ describe("Digests", () => {
     historyStatus = 200;
     fireEvent.click(screen.getByRole('button', { name: 'Retry history' }));
     expect(await screen.findByText(/No daily digests yet/)).toBeInTheDocument();
+  });
+
+  it('keeps the saved checkbox state when saving fails', async () => {
+    installFetch();
+    preferencePatchStatus = 500;
+    await renderDigests();
+    const daily = await screen.findByRole('checkbox', { name: 'Email me the daily digest' });
+    fireEvent.click(daily);
+    expect(await screen.findByText(/Could not save email preferences/)).toBeInTheDocument();
+    expect(daily).not.toBeChecked();
+    expect(daily).not.toBeDisabled();
+  });
+
+  it('explains the generation tier gate while keeping stored history available', async () => {
+    installFetch();
+    generationStatus = 403;
+    historyItems = [HISTORY_FIXTURE];
+    await renderDigests();
+    fireEvent.click(screen.getByRole('button', { name: 'Generate now' }));
+    expect(await screen.findByText(/Generating digests requires a paid account and workspace/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /2026-05-01.*2 meetings/i })).toBeInTheDocument();
   });
 
   it("renders the period selector with all five window options", async () => {

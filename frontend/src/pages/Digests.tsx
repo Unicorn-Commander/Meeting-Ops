@@ -46,7 +46,8 @@ function DigestWorkspace({ slug }: { slug?: string }) {
   const [error, setError] = useState('');
   const [progressMsg, setProgressMsg] = useState('');
   const request = useRef(0);
-  useEffect(() => () => { request.current += 1; }, []);
+  const activeRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => { request.current += 1; activeRequest.current?.abort(); }, []);
 
   useEffect(() => {
     if (!slug) return;
@@ -75,12 +76,15 @@ function DigestWorkspace({ slug }: { slug?: string }) {
 
   async function openDigest(id: number) {
     const serial = ++request.current;
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
     setLoading(true);
     setDigest(null);
     setError('');
     setProgressMsg('Loading digest…');
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/digests/history/${id}`, { headers: getHeaders() });
+      const response = await fetch(`${config.apiBaseUrl}/api/digests/history/${id}`, { headers: getHeaders(), signal: controller.signal });
       if (!response.ok) throw new Error('Could not load this digest. Please select it again.');
       const data: DigestData = await response.json();
       if (request.current === serial) setDigest(data);
@@ -93,6 +97,9 @@ function DigestWorkspace({ slug }: { slug?: string }) {
 
   async function fetchDigest(force = false) {
     const serial = ++request.current;
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
     setLoading(true);
     setDigest(null);
     setError('');
@@ -100,7 +107,7 @@ function DigestWorkspace({ slug }: { slug?: string }) {
     try {
       const params = new URLSearchParams({ period, date });
       if (force) params.set('force', 'true');
-      const response = await fetch(`${config.apiBaseUrl}/api/digests?${params}`, { headers: getHeaders() });
+      const response = await fetch(`${config.apiBaseUrl}/api/digests?${params}`, { headers: getHeaders(), signal: controller.signal });
       if (!response.ok) throw new Error(response.status === 403
         ? 'Generating digests requires a paid account and workspace. You can still read stored digests.'
         : 'Failed to generate digest.');
@@ -108,7 +115,7 @@ function DigestWorkspace({ slug }: { slug?: string }) {
       if (response.status === 202) {
         const payload = await response.json();
         result = await pollJob<DigestData>(payload.job_id, {
-          headers: getHeaders(),
+          headers: getHeaders(), signal: controller.signal,
           onProgress: state => {
             if (request.current === serial) setProgressMsg(state.status === 'running' ? 'Summarizing meetings…' : 'Waiting in queue…');
           },
@@ -127,7 +134,9 @@ function DigestWorkspace({ slug }: { slug?: string }) {
   }
 
   function changeTab(value: string) {
+    if (value === tab) return;
     request.current += 1;
+    activeRequest.current?.abort();
     setTab(value); setPeriod(value); setPageCursor(null); setCursor(null);
     setHistory([]); setDigest(null); setError(''); setLoading(false); setHistoryLoading(true);
   }

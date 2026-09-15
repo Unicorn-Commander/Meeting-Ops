@@ -374,12 +374,14 @@ def get_digest_history(
     try:
         for value in (from_date, to_date):
             if value:
-                datetime.strptime(value, "%Y-%m-%d")
+                if datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") != value:
+                    raise ValueError()
         if from_date and to_date and from_date > to_date:
             raise ValueError()
         if cursor:
             cursor_date, cursor_id = cursor.split("|")
-            datetime.strptime(cursor_date, "%Y-%m-%d")
+            if datetime.strptime(cursor_date, "%Y-%m-%d").strftime("%Y-%m-%d") != cursor_date:
+                raise ValueError()
             query = query.filter(or_(
                 MeetingDigest.date < cursor_date,
                 and_(MeetingDigest.date == cursor_date, MeetingDigest.id < int(cursor_id)),

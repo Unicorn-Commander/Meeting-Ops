@@ -25,10 +25,7 @@ def _enabled() -> bool:
 
 
 def _default_on() -> bool:
-    """When an org has NO weekly_digest setting at all, do we include it?
-
-    Default false = opt-IN. Flip `WEEKLY_DIGEST_DEFAULT_ON=true` to make the
-    digest opt-OUT (every org gets it unless they explicitly disable)."""
+    """Fallback org permission only; personal opt-ins are always required."""
     return os.getenv("WEEKLY_DIGEST_DEFAULT_ON", "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
