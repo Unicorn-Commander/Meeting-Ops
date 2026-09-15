@@ -150,7 +150,7 @@ from workers.reprocess_workers import (  # noqa: E402
     reprocess_session_job,
 )
 from workers.digest_workers import generate_digest_job  # noqa: E402
-from workers.weekly_digest_workers import weekly_digest_cron  # noqa: E402
+from workers.weekly_digest_workers import weekly_digest_cron, daily_digest_cron  # noqa: E402
 from workers.tts_workers import (  # noqa: E402
     render_tts_summary_job,
     render_tts_podcast_job,
@@ -166,6 +166,7 @@ class WorkerSettings:
         finalize_session_job,
         generate_digest_job,
         weekly_digest_cron,
+        daily_digest_cron,
         render_tts_summary_job,
         render_tts_podcast_job,
         reprocess_session_job,
@@ -179,12 +180,11 @@ class WorkerSettings:
         cron(media_retention_task, hour={4}, minute={30}),
         cron(data_retention_purge_task, hour={5}, minute={0}),
         cron(session_watchdog_task, minute={0, 30}),
-        # Weekly meeting digest email — Monday 13:00 UTC, summarizing the
-        # previous Mon-Sun week per opted-in org (see
-        # workers/weekly_digest_workers.py). Opt-in via
-        # Organization.settings["weekly_digest"]; idempotent via
-        # MeetingDigest.emailed_at.
-        cron(weekly_digest_cron, weekday="mon", hour={13}, minute={0}),
+        # Daily and weekly in-app digests for completed UTC windows (see
+        # workers/weekly_digest_workers.py). Store independently of email;
+        # per-account opt-in plus the org kill-switch govern delivery.
+        cron(daily_digest_cron, hour={13}, minute={0}),
+        cron(weekly_digest_cron, weekday="mon", hour={13}, minute={15}),
     ]
     max_jobs = get_bulk_import_concurrency()
     redis_settings = RedisSettings.from_dsn(
