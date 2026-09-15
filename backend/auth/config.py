@@ -100,6 +100,13 @@ ROLE_HIERARCHY = {
     "viewer": ["viewer"]
 }
 
+# security-3: roles a caller may assign to SOMEONE ELSE over the HTTP API.
+# Deliberately a strict subset of ROLE_HIERARCHY: "superuser" is absent
+# because global superuser is a flag on the User row that an operator sets,
+# never a membership role handed out in a request body. Anything not on this
+# list is rejected server-side; the wire never picks a role for free.
+ASSIGNABLE_ORG_ROLES = frozenset({"admin", "manager", "user", "viewer"})
+
 # Permission definitions
 PERMISSIONS = {
     # Session permissions

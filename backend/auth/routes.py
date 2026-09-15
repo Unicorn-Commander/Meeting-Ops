@@ -15,7 +15,7 @@ from auth.service import AuthService
 from auth.dependencies import get_current_organization, get_current_user, require_admin, require_permission
 from auth.email import send_password_reset_email, send_verification_email
 from auth.models import Organization, PasswordResetToken, User, UserOrganization
-from auth.config import auth_config
+from auth.config import ASSIGNABLE_ORG_ROLES, ROLE_HIERARCHY, auth_config
 from auth.invite_codes import (
     comp_personal_org_to_pro,
     consume_invite_code,
@@ -232,6 +232,31 @@ async def _optional_caller_for_register(
     return caller
 
 
+def _may_administer_organization(
+    db: Session, caller: User, organization_id: int
+) -> bool:
+    """Whether ``caller`` may create a member inside ``organization_id``.
+
+    Global superusers may. Everyone else must hold a membership row in THAT
+    organization whose role confers "admin" per ROLE_HIERARCHY. Being merely
+    authenticated is NOT enough -- that was the second escalation path into a
+    populated tenant (see the security-3 note in ``register``).
+    """
+    if getattr(caller, "is_superuser", False):
+        return True
+    membership = (
+        db.query(UserOrganization)
+        .filter(
+            UserOrganization.user_id == caller.id,
+            UserOrganization.organization_id == organization_id,
+        )
+        .first()
+    )
+    if membership is None:
+        return False
+    return "admin" in ROLE_HIERARCHY.get((membership.role or "").strip().lower(), [])
+
+
 @router.post("/register", response_model=UserResponse)
 async def register(
     user_data: UserCreate,
@@ -250,6 +275,115 @@ async def register(
     # personal org (not the shared default) and an email-verification link;
     # admin-created users keep the legacy behavior.
     is_self_serve = current_user is None
+
+    # --- security-3: org and role are AUTHORIZATION decisions, never wire input.
+    #
+    # Before this gate, UserCreate.organization_id and UserCreate.role went
+    # straight into AuthService.create_user, where "an explicit organization_id
+    # always wins" and `role` is written verbatim into user_organizations.
+    # Because this route serves anonymous callers whenever ALLOW_REGISTRATION
+    # is on, and its dependency is get_current_user_optional (NOT require_admin),
+    # that left two ways to land a self-chosen account inside an existing
+    # tenant at a self-chosen role -- including role="superuser", which
+    # ROLE_HIERARCHY grants everything:
+    #   1. an anonymous POST carrying {organization_id: <victim>, role: ...};
+    #   2. sign up self-serve, log in, then POST again as that (unprivileged)
+    #      user -- organization_id=None then fell through to
+    #      ensure_default_organization() with the wire role.
+    # Both are closed below. The server decides the org and the role; the wire
+    # only ever asks for an account. The sole legitimate caller
+    # (frontend/src/pages/Signup.tsx) sends neither field, so nothing real is
+    # rejected by this.
+    target_organization_id: Optional[int] = None
+    target_role = auth_config.DEFAULT_USER_ROLE
+
+    if is_self_serve:
+        # Anonymous signup may only ever land in a NEW private org at the
+        # lowest role (create_user(personal_org=True) makes `{username}-personal`
+        # and puts the user in it). It may never name an existing org, and may
+        # never name a role. We reject loudly rather than silently ignoring the
+        # fields, so an attempt is visible in the audit log and no caller is
+        # left believing it worked.
+        if user_data.organization_id is not None:
+            AuthService.log_action(
+                db,
+                None,
+                "register_org_injection_blocked",
+                "organization",
+                str(user_data.organization_id),
+                details={
+                    "email": str(user_data.email),
+                    "requested_role": user_data.role,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Self-serve signup cannot choose an organization. Ask an "
+                    "administrator of that workspace to invite you."
+                ),
+            )
+        if (user_data.role or "").strip().lower() != auth_config.DEFAULT_USER_ROLE:
+            AuthService.log_action(
+                db,
+                None,
+                "register_role_injection_blocked",
+                "user",
+                None,
+                details={
+                    "email": str(user_data.email),
+                    "requested_role": user_data.role,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Self-serve signup cannot choose a role.",
+            )
+    else:
+        # Authenticated admin-create path. Authentication alone is not
+        # authorization: the caller must be a superuser or an admin OF THE
+        # TARGET ORG, and the role must be on the server-side whitelist.
+        requested_role = (user_data.role or "").strip().lower()
+        if requested_role not in ASSIGNABLE_ORG_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Invalid role. Allowed: "
+                    + ", ".join(sorted(ASSIGNABLE_ORG_ROLES))
+                    + "."
+                ),
+            )
+        if user_data.organization_id is None:
+            # Previously fell through to ensure_default_organization() -- the
+            # shared migration safety-net org, which on a real deployment is
+            # the tenant that holds the data. Require an explicit target.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "organization_id is required when an administrator creates "
+                    "a user."
+                ),
+            )
+        if not _may_administer_organization(
+            db, current_user, user_data.organization_id
+        ):
+            AuthService.log_action(
+                db,
+                current_user.id,
+                "register_org_injection_blocked",
+                "organization",
+                str(user_data.organization_id),
+                details={
+                    "email": str(user_data.email),
+                    "requested_role": requested_role,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not an administrator of that organization.",
+            )
+        target_organization_id = user_data.organization_id
+        target_role = requested_role
 
     # Phase-1 beta gate (SELF-SERVE ONLY). A valid single-use code, when
     # redeemed, comps the new user to a TIME-LIMITED Pro tier on BOTH gated
@@ -281,10 +415,10 @@ async def register(
             username=user_data.username,
             password=user_data.password,
             full_name=user_data.full_name,
-            organization_id=user_data.organization_id,
-            role=user_data.role,
+            organization_id=target_organization_id,
+            role=target_role,
             created_by_id=current_user.id if current_user else None,
-            personal_org=is_self_serve and user_data.organization_id is None,
+            personal_org=is_self_serve,
         )
         # Consume the code only AFTER create_user succeeds (a failed create
         # raises above and must not burn a code). The consume is atomic

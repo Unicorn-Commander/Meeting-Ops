@@ -62,6 +62,20 @@ class AuthService:
         # Validate inputs
         email = sanitize_email(email)
         username = sanitize_username(username)
+
+        # security-3 defence in depth: even though POST /api/auth/register now
+        # derives the role server-side, refuse to WRITE a membership role that
+        # is not on the whitelist. "superuser" is not assignable here; it is a
+        # flag on the User row. A future caller that forgets the route-level
+        # gate still cannot mint a superuser membership.
+        from auth.config import ASSIGNABLE_ORG_ROLES
+
+        role = (role or "").strip().lower()
+        if role not in ASSIGNABLE_ORG_ROLES:
+            raise ValueError(
+                "Invalid role %r. Allowed: %s"
+                % (role, ", ".join(sorted(ASSIGNABLE_ORG_ROLES)))
+            )
         
         # Check if user already exists
         if db.query(User).filter(or_(User.email == email, User.username == username)).first():
