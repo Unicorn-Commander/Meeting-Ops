@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 
 from database.database import get_db
-from database.models import RecordingSession, MeetingDigest
+from database.models import RecordingSession, MeetingDigest, DigestDelivery
 from auth.dependencies import get_current_organization, get_current_user
 from auth.organization import ActiveOrganization
 from auth.models import User
@@ -145,6 +145,7 @@ async def _generate_digest(
             MeetingDigest.organization_id == org_id,
             MeetingDigest.period == period,
             MeetingDigest.date == date_str,
+            MeetingDigest.project_id == (str(project_id) if project_id is not None else None),
         )
         .first()
     )
@@ -152,6 +153,8 @@ async def _generate_digest(
     if existing:
         existing.content = content
         existing.meeting_count = len(sessions)
+        existing.source_meeting_ids = [s.id for s in sessions]
+        existing.generated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         return DigestResponse(
@@ -171,6 +174,8 @@ async def _generate_digest(
         project_id=project_id,
         content=content,
         meeting_count=len(sessions),
+        source_meeting_ids=[s.id for s in sessions],
+        generated_at=datetime.now(timezone.utc),
     )
     db.add(digest)
     db.commit()
@@ -288,3 +293,132 @@ async def get_digest(
         )
 
     return await _generate_digest(db, active_org.organization.id, period, date, project_id)
+
+
+class DigestPreferences(BaseModel):
+    email_daily_digest: bool
+    email_weekly_digest: bool
+
+
+class DigestPreferencesPatch(BaseModel):
+    email_daily_digest: Optional[bool] = None
+    email_weekly_digest: Optional[bool] = None
+
+
+@router.get("/preferences")
+def get_digest_preferences(
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    from workers.weekly_digest_workers import _org_opted_in
+    return {
+        "email_daily_digest": bool(current_user.email_daily_digest),
+        "email_weekly_digest": bool(current_user.email_weekly_digest),
+        "organization_email_enabled": _org_opted_in(active_org.organization),
+    }
+
+
+@router.patch("/preferences")
+def update_digest_preferences(
+    preferences: DigestPreferencesPatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    for field, value in preferences.model_dump(exclude_unset=True).items():
+        if value is None:
+            raise HTTPException(status_code=422, detail="Preferences must be booleans")
+        setattr(current_user, field, value)
+    db.commit()
+    return get_digest_preferences(current_user, active_org)
+
+
+def _history_item(db, digest, user_id):
+    delivery = db.query(DigestDelivery.sent_at).filter(
+        DigestDelivery.organization_id == digest.organization_id,
+        DigestDelivery.period == digest.period,
+        DigestDelivery.date == digest.date,
+        DigestDelivery.user_id == user_id,
+        DigestDelivery.sent_at.isnot(None),
+    ).first()
+    return {
+        "id": digest.id, "period": digest.period, "date": digest.date,
+        "meeting_count": digest.meeting_count,
+        "generated_at": digest.generated_at or digest.created_at,
+        "emailed_to_you": delivery is not None,
+    }
+
+
+@router.get("/history")
+def get_digest_history(
+    period: str = Query("day", pattern="^(day|week)$"),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    cursor: Optional[str] = Query(None),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    """Stored digests are readable on all tiers, like the existing cache hit.
+
+    Cursor is date|id, ordered newest window first with an id tie-breaker.
+    Project-specific digests are excluded from the organization history.
+    """
+    from sqlalchemy import and_, or_
+    query = db.query(MeetingDigest).filter(
+        MeetingDigest.organization_id == active_org.organization.id,
+        MeetingDigest.period == period,
+        MeetingDigest.project_id.is_(None),
+    )
+    try:
+        for value in (from_date, to_date):
+            if value:
+                datetime.strptime(value, "%Y-%m-%d")
+        if from_date and to_date and from_date > to_date:
+            raise ValueError()
+        if cursor:
+            cursor_date, cursor_id = cursor.split("|")
+            datetime.strptime(cursor_date, "%Y-%m-%d")
+            query = query.filter(or_(
+                MeetingDigest.date < cursor_date,
+                and_(MeetingDigest.date == cursor_date, MeetingDigest.id < int(cursor_id)),
+            ))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid date range or cursor")
+    if from_date:
+        query = query.filter(MeetingDigest.date >= from_date)
+    if to_date:
+        query = query.filter(MeetingDigest.date <= to_date)
+    rows = query.order_by(MeetingDigest.date.desc(), MeetingDigest.id.desc()).limit(limit + 1).all()
+    page = rows[:limit]
+    return {
+        "items": [_history_item(db, row, current_user.id) for row in page],
+        "next_cursor": f"{page[-1].date}|{page[-1].id}" if len(rows) > limit else None,
+    }
+
+
+@router.get("/history/{digest_id}")
+def get_digest_detail(
+    digest_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    active_org: ActiveOrganization = Depends(get_current_organization),
+):
+    digest = db.query(MeetingDigest).filter(
+        MeetingDigest.id == digest_id,
+        MeetingDigest.organization_id == active_org.organization.id,
+        MeetingDigest.project_id.is_(None),
+    ).first()
+    if digest is None:
+        raise HTTPException(status_code=404, detail="Digest not found")
+    # Re-check scope and existence: meetings can be deleted or moved later.
+    sources = db.query(RecordingSession).filter(
+        RecordingSession.organization_id == active_org.organization.id,
+        RecordingSession.id.in_(digest.source_meeting_ids or []),
+    ).order_by(RecordingSession.created_at, RecordingSession.id).all()
+    return {
+        **_history_item(db, digest, current_user.id), "content": digest.content,
+        "sources_recorded": digest.source_meeting_ids is not None,
+        "source_meetings": [{"id": s.id, "title": s.title or s.name or "Untitled"} for s in sources],
+    }

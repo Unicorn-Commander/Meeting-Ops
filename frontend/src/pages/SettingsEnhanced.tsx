@@ -8,6 +8,7 @@ import { isAdminRole } from '../utils/roles';
 import { deleteMyVoice, getMyVoice } from '../utils/api';
 import type { MyVoiceStatus } from '../utils/api';
 import { showToast } from '../components/Toast';
+import DigestEmailPreferences from '../components/settings/DigestEmailPreferences';
 import SettingsLayout from '../components/settings/SettingsLayout';
 import type { SaveStatus } from '../components/settings/SettingsLayout';
 import {
@@ -397,12 +398,7 @@ export default function SettingsEnhanced() {
           </div>
         );
       case 'notifications':
-        return (
-          <EmptyPanel
-            title="Notifications"
-            description="Per-meeting alerts, summary delivery, and digest cadence. Coming in a future release."
-          />
-        );
+        return <DigestEmailPreferences />;
       case 'hotkeys':
         return (
           <EmptyPanel

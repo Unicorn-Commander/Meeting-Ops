@@ -640,18 +640,37 @@ class MeetingDigest(Base):
     project_id = Column(Text, nullable=True)
     content = Column(Text, nullable=False)
     meeting_count = Column(Integer, default=0)
+    source_meeting_ids = Column(_JsonB(), nullable=True)
+    generated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     # v3.18.3 background-jobs: arq job_id that is currently generating
     # (or last generated) this digest. NULL on cached reads; set when
     # a new generate kicks off.
     generation_job_id = Column(String(64), nullable=True)
-    # v3.24.0 weekly-email-digest: timestamp the scheduled weekly-digest
-    # cron emailed this row. NULL = never emailed (eligible to send). Set
-    # after the first successful Postmark send so a cron restart / re-run /
-    # two-worker race can't double-send. Only the "week" period rows are
-    # ever stamped today; on-demand day/month/quarter/year digests leave it
-    # NULL. See workers/weekly_digest_workers.py.
+    # Legacy org-level email timestamp retained for compatibility only.
     emailed_at = Column(DateTime, nullable=True)
+
+
+class DigestDelivery(Base):
+    """Claim before sending; a unique recipient/window key prevents duplicate mail.
+
+    A NULL sent_at is an unresolved claim (e.g. process died during send).
+    Never automatically retry an ambiguous send: the email provider has no
+    idempotency API. Explicit failures release the claim for a later retry.
+    """
+    __tablename__ = "digest_delivery"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "period", "date", "user_id",
+                         name="uq_digest_delivery_recipient_window"),
+    )
+    id = Column(Integer, primary_key=True)
+    digest_id = Column(Integer, ForeignKey("meeting_digest.id"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    period = Column(String(20), nullable=False)
+    date = Column(String(10), nullable=False)
+    claimed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    sent_at = Column(DateTime, nullable=True)
 
 
 class UploadJob(Base):
