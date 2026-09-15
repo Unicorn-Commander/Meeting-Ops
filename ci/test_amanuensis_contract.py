@@ -26,14 +26,14 @@ def compose(*paths, profiles=False):
 
 
 class ImageContract(unittest.TestCase):
-    def test_digest_lock(self):
+    def test_commit_tag_lock(self):
         self.assertEqual(set(LOCK['images']), {'parakeet-svc', 'parakeet-stream-svc',
                                               'speaker-svc', 'parakeet-openai-shim'})
         for name, image in LOCK['images'].items():
             self.assertRegex(image, '^git.unicorncommander.ai/unicorncommander/amanuensis/'
-                             + re.escape(name) + r'@sha256:[0-9a-f]{64}$')
+                             + re.escape(name) + ':' + LOCK['engine_revision'] + '$')
 
-    def test_host_overrides_change_only_image_and_build(self):
+    def test_host_overrides_preserve_live_contract(self):
         cases = [('bigboy', {'meet-speaker-svc': 'speaker-svc'}),
                  ('midboy1', {'parakeet': 'parakeet-svc', 'parakeet-stream': 'parakeet-stream-svc'}),
                  ('midboy2', {'speaker-svc': 'speaker-svc'}),
@@ -43,19 +43,26 @@ class ImageContract(unittest.TestCase):
                 base = Path(td) / 'base.json'
                 services = {name: {'image': 'old:test', 'build': '.',
                     'environment': {'SYNTHETIC_SENTINEL': 'preserve'},
-                    'volumes': ['./patches/main.py:/app/main.py:ro'],
+                    'volumes': (['parakeet_models:/models', './patches/main.py:/app/main.py:ro'] if name == 'parakeet' else
+                                ['/home/muut/speaker-models:/models', './patches/main.py:/app/main.py:ro'] if name == 'speaker-svc' else
+                                ['cache:/models']),
                     'ports': ['127.0.0.1:18000:8881'],
                     'deploy': {'resources': {'reservations': {'devices': [
                         {'driver': 'nvidia', 'device_ids': ['synthetic-gpu'], 'capabilities': ['gpu']} ]}}}}
                     for name in mapping}
                 services['unrelated-voice'] = {'image': 'leave:unchanged'}
-                base.write_text(json.dumps({'services': services}))
+                base.write_text(json.dumps({'services': services, 'volumes': {'parakeet_models': {}, 'cache': {}}}))
                 before = compose(base)
                 after = compose(base, ROOT / 'deploy' / folder / 'docker-compose.amanuensis.yml')
                 expected = json.loads(json.dumps(before))
                 for name, svc in mapping.items():
                     expected['services'][name]['image'] = LOCK['images'][svc]
                     expected['services'][name].pop('build')
+                    if name in ('parakeet', 'speaker-svc'):
+                        expected['services'][name]['volumes'] = [m for m in expected['services'][name]['volumes']
+                                                                 if m['target'] != '/app/main.py']
+                    if name == 'parakeet':
+                        expected['services'][name]['environment']['PARAKEET_MODEL_PRECISION'] = 'fp32'
                 # Compose generates its project name from each temporary directory.
                 after.pop('name', None); expected.pop('name', None)
                 # Network names likewise follow that synthetic project name.
@@ -63,6 +70,15 @@ class ImageContract(unittest.TestCase):
                     for net in doc.get('networks', {}).values():
                         net.pop('name', None)
                 self.assertEqual(after, expected)
+
+    def test_no_host_main_mount_and_explicit_fp32(self):
+        for path in (ROOT / 'deploy').rglob('docker-compose.amanuensis.yml'):
+            self.assertNotRegex(path.read_text(), r'(?m)^\s*-.*main\.py')
+            self.assertNotIn('/app/main.py', path.read_text())
+        text = (ROOT / 'deploy/midboy1/docker-compose.amanuensis.yml').read_text()
+        self.assertRegex(text, r'PARAKEET_MODEL_PRECISION:\s+fp32')
+        self.assertEqual(LOCK['engine_revision'], 'f253e62db40417fe6bccacf4b7d36ae20b084936')
+        self.assertEqual(LOCK['build_run'], 2496)
 
     def test_bundle_is_opt_in(self):
         doc = compose(ROOT / 'deploy/bundled-engine/docker-compose.yml')

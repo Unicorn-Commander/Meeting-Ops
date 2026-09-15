@@ -13,9 +13,10 @@ jobs:
       - name: Validate opt-in compose and caller contracts
         run: |
           python3 ci/test_amanuensis_contract.py
-          bash -n ci/test_amanuensis_images.sh
+          python3 ci/test_amanuensis_cutover.py
+          bash -n ci/test_amanuensis_images.sh deploy/cutover/amanuensis-images.sh
           git diff --check
-      - name: Pull and test immutable images (CPU synthetic only)
+      - name: Pull and test commit-tagged images (CPU synthetic only)
         env:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

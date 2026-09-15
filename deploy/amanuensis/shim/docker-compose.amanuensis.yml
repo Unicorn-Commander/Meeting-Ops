@@ -1,6 +1,6 @@
-# Opt-in IMAGE-ONLY override. Requires Compose >=2.24.4. No cutover authorized.
-# Append to the existing host compose chain; keep all env, mounts and placement.
+# Opt-in cutover override. Requires Compose >=2.24.4. Aaron-approved window only.
+# Append to the LIVE compose chain; validate with deploy/cutover/amanuensis-images.sh.
 services:
   parakeet-openai-shim:
-    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim@sha256:04bbdf2e0e21c523361addb04ac9e27e8720e25bd1e90501212022daedf017f0
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:f253e62db40417fe6bccacf4b7d36ae20b084936
     build: !reset null

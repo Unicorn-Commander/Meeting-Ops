@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# CI only: use the exact published digests. No GPU, mounts, host network or model credentials.
+# CI only: use the published commit tags. No GPU, mounts, host network or model credentials.
 image() { python3 -c 'import json,sys; print(json.load(open("deploy/amanuensis/images.lock.json"))["images"][sys.argv[1]])' "$1"; }
 for svc in parakeet-svc parakeet-stream-svc speaker-svc parakeet-openai-shim; do
   docker pull "$(image "$svc")"
