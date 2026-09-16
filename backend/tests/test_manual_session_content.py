@@ -65,6 +65,7 @@ def test_full_route_consistency_and_exact_retry(fixture):
         assert current.final_summary['summary']==request['summary']
         assert current.processing_metadata['manual_content']['inference_performed'] is False
         assert current.source_type=='manual_content' and not current.audio_file
+        assert current.mode == row.mode
         assert current.duration==0 and current.started_at is None
         segments=db.query(Transcription).filter_by(session_id=row.id).all()
         assert len(segments)==2 and all(x.start_time is None and x.confidence is None for x in segments)
