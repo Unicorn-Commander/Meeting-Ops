@@ -116,14 +116,28 @@ def revision(session, lines, actions):
     return digest(snapshot)
 
 
+def legacy_participant_labels(session):
+    """Legacy display strings are not verified participants or identity links."""
+    value = session.participants
+    if value is None or value == []:
+        return []
+    if not isinstance(value, list) or len(value) > 100 or any(
+        not isinstance(label, str) or not label.strip() or len(label) > 200
+        for label in value
+    ):
+        raise HTTPException(409, "Structured or unbounded participant data requires separate review")
+    return list(value)
+
+
 def _assert_detached(db, session, actions):
     if session.status != "completed" or any((session.audio_file, session.audio_object_key,
         session.audio_storage_backend, session.processing_job_id, session.external_source,
         session.external_id, session.meeting_key, session.external_room_id, session.is_combined,
         session.source_device_id, session.room_id, session.room_source_id, session.project_app,
         session.project_id, session.project_slug, session.brigade_graph_node_id,
-        session.brigade_synced_at, session.brigade_sync_status, session.participants)):
+        session.brigade_synced_at, session.brigade_sync_status)):
         raise HTTPException(409, "Manual replacement requires a completed detached session without audio, jobs, verified roster or external projections")
+    legacy_participant_labels(session)
     checks = [
         (AgentSession, AgentSession.meeting_session_id == session.id),
         (Speaker, Speaker.session_id == session.id),
@@ -156,7 +170,7 @@ def state(db, session):
     lines, actions = _load(db, session)
     _assert_detached(db, session, actions)
     return {"session_id": session.session_id or str(session.id), "revision": revision(session, lines, actions),
-            "transcription_count": len(lines), "action_count": len(actions), "content_source": "manually_authored" if (session.processing_metadata or {}).get("manual_content") else (session.source_type or "unknown"), "audio_available": False}
+            "transcription_count": len(lines), "action_count": len(actions), "legacy_participant_labels": legacy_participant_labels(session), "content_source": "manually_authored" if (session.processing_metadata or {}).get("manual_content") else (session.source_type or "unknown"), "audio_available": False}
 
 
 def replace(db, session, request, user):
@@ -181,6 +195,7 @@ def replace(db, session, request, user):
                "decisions": request.decisions, "topics": request.topics,
                "action_items": [a.model_dump() for a in request.actions],
                "actions": [{**a.model_dump(), "action": a.text} for a in request.actions], "content_source": "manually_authored"}
+    session.participants = []  # Invalidate legacy display labels, never invent attendees.
     session.title = session.name = request.title
     session.title_user_set = True
     session.description = request.description
