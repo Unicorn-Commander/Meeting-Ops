@@ -1216,19 +1216,20 @@ async def get_session(
         
         # Get transcription segments with error handling
         segments = []
+        manual_content = bool((session.processing_metadata or {}).get("manual_content"))
         try:
             transcriptions = db.query(Transcription).filter(
                 Transcription.session_id == session.id
-            ).order_by(Transcription.start_time).all()
+            ).order_by(Transcription.id if manual_content else Transcription.start_time).all()
             
             for trans in transcriptions:
                 try:
                     segments.append({
                         "text": trans.text or "",
                         "speaker": trans.speaker or "Unknown",
-                        "start": trans.start_time or 0,
-                        "end": trans.end_time or 0,
-                        "confidence": trans.confidence or 0
+                        "start": trans.start_time if manual_content else (trans.start_time or 0),
+                        "end": trans.end_time if manual_content else (trans.end_time or 0),
+                        "confidence": trans.confidence if manual_content else (trans.confidence or 0)
                     })
                 except Exception as e:
                     logger.warning(f"Error processing transcription segment: {e}")
