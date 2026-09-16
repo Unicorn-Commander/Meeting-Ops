@@ -2965,7 +2965,7 @@ async def download_transcript(
         # Fallback to segments from Transcription table
         segments = db.query(Transcription).filter(
             Transcription.session_id == session.id
-        ).order_by(Transcription.start_time).all()
+        ).order_by(Transcription.id if manual_content else Transcription.start_time).all()
         
         if segments:
             for segment in segments:
