@@ -232,3 +232,66 @@ def test_unauthorized_request_never_locks_table(fixture,monkeypatch):
         db.commit()
     assert client.put(path(row),json=request,headers=headers).status_code==403
     assert client.put('/api/simple/recording-sessions/missing/manual-content',json=request,headers=headers).status_code==404
+
+
+def test_supported_semantic_restore_after_exact_manual_action_removal(fixture):
+    client, _, _, row, headers = fixture
+    request=body(client,row,headers)
+    original={'title':'Old synthetic content','description':'Restored authored content; no recording or inferred timing.',
+        'lines':[{'speaker':'Old speaker','text':'Old words'}], 'summary':'Original synthetic summary.',
+        'decisions':[], 'topics':[], 'actions':[{'text':'Old task'}]}
+    assert client.put(path(row),json=request,headers=headers).status_code==200
+    visible=client.get(f'/api/simple/recording-sessions/{row.session_id}',headers=headers).json()
+    assert len(visible['action_items'])==1
+    action=visible['action_items'][0]
+    assert action['source']=='manual' and action['status']=='todo'
+    assert not action['project_ops_task_id'] and not action['project_ops_proposal_id']
+    # Whole-conversion replacement is intentionally blocked while manual children exist.
+    assert client.get(path(row),headers=headers).status_code==409
+    assert client.delete(f"/api/action-items/{action['id']}",headers=headers).status_code==204
+    state=client.get(path(row),headers=headers)
+    assert state.status_code==200
+    restored=client.put(path(row),json={**original,'expected_revision':state.json()['revision']},headers=headers)
+    assert restored.status_code==200
+    after=client.get(f'/api/simple/recording-sessions/{row.session_id}',headers=headers).json()
+    assert after['transcript_simple']=='Old speaker: Old words'
+    assert after['final_summary']['summary']==original['summary']
+    assert len(after['action_items'])==1 and after['action_items'][0]['text']=='Old task'
+    assert after['action_items'][0]['source']=='manual'
+    assert after['metadata']['manual_content']['inference_performed'] is False
+
+
+@pytest.mark.parametrize('labels', [['Old display name', 'Other label'], [' Lone label ']])
+def test_legacy_string_labels_backed_up_and_invalidated(fixture,labels):
+    client, _, _, row, headers = fixture
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    with SessionLocal() as db:
+        db.get(RecordingSession,row.id).participants=labels
+        db.commit()
+    state=client.get(path(row),headers=headers)
+    assert state.status_code==200 and state.json()['legacy_participant_labels']==labels
+    request=body(client,row,headers)
+    assert client.put(path(row),json=request,headers=headers).status_code==200
+    after=client.get(f'/api/simple/recording-sessions/{row.session_id}',headers=headers).json()
+    assert after['participants']==[]
+    with SessionLocal() as db:
+        stored=db.get(RecordingSession,row.id)
+        assert stored.participants==[]
+        for label in labels:
+            assert label not in str(stored.processing_metadata)
+            assert label not in stored.transcript_simple
+            assert label not in str(stored.final_summary)
+
+
+@pytest.mark.parametrize('labels', [['legacy',{'id':'person-id','name':'Linked'}], [{'name':'Structured'}], ['x'*201], ['x']*101, [''], ['  '], 'legacy', [1]])
+def test_structured_mixed_or_unbounded_labels_refused(fixture,labels):
+    client, _, _, row, headers = fixture
+    request=body(client,row,headers)
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    with SessionLocal() as db:
+        db.get(RecordingSession,row.id).participants=labels
+        db.commit()
+    assert client.get(path(row),headers=headers).status_code==409
+    assert client.put(path(row),json=request,headers=headers).status_code==409
