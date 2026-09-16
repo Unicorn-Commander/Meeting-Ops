@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
+
 import shutil
 from pathlib import Path
 from typing import BinaryIO, Iterator, Optional
+
+from secret_config import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ MEDIA_CACHE_ROOT = Path(os.getenv("MEDIA_CACHE_DIR", str(RECORDINGS_DIR / "media
 
 GARAGE_ENDPOINT_URL = os.getenv("GARAGE_ENDPOINT_URL", "").strip()
 GARAGE_ACCESS_KEY = os.getenv("GARAGE_ACCESS_KEY", "").strip()
-GARAGE_SECRET_KEY = os.getenv("GARAGE_SECRET_KEY", "").strip()
+GARAGE_SECRET_KEY = get_secret("GARAGE_SECRET_KEY", "").strip()
 GARAGE_REGION = os.getenv("GARAGE_REGION", "garage").strip() or "garage"
 GARAGE_AUDIO_BUCKET = os.getenv("GARAGE_AUDIO_BUCKET", "meeting-ops-audio").strip()
 

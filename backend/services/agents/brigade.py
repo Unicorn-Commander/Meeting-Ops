@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from .base import AgentDescriptor, AgentSource
 
+from secret_config import get_secret
+
 logger = logging.getLogger(__name__)
 
 BRIGADE_URL_DEFAULT = "http://unicorn-brigade:8100"
@@ -37,7 +39,7 @@ def _brigade_api_key() -> Optional[str]:
     """Brigade service key — the same one brigade_client / brigade_writer use.
     The agents read endpoint is service-authed, so we send X-API-Key (a user
     JWT 401s)."""
-    return os.getenv("BRIGADE_API_KEY") or os.getenv("BRIGADE_ADMIN_KEY") or None
+    return get_secret("BRIGADE_API_KEY") or os.getenv("BRIGADE_ADMIN_KEY") or None
 
 
 def _bearer_from_request(request: Request) -> Optional[str]:
