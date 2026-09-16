@@ -212,7 +212,7 @@ def replace(db, session, request, user):
     session.processing_metadata = {**(session.processing_metadata or {}), "manual_content": {"version": 1, "author_user_id": user.id,
         "audio_available": False, "timing_verified": False, "inference_performed": False}}
     session.source_type = "manual_content"
-    session.mode = "manual"
+    # Capture mode is a constrained historical transport field; preserve it.
     session.started_at = session.ended_at = None
     session.duration = 0
     session.updated_at = datetime.now(timezone.utc)
