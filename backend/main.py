@@ -339,6 +339,7 @@ _load_router(app, "uc_sso", "auth.oidc_sso")
 # routing over /recording-sessions/{session_id} (the wildcard would swallow it).
 _load_router(app, "session_tags", "api.sessions_tags")
 _load_router(app, "recording", "api.simple_recording_db", required=True)
+_load_router(app, "manual_session_content", "api.manual_session_content", prefix="", required=True)
 _load_router(app, "always_on_recordings", "api.recording", required=True)
 _load_router(app, "medical_visits", "api.medical_visits")
 # Brigade Phase 2 read endpoint — lives in api.recording but as a

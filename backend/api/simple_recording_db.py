@@ -2934,10 +2934,12 @@ async def download_transcript(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
+    # Manual text does not carry recorded timing.
+    manual_content = bool((session.processing_metadata or {}).get("manual_content"))
     # Build transcript text with speaker diarization
-    transcript = f"Recording: {session.name or session.title or 'Untitled'}\n"
+    transcript = f"{'Manual content' if manual_content else 'Recording'}: {session.name or session.title or 'Untitled'}\n"
     transcript += f"Date: {session.created_at}\n"
-    transcript += f"Duration: {session.duration or 0} seconds\n"
+    transcript += ("Manually authored content; no audio or verified timing.\n" if manual_content else f"Duration: {session.duration or 0} seconds\n")
     
     # Add metadata if available
     if session.processing_metadata:
@@ -2951,6 +2953,9 @@ async def download_transcript(
         for segment in session.transcript_diarized.get("segments", []):
             speaker = segment.get("speaker", "Unknown Speaker")
             text = segment.get("text", "")
+            if manual_content:
+                transcript += f"[{speaker}]: {text}\n\n"
+                continue
             timestamp = segment.get("start", 0)
             minutes = int(timestamp // 60)
             seconds = int(timestamp % 60)
@@ -3133,9 +3138,10 @@ async def download_transcript_simple(
         raise HTTPException(status_code=404, detail="Session not found")
     
     # Build simple transcript text
-    transcript = f"Recording: {session.name or session.title or 'Untitled'}\n"
+    manual_content = bool((session.processing_metadata or {}).get("manual_content"))
+    transcript = f"{'Manual content' if manual_content else 'Recording'}: {session.name or session.title or 'Untitled'}\n"
     transcript += f"Date: {session.created_at}\n"
-    transcript += f"Duration: {session.duration or 0} seconds\n"
+    transcript += ("Manually authored content; no audio or verified timing.\n" if manual_content else f"Duration: {session.duration or 0} seconds\n")
     
     if session.processing_metadata:
         transcript += f"Word Count: {session.processing_metadata.get('word_count', 'N/A')}\n"

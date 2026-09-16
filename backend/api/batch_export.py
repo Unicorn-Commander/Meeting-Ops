@@ -907,6 +907,8 @@ def _get_plain_transcript(session: RecordingSession) -> str:
 
 def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     """Export session to a professional PDF document using reportlab."""
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        options = options.model_copy(update={"includeTimestamps": False})
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.colors import HexColor
@@ -1101,7 +1103,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     if session.meeting_time:
         date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
     duration_secs = session.duration or 0
-    duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A"
+    duration_str = "Manually authored; no verified timing" if (getattr(session, "processing_metadata", None) or {}).get("manual_content") else (f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A")
     participants = summary_data["participants"]
     meta_table = Table(
         [[
@@ -1293,6 +1295,8 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
 
 def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     """Export session to a professional DOCX document using python-docx."""
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        options = options.model_copy(update={"includeTimestamps": False})
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1374,7 +1378,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     if session.meeting_time:
         date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
     duration_secs = session.duration or 0
-    duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A"
+    duration_str = "Manually authored; no verified timing" if (getattr(session, "processing_metadata", None) or {}).get("manual_content") else (f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A")
     participants = summary_data["participants"]
 
     meta_table = doc.add_table(rows=1, cols=4)
@@ -1547,6 +1551,8 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
 
 def export_to_txt(session: RecordingSession, options: ExportOptions) -> str:
     """Export session to plain text format"""
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        return f"Meeting: {session.name}\nManually authored content; no audio or verified timing.\n\n" + ("\n".join((f"{seg.get('speaker', '')}: " if options.includeSpeakers else "") + seg.get("text", "") for seg in _get_transcript_segments(session)) if options.includeTranscript else "")
     lines = []
     lines.append(f"Meeting: {session.name or 'Untitled'}")
     lines.append(f"Date: {session.created_at}")
@@ -1591,6 +1597,8 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
     parsing session.summary (JSON-stringified). Includes transcript only
     when options.includeTranscript is set.
     """
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        options = options.model_copy(update={"includeTimestamps": False})
     brand = _resolve_report_brand(session, options)
     title = session.title or session.name or "Untitled Meeting"
     duration_min = round((session.duration or 0) / 60, 1)
@@ -1611,7 +1619,7 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
     lines.append(f"# {title}")
     lines.append("")
     lines.append(f"**Date:** {created}  ")
-    lines.append(f"**Duration:** {duration_min} minutes")
+    lines.append("**Source:** Manually authored; no audio or verified timing" if (getattr(session, "processing_metadata", None) or {}).get("manual_content") else f"**Duration:** {duration_min} minutes")
     if session.description:
         lines.append(f"**Notes:** {session.description}")
     lines.append("")
@@ -1710,6 +1718,8 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
 
 def export_to_json(session: RecordingSession, options: ExportOptions) -> str:
     """Export session to JSON format"""
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        return json.dumps({"session_id": session.id, "name": session.name, "content_source": "manually_authored", "audio_available": False, "timing_verified": False, "transcript": [{k: v for k,v in seg.items() if k not in {"start", "end"} and (k != "speaker" or options.includeSpeakers)} for seg in _get_transcript_segments(session)] if options.includeTranscript else []}, ensure_ascii=False)
     data = {
         "session_id": session.id,
         "name": session.name,
@@ -1744,6 +1754,8 @@ def export_to_json(session: RecordingSession, options: ExportOptions) -> str:
 
 def export_to_srt(session: RecordingSession, options: ExportOptions) -> str:
     """Export session to SRT subtitle format"""
+    if (getattr(session, "processing_metadata", None) or {}).get("manual_content"):
+        raise HTTPException(409, "Manually authored content has no verified subtitle timing")
     lines = []
     counter = 1
     
