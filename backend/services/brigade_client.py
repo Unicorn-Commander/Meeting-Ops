@@ -45,6 +45,8 @@ from typing import Any, Optional
 
 import httpx
 
+from secret_config import get_secret
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,7 @@ def _api_key() -> Optional[str]:
     is set — that flips the client into log-only mode.
     """
     return (
-        os.getenv("BRIGADE_API_KEY")
+        get_secret("BRIGADE_API_KEY")
         or os.getenv("BRIGADE_ADMIN_KEY")
         or None
     )

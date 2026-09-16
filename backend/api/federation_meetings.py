@@ -52,6 +52,8 @@ from services.brigade_jwt_verifier import (
 )
 from services import contact_ops_resolver
 
+from secret_config import get_secret
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/federation", tags=["federation"])
@@ -494,7 +496,7 @@ def _cursor_signing_key() -> bytes:
 
     secret = (
         os.getenv("FEDERATION_CURSOR_SIGNING_SECRET")
-        or os.getenv("SECRET_KEY")
+        or get_secret("SECRET_KEY")
         or ""
     ).strip()
     if not secret:

@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import logging
 import os
+
 import shutil
 import uuid as _uuid
 from pathlib import Path
 from typing import BinaryIO, Optional
+
+from secret_config import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ LOCAL_ATTACH_ROOT = RECORDINGS_DIR / "attachments"
 
 GARAGE_ENDPOINT_URL = os.getenv("GARAGE_ENDPOINT_URL", "").strip()
 GARAGE_ACCESS_KEY = os.getenv("GARAGE_ACCESS_KEY", "").strip()
-GARAGE_SECRET_KEY = os.getenv("GARAGE_SECRET_KEY", "").strip()
+GARAGE_SECRET_KEY = get_secret("GARAGE_SECRET_KEY", "").strip()
 GARAGE_REGION = os.getenv("GARAGE_REGION", "garage").strip() or "garage"
 GARAGE_ATTACHMENTS_BUCKET = os.getenv(
     "GARAGE_ATTACHMENTS_BUCKET", "meeting-ops-attachments"

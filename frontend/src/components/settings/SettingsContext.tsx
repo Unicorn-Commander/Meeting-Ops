@@ -72,7 +72,7 @@ export const ALL_SECTIONS: SettingsSectionMeta[] = [
     id: 'notifications',
     title: 'Notifications',
     icon: Bell,
-    description: 'Meeting alerts and summary delivery',
+    description: 'Optional daily and weekly digest email',
     category: 'preferences',
   },
   {
@@ -340,7 +340,6 @@ export interface SectionProps {
 // IDs of sections that are placeholder shells — no Save button, no state.
 // SettingsEnhanced reads this to suppress the Save button row.
 export const PLACEHOLDER_SECTIONS = new Set<string>([
-  'notifications',
   'hotkeys',
   // 'privacy' persists its toggle immediately (localStorage) — no backend
   // Save row needed, so we list it here to suppress the Save button.

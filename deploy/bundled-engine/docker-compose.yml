@@ -1,0 +1,49 @@
+# Declarative appliance/OSS engine placement; no GPU reservation or published ports.
+# All implementation and image ownership remains in Unicorn-Amanuensis.
+services:
+  parakeet-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-svc:f253e62db40417fe6bccacf4b7d36ae20b084936
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HF_HOME: /models/hf
+      NEMO_CACHE_DIR: /models/nemo
+      TORCH_HOME: /models/torch
+  parakeet-stream-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-stream-svc:f253e62db40417fe6bccacf4b7d36ae20b084936
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HF_HOME: /models/hf
+      NEMO_CACHE_DIR: /models/nemo
+      TORCH_HOME: /models/torch
+  speaker-svc:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/speaker-svc:f253e62db40417fe6bccacf4b7d36ae20b084936
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    volumes: [amanuensis-models:/models]
+    environment:
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      SPEAKER_EMBEDDER_DEVICE: cpu
+      PYANNOTE_DIARIZER_DEVICE: cpu
+      SPEAKER_EAGER_LOAD_EMBEDDER: "false"
+      SPEAKER_EAGER_LOAD_DIARIZER: "false"
+  parakeet-openai-shim:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:f253e62db40417fe6bccacf4b7d36ae20b084936
+    profiles: [bundled-engine]
+    restart: "no"
+    networks: [amanuensis-local]
+    environment:
+      PARAKEET_URL: http://parakeet-svc:8881
+      SHIM_PORT: "8011"
+      METERED_REPORT_URL: ${METERED_REPORT_URL:-}
+      FEDERATION_KEY: ${FEDERATION_KEY:-}
+networks:
+  amanuensis-local: {}
+volumes:
+  amanuensis-models: {}

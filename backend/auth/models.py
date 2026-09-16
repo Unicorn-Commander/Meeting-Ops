@@ -5,6 +5,7 @@ from sqlalchemy import (
     Integer,
     String,
     Boolean,
+    false,
     DateTime,
     ForeignKey,
     JSON,
@@ -94,6 +95,10 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     
+    # Optional account-wide delivery preferences. Organization controls still win.
+    email_daily_digest = Column(Boolean, nullable=False, default=False, server_default=false())
+    email_weekly_digest = Column(Boolean, nullable=False, default=False, server_default=false())
+
     # Profile
     full_name = Column(String)
     avatar_url = Column(String)

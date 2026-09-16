@@ -4,6 +4,8 @@ from datetime import timedelta
 from typing import Optional
 from pydantic import BaseModel
 
+from secret_config import get_secret
+
 logger = logging.getLogger(__name__)
 
 # security-2: the JWT signing key MUST be a strong, deployment-specific secret.
@@ -26,7 +28,7 @@ _DEV_FALLBACK_SECRET = "dev-insecure-secret-key-do-not-use-outside-local-dev-012
 
 
 def _resolve_secret_key() -> str:
-    raw = os.getenv("SECRET_KEY", "") or ""
+    raw = get_secret("SECRET_KEY", "") or ""
     env = os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "")).strip().lower()
     relaxed = env in _RELAXED_ENVS
     weak = (not raw) or (raw in _PLACEHOLDER_SECRETS) or (len(raw) < 32)

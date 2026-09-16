@@ -56,10 +56,13 @@ def _postmark_sender() -> str:
     return email
 
 
-def _send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+def _send(to_email: str, subject: str, html_body: str, text_body: str,
+          *, raise_on_transport_error: bool = False) -> bool:
     """Send one transactional email via the Postmark HTTP API. Returns True
     on a 2xx from Postmark, False (logged) otherwise. Never raises — a
-    failed send is a logged warning, the caller proceeds."""
+    failed send is a logged warning, the caller proceeds. Digest delivery opts
+    into raise_on_transport_error to preserve its claim on ambiguous outcomes;
+    other callers retain the existing best-effort behavior."""
     token = _postmark_token()
     if not token:
         logger.warning(
@@ -91,6 +94,8 @@ def _send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
                     "MessageStream": stream,
                 },
             )
+        if raise_on_transport_error and resp.status_code >= 500:
+            raise RuntimeError("Email provider outcome unknown")
         if resp.status_code != 200:
             logger.warning(
                 "auth email: postmark non-200 (%s) sending %r to %s: %s",
@@ -100,6 +105,8 @@ def _send(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
         logger.info("Sent %r to %s via Postmark", subject, to_email)
         return True
     except Exception as exc:  # noqa: BLE001
+        if raise_on_transport_error:
+            raise
         logger.warning(
             "auth email: postmark send failed for %r to %s: %s",
             subject, to_email, exc,

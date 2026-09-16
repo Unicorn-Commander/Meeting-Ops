@@ -1,0 +1,6 @@
+# Opt-in cutover override. Requires Compose >=2.24.4. Aaron-approved window only.
+# Append to the LIVE compose chain; validate with deploy/cutover/amanuensis-images.sh.
+services:
+  parakeet-openai-shim:
+    image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:f253e62db40417fe6bccacf4b7d36ae20b084936
+    build: !reset null
