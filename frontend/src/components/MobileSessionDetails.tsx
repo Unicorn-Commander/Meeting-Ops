@@ -1,3 +1,4 @@
+import AuthoredSpeakerLabels from "./AuthoredSpeakerLabels";
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -1299,6 +1300,8 @@ function SpeakersTab({
   onSpeakerChanged: () => void;
   sessionIdStr: string;
 }) {
+  if (untimed) return <AuthoredSpeakerLabels speakers={speakers} />;
+
   if (speakers.length === 0) {
     return (
       <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-6 text-sm text-zinc-400 text-center">

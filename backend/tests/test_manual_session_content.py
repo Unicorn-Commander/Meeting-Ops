@@ -296,3 +296,18 @@ def test_structured_mixed_or_unbounded_labels_refused(fixture,labels):
         db.commit()
     assert client.get(path(row),headers=headers).status_code==409
     assert client.put(path(row),json=request,headers=headers).status_code==409
+
+
+def test_manual_public_detail_preserves_authored_order_and_absent_measurements(fixture):
+    client, _, _, row, headers = fixture
+    request = body(client, row, headers)
+    request['lines'] = [
+        {'speaker': 'Dana', 'text': 'First authored line.'},
+        {'speaker': 'Ben', 'text': 'Second authored line.'},
+        {'speaker': 'Dana', 'text': 'Third authored line.'},
+    ]
+    assert client.put(path(row), json=request, headers=headers).status_code == 200
+    detail = client.get(f'/api/simple/recording-sessions/{row.session_id}', headers=headers).json()
+    for segments in [detail['transcription_segments'], detail['transcription']['segments']]:
+        assert [segment['text'] for segment in segments] == [line['text'] for line in request['lines']]
+        assert all(segment['start'] is None and segment['end'] is None and segment['confidence'] is None for segment in segments)

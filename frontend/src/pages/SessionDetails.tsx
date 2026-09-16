@@ -1,3 +1,4 @@
+import AuthoredSpeakerLabels from "../components/AuthoredSpeakerLabels";
 import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -2934,7 +2935,10 @@ export const SessionDetails: React.FC = () => {
                 Combined meeting — open a part for audio and transcript.
               </div>
             )}
-            {activeTab === 'speakers' && !session.is_combined && (
+            {activeTab === 'speakers' && !session.is_combined && session.metadata?.manual_content && (
+              <AuthoredSpeakerLabels speakers={speakers} />
+            )}
+            {activeTab === 'speakers' && !session.is_combined && !session.metadata?.manual_content && (
               <div className="space-y-4">
                 <div className="rounded-lg border border-purple-200 bg-gradient-to-br from-purple-50 to-indigo-50 p-5">
                   <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
@@ -3004,12 +3008,12 @@ export const SessionDetails: React.FC = () => {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className={`text-sm font-semibold ${unnamedSpeakerCount > 0 ? 'text-amber-900' : 'text-gray-900'}`}>
-                      {unnamedSpeakerCount > 0
+                      {session.metadata?.manual_content ? `${speakers.length} authored speaker labels` : unnamedSpeakerCount > 0
                         ? `${unnamedSpeakerCount} speaker${unnamedSpeakerCount === 1 ? '' : 's'} still need a name`
                         : `${speakers.length} identified speaker${speakers.length === 1 ? '' : 's'}`}
                     </p>
                     <p className={`text-xs ${unnamedSpeakerCount > 0 ? 'text-amber-700' : 'text-gray-500'}`}>
-                      Click a speaker to hear samples and confirm who they are.
+                      {session.metadata?.manual_content ? 'Labels supplied by the editor; voice identities are not verified.' : 'Click a speaker to hear samples and confirm who they are.'}
                     </p>
                   </div>
                   <button
@@ -3017,7 +3021,7 @@ export const SessionDetails: React.FC = () => {
                     onClick={() => selectTab('speakers')}
                     className="rounded-md bg-purple-600 px-3 py-2 text-xs font-medium text-white hover:bg-purple-500"
                   >
-                    Review speakers
+                    {session.metadata?.manual_content ? 'View labels' : 'Review speakers'}
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -3231,7 +3235,7 @@ export const SessionDetails: React.FC = () => {
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Brain className="w-5 h-5 text-purple-600" />
-                  AI Summary
+                  {session.metadata?.manual_content ? 'Authored summary' : 'AI Summary'}
                   {session.metadata?.total_progressive_summaries && (
                     <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full">
                       {session.metadata.total_progressive_summaries} progressive updates
@@ -3901,7 +3905,7 @@ export const SessionDetails: React.FC = () => {
                             selectTab('speakers');
                           }}
                           className="rounded-full bg-purple-100 px-2.5 py-1 text-xs font-medium text-purple-700 hover:bg-purple-200"
-                          title="Open speaker samples and identity controls"
+                          title={session.metadata?.manual_content ? "View authored speaker labels" : "Open speaker samples and identity controls"}
                         >
                           {segment.speaker || 'Speaker'}
                         </button>
@@ -4513,7 +4517,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Processing Metadata */}
-            {session.metadata && (
+            {session.metadata && !session.metadata.manual_content && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Zap className="w-5 h-5 text-yellow-500" />
@@ -4723,7 +4727,7 @@ export const SessionDetails: React.FC = () => {
             )}
 
             {/* Processing Info */}
-            {session.transcription && (
+            {session.transcription && !session.metadata?.manual_content && (
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Processing Details</h3>
                 
