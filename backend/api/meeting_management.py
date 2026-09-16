@@ -152,9 +152,10 @@ async def export_session(
         # Get transcripts (legacy Transcription rows — many sessions instead
         # carry diarized JSON on the session row itself; both paths are
         # tolerated below).
+        manual_content = bool((session.processing_metadata or {}).get("manual_content"))
         transcripts = db.query(Transcription).filter(
             Transcription.session_id == session.id
-        ).order_by(Transcription.start_time).all()
+        ).order_by(Transcription.id if manual_content else Transcription.start_time).all()
 
         if format == "txt":
             content = f"Meeting: {session.name}\n"

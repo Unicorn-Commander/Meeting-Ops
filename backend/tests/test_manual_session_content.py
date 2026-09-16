@@ -311,3 +311,20 @@ def test_manual_public_detail_preserves_authored_order_and_absent_measurements(f
     for segments in [detail['transcription_segments'], detail['transcription']['segments']]:
         assert [segment['text'] for segment in segments] == [line['text'] for line in request['lines']]
         assert all(segment['start'] is None and segment['end'] is None and segment['confidence'] is None for segment in segments)
+
+    exported = client.get(f'/api/recording-sessions/{row.id}/export?format=json', headers=headers)
+    assert exported.status_code == 200
+    assert [segment['text'] for segment in exported.json()['transcript']] == [line['text'] for line in request['lines']]
+    text_export = client.get(f'/api/recording-sessions/{row.id}/export?format=txt', headers=headers)
+    assert text_export.status_code == 200
+    assert [text_export.text.index(line['text']) for line in request['lines']] == sorted(text_export.text.index(line['text']) for line in request['lines'])
+
+    # Exercise the actual direct-download fallback when its diarized projection is absent.
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+    with SessionLocal() as db:
+        db.get(RecordingSession, row.id).transcript_diarized = None
+        db.commit()
+    fallback = client.get(f'/api/simple/recording-sessions/{row.id}/download/transcript', headers=headers)
+    assert fallback.status_code == 200
+    assert [fallback.text.index(line['text']) for line in request['lines']] == sorted(fallback.text.index(line['text']) for line in request['lines'])
