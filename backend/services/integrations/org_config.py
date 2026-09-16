@@ -42,6 +42,8 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from secret_config import get_secret
+
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +203,7 @@ def resolve_brigade(
         )
 
     # Fall through to env defaults — preserves pre-v3.19 behavior.
-    env_key = os.getenv("BRIGADE_API_KEY") or os.getenv("BRIGADE_ADMIN_KEY")
+    env_key = get_secret("BRIGADE_API_KEY") or os.getenv("BRIGADE_ADMIN_KEY")
     env_url = os.getenv("BRIGADE_API_BASE_URL")
     env_tenancy = os.getenv("BRIGADE_TENANCY_MODE", "shared")
     env_shared_agent = os.getenv("BRIGADE_SHARED_AGENT_ID")

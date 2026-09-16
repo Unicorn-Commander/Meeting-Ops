@@ -14,10 +14,13 @@ import jwt
 import datetime
 import os
 
+from secret_config import get_secret
+
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 security = HTTPBearer()
 
-SECRET_KEY = os.getenv("SECRET_KEY", "")  # security-2: no hardcoded fallback
+SECRET_KEY = get_secret("SECRET_KEY", "")  # security-2: no hardcoded fallback
 ALGORITHM = "HS256"
 
 class LoginRequest(BaseModel):
