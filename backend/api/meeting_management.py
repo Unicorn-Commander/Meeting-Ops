@@ -146,6 +146,9 @@ async def export_session(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        if format == "srt" and (session.processing_metadata or {}).get("manual_content"):
+            raise HTTPException(409, "Manually authored content has no verified subtitle timing")
+
         # Get transcripts (legacy Transcription rows — many sessions instead
         # carry diarized JSON on the session row itself; both paths are
         # tolerated below).
@@ -156,7 +159,7 @@ async def export_session(
         if format == "txt":
             content = f"Meeting: {session.name}\n"
             content += f"Date: {session.created_at}\n"
-            content += f"Duration: {session.duration} seconds\n\n"
+            content += ("Manually authored content; no audio or verified timing.\n\n" if (session.processing_metadata or {}).get("manual_content") else f"Duration: {session.duration} seconds\n\n")
             content += "Transcript:\n"
             content += "-" * 50 + "\n"
 
@@ -190,7 +193,8 @@ async def export_session(
                     "id": session.id,
                     "name": session.name,
                     "date": session.created_at.isoformat() if session.created_at else None,
-                    "duration": session.duration
+                    "duration": None if (session.processing_metadata or {}).get("manual_content") else session.duration,
+                    **({"content_source": "manually_authored", "timing_verified": False} if (session.processing_metadata or {}).get("manual_content") else {})
                 },
                 "transcript": [
                     {

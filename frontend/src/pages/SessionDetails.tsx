@@ -161,6 +161,7 @@ interface Session {
   }>;
   ai_insights?: any;           // Legacy field
   metadata?: {                 // Processing metadata
+    manual_content?: { version: number; author_user_id: number; audio_available: boolean; timing_verified: boolean; inference_performed: boolean };
     word_count?: number;
     speaker_count?: number;
     npu_accelerated?: boolean;
@@ -1552,6 +1553,7 @@ export const SessionDetails: React.FC = () => {
   };
 
   const formatTime = (seconds: number) => {
+    if (session?.metadata?.manual_content?.timing_verified === false) return "Untimed";
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -2201,6 +2203,15 @@ export const SessionDetails: React.FC = () => {
 
   return (
     <>
+    {session.metadata?.manual_content?.version === 1 &&
+      session.metadata.manual_content.audio_available === false &&
+      session.metadata.manual_content.timing_verified === false &&
+      session.metadata.manual_content.inference_performed === false && (
+      <div role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+        Manually authored content. An editor supplied this transcript, summary, and action items; no audio,
+        verified timing, or AI inference is associated with this revision.
+      </div>
+    )}
     <MobileSessionDetails {...mobileProps} />
     <div className="hidden md:flex min-h-screen bg-gray-50 flex-col">
       {/* Header — sticky so title / project / primary actions stay
@@ -3741,7 +3752,7 @@ export const SessionDetails: React.FC = () => {
                   bars at the time-ranges where they spoke, click any bar
                   to seek the audio player. Renders only when we have a
                   duration and multiple speakers. */}
-              {speakers.length > 1 && (
+              {!session.metadata?.manual_content && speakers.length > 1 && (
                 <SpeakerTimeline
                   duration={session.duration || segments.reduce((m, s) => Math.max(m, s.end || 0), 0)}
                   segments={segments.map((s) => ({ start: s.start, end: s.end, speaker: s.speaker }))}
@@ -3760,7 +3771,7 @@ export const SessionDetails: React.FC = () => {
                   Derived inline from the visible transcript segments so the
                   numbers stay correct after rename/merge without waiting on
                   ai_insights regeneration. */}
-              {speakers.length > 0 && segments.length > 0 && (() => {
+              {!session.metadata?.manual_content && speakers.length > 0 && segments.length > 0 && (() => {
                 const palette = [
                   'bg-purple-500', 'bg-blue-500', 'bg-emerald-500',
                   'bg-amber-500', 'bg-rose-500', 'bg-indigo-500',
@@ -3810,7 +3821,7 @@ export const SessionDetails: React.FC = () => {
               })()}
 
               {/* Speaker filter chips — click to filter to one speaker */}
-              {speakers.length > 1 && (
+              {!session.metadata?.manual_content && speakers.length > 1 && (
                 <div className="flex flex-wrap gap-2 mb-3 flex-shrink-0">
                   <button
                     onClick={() => setSelectedSpeaker('all')}

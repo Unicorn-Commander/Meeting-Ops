@@ -609,6 +609,7 @@ export default function MobileSessionDetails(props: Props) {
 
         {tab === 'speakers' && (
           <SpeakersTab
+            untimed={Boolean(session?.metadata?.manual_content)}
             speakers={speakers}
             speakerMetrics={speakerMetrics}
             timelineDuration={timelineDuration}
@@ -1282,9 +1283,11 @@ function TranscriptTab({
 }
 
 function SpeakersTab({
+  untimed,
   speakers, speakerMetrics, timelineDuration, segments, currentTime, seekTo,
   speakerLinks, orgSpeakers, onSpeakerChanged, sessionIdStr,
 }: {
+  untimed: boolean;
   speakers: string[];
   speakerMetrics: Array<{ speaker: string; seconds: number; words: number; pct: number }>;
   timelineDuration: number;
@@ -1306,7 +1309,7 @@ function SpeakersTab({
 
   return (
     <div className="space-y-3">
-      <SectionCard title="Speaker metrics" icon={Users}>
+      {!untimed && <SectionCard title="Speaker metrics" icon={Users}>
         <div className="space-y-3">
           {speakerMetrics.map((r, idx) => {
             const mm = Math.floor(r.seconds / 60);
@@ -1331,9 +1334,9 @@ function SpeakersTab({
             );
           })}
         </div>
-      </SectionCard>
+      </SectionCard>}
 
-      {speakers.length > 1 && timelineDuration > 1 && (
+      {!untimed && speakers.length > 1 && timelineDuration > 1 && (
         <SectionCard title="Timeline" icon={Clock}>
           <SpeakerTimeline
             duration={timelineDuration}
