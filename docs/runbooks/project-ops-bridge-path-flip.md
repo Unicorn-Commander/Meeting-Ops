@@ -63,8 +63,13 @@ Set the flag back (or remove it) and restart:
 PROJECTOPS_WRITE_PATH: direct
 ```
 
-Rollback is safe because each path keeps its own idempotency stamp
-(`po_task_id` for direct, `po_triage_submitted_at` / `project_ops_link_state`
-for triage). Items already submitted to triage are skipped by the direct
-writer's `po_task_id` absence check and re-submitted to triage by the triage
-writer only when unstamped — no duplicate work in either direction.
+The direct writer skips existing task links, triage submission stamps, and
+items already managed by the proposal lifecycle. Pending or rejected proposals
+therefore remain in human review instead of becoming tasks during rollback.
+The triage writer also skips existing task links and submitted proposals.
+
+This flag rollback does not restore compatibility with Project-Ops L2/L2c:
+its human-only `/tasks` route rejects the direct machine token. Keep the
+triage path enabled after L2/L2c deploy, or coordinate a Project-Ops rollback
+before resuming fresh direct writes. Local replay tests do not prove the live
+Brigade grant, token exchange, or tenant routing; verify those before deploy.

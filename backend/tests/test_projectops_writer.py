@@ -1002,6 +1002,41 @@ def test_triage_skips_direct_bridged_items(client):
     assert result.skipped == 1  # the already-bridged item
 
 
+def test_write_path_rollback_does_not_bypass_triage_review(client, monkeypatch):
+    """Rolling back to direct must not turn pending proposals into tasks."""
+    from database.database import SessionLocal
+    from services.projectops_writer import write_action_items_to_projectops
+
+    _patch_federation_token(monkeypatch, returns="fed-rollback-token")
+    _, session_id = _seed(
+        workspace_id="ws-rollback",
+        org_settings={"projectops_default_project_number": "P-00055"},
+    )
+    stub = _FakeProjectOpsClient()
+    db = SessionLocal()
+    try:
+        monkeypatch.setenv("PROJECTOPS_WRITE_PATH", "triage")
+        proposed = _run(write_action_items_to_projectops(
+            db=db, session_pk=session_id, client=stub
+        ))
+        assert proposed.ok is True
+        assert len(stub.submitted) == 1
+        monkeypatch.setenv("PROJECTOPS_WRITE_PATH", "direct")
+        rolled_back = _run(write_action_items_to_projectops(
+            db=db, session_pk=session_id, client=stub
+        ))
+    finally:
+        db.close()
+
+    assert rolled_back.ok is True
+    assert rolled_back.created == 0
+    assert rolled_back.skipped == 3
+    assert stub.created == []
+    for item in _items_for_session(session_id):
+        assert item.project_ops_link_state == "proposed"
+        assert not (item.raw_payload or {}).get("po_task_id")
+
+
 # ---------------------------------------------------------------------------
 # 18-20. Triage federation token (workspace-bound, aud=project-ops)
 #

@@ -538,10 +538,16 @@ async def write_action_items_to_projectops(
             created = 0
             skipped = 0
             for item in action_items:
-                existing = (item.raw_payload or {}).get(STAMP_TASK_ID)
-                if existing:
-                    # Already bridged. Don't duplicate. Project-Ops owns task
-                    # status; local checkbox changes never update it.
+                payload = item.raw_payload or {}
+                if (
+                    payload.get(STAMP_TASK_ID)
+                    or payload.get(STAMP_TRIAGE_SUBMITTED_AT)
+                    or getattr(item, "project_ops_task_id", None)
+                    or getattr(item, "project_ops_link_state", "local_only")
+                    not in {"local_only", "sync_failed"}
+                ):
+                    # Preserve triage review and existing links on rollback:
+                    # a proposal has no po_task_id until human approval.
                     skipped += 1
                     continue
 
