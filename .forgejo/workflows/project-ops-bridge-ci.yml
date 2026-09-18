@@ -41,7 +41,9 @@ name: Project-Ops bridge CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -77,3 +79,17 @@ jobs:
           tests/test_projectops_token.py
           tests/test_projectops_client_token.py
           -q
+
+  caller-contracts:
+    name: Cutover rollback contracts (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate existing consumer contracts
+        run: |
+          python3 ci/test_amanuensis_cutover.py
+          bash -n ci/test_amanuensis_images.sh deploy/cutover/amanuensis-images.sh
+          git diff --check
