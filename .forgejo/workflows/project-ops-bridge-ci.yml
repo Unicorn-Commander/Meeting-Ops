@@ -1,0 +1,79 @@
+# Project-Ops bridge CI — Meeting-Ops PR #35 (task c281b70c) gate.
+#
+# This is the workflow the parked Meeting-Ops -> Project-Ops action-item
+# bridge PR was missing: `amanuensis-contract.yml` only covers the Amanuensis
+# image contract and never exercises `backend/services/projectops_writer.py`
+# (the code the bridge PR changes), so Astra has no green exact-head to merge.
+#
+# It runs the repository's existing pytest suite for the bridge surface only:
+#   * tests/test_projectops_writer.py    — the writer the PR modifies,
+#     including the new PROJECTOPS_WRITE_PATH direct/triage switch.
+#   * tests/test_projectops_token.py     — the federation token path the
+#     triage delegation depends on (Brigade-exchanged meeting-ops actor).
+#   * tests/test_projectops_client_token.py — the legacy client token source.
+#
+# These are the tests `python3 -m pytest tests/ -v` (Makefile / backend/CLAUDE.md)
+# selects for the touched code. The three files are hermetic: they inject a
+# fake ProjectOpsClient and use httpx.MockTransport, and conftest.py points
+# DATABASE_URL at a throwaway SQLite file — no Postgres, no Redis, no Qdrant,
+# no network. The writer test file supplies its own `client`/`_writer_schema`
+# fixtures ("use the database seam directly instead of booting optional NPU
+# routes") so the heavy NPU/STT import tree (torch, fastembed, librosa) is
+# never loaded.
+#
+# Runner facts this file is designed for (legacy1 docker-in-docker sandbox):
+#   * `runs-on: ubuntu-latest` — the only label the uc-forgejo-runner
+#     advertises (same label `amanuensis-contract.yml` uses). Do not rename.
+#   * Job containers have NO docker socket — this workflow runs plain
+#     setup-python + pip, never `docker`.
+#   * Never publish host ports (`5432:5432`-style pins are the known
+#     never-green failure). No `services:` block is needed at all because the
+#     bridge tests are SQLite-hermetic; nothing is reached over a port.
+#   * setup-python is required: the runner image's Python is 3.10 and the
+#     toolcache has no preinstalled interpreter (same as Email-Ops / UUDA CI).
+#
+# Dependency set is deliberately minimal + pinned to the versions the repo's
+# own requirements.txt pins, so the job stays wheel-only (no apt, no
+# source-build packages like pyaudio/netifaces) and fast. A new bridge
+# dependency should be added here deliberately, not pulled in transitively.
+
+name: Project-Ops bridge CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-tests:
+    name: Project-Ops bridge (pytest · hermetic)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-input \
+            "fastapi==0.115.14" \
+            "sqlalchemy==2.0.32" \
+            "httpx==0.28.1" \
+            "pydantic==2.11.0" \
+            "pytest==8.3.4" \
+            "pytest-asyncio==0.24.0"
+
+      - name: Unit tests (Project-Ops bridge)
+        run: >-
+          python3 -m pytest
+          tests/test_projectops_writer.py
+          tests/test_projectops_token.py
+          tests/test_projectops_client_token.py
+          -q
