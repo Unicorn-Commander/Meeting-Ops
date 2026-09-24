@@ -46,6 +46,18 @@ const SPEAKERS = [
     embedding_dim: 192,
     embedding_model: "speechbrain/spkrec-ecapa-voxceleb",
   },
+  {
+    id: 3,
+    organization_id: 1,
+    display_name: "Speaker 4E80",
+    sample_count: 1,
+    has_centroid: true,
+    auto_generated: true,
+  },
+];
+
+const CONTACTS = [
+  { person_id: "c-dana", display_name: "Jules Whitman", email: "dana@example.com", match_confidence: 0.9, match_basis: "name_prefix" },
 ];
 
 const LINKS_BEFORE = [
@@ -114,6 +126,13 @@ function installFetch(opts: { linksAfterUpdate?: unknown } = {}) {
         confirmed: !!body.confirmed,
         source: "manual",
       });
+    }
+    if (url.includes("/api/contact-ops/people/search")) {
+      return jsonResponse({ items: CONTACTS, ambiguous: false });
+    }
+    if (url.match(/\/speaker-links\/11\/enroll$/) && init?.method === "POST") {
+      const body = JSON.parse(init.body as string);
+      return jsonResponse({ ...LINKS_BEFORE[1], speaker_id: 9, speaker_name: body.display_name, confirmed: true, source: "manual" });
     }
     if (url.endsWith("/identify-speakers") && init?.method === "POST") {
       return jsonResponse({ session_id: 42, linked: 2, unmatched: 0, backend: "pyannote-3.1" });
@@ -226,13 +245,17 @@ describe("SpeakerTagger", () => {
     expect(screen.getByText(/Showing 1 of 2 voices/i)).toBeInTheDocument();
   });
 
-  it("PATCHes a manual confirmation when a user picks a speaker for an unmatched label", async () => {
+  it("PATCHes a manual confirmation when a user searches and picks a speaker", async () => {
     installFetch();
     await renderTagger();
 
     await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
-    const select = screen.getByLabelText(/Speaker for SPEAKER_01/i) as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Speaker for SPEAKER_01/i }));
+    const search = screen.getByRole("combobox", { name: /Search people for Speaker for SPEAKER_01/i });
+    fireEvent.change(search, { target: { value: "sha" } });
+    // Typing highlights the best match; Enter picks it.
+    expect(screen.getByRole("option", { name: /Shafen Khan/ })).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(search, { key: "Enter" });
 
     await waitFor(() => {
       const patchCall = fetchCalls.find(
@@ -242,8 +265,50 @@ describe("SpeakerTagger", () => {
       const body = JSON.parse(patchCall?.init?.body as string);
       expect(body.speaker_id).toBe(2);
       expect(body.confirmed).toBe(true);
+      expect(body.contact_id).toBeUndefined();
       const headers = new Headers(patchCall?.init?.headers as HeadersInit);
       expect(headers.get("X-MeetingOps-Org")).toBe("magic-unicorn");
+    });
+  });
+
+  it("hides unnamed voiceprints until the search matches them", async () => {
+    installFetch();
+    await renderTagger();
+
+    await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Speaker for SPEAKER_01/i }));
+    expect(screen.getByRole("option", { name: /Aaron Stransky/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Speaker 4E80/ })).toBeNull();
+
+    fireEvent.change(
+      screen.getByRole("combobox", { name: /Search people for Speaker for SPEAKER_01/i }),
+      { target: { value: "speaker 4e" } },
+    );
+    expect(screen.getByRole("option", { name: /Speaker 4E80/ })).toBeInTheDocument();
+    expect(screen.getByText(/Unnamed voiceprints/i)).toBeInTheDocument();
+  });
+
+  it("names a voice from a Contact-Ops contact and links it in one pick", async () => {
+    installFetch();
+    await renderTagger();
+
+    await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Speaker for SPEAKER_01/i }));
+    fireEvent.change(
+      screen.getByRole("combobox", { name: /Search people for Speaker for SPEAKER_01/i }),
+      { target: { value: "dana" } },
+    );
+    const contact = await screen.findByRole("option", { name: /Jules Whitman/ });
+    fireEvent.click(contact);
+
+    await waitFor(() => {
+      const post = fetchCalls.find(c => c.url.endsWith("/speaker-links/11/enroll") && c.init?.method === "POST");
+      expect(post).toBeTruthy();
+      expect(JSON.parse(post?.init?.body as string)).toEqual({
+        display_name: "Jules Whitman",
+        email: "dana@example.com",
+        contact_id: "c-dana",
+      });
     });
   });
 

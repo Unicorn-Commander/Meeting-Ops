@@ -146,23 +146,33 @@ describe("SpeakerTagger self-introduction suggestions", () => {
     vi.restoreAllMocks();
   });
 
-  it("prefills the enroll input from a self-intro suggestion and does not auto-submit", async () => {
+  it("offers a self-intro name as a suggestion and sends nothing until it is picked", async () => {
     await renderTagger();
 
     await waitFor(() => expect(screen.getByText("SPEAKER_01")).toBeInTheDocument());
 
-    // Open the inline enroll form for the unidentified speaker.
-    const select = screen.getByLabelText(/Speaker for SPEAKER_01/i) as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "__enroll__" } });
+    // Open the picker for the unidentified speaker.
+    fireEvent.click(screen.getByRole("button", { name: /Speaker for SPEAKER_01/i }));
 
-    // The enroll input is prefilled with the suggested name (not blank).
-    const input = (await screen.findByPlaceholderText("e.g. Aaron Stransky")) as HTMLInputElement;
-    expect(input.value).toBe("Sarah");
+    // The heard name is offered first, as a "create" suggestion.
+    const suggestion = await screen.findByRole("option", { name: /Create “Sarah”/ });
+    expect(suggestion).toBeInTheDocument();
+    expect(screen.getByText(/Heard in this meeting/i)).toBeInTheDocument();
 
-    // Suggestion-only: opening the form fired no enroll POST.
+    // Suggestion-only: opening the picker fired no enroll POST, and an
+    // empty-box Enter picks nothing.
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /Search people for Speaker for SPEAKER_01/i }), { key: "Enter" });
     const enrollPost = fetchCalls.find(
       c => c.url.includes("/enroll") && c.init?.method === "POST",
     );
     expect(enrollPost).toBeUndefined();
+
+    // Picking it enrolls under that name.
+    fireEvent.click(suggestion);
+    await waitFor(() => {
+      const post = fetchCalls.find(c => c.url.includes("/enroll") && c.init?.method === "POST");
+      expect(post).toBeDefined();
+      expect(JSON.parse(String(post!.init!.body)).display_name).toBe("Sarah");
+    });
   });
 });

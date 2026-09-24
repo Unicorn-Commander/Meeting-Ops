@@ -38,6 +38,7 @@ from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
 from database.database import get_db
 from database.models import (
+    ActionItem,
     RecordingSession,
     SpeakerProfile,
     SpeakerSessionLink,
@@ -179,6 +180,9 @@ class SpeakerLinkUpdate(BaseModel):
     # the speaker to the caller's account and folds the pooled session
     # embedding into their portable user_voice_profile.
     is_me: bool = False
+    # Contact-Ops person picked in the speaker picker for this profile; fills
+    # an empty contact link only (see _attach_picked_contact).
+    contact_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class SpeakerContactLinkUpdate(BaseModel):
@@ -371,6 +375,12 @@ def _can_edit_speaker_state(
     )
 
 
+# Quiet period after the LAST speaker pick before the LLM summary refresh runs.
+SPEAKER_SUMMARY_REFRESH_DEBOUNCE_SECONDS = float(
+    os.getenv("SPEAKER_SUMMARY_REFRESH_DEBOUNCE_SECONDS", "90")
+)
+
+
 async def _enqueue_summary_refresh(session: RecordingSession, db: Session) -> None:
     """Fire-and-forget summary refresh after a speaker rename/enroll.
 
@@ -388,6 +398,13 @@ async def _enqueue_summary_refresh(session: RecordingSession, db: Session) -> No
     match the stamp, and completed sessions still carry the STALE id from
     their original finalize. Without the stamp every refresh silently
     drift-skips (found live on session 510).
+
+    Debounced (2026-09-24): the names are already right in the transcript,
+    summary text and action-item owners the moment the user picks (see
+    _relabel_cluster), so the LLM pass only polishes. Each pick queues its
+    own job deferred by SPEAKER_SUMMARY_REFRESH_DEBOUNCE_SECONDS and stamps
+    it; the drift guard makes every earlier pending job skip. Naming five
+    voices, or fixing a mis-click, costs one LLM run instead of five.
     """
     try:
         if (session.status or "") != "completed":
@@ -399,6 +416,8 @@ async def _enqueue_summary_refresh(session: RecordingSession, db: Session) -> No
             session.id,
             owner_user_id=session.user_id,
             owner_org_id=session.organization_id,
+            defer_by_seconds=SPEAKER_SUMMARY_REFRESH_DEBOUNCE_SECONDS,
+            dedupe=False,
         )
         if job_id:
             session.processing_job_id = job_id
@@ -509,7 +528,7 @@ def _relabel_cluster(
 
     raw = (link.raw_label or "").strip()
     new_name = (new_name or "").strip()
-    counts = {"rows": 0, "segments": 0, "summary": False, "hash_reset": False}
+    counts = {"rows": 0, "segments": 0, "summary": False, "action_items": 0, "hash_reset": False}
     if not raw or not new_name:
         return counts
 
@@ -576,14 +595,126 @@ def _relabel_cluster(
     # 3) summary / insights prose.
     counts["summary"] = bool(olds) and _propagate_speaker_rename(session, sorted(olds), new_name)
 
+    # 3b) action items: the owner column (exact label) and the item text
+    # (word-bounded), so the named person shows up on the item right away
+    # instead of only after the debounced LLM refresh re-extracts them.
+    counts["action_items"] = _relabel_action_items(db, session, olds, new_name) if olds else 0
+
     # 4) make the queued refresh really re-run the LLM.
-    if counts["rows"] or counts["segments"] or counts["summary"]:
+    if counts["rows"] or counts["segments"] or counts["summary"] or counts["action_items"]:
         md = dict(session.processing_metadata or {})
         if md.pop("summary_input_hash", None) is not None:
             session.processing_metadata = md
             flag_modified(session, "processing_metadata")
             counts["hash_reset"] = True
     return counts
+
+
+def _relabel_action_items(
+    db: Session,
+    session: RecordingSession,
+    old_labels: set[str],
+    new_name: str,
+) -> int:
+    """Rename a speaker label on this session's action items. ``owner`` is
+    matched exactly (it holds just the label); ``text`` word-bounded, the
+    same rule as the summary prose. Returns the number of items changed;
+    caller commits."""
+    import re
+
+    olds = sorted({l for l in old_labels if l and l != new_name}, key=len, reverse=True)
+    if not olds or not new_name:
+        return 0
+    pattern = re.compile(r"\b(" + "|".join(re.escape(l) for l in olds) + r")\b")
+    changed = 0
+    items = db.query(ActionItem).filter(ActionItem.session_id == session.id).all()
+    for item in items:
+        touched = False
+        if (item.owner or "").strip() in olds:
+            item.owner = new_name
+            touched = True
+        if item.text:
+            new_text = pattern.sub(new_name, item.text)
+            if new_text != item.text:
+                item.text = new_text
+                touched = True
+        if touched:
+            changed += 1
+    return changed
+
+
+def _find_speaker_for_pick(
+    db: Session,
+    organization_id: int,
+    display_name: str,
+    contact_id: Optional[str],
+) -> Optional[SpeakerProfile]:
+    """The profile a picker choice should land on: the one already linked to
+    the picked Contact-Ops person, else the same-name profile (org+name is
+    unique)."""
+    contact_id = (contact_id or "").strip()
+    if contact_id:
+        by_contact = (
+            db.query(SpeakerProfile)
+            .filter(
+                SpeakerProfile.organization_id == organization_id,
+                SpeakerProfile.contact_id == contact_id,
+            )
+            .order_by(SpeakerProfile.contact_link_confirmed.desc(), SpeakerProfile.id.asc())
+            .first()
+        )
+        if by_contact is not None:
+            return by_contact
+    return (
+        db.query(SpeakerProfile)
+        .filter(
+            SpeakerProfile.organization_id == organization_id,
+            SpeakerProfile.display_name == display_name,
+        )
+        .first()
+    )
+
+
+def _attach_picked_contact(
+    speaker: SpeakerProfile,
+    contact_id: Optional[str],
+    current_user: User,
+) -> None:
+    """Link a profile to the Contact-Ops person the user picked in the
+    speaker picker. Only FILLS an empty link (or re-confirms the same one):
+    the picker is open to every speaker editor, so it never re-points a
+    profile that already belongs to a different contact — that stays an
+    admin action in the Speaker Library. 409 instead of a silent overwrite.
+    """
+    contact_id = (contact_id or "").strip()
+    if not contact_id:
+        return
+    current = (speaker.contact_id or "").strip()
+    if current and current != contact_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{speaker.display_name}' is already linked to a different contact. "
+                "Change it in the Speaker Library."
+            ),
+        )
+    if current == contact_id and speaker.contact_link_confirmed:
+        return
+    speaker.contact_id = contact_id
+    speaker.contact_link_confirmed = True
+    speaker.contact_link_confirmed_by_user_id = current_user.id
+    speaker.contact_link_confirmed_at = datetime.now(timezone.utc)
+
+
+def _stamp_session_contacts(session: RecordingSession, db: Session) -> None:
+    """Carry confirmed speaker->contact links onto this meeting's participants
+    (Customer-Ops finds meetings by participant contact_id). Never raises."""
+    try:
+        from services.speaker_service import stamp_confirmed_speaker_contacts
+
+        stamp_confirmed_speaker_contacts(session, db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("participant contact stamp failed session=%s: %s", session.id, exc)
 
 
 def _apply_is_me_claim(speaker: SpeakerProfile, current_user: User) -> None:
@@ -1097,7 +1228,43 @@ async def update_speaker_contact_link(
     speaker.contact_link_confirmed_at = datetime.now(timezone.utc) if speaker.contact_link_confirmed else None
     db.commit()
     db.refresh(speaker)
+    if speaker.contact_link_confirmed:
+        _backfill_speaker_contact(db, speaker)
     return _to_response(speaker)
+
+
+# Past meetings touched per contact-link confirm; the rest fill in on their
+# next finalize.
+_CONTACT_BACKFILL_MAX_SESSIONS = 500
+
+
+def _backfill_speaker_contact(db: Session, speaker: SpeakerProfile) -> int:
+    """After a profile is linked to a contact, stamp that contact onto the
+    participants of the past meetings this voice was identified in, so
+    Customer-Ops (which finds meetings by participant contact_id) sees them.
+    The per-session gates in stamp_confirmed_speaker_contacts still apply.
+    Best-effort; returns the number of sessions visited."""
+    session_ids = [
+        sid for (sid,) in (
+            db.query(SpeakerSessionLink.session_id)
+            .filter(
+                SpeakerSessionLink.speaker_id == speaker.id,
+                SpeakerSessionLink.organization_id == speaker.organization_id,
+            )
+            .distinct()
+            .limit(_CONTACT_BACKFILL_MAX_SESSIONS)
+            .all()
+        )
+    ]
+    for sid in session_ids:
+        session = db.query(RecordingSession).filter(RecordingSession.id == sid).first()
+        if session is not None:
+            _stamp_session_contacts(session, db)
+    logger.info(
+        "contact link backfill speaker=%s contact=%s sessions=%s",
+        speaker.id, speaker.contact_id, len(session_ids),
+    )
+    return len(session_ids)
 
 
 @router.delete("/api/speakers/{speaker_id}", status_code=204)
@@ -1455,6 +1622,7 @@ async def update_speaker_link(
             # v3.36.0 "My Voice": bind the profile to the caller (409 if it
             # already belongs to someone else).
             _apply_is_me_claim(speaker, current_user)
+        _attach_picked_contact(speaker, payload.contact_id, current_user)
         link.speaker_id = speaker.id
     else:
         link.speaker_id = None
@@ -1555,6 +1723,7 @@ async def update_speaker_link(
 
     db.commit()
     db.refresh(link)
+    _stamp_session_contacts(session, db)
     await _enqueue_summary_refresh(session, db)
     return _link_to_response(
         db, link, my_voice_folded=_fold_status_to_flag(fold_status)
@@ -1577,6 +1746,8 @@ class CreateSpeakerForLinkRequest(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=1000)
     # v3.36.0 "My Voice": see SpeakerLinkUpdate.is_me.
     is_me: bool = False
+    # See EnrollFromSessionRequest.contact_id.
+    contact_id: Optional[str] = Field(default=None, max_length=64)
 
 
 @router.post(
@@ -1641,13 +1812,8 @@ async def create_speaker_for_link(
     # workspace — a superuser naming a speaker on another workspace's
     # meeting (god-view) was silently enrolling the voiceprint into their
     # OWN workspace, where this session's identify can never see it.
-    speaker = (
-        db.query(SpeakerProfile)
-        .filter(
-            SpeakerProfile.organization_id == session.organization_id,
-            SpeakerProfile.display_name == payload.display_name,
-        )
-        .first()
+    speaker = _find_speaker_for_pick(
+        db, session.organization_id, payload.display_name, payload.contact_id
     )
     if speaker is None:
         speaker = SpeakerProfile(
@@ -1661,6 +1827,7 @@ async def create_speaker_for_link(
         )
         db.add(speaker)
         db.flush()
+    _attach_picked_contact(speaker, payload.contact_id, current_user)
 
     if payload.is_me:
         # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
@@ -1717,6 +1884,7 @@ async def create_speaker_for_link(
         speaker.display_name, speaker.id, session.id, link.raw_label,
         active_org.organization.id, current_user.id,
     )
+    _stamp_session_contacts(session, db)
     await _enqueue_summary_refresh(session, db)
     return _link_to_response(
         db, link, my_voice_folded=_fold_status_to_flag(fold_status)
@@ -1959,6 +2127,9 @@ class EnrollFromSessionRequest(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=1000)
     # v3.36.0 "My Voice": see SpeakerLinkUpdate.is_me.
     is_me: bool = False
+    # Contact-Ops person picked in the speaker picker. The profile carrying
+    # this contact is reused first; otherwise the new/reused profile gets it.
+    contact_id: Optional[str] = Field(default=None, max_length=64)
 
 
 
@@ -2221,13 +2392,8 @@ async def enroll_speaker_from_session(
     # Session-scoped enrollment: the voiceprint belongs to the workspace the
     # MEETING lives in (session.organization_id), not the caller's active
     # workspace — see the create_speaker_for_link comment (v3.34.0).
-    speaker = (
-        db.query(SpeakerProfile)
-        .filter(
-            SpeakerProfile.organization_id == session.organization_id,
-            SpeakerProfile.display_name == payload.display_name,
-        )
-        .first()
+    speaker = _find_speaker_for_pick(
+        db, session.organization_id, payload.display_name, payload.contact_id
     )
     created_new = False
     if not speaker:
@@ -2241,6 +2407,7 @@ async def enroll_speaker_from_session(
         db.add(speaker)
         db.flush()
         created_new = True
+    _attach_picked_contact(speaker, payload.contact_id, current_user)
 
     if payload.is_me:
         # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
@@ -2319,6 +2486,7 @@ async def enroll_speaker_from_session(
         "Enrolled speaker '%s' (id=%d, new=%s) from session %s cluster %s (turn %.1fs-%.1fs)",
         speaker.display_name, speaker.id, created_new, session.id, link.raw_label, seg_start, seg_end,
     )
+    _stamp_session_contacts(session, db)
     await _enqueue_summary_refresh(session, db)
     return _link_to_response(
         db, link, my_voice_folded=_fold_status_to_flag(fold_status)

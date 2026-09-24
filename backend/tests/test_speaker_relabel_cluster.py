@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from api.speakers import _cluster_current_labels, _relabel_cluster
-from database.models import RecordingSession, SpeakerProfile, SpeakerSessionLink, Transcription
+from database.models import ActionItem, RecordingSession, SpeakerProfile, SpeakerSessionLink, Transcription
 
 
 class _Q:
@@ -28,12 +28,15 @@ class _Q:
 
 
 class _FakeDB:
-    def __init__(self, rows, *, still_used=None, prev_profile=None):
+    def __init__(self, rows, *, still_used=None, prev_profile=None, items=None):
         self.rows, self.still_used, self.prev_profile = rows, still_used, prev_profile
+        self.items = list(items or [])
 
     def query(self, model):
         if model is Transcription:
             return _Q(all_=self.rows)
+        if model is ActionItem:
+            return _Q(all_=self.items)
         if model is SpeakerSessionLink:
             return _Q(first=self.still_used)
         if model is SpeakerProfile:
@@ -86,7 +89,7 @@ def test_session_934_shape_rows_segments_and_prose_all_renamed():
 
     counts = _relabel_cluster(db, session, link, olds, "Sam Janowczyk")
 
-    assert counts == {"rows": 3, "segments": 2, "summary": True, "hash_reset": True}
+    assert counts == {"rows": 3, "segments": 2, "summary": True, "action_items": 0, "hash_reset": True}
     assert [r.speaker for r in rows] == [
         "Aaron Stransky", "Sam Janowczyk", "Aaron Stransky", "Sam Janowczyk", "Sam Janowczyk",
     ]
@@ -106,7 +109,7 @@ def test_relabel_is_idempotent():
     olds = _cluster_current_labels(db, session, link, previous_speaker_id=198)
     _relabel_cluster(db, session, link, olds, "Sam Janowczyk")
     again = _relabel_cluster(db, session, link, _cluster_current_labels(db, session, link, 198), "Sam Janowczyk")
-    assert again == {"rows": 0, "segments": 0, "summary": False, "hash_reset": False}
+    assert again == {"rows": 0, "segments": 0, "summary": False, "action_items": 0, "hash_reset": False}
 
 
 def test_previous_profile_still_used_by_another_cluster_is_not_a_match_key():
@@ -145,3 +148,42 @@ def test_no_segments_falls_back_to_label_match_only():
     assert [r.speaker for r in rows] == [
         "Aaron Stransky", "Sam Janowczyk", "Aaron Stransky", "Sam Janowczyk", "Speaker 2",
     ]
+
+
+def _items(cluster_name="Speaker 3F97"):
+    mk = lambda text, owner: ActionItem(session_id=934, organization_id=1, text=text, owner=owner)
+    return [
+        mk(f"{cluster_name} to order the parts", cluster_name),
+        mk("Send the deck", "Aaron Stransky"),
+        mk("Follow up with SPEAKER_00 on pricing", None),
+        mk("Speaker 3F970 is a different handle", "Speaker 3F970"),
+    ]
+
+
+def test_action_item_owners_and_text_follow_the_new_name():
+    """Owners were only fixed by the LLM re-summary before; the instant
+    relabel now carries the name onto the items too (2026-09-24)."""
+    session, rows, link, items = _session(), _rows(), _link(), _items()
+    db = _FakeDB(rows, prev_profile=SpeakerProfile(id=198, display_name="Speaker 3F97"), items=items)
+
+    olds = _cluster_current_labels(db, session, link, previous_speaker_id=198)
+    counts = _relabel_cluster(db, session, link, olds, "Sam Janowczyk")
+
+    assert counts["action_items"] == 2
+    assert [(i.owner, i.text) for i in items] == [
+        ("Sam Janowczyk", "Sam Janowczyk to order the parts"),
+        ("Aaron Stransky", "Send the deck"),
+        (None, "Follow up with Sam Janowczyk on pricing"),
+        ("Speaker 3F970", "Speaker 3F970 is a different handle"),   # word-bounded: untouched
+    ]
+    assert "summary_input_hash" not in session.processing_metadata
+
+
+def test_action_items_alone_still_reset_the_summary_hash():
+    session = _session("Speaker 3F97")
+    session.final_summary, session.summary = None, None
+    session.transcript_diarized = None
+    link, items = _link(), _items()
+    db = _FakeDB([], items=items)
+    counts = _relabel_cluster(db, session, link, {"Speaker 3F97"}, "Sam Janowczyk")
+    assert counts["action_items"] == 1 and counts["hash_reset"] is True

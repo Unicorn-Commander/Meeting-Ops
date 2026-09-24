@@ -17,6 +17,9 @@ def _seed_session_with_link(
     contact_id: str | None,
     confirmed: bool,
     similarity: float,
+    link_source: str = "auto",
+    link_confirmed: bool = False,
+    participants: list | None = None,
 ):
     Organization, _, RecordingSession, SpeakerProfile, SpeakerSessionLink = _models()
     suffix = uuid.uuid4().hex[:8]
@@ -29,7 +32,7 @@ def _seed_session_with_link(
         name="Speaker contact stamp test",
         status="completed",
         organization_id=org.id,
-        participants=[],
+        participants=list(participants or []),
     )
     db.add(session)
     db.flush()
@@ -48,8 +51,8 @@ def _seed_session_with_link(
         raw_label="SPEAKER_00",
         speaker_id=speaker.id,
         similarity=similarity,
-        source="auto",
-        confirmed=False,
+        source=link_source,
+        confirmed=link_confirmed,
     )
     db.add(link)
     db.commit()
@@ -121,5 +124,57 @@ def test_unconfirmed_or_low_confidence_contact_is_suggestion_not_stamp(app):
         assert summary["stamped"] == 0
         assert low.participants == []
         assert low.processing_metadata["speaker_contact_suggestions"][0]["reason"] == "below_threshold"
+    finally:
+        db.close()
+
+
+def test_human_confirmed_link_stamps_even_below_the_similarity_bar(app):
+    """A person naming the voice in the speaker picker is the assertion; a
+    low voiceprint score (short or noisy clip) must not hold the contact
+    back from the meeting (2026-09-24)."""
+    _, SessionLocal, _, _, _ = _models()
+    from services.speaker_service import stamp_confirmed_speaker_contacts
+
+    db = SessionLocal()
+    try:
+        session = _seed_session_with_link(
+            db,
+            contact_id="0b8e7b3c-2f7a-4f55-9d2f-2b7b0c2c7a11",
+            confirmed=True,
+            similarity=0.41,
+            link_source="manual",
+            link_confirmed=True,
+        )
+        summary = stamp_confirmed_speaker_contacts(session, db, threshold=0.80)
+        db.refresh(session)
+        assert summary["stamped"] == 1
+        assert session.participants[0]["contact_id"] == "0b8e7b3c-2f7a-4f55-9d2f-2b7b0c2c7a11"
+    finally:
+        db.close()
+
+
+def test_existing_participant_gets_the_contact_instead_of_a_duplicate(app):
+    _, SessionLocal, _, _, _ = _models()
+    from services.speaker_service import stamp_confirmed_speaker_contacts
+
+    db = SessionLocal()
+    try:
+        session = _seed_session_with_link(
+            db,
+            contact_id="7d0f3a52-8a0e-4a53-a8d4-0d6a4d0c2f90",
+            confirmed=True,
+            similarity=0.95,
+            participants=[
+                {"id": "p1", "name": "devon collins", "email": None, "role": "attendee"},
+                {"id": "p2", "name": "Someone Else", "email": "else@example.com", "role": "attendee"},
+            ],
+        )
+        summary = stamp_confirmed_speaker_contacts(session, db, threshold=0.80)
+        db.refresh(session)
+        assert summary["stamped"] == 1
+        assert len(session.participants) == 2
+        assert session.participants[0]["contact_id"] == "7d0f3a52-8a0e-4a53-a8d4-0d6a4d0c2f90"
+        assert session.participants[0]["id"] == "p1"
+        assert "contact_id" not in session.participants[1]
     finally:
         db.close()

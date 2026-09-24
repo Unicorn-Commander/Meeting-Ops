@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Users, Check, X, RefreshCw, AlertCircle, Play, Search, CircleHelp } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { showToast } from './Toast';
+import { SpeakerCombobox, type PickerChoice, type PickerContact, type PickerSpeaker } from './SpeakerCombobox';
 
 interface SpeakerLink {
   id: number;
@@ -41,19 +42,15 @@ const toastVoiceFold = (folded: boolean | null | undefined): void => {
   }
 };
 
-interface SpeakerOption {
-  id: number;
-  display_name: string;
+interface SpeakerOption extends PickerSpeaker {
   has_centroid: boolean;
   sample_count: number;
-  /**
-   * Backend contract (v3.43.0 "persistent speaker identity"): true = an
-   * auto-created profile not yet named by a human (display_name is a stable
-   * machine handle like "Speaker 3F2A"). Flagged in the assign dropdown so
-   * the user can tell it apart from a confirmed person.
-   */
-  auto_generated?: boolean;
 }
+
+/** Names are rewritten in place the moment a voice is named; the LLM
+ *  summary pass waits for a quiet period after the LAST pick (backend
+ *  SPEAKER_SUMMARY_REFRESH_DEBOUNCE_SECONDS), so corrections are cheap. */
+const NAMED_TOAST = 'Name applied to the transcript, summary and action items. The summary gets a full refresh a couple of minutes after your last change.';
 
 interface SpeakerTaggerProps {
   sessionId: string;
@@ -92,13 +89,6 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
   const [redetectCount, setRedetectCount] = useState<number>(2);
   // null = auto-detect speaker count (no num_speakers hint); use threshold instead.
   const [redetectAuto, setRedetectAuto] = useState<boolean>(false);
-  // Per-link "Enroll new speaker" inline form state. When set, the
-  // matching link row swaps its dropdown for a name input + Save button
-  // that calls the enroll-from-session endpoint to create a
-  // SpeakerProfile + voice sample in one step.
-  const [enrollingLinkId, setEnrollingLinkId] = useState<number | null>(null);
-  const [enrollName, setEnrollName] = useState<string>("");
-  const [enrolling, setEnrolling] = useState(false);
   // "This is me" — when checked, the next assign/enroll also updates the
   // current user's personal voice fingerprint (is_me: true in the body).
   // Unchecked by default and reset after a successful send so labeling
@@ -226,74 +216,161 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
     setRedetecting(false);
   };
 
-  const enrollFromSession = async (link: SpeakerLink, displayName: string) => {
-    const name = displayName.trim();
-    if (!name) {
-      setError('Enter a name for this speaker.');
-      return;
-    }
-    setEnrolling(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${link.id}/enroll`,
-        {
-          method: 'POST',
-          headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_name: name, ...(isMe ? { is_me: true } : {}) }),
-        },
-      );
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        // Re-pull both lists: a new SpeakerProfile may have been created
-        // and the link is now confirmed against it.
-        await loadAll();
-        setEnrollingLinkId(null);
-        setEnrollName("");
-        toastVoiceFold(data?.my_voice_folded);
-        if (isMe) setIsMe(false);
-        showToast.info('Summary will update with the new name in about a minute.');
-      } else {
-        const txt = await res.text();
-        setError(`Enroll failed (HTTP ${res.status}): ${txt.slice(0, 160)}`);
-      }
-    } catch (e) {
-      setError('Network error during enrollment.');
-    }
-    setEnrolling(false);
+  const searchContacts = useCallback(async (q: string): Promise<PickerContact[]> => {
+    const res = await fetch(
+      `${config.apiBaseUrl}/api/contact-ops/people/search?q=${encodeURIComponent(q)}&limit=8`,
+      { headers: orgHeaders() },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data?.items) ? data.items : [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrganization?.slug]);
+
+  const applyUpdatedLink = (updated: SpeakerLink) => {
+    const next = links.map(l => (l.id === updated.id ? updated : l));
+    setLinks(next);
+    if (onChange) onChange(next);
+    toastVoiceFold(updated.my_voice_folded);
   };
 
-  const updateLink = async (link: SpeakerLink, speakerId: number | null) => {
+  const readError = async (res: Response, what: string) => {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = typeof body?.detail === 'string' ? body.detail : '';
+    } catch { /* not JSON */ }
+    return detail || `${what} failed (HTTP ${res.status}).`;
+  };
+
+  const updateLink = async (
+    link: SpeakerLink,
+    speakerId: number | null,
+    contactId?: string,
+  ): Promise<boolean> => {
     setPendingLinkId(link.id);
+    setError(null);
     // Only stamp the user's voiceprint when actually assigning a speaker
     // (not when clearing back to Unknown).
     const sendIsMe = isMe && speakerId !== null;
+    let ok = false;
     try {
       const res = await fetch(
         `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${link.id}`,
         {
           method: 'PATCH',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ speaker_id: speakerId, confirmed: true, ...(sendIsMe ? { is_me: true } : {}) }),
+          body: JSON.stringify({
+            speaker_id: speakerId,
+            confirmed: true,
+            ...(sendIsMe ? { is_me: true } : {}),
+            ...(contactId ? { contact_id: contactId } : {}),
+          }),
         },
       );
       if (res.ok) {
-        const updated: SpeakerLink = await res.json();
-        const next = links.map(l => (l.id === updated.id ? updated : l));
-        setLinks(next);
-        if (onChange) onChange(next);
-        toastVoiceFold(updated.my_voice_folded);
+        applyUpdatedLink(await res.json());
         if (sendIsMe) setIsMe(false);
-        if (speakerId !== null) {
-          showToast.info('Summary will update with the new name in about a minute.');
-        }
+        if (speakerId !== null) showToast.info(NAMED_TOAST);
+        ok = true;
       } else {
-        setError(`Failed to update label (HTTP ${res.status}).`);
+        setError(await readError(res, 'Updating the label'));
       }
-    } catch (e) {
+    } catch {
       setError('Network error updating speaker label.');
     }
     setPendingLinkId(null);
+    return ok;
+  };
+
+  /**
+   * Name a voice as a NEW (or same-name) speaker. Enroll first — it also
+   * saves a voice sample so the next meeting recognizes them — and fall
+   * back to a name-only profile when this voice has no clean audio turn
+   * (short clusters, transcript-only imports).
+   */
+  const nameVoice = async (
+    link: SpeakerLink,
+    person: { display_name: string; email?: string | null; contact_id?: string },
+  ): Promise<void> => {
+    const name = person.display_name.trim();
+    if (!name) return;
+    setPendingLinkId(link.id);
+    setError(null);
+    const body = {
+      display_name: name,
+      ...(person.email ? { email: person.email } : {}),
+      ...(person.contact_id ? { contact_id: person.contact_id } : {}),
+      ...(isMe ? { is_me: true } : {}),
+    };
+    const post = (path: string) => fetch(
+      `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${link.id}/${path}`,
+      {
+        method: 'POST',
+        headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    try {
+      let res = await post('enroll');
+      if (res.status === 400) {
+        // No usable audio for this voice: create a name-only profile. That
+        // endpoint only fills an unassigned voice, so clear it first.
+        if (link.speaker_id !== null && !(await updateLink(link, null))) {
+          setPendingLinkId(null);
+          return;
+        }
+        setPendingLinkId(link.id);
+        res = await post('create-speaker');
+      }
+      if (res.ok) {
+        applyUpdatedLink(await res.json());
+        if (isMe) setIsMe(false);
+        // A new profile may exist now; re-pull the people list.
+        await loadAll();
+        showToast.info(person.contact_id ? `Linked to ${name} in Contact-Ops. ${NAMED_TOAST}` : NAMED_TOAST);
+      } else {
+        setError(await readError(res, 'Naming the speaker'));
+      }
+    } catch {
+      setError('Network error naming the speaker.');
+    }
+    setPendingLinkId(null);
+  };
+
+  const onPick = async (link: SpeakerLink, choice: PickerChoice) => {
+    switch (choice.kind) {
+      case 'speaker':
+        if (choice.speaker.id !== link.speaker_id || !link.confirmed) {
+          await updateLink(link, choice.speaker.id);
+        }
+        return;
+      case 'clear':
+        await updateLink(link, null);
+        return;
+      case 'create':
+        await nameVoice(link, { display_name: choice.name });
+        return;
+      case 'contact': {
+        const { contact, speaker } = choice;
+        if (speaker) {
+          const needsLink = speaker.contact_id !== contact.person_id;
+          if (await updateLink(link, speaker.id, needsLink ? contact.person_id : undefined)) {
+            if (needsLink) {
+              await loadAll();
+              showToast.success(`${speaker.display_name} is now linked to their Contact-Ops contact.`);
+            }
+          }
+          return;
+        }
+        await nameVoice(link, {
+          display_name: contact.display_name,
+          email: contact.email,
+          contact_id: contact.person_id,
+        });
+        return;
+      }
+    }
   };
 
   const unidentifiedCount = links.filter(link => link.speaker_id === null).length;
@@ -489,7 +566,7 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
         <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-purple-900">
           <CircleHelp className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
           {unidentifiedCount > 0
-            ? 'Start with “Needs a name”: listen, then choose an existing person or enroll a new one. Nothing is changed until you select or save.'
+            ? 'Start with “Needs a name”: listen, then search for the person (or a Contact-Ops contact) and pick them. Nothing changes until you pick.'
             : 'Every detected voice has a name. Use “Needs review” to confirm suggested matches or “All voices” to revisit a label.'}
         </p>
       </div>
@@ -519,7 +596,6 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
         {visibleLinks.map(link => {
           const sim = link.similarity ?? null;
           const simBadge = sim !== null ? `${(sim * 100).toFixed(0)}%` : null;
-          const isEnrolling = enrollingLinkId === link.id;
           const representativeSamples = segments
             .filter((segment) => {
               const raw = (segment.raw_label || '').trim();
@@ -549,118 +625,38 @@ export const SpeakerTagger: React.FC<SpeakerTaggerProps> = ({
               <span className="font-mono text-xs text-gray-500 w-24 truncate" title={link.raw_label}>
                 {link.raw_label}
               </span>
-              {isEnrolling ? (
-                <>
-                  <div className="flex-1 flex flex-col gap-1">
-                    {/* Self-intro suggestions ("Hi, I'm John") parsed from
-                        this speaker's own lines. Clicking only prefills the
-                        name input — the user still presses Save, so nothing
-                        is auto-applied. */}
-                    {(link.name_suggestions?.length ?? 0) > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[11px] text-gray-500">Suggested:</span>
-                        {link.name_suggestions!.map((sugg, i) => (
-                          <button
-                            key={`${sugg.name}-${i}`}
-                            type="button"
-                            disabled={enrolling}
-                            title={sugg.evidence || `Heard them say: ${sugg.name}`}
-                            onClick={() => setEnrollName(sugg.name)}
-                            className="rounded-full border border-amber-400 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-                          >
-                            {sugg.name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <input
-                      type="text"
-                      value={enrollName}
-                      placeholder="e.g. Aaron Stransky"
-                      autoFocus
-                      onChange={(e) => setEnrollName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !enrolling) enrollFromSession(link, enrollName);
-                        if (e.key === 'Escape') { setEnrollingLinkId(null); setEnrollName(""); }
-                      }}
-                      disabled={enrolling}
-                      className="w-full rounded border border-purple-400 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    />
-                  </div>
-                  <button
-                    onClick={() => enrollFromSession(link, enrollName)}
-                    disabled={enrolling || !enrollName.trim()}
-                    className="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1 self-start"
-                    title="Create speaker profile + enroll voice from this clip"
-                  >
-                    {enrolling ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                    Save
-                  </button>
-                  <button
-                    onClick={() => { setEnrollingLinkId(null); setEnrollName(""); }}
-                    disabled={enrolling}
-                    className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50 self-start"
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <>
-                  <select
-                    aria-label={`Speaker for ${link.raw_label}`}
-                    value={link.speaker_id ?? ''}
-                    onChange={e => {
-                      const v = e.target.value;
-                      if (v === '__enroll__') {
-                        setEnrollingLinkId(link.id);
-                        // Prefill from a self-intro suggestion ("Hi, I'm
-                        // John") when one exists — the user still presses
-                        // Save (enrollFromSession), so nothing auto-applies.
-                        setEnrollName(link.name_suggestions?.[0]?.name ?? "");
-                        return;
-                      }
-                      updateLink(link, v ? Number(v) : null);
-                    }}
-                    disabled={pendingLinkId === link.id}
-                    className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm bg-white text-gray-900 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  >
-                    <option value="">— Unknown —</option>
-                    {speakers.map(s => (
-                      <option key={s.id} value={s.id}>
-                        {s.display_name}
-                        {s.auto_generated && ' (unconfirmed)'}
-                        {!s.has_centroid && ' (no enrollment)'}
-                      </option>
-                    ))}
-                    <option value="__enroll__">+ Enroll new speaker…</option>
-                  </select>
-                  {link.confirmed && (
-                    <span title="Manually confirmed" className="text-green-600">
-                      <Check className="w-4 h-4" />
-                    </span>
-                  )}
-                  {!link.confirmed && link.source === 'auto' && simBadge && (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700" title="Auto-matched confidence">
-                      {simBadge}
-                    </span>
-                  )}
-                  {!link.confirmed && link.source === 'auto' && !simBadge && link.speaker_id === null && (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="No matching profile was found">
-                      no match · needs a name
-                    </span>
-                  )}
-                </>
+              <SpeakerCombobox
+                label={`Speaker for ${link.raw_label}`}
+                speakers={speakers}
+                value={link.speaker_id}
+                suggestions={(link.name_suggestions || []).map(sugg => sugg.name)}
+                searchContacts={searchContacts}
+                onPick={choice => { void onPick(link, choice); }}
+                busy={pendingLinkId === link.id}
+              />
+              {link.confirmed && (
+                <span title="Manually confirmed" className="text-green-600">
+                  <Check className="w-4 h-4" />
+                </span>
+              )}
+              {!link.confirmed && link.source === 'auto' && simBadge && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700" title="Auto-matched confidence">
+                  {simBadge}
+                </span>
+              )}
+              {!link.confirmed && link.source === 'auto' && !simBadge && link.speaker_id === null && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="No matching profile was found">
+                  no match · needs a name
+                </span>
               )}
             </div>
-            {!isEnrolling && (
-              <p className={`mt-1.5 text-xs ${link.speaker_id === null ? 'text-amber-800' : link.confirmed ? 'text-green-700' : 'text-blue-700'}`}>
-                {link.speaker_id === null
-                  ? 'Unidentified voice — select a known person or choose “Enroll new speaker”.'
-                  : link.confirmed
-                    ? 'Confirmed identity.'
-                    : 'Suggested identity — confirm or correct it after listening.'}
-              </p>
-            )}
+            <p className={`mt-1.5 text-xs ${link.speaker_id === null ? 'text-amber-800' : link.confirmed ? 'text-green-700' : 'text-blue-700'}`}>
+              {link.speaker_id === null
+                ? 'Unidentified voice — search for the person, pick a Contact-Ops contact, or type a new name.'
+                : link.confirmed
+                  ? 'Confirmed identity.'
+                  : 'Suggested identity — confirm or correct it after listening.'}
+            </p>
             {onPlaySample && representativeSamples.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {representativeSamples.map((sample, index) => {

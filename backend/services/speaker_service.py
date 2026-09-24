@@ -781,6 +781,23 @@ def _segments_from_session(session: RecordingSession) -> list[dict]:
     return []
 
 
+def _participant_without_contact(participants: list, speaker) -> Optional[dict]:
+    """The participant entry that is this speaker but has no contact_id yet:
+    matched on email first, then on the exact name (case-insensitive)."""
+    email = (getattr(speaker, "email", None) or "").strip().lower()
+    name = (getattr(speaker, "display_name", None) or "").strip().lower()
+    open_entries = [p for p in participants if isinstance(p, dict) and not p.get("contact_id")]
+    if email:
+        for p in open_entries:
+            if (p.get("email") or "").strip().lower() == email:
+                return p
+    if name:
+        for p in open_entries:
+            if (p.get("name") or "").strip().lower() == name:
+                return p
+    return None
+
+
 def stamp_confirmed_speaker_contacts(
     session: RecordingSession,
     db: Session,
@@ -791,9 +808,14 @@ def stamp_confirmed_speaker_contacts(
 
     A speaker match becomes an asserted meeting participant only when all three
     gates pass: the session link has a speaker_id, the link similarity is at or
-    above the high threshold, and the SpeakerProfile has a confirmed
-    Contact-Ops contact_id. Everything else is recorded as a suggestion in
+    above the high threshold (or a person confirmed the link by hand), and the
+    SpeakerProfile has a confirmed Contact-Ops contact_id. Everything else is
+    recorded as a suggestion in
     session.processing_metadata["speaker_contact_suggestions"]. Never raises.
+
+    An existing participant entry for the same person (same email, else same
+    name) that has no contact_id yet gets the contact_id stamped onto it
+    instead of a second entry being appended.
     """
     summary = {"stamped": 0, "suggested": 0, "threshold": threshold}
     try:
@@ -822,7 +844,9 @@ def stamp_confirmed_speaker_contacts(
             contact_id = (speaker.contact_id or "").strip()
             similarity = float(link.similarity or 0.0)
             confirmed_contact = bool(speaker.contact_link_confirmed and contact_id)
-            high_confidence = similarity >= threshold
+            # A human naming the voice outranks any similarity score.
+            human_confirmed = bool(link.confirmed and (link.source or "") == "manual")
+            high_confidence = similarity >= threshold or human_confirmed
 
             suggestion = {
                 "speaker_id": speaker.id,
@@ -835,6 +859,13 @@ def stamp_confirmed_speaker_contacts(
 
             if confirmed_contact and high_confidence:
                 if contact_id not in existing_contact_ids:
+                    twin = _participant_without_contact(participants, speaker)
+                    if twin is not None:
+                        twin["contact_id"] = contact_id
+                        existing_contact_ids.add(contact_id)
+                        summary["stamped"] += 1
+                        changed = True
+                        continue
                     participants.append({
                         "id": str(uuid.uuid4()),
                         "name": speaker.display_name,

@@ -369,3 +369,29 @@ def test_jobs_endpoint_rejects_cross_org_owner(client):
 
     assert response.status_code == 404
     status_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_debounced_enqueue_defers_and_never_reuses_a_job():
+    """The speaker-rename summary refresh: every call is its own deferred
+    job (the finalize drift guard skips all but the newest)."""
+    from services import job_runner
+
+    jobs = [MagicMock(job_id="arq-d-1"), MagicMock(job_id="arq-d-2")]
+    mock_pool = AsyncMock()
+    mock_pool.enqueue_job = AsyncMock(side_effect=jobs)
+
+    with patch.object(job_runner, "get_arq_pool", AsyncMock(return_value=mock_pool)):
+        first = await job_runner.enqueue_job(
+            "finalize_session_job", 42, owner_user_id=1, owner_org_id=1,
+            defer_by_seconds=90, dedupe=False,
+        )
+        second = await job_runner.enqueue_job(
+            "finalize_session_job", 42, owner_user_id=1, owner_org_id=1,
+            defer_by_seconds=90, dedupe=False,
+        )
+
+    assert (first, second) == ("arq-d-1", "arq-d-2")
+    assert mock_pool.enqueue_job.await_count == 2
+    for call in mock_pool.enqueue_job.await_args_list:
+        assert call.kwargs["_defer_by"] == 90.0

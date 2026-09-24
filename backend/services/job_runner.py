@@ -86,6 +86,8 @@ async def enqueue_job(
     owner_user_id: int | None = None,
     owner_org_id: int | None = None,
     request_id: str | None = None,
+    defer_by_seconds: float | None = None,
+    dedupe: bool = True,
     **kwargs: Any,
 ) -> str:
     """Enqueue an arq job by registered function name.
@@ -94,10 +96,15 @@ async def enqueue_job(
     `(function_name, args, kwargs)` returns the previously-enqueued
     job_id instead of creating a new arq job. Outside the window, or
     when the arq pool errors, we fall through to a fresh enqueue.
+
+    ``defer_by_seconds`` delays the run; ``dedupe=False`` skips the window
+    so every call gets its own job. Together they make a debounce for a
+    job with its own drift guard (the speaker-rename summary refresh):
+    each call stamps the newest job id, and older deferred jobs skip.
     """
     _gc_idempotency_cache()
     key = _hash_args(function_name, args, kwargs)
-    existing = _idempotency_cache.get(key)
+    existing = _idempotency_cache.get(key) if dedupe else None
     if existing:
         existing_job_id, _expires = existing
         logger.info(
@@ -114,6 +121,8 @@ async def enqueue_job(
         worker_kwargs["request_id"] = request_id
 
     pool = await get_arq_pool()
+    if defer_by_seconds:
+        worker_kwargs["_defer_by"] = float(defer_by_seconds)
     job = await pool.enqueue_job(
         function_name,
         *args,
@@ -128,7 +137,8 @@ async def enqueue_job(
             f"arq.enqueue_job returned None for fn={function_name}"
         )
 
-    _idempotency_cache[key] = (job.job_id, time.time() + _IDEMPOTENCY_WINDOW_SECONDS)
+    if dedupe:
+        _idempotency_cache[key] = (job.job_id, time.time() + _IDEMPOTENCY_WINDOW_SECONDS)
     if owner_user_id is None or owner_org_id is None:
         logger.warning("job_runner: job %s enqueued without ownership stamp", job.job_id)
     else:

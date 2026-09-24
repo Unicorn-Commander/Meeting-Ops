@@ -1,10 +1,13 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Edit2, Check, RefreshCw, GitMerge, X, User } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
 import { showToast } from './Toast';
 import { showConfirm } from '../utils/notifications';
+import { SpeakerCombobox, type PickerChoice, type PickerContact, type PickerSpeaker } from './SpeakerCombobox';
+
+const NAMED_TOAST = 'Name applied to the transcript, summary and action items. The summary gets a full refresh a couple of minutes after your last change.';
 
 /**
  * Honest "my voice fingerprint" toast keyed off the backend's
@@ -31,9 +34,7 @@ interface SpeakerLink {
   speaker_display?: string | null;
 }
 
-interface SpeakerOption {
-  id: number;
-  display_name: string;
+interface SpeakerOption extends PickerSpeaker {
   has_centroid: boolean;
 }
 
@@ -60,8 +61,9 @@ interface Props {
  *    sample, relabel the cluster. Powered by the
  *    /sessions/{id}/speaker-links/{link_id}/enroll endpoint.
  *
- *  - Assign to existing speaker: pick from the org's SpeakerProfiles
- *    via PATCH /speaker-links/{id}.
+ *  - Who is this?: the search-first SpeakerCombobox over the org's
+ *    SpeakerProfiles and Contact-Ops people (PATCH /speaker-links/{id},
+ *    or enroll with contact_id for a new person).
  *
  *  - Merge into another cluster: pick another cluster present in this
  *    session via POST /speaker-links/merge. Useful when pyannote
@@ -186,27 +188,47 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode]);
 
-  const handleEnroll = async () => {
+  const searchContacts = useCallback(async (q: string): Promise<PickerContact[]> => {
+    const res = await fetch(
+      `${config.apiBaseUrl}/api/contact-ops/people/search?q=${encodeURIComponent(q)}&limit=8`,
+      { headers: orgHeaders() },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data?.items) ? data.items : [];
+  }, [activeOrganization?.slug]);
+
+  const handleEnroll = async (
+    typedName: string = draftName,
+    extra: { email?: string | null; contact_id?: string } = {},
+  ) => {
     if (!ownLink) {
       setError('Could not find the speaker link for this segment.');
       return;
     }
-    const name = draftName.trim();
+    const name = typedName.trim();
     if (!name) {
       setError('Enter a name first.');
       return;
     }
     setBusy(true);
     setError(null);
+    const body = JSON.stringify({
+      display_name: name,
+      ...(extra.email ? { email: extra.email } : {}),
+      ...(extra.contact_id ? { contact_id: extra.contact_id } : {}),
+      ...(isMe ? { is_me: true } : {}),
+    });
+    const post = (path: string) => fetch(
+      `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${ownLink.id}/${path}`,
+      { method: 'POST', headers: { ...orgHeaders(), 'Content-Type': 'application/json' }, body },
+    );
     try {
-      const res = await fetch(
-        `${config.apiBaseUrl}/api/sessions/${sessionId}/speaker-links/${ownLink.id}/enroll`,
-        {
-          method: 'POST',
-          headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_name: name, ...(isMe ? { is_me: true } : {}) }),
-        },
-      );
+      let res = await post('enroll');
+      if (res.status === 400 && ownLink.speaker_id === null) {
+        // No usable audio turn for this voice: name-only profile instead.
+        res = await post('create-speaker');
+      }
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         setOpen(false);
@@ -214,7 +236,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         setDraftName('');
         toastVoiceFold(data?.my_voice_folded);
         if (isMe) setIsMe(false);
-        showToast.info('Summary will update with the new name in about a minute.');
+        showToast.info(extra.contact_id ? `Linked to ${name} in Contact-Ops. ${NAMED_TOAST}` : NAMED_TOAST);
         onChanged();
       } else {
         const txt = await res.text();
@@ -226,7 +248,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
     setBusy(false);
   };
 
-  const handleAssign = async (speakerId: number) => {
+  const handleAssign = async (speakerId: number | null, contactId?: string) => {
     if (!ownLink) return;
     setBusy(true);
     setError(null);
@@ -236,7 +258,12 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         {
           method: 'PATCH',
           headers: { ...orgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ speaker_id: speakerId, confirmed: true, ...(isMe ? { is_me: true } : {}) }),
+          body: JSON.stringify({
+            speaker_id: speakerId,
+            confirmed: true,
+            ...(isMe && speakerId !== null ? { is_me: true } : {}),
+            ...(contactId ? { contact_id: contactId } : {}),
+          }),
         },
       );
       if (res.ok) {
@@ -244,15 +271,44 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
         setOpen(false);
         toastVoiceFold(data?.my_voice_folded);
         if (isMe) setIsMe(false);
-        showToast.info('Summary will update with the new name in about a minute.');
+        if (speakerId !== null) showToast.info(NAMED_TOAST);
         onChanged();
       } else {
-        setError(`Assign failed (${res.status}).`);
+        let detail = '';
+        try { detail = (await res.json())?.detail || ''; } catch { /* not JSON */ }
+        setError(typeof detail === 'string' && detail ? detail : `Assign failed (${res.status}).`);
       }
     } catch (e) {
       setError('Network error.');
     }
     setBusy(false);
+  };
+
+  const handlePick = async (choice: PickerChoice) => {
+    switch (choice.kind) {
+      case 'speaker':
+        await handleAssign(choice.speaker.id);
+        return;
+      case 'create':
+        await handleEnroll(choice.name);
+        return;
+      case 'contact':
+        if (choice.speaker) {
+          await handleAssign(
+            choice.speaker.id,
+            choice.speaker.contact_id !== choice.contact.person_id ? choice.contact.person_id : undefined,
+          );
+        } else {
+          await handleEnroll(choice.contact.display_name, {
+            email: choice.contact.email,
+            contact_id: choice.contact.person_id,
+          });
+        }
+        return;
+      case 'clear':
+        await handleAssign(null);
+        return;
+    }
   };
 
   const handleMerge = async (targetLinkId: number) => {
@@ -413,28 +469,21 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
                 <span>This is me — also update my personal voice fingerprint</span>
               </label>
 
-              {speakers.length > 0 && (
-                <div className="pt-1 pb-0.5">
-                  <p className="px-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
-                    Assign to existing
-                  </p>
-                  <div className="max-h-32 overflow-y-auto">
-                    {speakers.map((s) => (
-                      <button
-                        key={s.id}
-                        disabled={busy}
-                        onClick={() => handleAssign(s.id)}
-                        className="w-full text-left px-2 py-1 rounded text-sm hover:bg-purple-50 text-gray-700 hover:text-purple-700 truncate"
-                      >
-                        {s.display_name}
-                        {!s.has_centroid && (
-                          <span className="ml-1 text-[10px] text-gray-400">(no voice sample yet)</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <div className="pt-1 pb-0.5">
+                <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                  Who is this?
+                </p>
+                <SpeakerCombobox
+                  inline
+                  label={`Speaker for ${speaker}`}
+                  speakers={speakers}
+                  value={ownLink?.speaker_id ?? null}
+                  searchContacts={searchContacts}
+                  onPick={choice => { void handlePick(choice); }}
+                  busy={busy}
+                  idleLimit={5}
+                />
+              </div>
 
               {otherLinks.length > 0 && (
                 <div className="pt-1 pb-0.5 border-t border-gray-100">
@@ -497,7 +546,7 @@ export const SpeakerLabelEditor: React.FC<Props> = ({
                   Back
                 </button>
                 <button
-                  onClick={handleEnroll}
+                  onClick={() => handleEnroll()}
                   disabled={busy || !draftName.trim()}
                   className="inline-flex items-center gap-1 rounded bg-purple-600 px-3 py-1 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
                 >
