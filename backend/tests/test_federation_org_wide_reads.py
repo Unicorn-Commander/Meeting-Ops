@@ -145,3 +145,15 @@ def test_participants_only_org_refuses_org_wide_reads(seeded):
 def test_tools_are_listed():
     names = {t["name"] for t in fm._TOOL_SCHEMAS}
     assert fm.ORG_WIDE_TOOLS <= names
+
+
+def test_an_email_typed_as_a_name_does_not_leave(seeded):
+    from database.models import RecordingSession
+
+    s = RecordingSession(organization_id=seeded["org"], title="x", name="x", mode="upload",
+                         participants=[{"name": "someone@example.com", "contact_id": None},
+                                       {"name": "  Real Name "}])
+    assert fm._participants_public(s) == [
+        {"contact_id": None, "display_name": None},
+        {"contact_id": None, "display_name": "Real Name"},
+    ]

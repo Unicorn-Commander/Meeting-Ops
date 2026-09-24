@@ -204,10 +204,15 @@ def _participants_public(session: RecordingSession) -> list[dict]:
     for p in raw:
         if not isinstance(p, dict):
             continue
+        name = p.get("name")
+        # A roster entry typed as an address puts the email in ``name``;
+        # that must not ride out as a display name.
+        if not isinstance(name, str) or "@" in name or not name.strip():
+            name = None
         out.append(
             {
                 "contact_id": p.get("contact_id") or None,
-                "display_name": p.get("name") or None,
+                "display_name": name.strip() if name else None,
             }
         )
     return out
