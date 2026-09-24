@@ -1,6 +1,24 @@
 ## [Unreleased]
 
 ### Fixed
+- **Parakeet no longer drops the only line in a long, mostly silent recording.** Parakeet
+  TDT 1.1B returned NOTHING for a 116 s call holding one 2 s line ("Rook, say ready,
+  please"); the same line in a 30 s window came back exact, and 60 s windows already
+  garbled it. `LocalParakeetProvider` now re-runs a pass that succeeded but came back empty
+  (on a file longer than one window) in ~30 s windows cut at the quietest 100 ms near each
+  boundary, skips windows of digital silence, and shifts segment and word timestamps back
+  onto the whole file. The retry only counts when some line carries 3+ words, because music
+  and clicks still yield one- and two-word fragments ("four", "mhm"). A service error is
+  never retried. Knobs: `PARAKEET_SPARSE_RETRY` (on), `PARAKEET_SPARSE_WINDOW_SECONDS` (30),
+  `PARAKEET_SPARSE_MIN_WORDS` (3). Tests: `backend/tests/test_parakeet_sparse_retry.py`.
+- **A failed upload fails its session at once, with the real reason.** Only the upload job
+  was marked failed; the session sat at "processing" until the 6-hour watchdog flipped it
+  with a generic "stuck-processing" reason (34 of 45 no-speech Stable uploads, measured).
+  The pipeline now writes `status=failed` plus `processing_metadata.upload_error` /
+  `no_speech` the moment it fails (never for an `attach` target), and an empty pass raises
+  `NoSpeechDetected` ("No speech detected in this recording.") instead of the generic
+  "Transcription produced no segments.". The session page shows "No speech detected" or
+  the real error. Tests: `backend/tests/test_upload_session_failure_state.py`.
 - **MCP tools now read the response shapes the REST API actually returns.** The tool
   layer renders backend JSON, so endpoint envelopes are a contract, and three had
   drifted out from under it. `list_meetings` read a `sessions` key on a payload that

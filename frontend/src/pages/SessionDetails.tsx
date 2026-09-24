@@ -177,6 +177,11 @@ interface Session {
     // null/undefined for sessions before this feature OR for privacy-mode
     // sessions that never uploaded audio.
     reprocess_status?: 'queued' | 'in_progress' | 'complete' | 'failed' | 'skipped' | null;
+    // Upload pipeline failure, written the moment the pipeline fails
+    // (2026-09-24; before, the session sat at "processing" for hours).
+    upload_error?: string;
+    no_speech?: boolean;
+    upload_failed_at?: string;
     full_audio?: {
       status?: string;
       started_at?: string;
@@ -3059,6 +3064,20 @@ export const SessionDetails: React.FC = () => {
                     Running higher-accuracy transcription, diarization, speaker matching,
                     and final summary. The transcript and summary on this page will refresh
                     when complete.
+                  </p>
+                </div>
+              </div>
+            )}
+            {session.status === 'failed' && session.metadata?.upload_error && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-amber-900">
+                    {session.metadata?.no_speech ? 'No speech detected' : 'Transcription failed'}
+                  </h3>
+                  <p className="text-sm text-amber-800 mt-1">
+                    {session.metadata?.no_speech
+                      ? 'The recording was processed but holds nothing to transcribe (silence, noise or music).'
+                      : session.metadata.upload_error}
                   </p>
                 </div>
               </div>
