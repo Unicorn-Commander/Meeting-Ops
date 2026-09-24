@@ -2117,8 +2117,11 @@ export const SessionDetails: React.FC = () => {
   // Still working: live processing (or server reprocess) with nothing yet.
   const showProcessingEmpty = isEmptyRecord && session.status === 'processing';
   // Never finalized: not completed, not processing, and nothing captured.
+  // Not when the upload pipeline recorded why it failed (e.g. no speech):
+  // the audio DID reach the server, and that banner already says so.
   const showUnfinalizedEmpty =
-    isEmptyRecord && !isProcessing && session.status !== 'completed';
+    isEmptyRecord && !isProcessing && session.status !== 'completed' &&
+    !session.metadata?.upload_error;
 
   const audioSrc = session.audio_file
     ? getOrgQueryUrl(`${config.apiUrl}/api/simple/recording-sessions/${session.id || sessionId}/download/audio`)
