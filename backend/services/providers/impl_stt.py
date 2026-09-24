@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
+import wave
 from typing import Any, Optional
 
 import httpx
@@ -229,6 +231,110 @@ class LocalWhisperProvider:
         }
 
 
+# --- Parakeet sparse-speech retry (2026-09-24) ------------------------------
+#
+# Parakeet TDT 1.1B returns NOTHING for a long file that is mostly silence.
+# Measured on a 116 s Stable call holding one 2 s line ("Rook, say ready,
+# please"): whole file -> "", 60 s windows -> "rock say what he please", 30 s
+# windows -> "rook say ready please" (0.97). So an empty pass on a file longer
+# than one window is re-run in ~30 s windows cut at quiet points.
+#
+# Gate: Parakeet does not invent sentences on noise the way Whisper does, but
+# music and clicks still produce one- and two-word fragments ("four", "mhm").
+# The retry only counts when some line carries PARAKEET_SPARSE_MIN_WORDS (3)
+# or more words; otherwise the empty pass stands. PARAKEET_SPARSE_RETRY=0
+# switches it off.
+
+#: Peak below which a window is digital silence (about -60 dBFS for int16).
+_SILENCE_PEAK = 33
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _sparse_retry_enabled() -> bool:
+    return os.getenv("PARAKEET_SPARSE_RETRY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _read_pcm16_mono(path: str):
+    """A 16-bit PCM WAV as ``(int16 mono samples, rate)``; None for anything else."""
+    import numpy as np
+
+    try:
+        with wave.open(path, "rb") as handle:
+            if handle.getsampwidth() != 2:
+                return None
+            channels, rate = handle.getnchannels(), handle.getframerate()
+            data = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2")
+    except (wave.Error, EOFError, OSError):
+        return None
+    if channels > 1:
+        data = data[: len(data) - len(data) % channels].reshape(-1, channels).mean(axis=1).astype("<i2")
+    return data, rate
+
+
+async def _decode_pcm16_mono(path: str, rate: int = 16000):
+    """Anything ffmpeg can read, as 16 kHz mono int16 — for non-WAV inputs."""
+    import numpy as np
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-v", "error", "-i", path,
+            "-ac", "1", "-ar", str(rate), "-f", "s16le", "-",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0 or not out:
+        return None
+    return np.frombuffer(out, dtype="<i2"), rate
+
+
+def _write_pcm16_wav(path: str, samples, rate: int) -> None:
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.astype("<i2").tobytes())
+
+
+def _quiet_cut_points(samples, rate: int, window_s: float, *, search_s: float = 5.0, hop_s: float = 0.1) -> list[int]:
+    """Sample offsets to cut at: one per ``window_s``, each moved back to the
+    quietest ``hop_s`` slice in the ``search_s`` before its boundary so a cut
+    never lands inside a word. Starts at 0, ends at ``len(samples)``; no
+    window is longer than ``window_s``."""
+    import numpy as np
+
+    total = len(samples)
+    window = max(1, int(window_s * rate))
+    hop = max(1, int(hop_s * rate))
+    search = int(search_s * rate)
+    cuts = [0]
+    while total - cuts[-1] > window:
+        boundary = cuts[-1] + window
+        best, best_energy = boundary, None
+        for start in range(max(cuts[-1] + hop, boundary - search), boundary - hop + 1, hop):
+            piece = samples[start:start + hop].astype(np.float64)
+            energy = float(np.mean(piece * piece))
+            if best_energy is None or energy < best_energy:
+                best, best_energy = start + hop // 2, energy
+        cuts.append(best)
+    cuts.append(total)
+    return cuts
+
+
 class LocalParakeetProvider:
     """Calls the in-cluster meet-parakeet-svc container.
 
@@ -248,6 +354,98 @@ class LocalParakeetProvider:
         self.return_word_timestamps = return_word_timestamps
 
     async def transcribe(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = "en",
+    ) -> dict[str, Any]:
+        result = await self._transcribe_once(audio_path, language=language)
+        # Only a pass that SUCCEEDED and came back empty is retried: a service
+        # error keeps its real reason, and speech found stays as it is.
+        if result.get("segments") or result.get("error") or not _sparse_retry_enabled():
+            return result
+        try:
+            retried = await self._transcribe_windows(audio_path, language=language)
+        except Exception:  # noqa: BLE001 — the retry must never break the pass
+            logger.exception("Parakeet sparse-speech retry failed for %s", audio_path)
+            return result
+        if retried:
+            logger.info(
+                "Parakeet sparse-speech retry recovered %d segment(s) from %s (%d windows)",
+                len(retried["segments"]), audio_path, retried["sparse_retry"]["windows"],
+            )
+            return retried
+        return result
+
+    async def _transcribe_windows(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = "en",
+    ) -> dict[str, Any] | None:
+        """Re-run an empty pass in short windows cut at quiet points.
+
+        Returns a normal result with timestamps shifted back into the whole
+        file, or None when the windows hold no speech (or the service failed
+        part-way, in which case the original empty pass stands).
+        """
+        import numpy as np
+
+        loaded = _read_pcm16_mono(audio_path) or await _decode_pcm16_mono(audio_path)
+        if loaded is None:
+            return None
+        samples, rate = loaded
+        window_s = _env_float("PARAKEET_SPARSE_WINDOW_SECONDS", 30.0)
+        duration = len(samples) / float(rate) if rate else 0.0
+        if duration <= window_s:
+            return None  # the full pass already was one window
+        min_words = _env_int("PARAKEET_SPARSE_MIN_WORDS", 3)
+        cuts = _quiet_cut_points(samples, rate, window_s)
+        segments: list[dict[str, Any]] = []
+        words: list[dict[str, Any]] = []
+        texts: list[str] = []
+        model = self.model
+        with tempfile.TemporaryDirectory(prefix="parakeet-sparse-") as tmp:
+            for index in range(len(cuts) - 1):
+                chunk = samples[cuts[index]:cuts[index + 1]]
+                # Digital silence has nothing to find; don't spend a GPU call on it.
+                if not len(chunk) or int(np.abs(chunk.astype(np.int32)).max()) < _SILENCE_PEAK:
+                    continue
+                window_path = os.path.join(tmp, f"window-{index}.wav")
+                _write_pcm16_wav(window_path, chunk, rate)
+                part = await self._transcribe_once(window_path, language=language)
+                if part.get("error"):
+                    logger.warning(
+                        "Parakeet sparse-speech retry stopped at window %d: %s", index, part["error"]
+                    )
+                    return None
+                offset = cuts[index] / float(rate)
+                for seg in part["segments"]:
+                    segments.append({**seg, "start": seg["start"] + offset, "end": seg["end"] + offset})
+                for word in part["words"]:
+                    words.append({**word, "start": word["start"] + offset, "end": word["end"] + offset})
+                if part.get("text"):
+                    texts.append(part["text"])
+                model = part.get("model") or model
+        if not any(len((seg.get("text") or "").split()) >= min_words for seg in segments):
+            logger.info(
+                "Parakeet sparse-speech retry found no line of %d+ words in %s (%d fragment(s) dropped)",
+                min_words, audio_path, len(segments),
+            )
+            return None
+        return {
+            "text": " ".join(texts).strip(),
+            "segments": segments,
+            "words": words,
+            "duration": duration,
+            "language": language or "en",
+            "confidence": 0.97,
+            "model": model,
+            "rtf": None,
+            "sparse_retry": {"windows": len(cuts) - 1, "window_seconds": window_s},
+        }
+
+    async def _transcribe_once(
         self,
         audio_path: str,
         *,

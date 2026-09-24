@@ -994,6 +994,7 @@ def _stamp_speaker_contacts_fresh(session_pk: int) -> None:
 
 async def run_upload_pipeline(upload_id: str) -> None:
     db = SessionLocal()
+    session_pk: Optional[int] = None
     try:
         job = db.query(UploadJob).filter(UploadJob.upload_id == uuid.UUID(upload_id)).first()
         if not job or job.stage == "cancelled":
@@ -1031,6 +1032,9 @@ async def run_upload_pipeline(upload_id: str) -> None:
         opts = coerce_options(job.transcription_options)
 
         session = await _resolve_session_for_job(db, job, audio_path, source_path=source_path)
+        # Only a session this upload created is ours to fail; an "attach"
+        # target already has a life (and usually a transcript) of its own.
+        session_pk = session.id if job.action != "attach" else None
 
         # --- Kick off diarization CONCURRENTLY with transcription. STT
         # (Parakeet) and diarization (pyannote) read the same audio
@@ -1331,6 +1335,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
             await ws_manager.broadcast(upload_id, _status_payload(job))
+        _mark_session_failed(db, session_pk, exc)
         raise
     finally:
         db.close()
@@ -1624,6 +1629,49 @@ def _advance_stale_reprocess_flags(session: RecordingSession) -> bool:
     return changed
 
 
+NO_SPEECH_MESSAGE = "No speech detected in this recording."
+
+
+class NoSpeechDetected(RuntimeError):
+    """The STT pass succeeded and found nothing to transcribe."""
+
+
+def _mark_session_failed(db: Session, session_pk: Optional[int], exc: BaseException) -> None:
+    """Give the upload's session its terminal state the moment the pipeline fails.
+
+    Before 2026-09-24 only the UploadJob was marked failed: the session sat at
+    "processing" until the 6-hour watchdog flipped it with a generic
+    "stuck-processing" reason (34 of 45 no-speech Stable uploads, measured).
+    Best-effort — the job row already carries the error; never raises.
+    """
+    if session_pk is None:
+        return
+    # Imported here, like session_watchdog does: the flush needs the tables
+    # recording_sessions points at registered, and a call-time import always
+    # binds the live mapper (tests/conftest.py reloads the model modules).
+    from auth.models import Organization  # noqa: F401
+    from database.models import RecordingSession as _RecordingSession
+    try:
+        from database.models_rooms import RoomAudioSource  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        session = db.query(_RecordingSession).filter(_RecordingSession.id == session_pk).first()
+        if session is None or session.status not in ("processing", "queued", "pending"):
+            return
+        no_speech = isinstance(exc, NoSpeechDetected)
+        md = dict(session.processing_metadata or {})
+        md["upload_error"] = NO_SPEECH_MESSAGE if no_speech else str(exc)[:500]
+        md["no_speech"] = no_speech
+        md["upload_failed_at"] = datetime.now(timezone.utc).isoformat()
+        session.processing_metadata = md
+        session.status = "failed"
+        db.commit()
+    except Exception as mark_exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("could not mark session %s failed after upload error: %s", session_pk, mark_exc)
+
+
 async def _transcribe_audio(
     audio_path: Path,
     org_id: int,
@@ -1656,7 +1704,12 @@ async def _transcribe_audio(
         # Surface the provider's real reason (STT "audio too long" / 500 /
         # timeout, carried on result["error"]) instead of a generic message,
         # so the job's error_message tells the user what actually happened.
-        raise RuntimeError((result or {}).get("error") or "Transcription produced no segments.")
+        # A pass that succeeded and still heard nothing (after the Parakeet
+        # sparse-speech retry) is a recording without speech, not a fault.
+        error = (result or {}).get("error")
+        if error:
+            raise RuntimeError(error)
+        raise NoSpeechDetected(NO_SPEECH_MESSAGE)
     # _persist_transcription expects audio_duration; the providers return
     # `duration` directly, so mirror it for back-compat.
     result.setdefault("audio_duration", result.get("duration", 0.0))
