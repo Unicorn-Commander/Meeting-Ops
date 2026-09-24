@@ -23,6 +23,20 @@ whichever it speaks):
   * REST:  GET /api/federation/v1/contacts/{contact_id}/{meetings|summaries|action-items}
   * MCP :  POST /api/federation/mcp   (JSON-RPC: initialize / tools/list / tools/call)
 
+Org-wide reads (2026-09-24, for Legal-Ops): ``search_meetings``,
+``list_meetings``, ``get_meeting_details``, ``get_meeting_insights`` and
+``list_action_items`` answer for the whole workspace rather than one contact.
+They carry the same guarantees as the contact tools, plus one more:
+  * same ``meetings:read`` scope, same tenant binding, same minimized
+    participant projection (no email, no speaker metadata);
+  * a summary and its decisions leave only when a human APPROVED the
+    federation summary (``approved_summary_payload``), exactly as for
+    Customer-Ops; transcript text is never returned and is only searched
+    when the caller also holds the transcript scope;
+  * an organization whose ``session_visibility`` is ``participants`` has
+    said "being in the company is not being in the room" — a machine caller
+    was in no room, so org-wide reads refuse (403) for that org.
+
 This surface is read-only; no writes back into Meeting-Ops.
 """
 
@@ -1000,7 +1014,225 @@ _TOOL_SCHEMAS = [
             "required": ["contact_id"],
         },
     },
+    {
+        "name": "search_meetings",
+        "description": (
+            "Org-wide keyword search over meeting titles, descriptions and "
+            "summary previews (transcripts only with the transcript scope)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_meetings",
+        "description": "Org-wide meetings, newest first, optionally by status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"status": {"type": "string"}, "limit": {"type": "integer"}},
+        },
+    },
+    {
+        "name": "get_meeting_details",
+        "description": (
+            "One meeting: metadata, participants, action items, and the "
+            "approved summary with its decisions (null until approved)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "get_meeting_insights",
+        "description": "Approved summary, key points and decisions for one meeting.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "list_action_items",
+        "description": "Action items for one meeting.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["session_id"],
+        },
+    },
 ]
+
+
+# --- Org-wide reads -------------------------------------------------------
+
+ORG_WIDE_TOOLS = frozenset(
+    {
+        "search_meetings",
+        "list_meetings",
+        "get_meeting_details",
+        "get_meeting_insights",
+        "list_action_items",
+    }
+)
+MAX_QUERY_LENGTH = 500
+
+
+def _require_org_wide_visibility(db: Session, org_id: int) -> None:
+    from services.session_visibility import (
+        VISIBILITY_PARTICIPANTS,
+        visibility_for_org_id,
+    )
+
+    if visibility_for_org_id(db, org_id) == VISIBILITY_PARTICIPANTS:
+        raise HTTPException(
+            status_code=403,
+            detail="this organization limits meetings to their participants",
+        )
+
+
+def _meeting_item(session: RecordingSession, action_count: int = 0) -> dict:
+    status, approved = approved_summary_payload(session)
+    return {
+        "id": session.id,
+        "session_id": session.session_id or str(session.id),
+        "title": session.title or session.name or None,
+        "started_at": _iso(session.started_at),
+        "ended_at": _iso(session.ended_at),
+        "created_at": _iso(session.created_at),
+        "duration_seconds": int(round(session.duration or 0)),
+        "status": session.status,
+        "participants": _participants_public(session),
+        "action_item_count": action_count,
+        "summary_status": status,
+        # Only an approved summary may leave; its first line is the snippet.
+        "snippet": (approved["body"] or "")[:280] or None if approved else None,
+    }
+
+
+def _session_for(db: Session, org_id: int, raw_id: Any) -> RecordingSession:
+    value = str(raw_id or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    q = db.query(RecordingSession).filter(RecordingSession.organization_id == org_id)
+    session = None
+    if value.isdigit():
+        session = q.filter(RecordingSession.id == int(value)).first()
+    if session is None:
+        session = q.filter(RecordingSession.session_id == value).first()
+    if session is None:
+        # Same answer for "absent" and "another tenant's": no oracle.
+        raise HTTPException(status_code=404, detail="meeting not found")
+    return session
+
+
+def search_meetings(
+    db: Session, org_id: int, query: str, *, limit: Optional[int] = None,
+    include_transcript: bool = False,
+) -> dict:
+    text = str(query or "").strip()[:MAX_QUERY_LENGTH]
+    if not text:
+        raise HTTPException(status_code=400, detail="query is required")
+    n = min(_clamp_limit(limit), 20)
+    pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    fields = [
+        RecordingSession.title,
+        RecordingSession.name,
+        RecordingSession.description,
+        RecordingSession.summary_preview,
+    ]
+    if include_transcript:
+        fields.append(RecordingSession.transcript_simple)
+    rows = (
+        db.query(RecordingSession)
+        .filter(
+            RecordingSession.organization_id == org_id,
+            or_(*[f.ilike(pattern, escape="\\") for f in fields]),
+        )
+        .order_by(RecordingSession.id.desc())
+        .limit(n)
+        .all()
+    )
+    counts = _action_item_counts(db, org_id, [s.id for s in rows])
+    items = [_meeting_item(s, counts.get(s.id, 0)) for s in rows]
+    return {"query": text, "meetings": items, "count": len(items)}
+
+
+def list_meetings(
+    db: Session, org_id: int, *, status: Optional[str] = None, limit: Optional[int] = None
+) -> dict:
+    n = _clamp_limit(limit)
+    q = db.query(RecordingSession).filter(RecordingSession.organization_id == org_id)
+    wanted = str(status or "").strip()
+    if wanted:
+        q = q.filter(RecordingSession.status == wanted[:40])
+    rows = q.order_by(RecordingSession.id.desc()).limit(n).all()
+    counts = _action_item_counts(db, org_id, [s.id for s in rows])
+    items = [_meeting_item(s, counts.get(s.id, 0)) for s in rows]
+    return {"meetings": items, "count": len(items)}
+
+
+def _approved_insights(session: RecordingSession) -> dict:
+    status, approved = approved_summary_payload(session)
+    if status != "approved" or approved is None:
+        return {"summary_status": status, "summary": None, "decisions": []}
+    projection = _summary_projection(session) or {}
+    return {
+        "summary_status": status,
+        "summary": {
+            "body": approved["body"],
+            "key_points": approved["key_points"],
+            "approved_at": approved["approved_at"],
+        },
+        # The approval digest covers decisions too, so they travel together.
+        "decisions": projection.get("decisions", []),
+    }
+
+
+def get_meeting_details(db: Session, org_id: int, session_id: Any) -> dict:
+    session = _session_for(db, org_id, session_id)
+    actions = _actions_by_session(db, org_id, [session.id]).get(session.id, [])
+    return {
+        "meeting": _meeting_item(session, len(actions)),
+        "action_items": actions,
+        **_approved_insights(session),
+    }
+
+
+def get_meeting_insights(db: Session, org_id: int, session_id: Any) -> dict:
+    session = _session_for(db, org_id, session_id)
+    actions = _actions_by_session(db, org_id, [session.id]).get(session.id, [])
+    return {"meeting_id": session.id, "action_items": actions, **_approved_insights(session)}
+
+
+def list_action_items(
+    db: Session, org_id: int, session_id: Any, *, limit: Optional[int] = None
+) -> dict:
+    session = _session_for(db, org_id, session_id)
+    actions = _actions_by_session(db, org_id, [session.id]).get(session.id, [])
+    return {"meeting_id": session.id, "action_items": actions[: _clamp_limit(limit)]}
+
+
+def _dispatch_org_wide(db: Session, ctx: FederationContext, name: str, args: dict) -> Any:
+    _require_org_wide_visibility(db, ctx.org_id)
+    limit = args.get("limit")
+    if name == "search_meetings":
+        return search_meetings(
+            db, ctx.org_id, args.get("query"), limit=limit,
+            include_transcript=TRANSCRIPT_SCOPE in ctx.scopes,
+        )
+    if name == "list_meetings":
+        return list_meetings(db, ctx.org_id, status=args.get("status"), limit=limit)
+    if name == "get_meeting_details":
+        return get_meeting_details(db, ctx.org_id, args.get("session_id"))
+    if name == "get_meeting_insights":
+        return get_meeting_insights(db, ctx.org_id, args.get("session_id"))
+    if name == "list_action_items":
+        return list_action_items(db, ctx.org_id, args.get("session_id"), limit=limit)
+    raise KeyError(name)
 
 
 def _rpc_ok(rpc_id: Any, result: Any) -> dict:
@@ -1031,6 +1263,8 @@ def _tool_envelope(name: str, data: Any) -> Any:
 async def _dispatch_tool(
     db: Session, ctx: FederationContext, name: str, args: dict
 ) -> Any:
+    if name in ORG_WIDE_TOOLS:
+        return _dispatch_org_wide(db, ctx, name, args)
     contact_id = str(args.get("contact_id") or "").strip()
     if not contact_id:
         raise HTTPException(status_code=400, detail="contact_id is required")
