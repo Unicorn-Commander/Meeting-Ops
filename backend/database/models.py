@@ -392,10 +392,11 @@ class SessionCollaborator(Base):
 class ActionItem(Base):
     """First-class action item promoted out of `recording_sessions.final_summary`.
 
-    Backfilled by alembic 021_action_items from the legacy JSON columns and
-    re-derived on every summarize pass (see
-    `services.action_items_extractor.persist_action_items`). Manual entries
-    created from the UI use `source='manual'`.
+    Backfilled by alembic 021_action_items from the legacy JSON columns.
+    Later summarize passes merge into this table (see
+    `services.action_items_extractor.persist_action_items`): a manual row
+    or a row a person has edited is kept. Manual entries created from
+    the UI use `source='manual'`.
 
     Status transitions are validated by a CHECK constraint at the DB level;
     when status flips to 'done' the API sets `completed_at`.

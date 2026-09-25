@@ -3039,9 +3039,10 @@ async def _summarize_session(
         if new_title and new_title.lower() not in {"untitled", "meeting", "recording"}:
             session.title = new_title[:200]
 
-    # Promote action items out of the JSON column into the first-class
+    # Promote action items out of the JSON columns into the first-class
     # `action_items` table so the dashboard + PWA notifications can
-    # read them directly. Re-process = fresh slate (delete + insert).
+    # read them directly. Re-extraction merges: human edits stay, and a
+    # matching machine row keeps its id and Project-Ops stamps.
     try:
         from services.action_items_extractor import persist_action_items
         persist_action_items(db, session)
