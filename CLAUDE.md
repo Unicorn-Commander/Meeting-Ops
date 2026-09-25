@@ -242,21 +242,22 @@ UC-Meeting-Ops/
 
 The cloud Meeting-Ops instance lives at `/home/muut/Production/UC-Meeting-Ops/` on bigboy (magicunicorn on Tailscale, 100.121.80.175). Source tree is at `/home/muut/Production/UC-Meeting-Ops/src/` (where .git lives).
 
-### Compose invocation quirk
+### Compose invocation: run from src/deploy/bigboy
 
-`deploy/` is symlinked from the project root: `/home/muut/Production/UC-Meeting-Ops/deploy → src/deploy`. The compose file uses a build context of `../../src/backend` which only resolves via the symlinked path. Therefore:
+`deploy/` is also symlinked from the project root (`/home/muut/Production/UC-Meeting-Ops/deploy → src/deploy`), but compose does NOT resolve that symlink: relative paths resolve from the directory you name. Every relative path in `deploy/bigboy/docker-compose.bigboy.yml` is written for the file's real directory, `src/deploy/bigboy` (`../../` = `src/`). The live data is `src/recordings` and `src/data`.
 
 ```bash
-# CORRECT — run from project root (where the symlink is)
-cd /home/muut/Production/UC-Meeting-Ops/
-docker compose --env-file deploy/bigboy/.env.bigboy -f deploy/bigboy/docker-compose.bigboy.yml up -d --force-recreate --build
+# CORRECT
+cd /home/muut/Production/UC-Meeting-Ops/src/deploy/bigboy
+docker compose -p bigboy -f docker-compose.bigboy.yml -f docker-compose.pinned.yml --env-file .env.bigboy up -d --no-deps --no-build <svc>
 
-# WRONG — runs from src/, build context resolves to a non-existent path
-cd /home/muut/Production/UC-Meeting-Ops/src/
+# WRONG: through the root symlink, ../../ becomes the project root, so the
+# backend and workers mount the OLD root recordings/ and data/ folders.
+cd /home/muut/Production/UC-Meeting-Ops/
 docker compose -f deploy/bigboy/docker-compose.bigboy.yml ...
 ```
 
-Always invoke compose from `/home/muut/Production/UC-Meeting-Ops/`, not from `/src/`.
+Until 2026-09-25 the frontend build context, its nginx.conf mount, and the report-logo mount still used the old root-relative `../../src/...` form. Run from the real directory, that meant the frontend could not start and PDF exports lost their logo, because docker created an empty `src/src/...` directory for the missing path. All paths now use the same base. `docker-compose.pinned.yml` (untracked, on bigboy) pins immutable image tags; check a recreate with `python3 .parity-check.py docker-compose.pinned.yml`.
 
 ### Always pass --env-file
 
