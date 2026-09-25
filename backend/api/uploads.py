@@ -1295,6 +1295,38 @@ async def run_upload_pipeline(upload_id: str) -> None:
             flag_modified(session, "processing_metadata")
             db.commit()
 
+        # Project-Ops triage submit. Best-effort one-way push: each
+        # AI-extracted action item is submitted to the PO triage inbox
+        # (propose-only) — the agent routes/dedups it and a human approves
+        # in Project-Ops before anything becomes a task. No target project
+        # needed (triage resolves routing). Idempotent via a
+        # po_triage_submitted_at stamp on action_items.raw_payload (and PO's
+        # own sourceActionItemId uniqueness), so a retried/re-run upload
+        # doesn't duplicate. Same swallow-all posture as the semantic-index
+        # block above and as the always-on finalize/reprocess paths
+        # (workers/finalize_workers.py, api/recording.py): a triage failure
+        # NEVER fails the upload or its session.
+        try:
+            from services.projectops_writer import submit_action_items_to_triage
+
+            _po_result = await submit_action_items_to_triage(
+                db=db, session_pk=session.id, completion_mode="live"
+            )
+            if not _po_result.ok:
+                logger.warning(
+                    "Upload projectops triage push did NOT succeed "
+                    "session=%s mode=%s detail=%s",
+                    session.id,
+                    _po_result.mode,
+                    _po_result.detail,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Upload projectops triage write failed (non-fatal) session=%s: %s",
+                session.id,
+                exc,
+            )
+
         # A successful uploads-path run is this session's newest truth —
         # advance any stale reprocess failure flags so the red "Reprocess
         # failed" banner can't outlive a healthy re-run (see helper).

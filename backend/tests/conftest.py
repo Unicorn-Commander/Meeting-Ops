@@ -187,7 +187,19 @@ def app():
     # those cached references point at the original Base, which the
     # database.models reload has now replaced. Reload them too so their
     # model lookups resolve through the freshly-bound Base.metadata.
-    for mod_name in ("services.bulk_import_queue", "workers.bulk_import_worker"):
+    # api.uploads is the same story: test_upload_recorded_at.py imports
+    # ``ended_at_from_started`` / ``started_at_from_recorded`` from it at
+    # module level (no ``app`` fixture), which at collection time binds its
+    # module-level ``RecordingSession``/``Transcription``/``UploadJob``
+    # imports to the pre-reload Base. Any later test that runs the real
+    # ``run_upload_pipeline`` against the reloaded (test) DB then fails to
+    # flush a session mapped to the stale metadata (its FK targets, e.g.
+    # ``conference_rooms``, never got attached to the OLD Base.metadata).
+    for mod_name in (
+        "services.bulk_import_queue",
+        "workers.bulk_import_worker",
+        "api.uploads",
+    ):
         if mod_name in sys.modules:
             importlib.reload(sys.modules[mod_name])
     from database.database import engine, SessionLocal
