@@ -187,3 +187,22 @@ def test_action_items_alone_still_reset_the_summary_hash():
     db = _FakeDB([], items=items)
     counts = _relabel_cluster(db, session, link, {"Speaker 3F97"}, "Sam Janowczyk")
     assert counts["action_items"] == 1 and counts["hash_reset"] is True
+
+
+def test_relabeled_machine_item_still_counts_as_machine_for_the_merge():
+    """The relabel renames inside raw_payload too, so persist_action_items
+    keeps treating the row as an untouched machine row (not a human edit
+    that would be kept forever beside a re-extracted duplicate)."""
+    from services.action_items_extractor import _row_is_human
+
+    blob = {"action": "Speaker 3F97 to order the parts", "owner": "Speaker 3F97"}
+    item = ActionItem(session_id=934, organization_id=1, text=blob["action"],
+                      owner="Speaker 3F97", status="todo", source="final_summary",
+                      raw_payload=dict(blob))
+    assert _row_is_human(item) is False
+    session, link = _session(), _link()
+    db = _FakeDB(_rows(), prev_profile=SpeakerProfile(id=198, display_name="Speaker 3F97"), items=[item])
+    _relabel_cluster(db, session, link, _cluster_current_labels(db, session, link, 198), "Sam Janowczyk")
+    assert (item.owner, item.text) == ("Sam Janowczyk", "Sam Janowczyk to order the parts")
+    assert item.raw_payload == {"action": "Sam Janowczyk to order the parts", "owner": "Sam Janowczyk"}
+    assert _row_is_human(item) is False

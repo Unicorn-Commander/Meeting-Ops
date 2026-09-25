@@ -619,8 +619,16 @@ def _relabel_action_items(
     """Rename a speaker label on this session's action items. ``owner`` is
     matched exactly (it holds just the label); ``text`` word-bounded, the
     same rule as the summary prose. Returns the number of items changed;
-    caller commits."""
+    caller commits.
+
+    The same rename is applied inside ``raw_payload`` (the LLM blob the
+    row was extracted from). persist_action_items treats a row whose
+    columns differ from its blob as human-edited and keeps it forever, so
+    renaming only the columns would freeze the row and the next re-summary
+    would insert a duplicate beside it.
+    """
     import re
+    from sqlalchemy.orm.attributes import flag_modified
 
     olds = sorted({l for l in old_labels if l and l != new_name}, key=len, reverse=True)
     if not olds or not new_name:
@@ -638,9 +646,26 @@ def _relabel_action_items(
             if new_text != item.text:
                 item.text = new_text
                 touched = True
+        if isinstance(item.raw_payload, dict):
+            new_payload = _rename_in(item.raw_payload, pattern, new_name)
+            if new_payload != item.raw_payload:
+                item.raw_payload = new_payload
+                flag_modified(item, "raw_payload")
+                touched = True
         if touched:
             changed += 1
     return changed
+
+
+def _rename_in(value, pattern, new_name):
+    """Word-bounded rename through a JSON value (strings only; keys kept)."""
+    if isinstance(value, str):
+        return pattern.sub(new_name, value)
+    if isinstance(value, list):
+        return [_rename_in(v, pattern, new_name) for v in value]
+    if isinstance(value, dict):
+        return {k: _rename_in(v, pattern, new_name) for k, v in value.items()}
+    return value
 
 
 def _find_speaker_for_pick(
