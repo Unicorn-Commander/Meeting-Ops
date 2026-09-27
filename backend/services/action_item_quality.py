@@ -536,6 +536,27 @@ def get_action_item_gate_mode() -> str:
 
 
 def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
+    """Fail-open wrapper: the gate is a filter, never a safety control.
+
+    Any unexpected exception inside the classifier returns every item
+    unchanged (``kept``), logs one WARNING with the source and exception
+    type (no item text), and records ``counts["gate_error"] = 1`` so the
+    caller's metadata shows the gate did not run (review round 2, MEDIUM).
+    """
+    try:
+        return _apply_quality_gate(items, source=source)
+    except Exception as exc:  # noqa: BLE001 - deliberate fail-open
+        logger.warning(
+            "action_item_quality gate_error source=%s exc=%s items=%d; kept all items unfiltered",
+            source,
+            type(exc).__name__,
+            len(items) if isinstance(items, list) else 0,
+        )
+        kept = list(items) if isinstance(items, list) else []
+        return GateResult(kept=kept, dropped=[], counts={"gate_error": 1})
+
+
+def _apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
     """Annotate extracted items, and drop them only in enforce mode.
 
     Dicts gain a ``quality`` record. Strings stay strings. Empty input is a
@@ -576,15 +597,17 @@ def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
         if already_logged:
             continue
         logger.info(
-            "action_item_quality %s reason=%s confidence=%.2f source=%s owner=%s text=%s mode=%s",
+            "action_item_quality %s reason=%s confidence=%.2f source=%s owner=%s text_len=%d mode=%s",
             "would_drop" if shadow else "dropped",
             record.reason,
             record.confidence,
             source,
             owner or "",
-            (text or "")[:500],
+            len(text or ""),
             mode,
         )
+        # Item text is transcript content: DEBUG only, never INFO (review round 2, MEDIUM).
+        logger.debug("action_item_quality item source=%s reason=%s text=%s", source, record.reason, (text or "")[:500])
 
     if counts:
         logger.info(

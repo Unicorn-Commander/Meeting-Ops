@@ -771,3 +771,32 @@ def test_parse_summary_action_items_heading_still_fills_action_items():
     ]
     assert parsed["key_decisions"] == ["Use the retainer."]
     assert "Send the amended contract to Aaron." not in parsed["key_decisions"]
+
+
+def test_gate_error_fails_open_and_keeps_every_item(monkeypatch, caplog):
+    import services.action_item_quality as q
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(q, "classify_action_item", boom)
+    items = [{"text": "Send the amended contract to Aaron."}, "Close the project ops window"]
+    with caplog.at_level(logging.WARNING, logger="services.action_item_quality"):
+        result = apply_quality_gate(items, source="unit")
+    assert result.kept == items
+    assert result.dropped == []
+    assert result.counts == {"gate_error": 1}
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "gate_error" in rec.message]
+    assert len(warnings) == 1
+    assert "RuntimeError" in warnings[0].message
+    assert "amended contract" not in warnings[0].message
+
+
+def test_item_text_never_reaches_info_logs(caplog):
+    text = "Close the project ops window and share the secret plan"
+    with caplog.at_level(logging.INFO, logger="services.action_item_quality"):
+        apply_quality_gate([{"text": text}], source="unit")
+    info_messages = [rec.message for rec in caplog.records if rec.levelno >= logging.INFO]
+    assert info_messages, "expected the drop/would_drop INFO lines"
+    assert all("secret plan" not in message for message in info_messages)
+    assert any("text_len=" in message for message in info_messages)
