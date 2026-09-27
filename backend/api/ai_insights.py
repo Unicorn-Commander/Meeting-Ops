@@ -519,12 +519,19 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
     svc = _resolve_llm(db, org_id, task="quality")
     if svc:
         try:
+            from services.action_item_quality import COMMITMENT_EXTRACTION_RULES
             raw = await asyncio.to_thread(
                 svc.chat_sync,
-                system_prompt="You extract action items from meeting transcripts. Return ONLY a JSON array.",
+                system_prompt=(
+                    "You extract commitments from meeting transcripts. Return ONLY a JSON array.\n"
+                    + COMMITMENT_EXTRACTION_RULES
+                ),
                 user_prompt=(
-                    "Extract action items from this meeting transcript. "
-                    "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low).\n\n"
+                    "Extract COMMITMENTS from this meeting transcript: who will do what, by when. "
+                    "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low). "
+                    "assignee is a real name when the transcript has one; otherwise the speaker label. "
+                    "Do not include navigation, meeting mechanics, personal errands, third-party to-dos, "
+                    "vague non-commitments, or restatements of the meeting topic.\n\n"
                     f"{transcript[:12000]}"
                 ),
                 max_tokens=500,

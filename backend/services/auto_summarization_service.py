@@ -121,7 +121,7 @@ _SUMMARY_PROMPTS = {
     "executive": (
         "Create an executive summary with:\n"
         "1. Key Decisions (bullet points)\n"
-        "2. Action Items with owners\n"
+        "2. Commitments only: who will do what, by when. Use a real name for the owner when the transcript has one, otherwise the speaker label. Skip navigation, meeting mechanics, personal errands, and vague non-commitments.\n"
         "3. Strategic Implications\n"
         "4. Next Steps\n"
         "Keep it concise and actionable."
@@ -140,7 +140,9 @@ _SUMMARY_PROMPTS = {
         "your process. Use only transcript facts. Include:\n"
         "1. Main Topics (3-5 concrete bullet points)\n"
         "2. Key Decisions Made\n"
-        "3. Action Items (who, what, when; use 'owner not stated' when absent)\n"
+        "3. Commitments only (who will do what, by when; use 'owner not stated' when absent). "
+        "Owner is a real name from the transcript when one is given, otherwise the speaker label. "
+        "Skip in-call navigation, meeting mechanics, personal errands, third-party to-dos, and vague non-commitments.\n"
         "4. Open Questions and Risks\n"
         "Write 'None noted' for an empty section. Keep it clear, specific, and organized."
     ),

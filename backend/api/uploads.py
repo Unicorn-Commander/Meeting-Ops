@@ -2178,18 +2178,18 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
 _SUMMARY_TEMPLATE_GUIDANCE: dict[str, str] = {
     "standard": (
         "Produce a balanced meeting summary covering main topics, key "
-        "decisions, action items, and follow-ups. Keep tone neutral and "
-        "useful for someone who missed the meeting."
+        "decisions, commitments (who will do what, by when), and follow-ups. "
+        "Keep tone neutral and useful for someone who missed the meeting."
     ),
     "executive": (
         "Produce an executive-style summary: lead with strategic implications "
-        "and decisions, then action items with owners, then a one-line "
+        "and decisions, then commitments with owners (who will do what, by when), then a one-line "
         "recap. Skip routine status updates."
     ),
     "technical": (
         "Produce a technical summary: architecture/design decisions, "
         "implementation details, technical debt mentioned, dependencies and "
-        "blockers, then action items. Keep code/system terms verbatim."
+        "blockers, then commitments (who will do what, by when). Keep code/system terms verbatim."
     ),
 }
 
@@ -2238,7 +2238,7 @@ For each major topic discussed, create a numbered section:
 ## Action Items
 Create a markdown table with these columns:
 | Owner | Action | Priority | Deadline |
-For each action item explicitly stated in the transcript. If owner/deadline not stated, write "Not specified."
+For each COMMITMENT explicitly stated (who will do what, by when). Owner is a real name from the transcript when one is given, otherwise the speaker label. If owner/deadline not stated, write "Not specified." Do not list navigation, meeting mechanics, personal errands, third-party to-dos, or vague non-commitments.
 
 ## Key Decisions
 List each decision made during the meeting:
@@ -2295,7 +2295,7 @@ Output exactly these sections:
 - The substantive points made, in order. Keep it tight.
 
 ## Action Items
-Only actions EXPLICITLY stated. If none, write "None identified." — never invent or infer items.
+Only COMMITMENTS explicitly stated (who will do what, by when). Owner is a real name from the transcript when one is given, otherwise the speaker label. If none, write "None identified." — never invent items, and do not list navigation, meeting mechanics, personal errands, or vague non-commitments.
 
 ---
 TRANSCRIPT:
@@ -2585,7 +2585,7 @@ Output ONLY a single fenced JSON block (no prose before or after) with this exac
 ```json
 {{"key_points": ["point (Speaker Name)", ...],
   "decisions": ["decision (decided by Speaker)", ...],
-  "action_items": [{{"task": "...", "assignee": "Speaker or Not specified"}}],
+  "action_items": [{{"task": "concrete commitment", "assignee": "real name or speaker label"}}],
   "quotes": [{{"text": "exact words from this chunk", "speaker": "Speaker Name"}}],
   "open_questions": ["..."],
   "notable": ["any other substantive context worth carrying forward"]}}
@@ -2622,7 +2622,7 @@ For each major topic discussed, create a numbered section:
 ## Action Items
 Create a markdown table with these columns:
 | Owner | Action | Priority | Deadline |
-For each action item explicitly stated. If owner/deadline not stated, write "Not specified."
+For each COMMITMENT explicitly stated (who will do what, by when). Owner is a real name from the digest when one is given, otherwise the speaker label. If owner/deadline not stated, write "Not specified." Do not list navigation, meeting mechanics, personal errands, third-party to-dos, or vague non-commitments.
 
 ## Key Decisions
 List each decision made during the meeting:
@@ -2660,6 +2660,34 @@ After the markdown sections above, emit a single fenced JSON block with the same
   "title": "short descriptive title for this meeting"}}
 ```
 """
+
+
+from services.action_item_quality import COMMITMENT_EXTRACTION_RULES as _COMMITMENT_RULES
+
+
+def _inject_commitment_rules(prompt: str) -> str:
+    """Put the shared commitment rules next to the action-item instructions.
+
+    The JSON keys stay as they are. The rules string has no braces, so the
+    surrounding ``str.format`` templates still work.
+    """
+    rules = _COMMITMENT_RULES.strip() + "\n"
+    for needle in ("## Action Items\n", "Rules:\n"):
+        if needle in prompt:
+            return prompt.replace(needle, needle + rules + "\n", 1)
+    return prompt.rstrip() + "\n\n" + rules
+
+
+MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT = (
+    MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT.rstrip()
+    + "\n\n"
+    + _COMMITMENT_RULES.strip()
+    + "\n"
+)
+MEETING_OPS_SUMMARIZER_STYLE_PROMPT = _inject_commitment_rules(MEETING_OPS_SUMMARIZER_STYLE_PROMPT)
+MEETING_OPS_MEMO_PROMPT = _inject_commitment_rules(MEETING_OPS_MEMO_PROMPT)
+MEETING_OPS_MAP_PROMPT = _inject_commitment_rules(MEETING_OPS_MAP_PROMPT)
+MEETING_OPS_REDUCE_PROMPT = _inject_commitment_rules(MEETING_OPS_REDUCE_PROMPT)
 
 
 async def _summarize_mapreduce(

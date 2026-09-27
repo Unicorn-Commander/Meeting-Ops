@@ -358,3 +358,32 @@ def item_text_of(item):
     if isinstance(item, str):
         return item
     return item.get("text") or item.get("action") or item.get("task")
+
+
+def test_commitment_rules_have_no_format_braces_and_prompts_keep_the_json_contract():
+    from pathlib import Path
+
+    from services.action_item_quality import COMMITMENT_EXTRACTION_RULES
+
+    assert "{" not in COMMITMENT_EXTRACTION_RULES
+    assert "}" not in COMMITMENT_EXTRACTION_RULES
+    assert "who will do what, by when" in COMMITMENT_EXTRACTION_RULES
+    root = Path(__file__).resolve().parents[1]
+    uploads = (root / "api" / "uploads.py").read_text()
+    assert "COMMITMENT_EXTRACTION_RULES" in uploads
+    assert '"actions":' in uploads
+    insights = (root / "api" / "ai_insights.py").read_text()
+    assert "text, assignee, priority" in insights
+    assert "COMMITMENT_EXTRACTION_RULES" in (root / "models" / "unified_agent.py").read_text()
+    joined = "\n".join(
+        (root / rel).read_text()
+        for rel in (
+            "api/recording.py",
+            "services/unified_agent_service.py",
+            "services/auto_summarization_service.py",
+            "services/meeting_notes_service.py",
+            "services/agent_manager_service.py",
+            "create_agent_tables.py",
+        )
+    )
+    assert joined.count("who will do what, by when") >= 6

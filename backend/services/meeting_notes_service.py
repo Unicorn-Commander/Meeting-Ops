@@ -182,10 +182,13 @@ class MeetingNotesService:
         
         Guidelines:
         - Extract real information from the transcript only
+        - actionItems are COMMITMENTS only: who will do what, by when
+        - owner is a real name when the transcript has one, otherwise the speaker label
+        - Do not include in-call navigation, meeting mechanics, personal errands, third-party to-dos, vague non-commitments, or restatements of the topic
         - Use empty arrays [] if information is not available
         - Keep responses concise and actionable
         - Identify speakers/participants when possible
-        - Format as valid JSON only
+        - Format as valid JSON only. Keep the actionItems object keys: task, owner, deadline, priority
         """
     
     def _build_incremental_prompt(self, new_transcript: str, previous_notes: Dict[str, Any]) -> str:

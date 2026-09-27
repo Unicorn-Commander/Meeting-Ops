@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Column, String, Text, JSON, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from database.models import Base
+from services.action_item_quality import COMMITMENT_EXTRACTION_RULES
 
 class UnifiedMeetingAgent(Base):
     """
@@ -29,11 +30,13 @@ Analyze meeting transcripts and provide structured summaries.
 Generate comprehensive analysis including:
 - Executive summary (2-3 sentences)
 - Key bullet points (3-5 main topics)
-- Action items with owners when mentioned
+- Commitments: who will do what, by when, with the owner as a real name when the transcript has one (otherwise the speaker label)
 - Important decisions made
 - Suggested meeting title
 
-Be concise, accurate, and focus on actionable insights.""")
+Be concise, accurate, and focus on commitments. Do not treat in-call navigation, meeting mechanics, personal errands, third-party to-dos, or vague non-commitments as action items.
+
+""" + COMMITMENT_EXTRACTION_RULES)
     
     # Model Configuration
     provider_type = Column(String(50), default="ollama")  # ollama, openai, anthropic
@@ -62,8 +65,8 @@ Be concise, accurate, and focus on actionable insights.""")
         ],
         "actions": [
             {
-                "action": "Specific task or follow-up",
-                "owner": "Person responsible (if mentioned)",
+                "action": "Concrete commitment: who will do what, by when",
+                "owner": "Real name from the transcript, or the speaker label",
                 "priority": "high|medium|low"
             }
         ],
@@ -127,13 +130,15 @@ EXECUTIVE SUMMARY: Provide a 2-3 sentence overview of the meeting's purpose and 
 
 KEY POINTS: List 3-5 main topics, decisions, or discussion points as bullet points.
 
-ACTION ITEMS: Extract specific tasks, follow-ups, or assignments with owners when mentioned.
+ACTION ITEMS: Extract COMMITMENTS only: who will do what, by when. The owner is a real name when the transcript has one, otherwise the speaker label. Do not include in-call navigation, meeting mechanics, personal errands, third-party to-dos, vague non-commitments, or restatements of the meeting topic.
 
 DECISIONS: List important decisions, agreements, or conclusions reached.
 
 MEETING TITLE: Suggest a descriptive title based on the meeting content.
 
-Be accurate, actionable, and focus on what matters most for follow-up.""",
+Be accurate and focus on commitments.
+
+""" + COMMITMENT_EXTRACTION_RULES,
             provider_type="ollama",
             model_name="granite3.3:8b",
             model_settings={
