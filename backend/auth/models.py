@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 from database.database import Base
 import os
 
@@ -98,6 +98,9 @@ class User(Base):
     # Optional account-wide delivery preferences. Organization controls still win.
     email_daily_digest = Column(Boolean, nullable=False, default=False, server_default=false())
     email_weekly_digest = Column(Boolean, nullable=False, default=False, server_default=false())
+    # Public preference name; retain the original column/API spelling for
+    # compatibility with the first in-app-digests migration.
+    weekly_digest_email = synonym("email_weekly_digest")
 
     # Profile
     full_name = Column(String)

@@ -5,6 +5,7 @@ import { config } from '../../config';
 interface Preferences {
   email_daily_digest: boolean;
   email_weekly_digest: boolean;
+  weekly_digest_email: boolean;
   organization_email_enabled: boolean;
 }
 
@@ -61,7 +62,7 @@ function PreferenceForm({ slug }: { slug?: string }) {
   return (
     <section aria-label="Digest email preferences" className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-zinc-200 space-y-3">
       <h2 className="font-semibold">Digest email preferences</h2>
-      <p className="text-sm text-zinc-400">Digests live in Meeting-Ops. Email is optional and off by default. These preferences follow your account across workspaces.</p>
+      <p className="text-sm text-zinc-400">Digests live in Meeting-Ops. Email is optional. These preferences follow your account across workspaces.</p>
       {!preferences && !error && <p role="status">Loading email preferences…</p>}
       {preferences && <>
         {(['daily', 'weekly'] as const).map(cadence => (

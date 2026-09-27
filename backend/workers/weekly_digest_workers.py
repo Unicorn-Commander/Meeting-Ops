@@ -187,7 +187,11 @@ def deliver_digest(db, org, digest) -> int:
             logger.exception("digest delivery unresolved claim_id=%s", delivery.id)
             continue
         if success:
-            delivery.sent_at = datetime.now(timezone.utc)
+            sent_at = datetime.now(timezone.utc)
+            delivery.sent_at = sent_at
+            # Keep the legacy row-level receipt meaningful: NULL means that
+            # this scheduled digest has not been emailed to anyone.
+            digest.emailed_at = sent_at
             sent += 1
         else:
             db.delete(delivery)

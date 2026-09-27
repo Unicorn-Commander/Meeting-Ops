@@ -97,6 +97,7 @@ async def test_scheduled_store_without_email_and_cached_rerun(cohort, period, da
         assert row.content == 'Stored summary from meetings.'
         assert row.source_meeting_ids == [cohort['sid']]
         assert row.generated_at is not None
+        assert row.emailed_at is None
     cohort['sender'].assert_not_called()
     calls = cohort['llm'].chat.await_count
     await store_scheduled_digests(period, date_str=date)
@@ -109,7 +110,7 @@ async def test_scheduled_store_without_email_and_cached_rerun(cohort, period, da
 async def test_only_personally_opted_in_and_idempotent(cohort, period, date):
     from workers.weekly_digest_workers import store_scheduled_digests
     from database.database import SessionLocal
-    from database.models import DigestDelivery
+    from database.models import DigestDelivery, MeetingDigest
     opt_in(cohort)
     await store_scheduled_digests(period, date_str=date)
     cohort['sender'].assert_called_once()
@@ -119,6 +120,7 @@ async def test_only_personally_opted_in_and_idempotent(cohort, period, date):
     with SessionLocal() as db:
         rows = db.query(DigestDelivery).filter_by(organization_id=cohort['org']).all()
         assert len(rows) == 1 and rows[0].user_id == cohort['user'] and rows[0].sent_at
+        assert db.query(MeetingDigest).filter_by(organization_id=cohort['org'], period=period, date=date).one().emailed_at
 
 
 @pytest.mark.asyncio
@@ -179,14 +181,32 @@ async def test_history_scoping_detail_sources_and_personal_delivery(client, coho
     assert client.get('/api/digests/history?period=day').status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_weekly_history_exposes_range_title_and_delivery_marker(client, cohort):
+    from workers.weekly_digest_workers import store_scheduled_digests
+    opt_in(cohort)
+    await store_scheduled_digests('week', date_str='2026-08-10')
+    response = client.get('/api/digests/history?period=week', headers=cohort['headers'])
+    assert response.status_code == 200
+    item = response.json()['items'][0]
+    assert item['title'] == 'Weekly digest · Aug 10–Aug 16, 2026'
+    assert item['week_range'] == 'Aug 10–Aug 16, 2026'
+    assert item['delivery_status'] == 'emailed'
+    detail = client.get(f"/api/digests/history/{item['id']}", headers=cohort['headers'])
+    assert detail.json()['delivery_status'] == 'emailed'
+
+
 def test_preferences_default_off_patch_only_self_and_kill_switch(client, cohort):
     headers = cohort['headers']
     before = client.get('/api/digests/preferences', headers=headers)
     assert before.status_code == 200
     assert not before.json()['email_daily_digest'] and not before.json()['email_weekly_digest']
+    assert before.json()['weekly_digest_email'] is False
     changed = client.patch('/api/digests/preferences', json={'email_daily_digest': True}, headers=headers)
     assert changed.status_code == 200 and changed.json()['email_daily_digest']
     assert not changed.json()['email_weekly_digest']
+    changed = client.patch('/api/digests/preferences', json={'weekly_digest_email': True}, headers=headers)
+    assert changed.status_code == 200 and changed.json()['email_weekly_digest'] and changed.json()['weekly_digest_email']
     assert not client.get('/api/digests/preferences', headers=cohort['other_headers']).json()['email_daily_digest']
     opt_in(cohort, kill=True)
     assert not client.get('/api/digests/preferences', headers=headers).json()['organization_email_enabled']
@@ -301,6 +321,30 @@ def test_additive_migration_preserves_rows_defaults_off_and_unique_recipient_win
             migration.downgrade()
         assert conn.execute(sa.text('SELECT content FROM meeting_digest')).scalar() == 'Legacy digest'
         assert 'digest_delivery' not in sa.inspect(conn).get_table_names()
+
+
+def test_legacy_weekly_subscribers_are_backfilled():
+    import importlib.util
+    from pathlib import Path
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    path = Path(__file__).parents[1] / 'alembic/versions/064_backfill_legacy_weekly_digest_email.py'
+    spec = importlib.util.spec_from_file_location('legacy_digest_migration', path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine('sqlite://')
+    with engine.begin() as conn:
+        conn.execute(sa.text('CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, email_weekly_digest BOOLEAN NOT NULL DEFAULT 0)'))
+        conn.execute(sa.text('CREATE TABLE organizations (id INTEGER PRIMARY KEY, settings JSON)'))
+        conn.execute(sa.text('CREATE TABLE user_organizations (user_id INTEGER, organization_id INTEGER, role TEXT)'))
+        conn.execute(sa.text("INSERT INTO users VALUES (1, 'admin@example.com', 0), (2, 'other@example.com', 0)"))
+        conn.execute(sa.text("INSERT INTO organizations VALUES (1, '{\"weekly_digest\": {\"enabled\": true}}')"))
+        conn.execute(sa.text("INSERT INTO user_organizations VALUES (1, 1, 'admin'), (2, 1, 'user')"))
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+        assert conn.execute(sa.text('SELECT email_weekly_digest FROM users WHERE id = 1')).scalar() == 1
+        assert conn.execute(sa.text('SELECT email_weekly_digest FROM users WHERE id = 2')).scalar() == 0
 
 
 @pytest.mark.parametrize('strict', [False, True])

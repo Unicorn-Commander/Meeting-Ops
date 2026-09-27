@@ -69,6 +69,12 @@ def _get_date_range(period: str, date_str: str) -> tuple[datetime, datetime]:
         raise ValueError(f"Invalid period: {period}")
 
 
+def _week_range_label(date_str: str) -> str:
+    start, end = _get_date_range("week", date_str)
+    last_day = (end - timedelta(days=1)).strftime("%b %-d, %Y")
+    return f"{start.strftime('%b %-d')}–{last_day}"
+
+
 async def _generate_digest(
     db: Session,
     org_id: int,
@@ -303,6 +309,7 @@ class DigestPreferences(BaseModel):
 class DigestPreferencesPatch(BaseModel):
     email_daily_digest: Optional[bool] = None
     email_weekly_digest: Optional[bool] = None
+    weekly_digest_email: Optional[bool] = None
 
 
 @router.get("/preferences")
@@ -314,6 +321,7 @@ def get_digest_preferences(
     return {
         "email_daily_digest": bool(current_user.email_daily_digest),
         "email_weekly_digest": bool(current_user.email_weekly_digest),
+        "weekly_digest_email": bool(current_user.email_weekly_digest),
         "organization_email_enabled": _org_opted_in(active_org.organization),
     }
 
@@ -325,7 +333,10 @@ def update_digest_preferences(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    for field, value in preferences.model_dump(exclude_unset=True).items():
+    values = preferences.model_dump(exclude_unset=True)
+    if "weekly_digest_email" in values:
+        values["email_weekly_digest"] = values.pop("weekly_digest_email")
+    for field, value in values.items():
         if value is None:
             raise HTTPException(status_code=422, detail="Preferences must be booleans")
         setattr(current_user, field, value)
@@ -341,12 +352,19 @@ def _history_item(db, digest, user_id):
         DigestDelivery.user_id == user_id,
         DigestDelivery.sent_at.isnot(None),
     ).first()
-    return {
+    item = {
         "id": digest.id, "period": digest.period, "date": digest.date,
         "meeting_count": digest.meeting_count,
         "generated_at": digest.generated_at or digest.created_at,
         "emailed_to_you": delivery is not None,
+        "delivery_status": "emailed" if delivery is not None else "in-app only",
     }
+    if digest.period == "week":
+        item["week_range"] = _week_range_label(digest.date)
+        item["title"] = f"Weekly digest · {_week_range_label(digest.date)}"
+    else:
+        item["title"] = f"Daily digest · {digest.date}"
+    return item
 
 
 @router.get("/history")
