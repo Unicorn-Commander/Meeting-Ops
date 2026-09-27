@@ -14,6 +14,9 @@ interface DigestData {
   meeting_count: number;
   generated_at?: string;
   emailed_to_you?: boolean;
+  delivery_status?: string;
+  title?: string;
+  week_range?: string;
   source_meetings?: { id: string; title: string }[];
   sources_recorded?: boolean;
 }
@@ -161,9 +164,9 @@ function DigestWorkspace({ slug }: { slug?: string }) {
         <section id="digest-history" role="tabpanel" aria-labelledby={`tab-${tab}`} className="space-y-3 min-w-0">
           {historyError && <p role="alert" className="text-red-300">{historyError} <button className="underline" onClick={() => setRevision(value => value + 1)}>Retry history</button></p>}
           {history.map(item => <button key={item.id} onClick={() => item.id && openDigest(item.id)} className="block w-full text-left border border-zinc-700 rounded-lg p-4 hover:bg-zinc-900 space-y-1" aria-pressed={digest?.id === item.id}>
-            <span className="block font-medium">{item.date} · {item.meeting_count} meeting{item.meeting_count !== 1 ? 's' : ''}</span>
+            <span className="block font-medium">{item.title || `${item.date} · ${item.meeting_count} meeting${item.meeting_count !== 1 ? 's' : ''}`}</span>
             <span className="block text-sm text-zinc-400">Generated {timestamp(item.generated_at)}</span>
-            <span className="block text-sm text-zinc-400">{item.emailed_to_you ? 'Emailed to you' : 'Not emailed to you'}</span>
+            <span className="block text-sm text-zinc-400">{item.emailed_to_you ? 'Emailed to you' : 'in-app only'}</span>
           </button>)}
           {historyLoading && <p role="status">Loading digest history…</p>}
           {!historyLoading && !historyError && history.length === 0 && <p className="rounded-lg border border-dashed border-zinc-700 p-6 text-zinc-400">No {tab === 'day' ? 'daily' : 'weekly'} digests yet. Completed meetings in eligible workspaces appear after the next scheduled run, or choose Generate now.</p>}
@@ -173,8 +176,9 @@ function DigestWorkspace({ slug }: { slug?: string }) {
           {loading && <p role="status">{progressMsg}</p>}
           {error && <p role="alert" className="text-red-300">{error}</p>}
           {digest && !loading && <article className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 space-y-4">
-            <h2 className="font-semibold">{digest.period} digest · {digest.date}</h2>
+            <h2 className="font-semibold">{digest.title || `${digest.period} digest · ${digest.date}`}</h2>
             <p className="text-sm text-zinc-400">{digest.meeting_count} meetings · Generated {timestamp(digest.generated_at)}</p>
+            {digest.delivery_status && <p className="text-sm text-zinc-400">{digest.delivery_status}</p>}
             <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{digest.content}</p>
             <h3 className="font-medium">Source meetings</h3>
             {digest.source_meetings?.length ? <ul className="space-y-2">{digest.source_meetings.map(meeting => <li key={meeting.id}><Link className="text-fuchsia-300 underline break-words" to={`/sessions/${encodeURIComponent(meeting.id)}`}>{meeting.title}</Link></li>)}</ul>
