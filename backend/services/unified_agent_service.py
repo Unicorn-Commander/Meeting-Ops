@@ -648,6 +648,12 @@ Provide JSON analysis:
                     json_str = self._extract_json_from_ai_response(result)
                     if json_str:
                         parsed_result = json.loads(json_str)
+                        if isinstance(parsed_result, dict):
+                            from services.action_item_quality import gate_summary_lists
+                            gate_summary_lists(
+                                parsed_result,
+                                source=f"unified_agent.final_summary session={session_id}",
+                            )
                         logger.info(f"Comprehensive final summary generated with {len(parsed_result.get('bullets', []))} key points")
                         return parsed_result
                     else:
@@ -763,6 +769,12 @@ RESPOND WITH JSON:
                     if json_str:
                         try:
                             analysis_result = json.loads(json_str)
+                            if isinstance(analysis_result, dict):
+                                from services.action_item_quality import gate_summary_lists
+                                gate_summary_lists(
+                                    analysis_result,
+                                    source=f"unified_agent.analyze_meeting session={session_id}",
+                                )
                             logger.info(f"Meeting analysis completed using {self.model_name}")
                             return {
                                 "success": True,

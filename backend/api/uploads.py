@@ -2718,6 +2718,12 @@ async def _summarize_mapreduce(
             logger.warning("map-reduce: chunk %d/%d LLM call failed: %s", chunk["index"] + 1, total, exc)
             return None
         data = _parse_summarizer_json(text, fallback_title="")
+        from services.action_item_quality import gate_summary_lists
+        if isinstance(data, dict):
+            gate_summary_lists(
+                data,
+                source=f"uploads.map_chunk chunk={chunk['index']}",
+            )
         return {
             "index": chunk["index"],
             "range": f"{_fmt_clock(chunk['start'])}–{_fmt_clock(chunk['end'])}",
@@ -3048,6 +3054,10 @@ async def _summarize_session(
         if _fallback:
             _exec = _fallback
     analysis["executive"] = _exec
+    from services.action_item_quality import gate_summary_lists
+    gate_summary_lists(
+        analysis, source=f"uploads.summarize session={session.id}"
+    )
     session.summary = json.dumps(analysis)
     session.final_summary = {
         "executive": _exec,

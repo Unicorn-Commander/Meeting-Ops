@@ -42,6 +42,14 @@ def _resolve_llm(db: Session, org_id: Optional[int], task: str = "quality"):
         return None
 
 
+class ActionItemQuality(BaseModel):
+    """Additive tier-1 record. Absent on insights cached before the gate."""
+
+    kept: bool
+    reason: str
+    confidence: float
+
+
 class ActionItem(BaseModel):
     id: str
     text: str
@@ -50,6 +58,7 @@ class ActionItem(BaseModel):
     dueDate: Optional[str] = None
     completed: bool = False
     category: str = "general"
+    quality: Optional[ActionItemQuality] = None
 
 class KeywordTrend(BaseModel):
     word: str
@@ -526,17 +535,26 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
                 match = re.search(r'\[.*?\]', raw, re.DOTALL)
                 if match:
                     items = json.loads(match.group(0))
+                    from services.action_item_quality import apply_quality_gate
+                    gated = apply_quality_gate(
+                        [item for item in items if isinstance(item, dict)],
+                        source="ai_insights.extract",
+                    )
                     results = []
-                    for i, item in enumerate(items[:10]):
-                        if isinstance(item, dict) and "text" in item:
-                            results.append(ActionItem(
-                                id=f"action_{i+1}",
-                                text=item["text"],
-                                assignee=item.get("assignee"),
-                                priority=item.get("priority", "medium"),
-                                completed=False,
-                                category="meeting",
-                            ))
+                    for i, item in enumerate(gated.kept[:10]):
+                        text = item.get("text") if isinstance(item, dict) else None
+                        if not isinstance(text, str) or not text.strip():
+                            continue
+                        quality = item.get("quality") if isinstance(item.get("quality"), dict) else None
+                        results.append(ActionItem(
+                            id=f"action_{i+1}",
+                            text=text,
+                            assignee=item.get("assignee") or item.get("owner"),
+                            priority=item.get("priority") or "medium",
+                            completed=False,
+                            category="meeting",
+                            quality=quality,
+                        ))
                     if results:
                         return results
         except Exception as e:

@@ -254,6 +254,77 @@ def _meeting_date(session: Any) -> str:
     return "unknown date"
 
 
+def _gate_pending_items(
+    db: Session,
+    session: Any,
+    pending: list,
+    *,
+    source: str,
+) -> tuple[list, int]:
+    """Drop extracted rows the tier-1 gate rejects before they are pushed.
+
+    Manual rows are a person's own commitments and are not re-classified.
+    Kept and dropped rows both get an additive ``quality`` object on
+    ``raw_payload``. The same counts are written to
+    ``processing_metadata['action_item_quality']`` so the push attempt has
+    a record even when the task payload has nowhere else to put it.
+    Original order is preserved. Returns ``(pushable, dropped_count)``.
+    """
+    if not pending:
+        return pending, 0
+    from services.action_item_quality import apply_quality_gate
+
+    manual = []
+    extracted = []
+    for item in pending:
+        if getattr(item, "source", None) == "manual":
+            manual.append(item)
+        else:
+            extracted.append(item)
+    wrapped = [
+        {
+            "text": getattr(item, "text", None) or "",
+            "owner": getattr(item, "owner", None),
+            "raw_payload": dict(getattr(item, "raw_payload", None) or {}),
+            "_index": index,
+        }
+        for index, item in enumerate(extracted)
+    ]
+    result = apply_quality_gate(wrapped, source=source)
+
+    def _stamp_quality(stamped: dict, row: Any) -> None:
+        quality = stamped.get("quality")
+        if not isinstance(quality, dict):
+            return
+        payload = dict(getattr(row, "raw_payload", None) or {})
+        payload["quality"] = quality
+        row.raw_payload = payload
+
+    chosen = set()
+    for stamped in result.kept:
+        row = extracted[stamped["_index"]]
+        _stamp_quality(stamped, row)
+        chosen.add(id(row))
+    for stamped in result.dropped:
+        row = extracted[stamped["_index"]]
+        _stamp_quality(stamped, row)
+    for row in manual:
+        chosen.add(id(row))
+    pushable = [row for row in pending if id(row) in chosen]
+
+    meta = dict(getattr(session, "processing_metadata", None) or {})
+    meta["action_item_quality"] = {
+        "source": source,
+        "kept": len(pushable),
+        "dropped": len(result.dropped),
+        "by_reason": dict(result.counts),
+        "at": _utcnow_iso(),
+    }
+    session.processing_metadata = meta
+    db.commit()
+    return pushable, len(result.dropped)
+
+
 def _build_description(session: Any, item: Any) -> str:
     owner = (item.owner or "").strip() or "unassigned"
     return (
@@ -385,6 +456,14 @@ def _candidate_source_ref(
         ref["owner"] = owner
     if linked_ref:
         ref["linkedProjectRef"] = linked_ref
+    payload = getattr(item, "raw_payload", None)
+    if isinstance(payload, dict) and isinstance(payload.get("quality"), dict):
+        quality = payload["quality"]
+        ref["quality"] = {
+            "kept": bool(quality.get("kept")),
+            "reason": quality.get("reason"),
+            "confidence": quality.get("confidence"),
+        }
     return ref
 
 
@@ -537,6 +616,7 @@ async def write_action_items_to_projectops(
 
             created = 0
             skipped = 0
+            actionable = []
             for item in action_items:
                 payload = item.raw_payload or {}
                 if (
@@ -550,7 +630,16 @@ async def write_action_items_to_projectops(
                     # a proposal has no po_task_id until human approval.
                     skipped += 1
                     continue
+                actionable.append(item)
+            actionable, quality_dropped = _gate_pending_items(
+                db,
+                session,
+                actionable,
+                source=f"projectops_direct session={session_pk}",
+            )
+            skipped += quality_dropped
 
+            for item in actionable:
                 try:
                     result = await active_client.create_task(
                         project_number=target_ref,
@@ -590,20 +679,24 @@ async def write_action_items_to_projectops(
 
             logger.info(
                 "projectops_writer session=%s mode=%s target=%s(%s) "
-                "created=%d skipped=%d",
+                "created=%d skipped=%d quality_dropped=%d",
                 session_pk,
                 completion_mode,
                 target_ref,
                 source,
                 created,
                 skipped,
+                quality_dropped,
             )
+            detail = f"target={target_ref} source={source}"
+            if quality_dropped:
+                detail += f" quality_dropped={quality_dropped}"
             return ProjectOpsWriteResult(
                 ok=True,
                 mode="live",
                 created=created,
                 skipped=skipped,
-                detail=f"target={target_ref} source={source}",
+                detail=detail,
             )
         finally:
             if owned_client:
@@ -745,15 +838,33 @@ async def submit_action_items_to_triage(
                 and not (it.raw_payload or {}).get(STAMP_TASK_ID)
             ]
             already = len(action_items) - len(pending)
+            quality_dropped = 0
+            if pending:
+                pending, quality_dropped = _gate_pending_items(
+                    db,
+                    session,
+                    pending,
+                    source=f"projectops_triage session={session_pk}",
+                )
+                already += quality_dropped
             if not pending:
                 logger.info(
                     "projectops_triage session=%s nothing new to submit "
-                    "(already=%d)",
+                    "(already=%d quality_dropped=%d)",
                     session_pk,
                     already,
+                    quality_dropped,
                 )
                 return ProjectOpsWriteResult(
-                    ok=True, mode="live", created=0, skipped=already
+                    ok=True,
+                    mode="live",
+                    created=0,
+                    skipped=already,
+                    detail=(
+                        f"quality_dropped={quality_dropped}"
+                        if quality_dropped
+                        else None
+                    ),
                 )
 
             # An explicit session<->PO link (or per-meeting override) rides
@@ -885,22 +996,26 @@ async def submit_action_items_to_triage(
             po_skipped = (
                 int(result.get("skipped", 0)) if isinstance(result, dict) else 0
             )
+            detail = f"submitted={len(pending)} po_created={po_created}"
+            if quality_dropped:
+                detail += f" quality_dropped={quality_dropped}"
             logger.info(
                 "projectops_triage session=%s mode=%s submitted=%d "
-                "po_created=%d po_skipped=%d already=%d",
+                "po_created=%d po_skipped=%d already=%d quality_dropped=%d",
                 session_pk,
                 completion_mode,
                 len(pending),
                 po_created,
                 po_skipped,
                 already,
+                quality_dropped,
             )
             return ProjectOpsWriteResult(
                 ok=True,
                 mode="live",
                 created=po_created,
                 skipped=already + po_skipped,
-                detail=f"submitted={len(pending)} po_created={po_created}",
+                detail=detail,
             )
         finally:
             if owned_client:

@@ -262,6 +262,98 @@ def test_fixture_count_covers_the_required_set():
     assert len(NEGATIVES) + len(POSITIVES) >= 25
 
 
+class _Query:
+    def __init__(self, db):
+        self._db = db
+        self._session_id = None
+
+    def filter(self, *exprs):
+        for expr in exprs:
+            left = getattr(expr, "left", None)
+            right = getattr(expr, "right", None)
+            if getattr(left, "key", None) == "session_id":
+                self._session_id = right.value
+        return self
+
+    def order_by(self, *_args):
+        return self
+
+    def all(self):
+        rows = [row for row in self._db.rows if row.session_id == self._session_id]
+        return sorted(rows, key=lambda row: (row.sort_order or 0, row.id or 0))
+
+
+class _FakeDB:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def query(self, model):
+        return _Query(self)
+
+    def delete(self, row):
+        self.rows = [existing for existing in self.rows if existing is not row]
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def flush(self):
+        return None
+
+
+class _Session:
+    def __init__(self, final_summary):
+        self.id = 42
+        self.organization_id = 3
+        self.final_summary = final_summary
+        self.ai_insights = None
+
+
+def test_persist_stores_commitments_and_drops_navigation(caplog):
+    from database.models import ActionItem
+    from services.action_items_extractor import persist_action_items
+
+    db = _FakeDB([])
+    session = _Session({
+        "actions": [
+            {"action": "Close the project ops window", "owner": "Speaker 1"},
+            {"action": "Send the amended contract to Aaron.", "owner": "Aaron"},
+            "Take the car to service.",
+        ]
+    })
+    with caplog.at_level(logging.INFO, logger="services.action_item_quality"):
+        stored = persist_action_items(db, session)
+    texts = [row.text for row in db.rows]
+    assert stored == 1
+    assert texts == ["Send the amended contract to Aaron."]
+    assert db.rows[0].raw_payload["quality"]["kept"] is True
+    assert db.rows[0].raw_payload["quality"]["reason"] == "commitment"
+    assert any("reason=in_call_navigation" in rec.message for rec in caplog.records)
+    assert any("reason=personal_errand" in rec.message for rec in caplog.records)
+    assert isinstance(db.rows[0], ActionItem)
+
+
+def test_persist_keeps_a_manual_row_even_when_the_text_would_be_dropped():
+    from database.models import ActionItem
+    from services.action_items_extractor import persist_action_items
+
+    manual = ActionItem(
+        id=9,
+        session_id=42,
+        organization_id=3,
+        text="Close the project ops window",
+        owner="Ada",
+        status="todo",
+        sort_order=0,
+        source="manual",
+        raw_payload={"text": "Close the project ops window"},
+    )
+    db = _FakeDB([manual])
+    session = _Session({"actions": [{"action": "Close the project ops window"}]})
+    assert persist_action_items(db, session) == 1
+    assert db.rows == [manual]
+    assert manual.text == "Close the project ops window"
+
+
 def item_text_of(item):
     if isinstance(item, str):
         return item

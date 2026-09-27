@@ -36,6 +36,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, List, Optional
 
+from services.action_item_quality import apply_quality_gate
+
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +146,20 @@ def _iter_buckets(
 def extract_action_items(
     final_summary: Any,
     ai_insights: Any,
+    *,
+    quality_source: str = "action_items_extractor",
 ) -> List[dict]:
     """Return a deduplicated, ordered list of action-item dicts ready
     for INSERT into the `action_items` table.
 
     Dedup key is the first 120 chars of the text (lowercased + collapsed
-    whitespace), matching the frontend parser's behavior."""
+    whitespace), matching the frontend parser's behavior.
+
+    The tier-1 quality gate runs before the list is returned, so navigation,
+    personal errands, and other non-commitments are not inserted. Dropped
+    lines are logged with a reason. Kept dicts carry ``quality`` on
+    ``raw_payload``.
+    """
     out: List[dict] = []
     seen: set[str] = set()
 
@@ -177,7 +187,7 @@ def extract_action_items(
                 }
             )
 
-    return out
+    return apply_quality_gate(out, source=quality_source).kept
 
 
 def _dedup_key(text: str) -> str:
@@ -326,6 +336,7 @@ def persist_action_items(db, session) -> int:
     incoming = extract_action_items(
         getattr(session, "final_summary", None),
         getattr(session, "ai_insights", None),
+        quality_source=f"persist_action_items session={session.id}",
     )
     existing = (
         db.query(ActionItem)

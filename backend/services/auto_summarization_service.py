@@ -193,6 +193,8 @@ def _parse_summary(response: str) -> Dict[str, Any]:
             for line in decisions_block.split("\n")
             if line.strip() and line.strip()[0] in "-*"
         ]
+    from services.action_item_quality import gate_summary_lists
+    gate_summary_lists(summary, source="auto_summarization")
     return summary
 
 
@@ -642,6 +644,11 @@ class AutoSummarizationService:
             # completed final summary to callers until it is durable; callers
             # use the returned payload to update sockets/UI while subsequent
             # reads use this database field.
+            from services.action_item_quality import gate_summary_lists
+            gate_summary_lists(
+                final_summary,
+                source=f"auto_summarization.final session={session_id}",
+            )
             persisted = await asyncio.to_thread(
                 _persist_final_summary, session_id, final_summary
             )
