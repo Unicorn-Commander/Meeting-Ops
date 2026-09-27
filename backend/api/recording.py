@@ -202,6 +202,7 @@ SLICE_SYSTEM_PROMPT = (
     "previous summary, produce an updated, useful meeting brief that:\n"
     "- Leads with a two-sentence plain-English gist of what changed\n"
     "- Uses the headings Decisions, Action items, Open questions, and Risks\n"
+    "- Action items are COMMITMENTS only: who will do what, by when. Use a real name when the transcript has one, otherwise the speaker label. Do not list in-call navigation, meeting mechanics, personal errands, third-party to-dos, or vague non-commitments\n"
     "- Gives an owner and due date when either is stated; otherwise says 'owner not stated'\n"
     "- Writes 'None noted' for an empty section instead of advice or a disclaimer\n"
     "- Stays under 200 words and reads like notes a thoughtful attendee would take\n\n"
@@ -1350,11 +1351,14 @@ async def summarize_with_server_llm(
         system_prompt = (
             "You summarize live meeting transcripts for Meeting-Ops. "
             "Only use facts in the transcript. Keep the summary concise, "
-            "actionable, and update-friendly."
+            "actionable, and update-friendly. Action items are commitments "
+            "(who will do what, by when), not in-call navigation, meeting "
+            "mechanics, personal errands, or vague offers to stay available."
         )
         user_prompt = (
             "Create a rolling meeting summary with these sections: "
-            "Current gist, decisions, action items, open questions. "
+            "Current gist, decisions, commitments (who will do what, by when), open questions. "
+            "Use a real name for an owner when the transcript has one, otherwise the speaker label. "
             "Use short paragraphs and preserve important names.\n\n"
             f"Transcript:\n{transcript[:60000]}"
         )

@@ -51,3 +51,23 @@ ROOM_MODE_ENABLED: bool = _bool("ROOM_MODE_ENABLED", True)
 PROJECTOPS_AUTO_PUSH_ACTION_ITEMS: bool = _bool(
     "PROJECTOPS_AUTO_PUSH_ACTION_ITEMS", False
 )
+
+
+def action_item_gate_mode() -> str:
+    """Live ``ACTION_ITEM_GATE_MODE`` setting: ``shadow`` or ``enforce``.
+
+    The environment wins. The default is ``shadow``: the gate annotates
+    every item and counts what it would drop, and nothing is removed.
+    ``enforce`` removes those items. Any other value stays on shadow.
+    """
+    raw = os.getenv("ACTION_ITEM_GATE_MODE")
+    if raw is None or not str(raw).strip():
+        return "shadow"
+    value = str(raw).strip().lower()
+    if value not in {"shadow", "enforce"}:
+        return "shadow"
+    return value
+
+
+# Documented default. Call action_item_gate_mode() for the value in force.
+ACTION_ITEM_GATE_MODE = "shadow"

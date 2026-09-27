@@ -19,6 +19,7 @@ from database.models import RecordingSession
 from models.unified_agent import UnifiedMeetingAgent
 from services.progressive_interval_manager import progressive_interval_manager, ProgressiveConfig
 from services.providers import get_provider_registry
+from services.action_item_quality import COMMITMENT_EXTRACTION_RULES
 from services.summarization_lease import summarization_lease
 
 logger = logging.getLogger(__name__)
@@ -621,12 +622,14 @@ Brief summary:"""
 {transcript}
 {progressive_context}
 
-Provide JSON analysis:
+Provide JSON analysis. The actions array is COMMITMENTS only (who will do what, by when). owner is a real name from the transcript when one is given, otherwise the speaker label.
+
+{COMMITMENT_EXTRACTION_RULES}
 
 {{
     "executive": "2-3 sentence summary",
     "bullets": ["key point 1", "key point 2"],
-    "actions": [{{"action": "task", "owner": "person", "priority": "high"}}],
+    "actions": [{{"action": "concrete deliverable", "owner": "real name or speaker label", "priority": "high"}}],
     "decisions": ["decision 1"],
     "title": "Meeting Title"
 }}"""
@@ -648,6 +651,12 @@ Provide JSON analysis:
                     json_str = self._extract_json_from_ai_response(result)
                     if json_str:
                         parsed_result = json.loads(json_str)
+                        if isinstance(parsed_result, dict):
+                            from services.action_item_quality import gate_summary_lists
+                            gate_summary_lists(
+                                parsed_result,
+                                source=f"unified_agent.final_summary session={session_id}",
+                            )
                         logger.info(f"Comprehensive final summary generated with {len(parsed_result.get('bullets', []))} key points")
                         return parsed_result
                     else:
@@ -734,15 +743,17 @@ TRANSCRIPT:
 Provide:
 1. Brief summary (2-3 sentences)
 2. Key points (3-5 bullets)
-3. Action items with owners
+3. COMMITMENTS only: who will do what, by when. owner is a real name from the transcript when one is given, otherwise the speaker label
 4. Important decisions
 5. Suggested title
+
+{COMMITMENT_EXTRACTION_RULES}
 
 RESPOND WITH JSON:
 {{
     "executive": "Brief summary of the meeting",
     "bullets": ["Key point 1", "Key point 2", "Key point 3"],
-    "actions": [{{"action": "Task", "owner": "Person", "priority": "high"}}],
+    "actions": [{{"action": "concrete deliverable", "owner": "real name or speaker label", "priority": "high"}}],
     "decisions": ["Decision 1"],
     "title": "Meeting title"
 }}"""
@@ -763,6 +774,12 @@ RESPOND WITH JSON:
                     if json_str:
                         try:
                             analysis_result = json.loads(json_str)
+                            if isinstance(analysis_result, dict):
+                                from services.action_item_quality import gate_summary_lists
+                                gate_summary_lists(
+                                    analysis_result,
+                                    source=f"unified_agent.analyze_meeting session={session_id}",
+                                )
                             logger.info(f"Meeting analysis completed using {self.model_name}")
                             return {
                                 "success": True,

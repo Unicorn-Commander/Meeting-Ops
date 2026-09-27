@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy.orm import Session
 from database.database import get_db_session
 from models.agent_system import MeetingAgent, AgentType, AgentPermission, AgentTemplate, AgentSession
+from services.action_item_quality import COMMITMENT_EXTRACTION_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +97,13 @@ Analyze the complete meeting transcript and provide:
 
 1. Executive Summary (2-3 sentences)
 2. Key Discussion Points (3-5 bullets)
-3. Action Items with owners and priorities
+3. Commitments only: who will do what, by when. Owner is a real name when the transcript has one, otherwise the speaker label. Do not include navigation, meeting mechanics, personal errands, third-party to-dos, or vague non-commitments.
 4. Important Decisions Made
 5. Suggested Meeting Title
 6. Next Steps
 
-Format as structured JSON.""",
+""" + COMMITMENT_EXTRACTION_RULES + """
+Format as structured JSON. Keep the actions JSON shape: action, owner, priority.""",
                     output_format="json",
                     output_template={
                         "executive": "string",

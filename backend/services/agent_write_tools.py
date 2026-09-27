@@ -191,6 +191,11 @@ def _summary_from_session(session: RecordingSession) -> dict[str, Any]:
     summary = session.final_summary if isinstance(session.final_summary, dict) else {}
     bullets = summary.get("bullets") or summary.get("key_points") or []
     actions = summary.get("actions") or summary.get("action_items") or []
+    if isinstance(actions, list) and actions:
+        from services.action_item_quality import apply_quality_gate
+        actions = apply_quality_gate(
+            list(actions), source="agent_write_tools"
+        ).kept
     decisions = summary.get("decisions") or summary.get("key_decisions") or []
     return {
         "executive": summary.get("executive") or summary.get("executive_summary") or "",

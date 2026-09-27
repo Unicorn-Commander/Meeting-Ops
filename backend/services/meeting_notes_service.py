@@ -182,10 +182,13 @@ class MeetingNotesService:
         
         Guidelines:
         - Extract real information from the transcript only
+        - actionItems are COMMITMENTS only: who will do what, by when
+        - owner is a real name when the transcript has one, otherwise the speaker label
+        - Do not include in-call navigation, meeting mechanics, personal errands, third-party to-dos, vague non-commitments, or restatements of the topic
         - Use empty arrays [] if information is not available
         - Keep responses concise and actionable
         - Identify speakers/participants when possible
-        - Format as valid JSON only
+        - Format as valid JSON only. Keep the actionItems object keys: task, owner, deadline, priority
         """
     
     def _build_incremental_prompt(self, new_transcript: str, previous_notes: Dict[str, Any]) -> str:
@@ -212,6 +215,13 @@ class MeetingNotesService:
         Return only valid JSON with the complete updated structure.
         """
     
+    def _gate_notes(self, data: Any) -> Any:
+        """Drop non-commitments before notes are returned to a caller."""
+        if isinstance(data, dict):
+            from services.action_item_quality import gate_summary_lists
+            gate_summary_lists(data, source="meeting_notes")
+        return data
+
     def _parse_notes_response(self, response: str) -> Dict[str, Any]:
         """Parse the model response into structured notes"""
         try:
@@ -220,18 +230,18 @@ class MeetingNotesService:
             
             # Look for JSON content
             if response.startswith('{') and response.endswith('}'):
-                return json.loads(response)
+                return self._gate_notes(json.loads(response))
             
             # Try to find JSON block in markdown-style response
             import re
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(1))
+                return self._gate_notes(json.loads(json_match.group(1)))
             
             # Try to find any JSON-like content
             json_match = re.search(r'(\{.*\})', response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(1))
+                return self._gate_notes(json.loads(json_match.group(1)))
             
             # If no valid JSON found, create structured notes from text
             return self._text_to_notes(response)

@@ -9,17 +9,19 @@ silent fallback would bypass per-org provider configuration and billing.
 """
 
 import asyncio
+import re
 import time
 import logging
 from typing import Dict, Optional, Any
 from datetime import datetime, timezone
 import json
 
-from services.system_service import SystemService
-from services.providers import get_provider_registry
-from services.summarization_lease import summarization_lease
-
 logger = logging.getLogger(__name__)
+
+# SystemService, the provider registry, and the summarization lease import the
+# appliance runtime (audio HTTP client, Postgres driver). The heading parser
+# below is pure and is unit-tested without that runtime, so those imports stay
+# inside the functions that actually call out.
 
 
 def _resolve_org_id(session_id: str) -> Optional[int]:
@@ -121,7 +123,7 @@ _SUMMARY_PROMPTS = {
     "executive": (
         "Create an executive summary with:\n"
         "1. Key Decisions (bullet points)\n"
-        "2. Action Items with owners\n"
+        "2. Commitments only: who will do what, by when. Use a real name for the owner when the transcript has one, otherwise the speaker label. Skip navigation, meeting mechanics, personal errands, and vague non-commitments.\n"
         "3. Strategic Implications\n"
         "4. Next Steps\n"
         "Keep it concise and actionable."
@@ -140,11 +142,72 @@ _SUMMARY_PROMPTS = {
         "your process. Use only transcript facts. Include:\n"
         "1. Main Topics (3-5 concrete bullet points)\n"
         "2. Key Decisions Made\n"
-        "3. Action Items (who, what, when; use 'owner not stated' when absent)\n"
+        "3. Commitments only (who will do what, by when; use 'owner not stated' when absent). "
+        "Owner is a real name from the transcript when one is given, otherwise the speaker label. "
+        "Skip in-call navigation, meeting mechanics, personal errands, third-party to-dos, and vague non-commitments.\n"
         "4. Open Questions and Risks\n"
         "Write 'None noted' for an empty section. Keep it clear, specific, and organized."
     ),
 }
+
+
+def _is_commitment_heading(line: str) -> bool:
+    """True for a "Commitments" / "Commitments only" section title.
+
+    The executive and standard prompts ask for that heading. A bullet that
+    merely mentions a commitment is not a heading. "Action items" and
+    "Action points" stay on the older check.
+    """
+    raw = line.strip()
+    if not raw or raw[0] in "-*•":
+        return False
+    stripped = raw
+    if raw.startswith("#"):
+        stripped = re.sub(r"^#{1,6}\s+", "", raw)
+    elif re.match(r"^\d+[.)]\s+", raw):
+        stripped = re.sub(r"^\d+[.)]\s+", "", raw)
+    if stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
+        stripped = stripped[2:-2].strip()
+    lower = stripped.lower().strip()
+    if lower.rstrip(":") == "commitments":
+        return True
+    if (
+        lower == "commitments only"
+        or lower.startswith("commitments only:")
+        or lower.startswith("commitments only (")
+    ):
+        return True
+    return False
+
+
+# Later sections in the executive and standard templates. Recognising them
+# closes the commitment bucket so "Next Steps" bullets are not action items.
+_OTHER_SECTION_TITLES = frozenset({
+    "strategic implications",
+    "next steps",
+    "open questions",
+    "open questions and risks",
+    "implementation details",
+    "technical debt",
+    "technical debt items",
+    "dependencies and blockers",
+    "technical topics discussed",
+})
+
+
+def _is_other_section_heading(line: str) -> bool:
+    raw = line.strip()
+    if not raw or raw[0] in "-*•":
+        return False
+    stripped = raw
+    if raw.startswith("#"):
+        stripped = re.sub(r"^#{1,6}\s+", "", raw)
+    elif re.match(r"^\d+[.)]\s+", raw):
+        stripped = re.sub(r"^\d+[.)]\s+", "", raw)
+    if stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
+        stripped = stripped[2:-2].strip()
+    lower = stripped.lower().strip().rstrip(":")
+    return lower in _OTHER_SECTION_TITLES or lower.startswith("open questions")
 
 
 def _parse_summary(response: str) -> Dict[str, Any]:
@@ -161,7 +224,9 @@ def _parse_summary(response: str) -> Dict[str, Any]:
     for raw_line in response.split("\n"):
         line = raw_line.strip()
         lower = line.lower()
-        if any(h in lower for h in ("action items", "action points")):
+        if _is_commitment_heading(line) or any(
+            h in lower for h in ("action items", "action points")
+        ):
             if current_section:
                 summary["sections"][current_section] = "\n".join(current_content)
             current_section, current_content = "action_items", []
@@ -173,6 +238,10 @@ def _parse_summary(response: str) -> Dict[str, Any]:
             if current_section:
                 summary["sections"][current_section] = "\n".join(current_content)
             current_section, current_content = "topics", []
+        elif _is_other_section_heading(line):
+            if current_section:
+                summary["sections"][current_section] = "\n".join(current_content)
+            current_section, current_content = "other", []
         elif line and not line.endswith(":"):
             current_content.append(line)
 
@@ -193,6 +262,8 @@ def _parse_summary(response: str) -> Dict[str, Any]:
             for line in decisions_block.split("\n")
             if line.strip() and line.strip()[0] in "-*"
         ]
+    from services.action_item_quality import gate_summary_lists
+    gate_summary_lists(summary, source="auto_summarization")
     return summary
 
 
@@ -217,6 +288,7 @@ def _summarize_with_org(
 
     try:
         from database.database import SessionLocal
+        from services.providers import get_provider_registry
         db = SessionLocal()
         try:
             registry = get_provider_registry(db)
@@ -285,6 +357,7 @@ class AutoSummarizationService:
         # before the org lookup below, because that lookup awaits — and every
         # viewer who connected in the same instant is sitting right here,
         # already past the active_tasks check, waiting to be let through.
+        from services.summarization_lease import summarization_lease
         if not await summarization_lease.acquire(session_id, on_lost=self._lease_lost):
             logger.warning(
                 f"Auto-summarization for session {session_id} is already running "
@@ -306,6 +379,7 @@ class AutoSummarizationService:
             self.active_tasks[session_id] = task
         except Exception:
             # Never strand the lease on a run that did not start.
+            from services.summarization_lease import summarization_lease
             await summarization_lease.release(session_id)
             raise
 
@@ -344,6 +418,7 @@ class AutoSummarizationService:
             await self._cancel_local_run(session_id)
             # Release only what we started: release() is holder-scoped, so a
             # lease held by the unified agent (or another process) is untouched.
+            from services.summarization_lease import summarization_lease
             await summarization_lease.release(session_id)
 
             logger.info(f"Stopped auto-summarization for session {session_id}")
@@ -361,6 +436,7 @@ class AutoSummarizationService:
         try:
             while True:
                 # Load current settings
+                from services.system_service import SystemService
                 settings = SystemService.load_settings()
                 
                 # Check if live summarization is enabled
@@ -441,6 +517,7 @@ class AutoSummarizationService:
             # kept its lease would block every later attempt on this meeting
             # until the lease expired.
             self.active_tasks.pop(session_id, None)
+            from services.summarization_lease import summarization_lease
             await summarization_lease.release(session_id)
     
     async def _generate_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -525,6 +602,7 @@ class AutoSummarizationService:
     
     def get_status(self, session_id: str) -> Dict[str, Any]:
         """Get status of auto-summarization for a session"""
+        from services.system_service import SystemService
         settings = SystemService.load_settings()
         
         return {
@@ -580,6 +658,7 @@ class AutoSummarizationService:
         This is separate from the periodic summaries during recording
         """
         try:
+            from services.system_service import SystemService
             settings = SystemService.load_settings()
             
             if not settings.enableFinalSummary:
@@ -642,6 +721,11 @@ class AutoSummarizationService:
             # completed final summary to callers until it is durable; callers
             # use the returned payload to update sockets/UI while subsequent
             # reads use this database field.
+            from services.action_item_quality import gate_summary_lists
+            gate_summary_lists(
+                final_summary,
+                source=f"auto_summarization.final session={session_id}",
+            )
             persisted = await asyncio.to_thread(
                 _persist_final_summary, session_id, final_summary
             )

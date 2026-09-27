@@ -801,6 +801,12 @@ async def upload_transcript(
 
                     if summary_result and summary_result.get("success"):
                         analysis = summary_result.get("analysis", {})
+                        if isinstance(analysis, dict):
+                            from services.action_item_quality import gate_summary_lists
+                            gate_summary_lists(
+                                analysis,
+                                source=f"satellite.summarize session={session.id}",
+                            )
                         session.final_summary = {
                             "executive": analysis.get("executive", ""),
                             "bullets": analysis.get("bullets", []),
