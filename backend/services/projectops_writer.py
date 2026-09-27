@@ -261,19 +261,23 @@ def _gate_pending_items(
     *,
     source: str,
 ) -> tuple[list, int]:
-    """Drop extracted rows the tier-1 gate rejects before they are pushed.
+    """Annotate extracted rows before they are pushed.
 
     Manual rows are a person's own commitments and are not re-classified.
-    Kept and dropped rows both get an additive ``quality`` object on
-    ``raw_payload``. The same counts are written to
-    ``processing_metadata['action_item_quality']`` so the push attempt has
-    a record even when the task payload has nowhere else to put it.
-    Original order is preserved. Returns ``(pushable, dropped_count)``.
+    Every classified row gets an additive ``quality`` object on
+    ``raw_payload``. Counts land on
+    ``processing_metadata['action_item_quality']``. Original order is
+    preserved. Returns ``(pushable, classified_drops)``.
+
+    Shadow keeps would-drop rows in ``pushable`` and records them as
+    ``would_drop``. Enforce leaves them out and records ``dropped``.
+    Callers must withhold ``classified_drops`` only in enforce.
     """
     if not pending:
         return pending, 0
-    from services.action_item_quality import apply_quality_gate
+    from services.action_item_quality import apply_quality_gate, get_action_item_gate_mode
 
+    mode = get_action_item_gate_mode()
     manual = []
     extracted = []
     for item in pending:
@@ -312,17 +316,31 @@ def _gate_pending_items(
         chosen.add(id(row))
     pushable = [row for row in pending if id(row) in chosen]
 
+    shadow = mode == "shadow"
     meta = dict(getattr(session, "processing_metadata", None) or {})
     meta["action_item_quality"] = {
         "source": source,
+        "mode": mode,
         "kept": len(pushable),
-        "dropped": len(result.dropped),
+        "dropped": 0 if shadow else len(result.dropped),
+        "would_drop": len(result.dropped) if shadow else 0,
         "by_reason": dict(result.counts),
         "at": _utcnow_iso(),
     }
     session.processing_metadata = meta
     db.commit()
+    # The second value is the classified drop count in both modes. Callers
+    # withhold that many from the push only in enforce; shadow still pushes.
     return pushable, len(result.dropped)
+
+
+def _withhold_from_push(session: Any, classified_drops: int) -> int:
+    """Rows to leave out of this push. Shadow counts them and still pushes."""
+    meta = getattr(session, "processing_metadata", None)
+    note = meta.get("action_item_quality") if isinstance(meta, dict) else None
+    if isinstance(note, dict) and note.get("mode") == "shadow":
+        return 0
+    return classified_drops
 
 
 def _build_description(session: Any, item: Any) -> str:
@@ -637,7 +655,7 @@ async def write_action_items_to_projectops(
                 actionable,
                 source=f"projectops_direct session={session_pk}",
             )
-            skipped += quality_dropped
+            skipped += _withhold_from_push(session, quality_dropped)
 
             for item in actionable:
                 try:
@@ -677,20 +695,25 @@ async def write_action_items_to_projectops(
                 db.commit()
                 created += 1
 
+            quality_note = (session.processing_metadata or {}).get("action_item_quality") or {}
             logger.info(
                 "projectops_writer session=%s mode=%s target=%s(%s) "
-                "created=%d skipped=%d quality_dropped=%d",
+                "created=%d skipped=%d quality_dropped=%d quality_would_drop=%d gate=%s",
                 session_pk,
                 completion_mode,
                 target_ref,
                 source,
                 created,
                 skipped,
-                quality_dropped,
+                quality_note.get("dropped", 0),
+                quality_note.get("would_drop", 0),
+                quality_note.get("mode", ""),
             )
             detail = f"target={target_ref} source={source}"
-            if quality_dropped:
-                detail += f" quality_dropped={quality_dropped}"
+            if quality_note.get("dropped"):
+                detail += f" quality_dropped={quality_note['dropped']}"
+            if quality_note.get("would_drop"):
+                detail += f" quality_would_drop={quality_note['would_drop']}"
             return ProjectOpsWriteResult(
                 ok=True,
                 mode="live",
@@ -846,25 +869,30 @@ async def submit_action_items_to_triage(
                     pending,
                     source=f"projectops_triage session={session_pk}",
                 )
-                already += quality_dropped
+                already += _withhold_from_push(session, quality_dropped)
             if not pending:
+                note = (session.processing_metadata or {}).get("action_item_quality") or {}
                 logger.info(
                     "projectops_triage session=%s nothing new to submit "
-                    "(already=%d quality_dropped=%d)",
+                    "(already=%d quality_dropped=%d quality_would_drop=%d gate=%s)",
                     session_pk,
                     already,
-                    quality_dropped,
+                    note.get("dropped", 0),
+                    note.get("would_drop", 0),
+                    note.get("mode", ""),
                 )
+                if note.get("dropped"):
+                    empty_detail = f"quality_dropped={note['dropped']}"
+                elif note.get("would_drop"):
+                    empty_detail = f"quality_would_drop={note['would_drop']}"
+                else:
+                    empty_detail = None
                 return ProjectOpsWriteResult(
                     ok=True,
                     mode="live",
                     created=0,
                     skipped=already,
-                    detail=(
-                        f"quality_dropped={quality_dropped}"
-                        if quality_dropped
-                        else None
-                    ),
+                    detail=empty_detail,
                 )
 
             # An explicit session<->PO link (or per-meeting override) rides
@@ -996,19 +1024,25 @@ async def submit_action_items_to_triage(
             po_skipped = (
                 int(result.get("skipped", 0)) if isinstance(result, dict) else 0
             )
+            note = (session.processing_metadata or {}).get("action_item_quality") or {}
             detail = f"submitted={len(pending)} po_created={po_created}"
-            if quality_dropped:
-                detail += f" quality_dropped={quality_dropped}"
+            if note.get("dropped"):
+                detail += f" quality_dropped={note['dropped']}"
+            if note.get("would_drop"):
+                detail += f" quality_would_drop={note['would_drop']}"
             logger.info(
                 "projectops_triage session=%s mode=%s submitted=%d "
-                "po_created=%d po_skipped=%d already=%d quality_dropped=%d",
+                "po_created=%d po_skipped=%d already=%d quality_dropped=%d "
+                "quality_would_drop=%d gate=%s",
                 session_pk,
                 completion_mode,
                 len(pending),
                 po_created,
                 po_skipped,
                 already,
-                quality_dropped,
+                note.get("dropped", 0),
+                note.get("would_drop", 0),
+                note.get("mode", ""),
             )
             return ProjectOpsWriteResult(
                 ok=True,

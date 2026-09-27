@@ -8,12 +8,21 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from services.action_item_quality import (
     apply_quality_gate,
     classify_action_item,
     gate_summary_lists,
+    get_action_item_gate_mode,
     tier2_llm_verifier,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enforce_action_item_gate(monkeypatch):
+    """Drop-behavior tests in this module assume enforce. Shadow tests opt out."""
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "enforce")
 
 
 NEGATIVES = [
@@ -540,6 +549,216 @@ def test_parse_summary_executive_commitments_heading_fills_action_items():
     assert "Schedule the kickoff." not in parsed["action_items"]
     assert "Margin improves next quarter." not in parsed["sections"]["action_items"]
     assert "Schedule the kickoff." not in parsed["sections"]["action_items"]
+
+
+def test_gate_mode_defaults_to_shadow(monkeypatch):
+    monkeypatch.delenv("ACTION_ITEM_GATE_MODE", raising=False)
+    assert get_action_item_gate_mode() == "shadow"
+
+
+def test_unknown_gate_mode_stays_shadow(monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "observe")
+    assert get_action_item_gate_mode() == "shadow"
+
+
+def test_enforce_gate_mode_is_case_insensitive(monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "ENFORCE")
+    assert get_action_item_gate_mode() == "enforce"
+
+
+def test_shadow_mode_annotates_counts_and_drops_nothing(monkeypatch, caplog):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "shadow")
+    items = [
+        {"text": "Close the project ops window", "owner": "Speaker 1"},
+        {"text": "Send the amended contract to Aaron.", "owner": "Aaron"},
+    ]
+    with caplog.at_level(logging.INFO, logger="services.action_item_quality"):
+        result = apply_quality_gate(items, source="unit")
+    assert [item["text"] for item in result.kept] == [
+        "Close the project ops window",
+        "Send the amended contract to Aaron.",
+    ]
+    assert result.dropped_count == 1
+    assert result.counts["in_call_navigation"] == 1
+    assert result.kept[0]["quality"]["kept"] is False
+    assert result.kept[0]["quality"]["reason"] == "in_call_navigation"
+    assert result.kept[1]["quality"]["kept"] is True
+    assert any("would_drop reason=in_call_navigation" in rec.message for rec in caplog.records)
+    assert any("mode=shadow" in rec.message and "would_drop=1" in rec.message for rec in caplog.records)
+
+
+def test_enforce_mode_removes_rejected_items(monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "enforce")
+    result = apply_quality_gate(
+        [
+            {"text": "Close the project ops window"},
+            "Send the amended contract to Aaron.",
+        ],
+        source="unit",
+    )
+    assert result.kept == ["Send the amended contract to Aaron."]
+    assert result.dropped_count == 1
+    assert result.dropped[0]["quality"]["kept"] is False
+
+
+def test_shadow_summary_lists_keep_and_annotate(monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "shadow")
+    payload = {
+        "actions": [
+            {"action": "Close the project ops window"},
+            {"action": "Send the amended contract to Aaron.", "owner": "Aaron"},
+        ],
+        "decisions": ["Use the retainer."],
+    }
+    gate_summary_lists(payload, source="summary")
+    assert len(payload["actions"]) == 2
+    assert payload["actions"][0]["quality"]["reason"] == "in_call_navigation"
+    assert payload["actions"][0]["quality"]["kept"] is False
+    assert payload["actions"][1]["quality"]["reason"] == "commitment"
+    assert payload["decisions"] == ["Use the retainer."]
+
+
+def test_shadow_and_enforce_projectops_push(monkeypatch):
+    from services.projectops_writer import _gate_pending_items, _withhold_from_push
+
+    class _Row:
+        def __init__(self, text, source="final_summary"):
+            self.text = text
+            self.owner = "Ada"
+            self.source = source
+            self.raw_payload = {"action": text}
+
+    class _DB:
+        def commit(self):
+            self.committed = True
+
+    class _PushSession:
+        processing_metadata = None
+
+    def _run(mode):
+        monkeypatch.setenv("ACTION_ITEM_GATE_MODE", mode)
+        window = _Row("Close the project ops window")
+        send = _Row("Send the amended contract to Aaron.")
+        manual = _Row("Close the project ops window", source="manual")
+        manual.raw_payload = {"text": "Close the project ops window"}
+        db = _DB()
+        session = _PushSession()
+        pushable, classified = _gate_pending_items(
+            db, session, [window, send, manual], source="unit-push",
+        )
+        return pushable, classified, session, window, send, manual
+
+    pushable, classified, session, window, send, manual = _run("shadow")
+    assert [row.text for row in pushable] == [
+        "Close the project ops window",
+        "Send the amended contract to Aaron.",
+        "Close the project ops window",
+    ]
+    assert classified == 1
+    note = session.processing_metadata["action_item_quality"]
+    assert note["mode"] == "shadow"
+    assert note["would_drop"] == 1
+    assert note["dropped"] == 0
+    assert note["by_reason"] == {"in_call_navigation": 1}
+    assert window.raw_payload["quality"]["kept"] is False
+    assert send.raw_payload["quality"]["kept"] is True
+    assert "quality" not in manual.raw_payload
+    assert _withhold_from_push(session, classified) == 0
+
+    pushable, classified, session, window, send, manual = _run("enforce")
+    assert [row.text for row in pushable] == [
+        "Send the amended contract to Aaron.",
+        "Close the project ops window",
+    ]
+    assert pushable[-1] is manual
+    note = session.processing_metadata["action_item_quality"]
+    assert note["mode"] == "enforce"
+    assert note["dropped"] == 1
+    assert note["would_drop"] == 0
+    assert window.raw_payload["quality"]["kept"] is False
+    assert _withhold_from_push(session, classified) == 1
+
+
+def _machine_window():
+    from database.models import ActionItem
+
+    return ActionItem(
+        id=7,
+        session_id=42,
+        organization_id=3,
+        text="Close the project ops window",
+        owner="Speaker 1",
+        status="todo",
+        sort_order=0,
+        source="final_summary",
+        raw_payload={"action": "Close the project ops window", "owner": "Speaker 1"},
+    )
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_resummary_does_not_delete_a_row_only_because_the_gate_rejects_it(mode, monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", mode)
+    from services.action_items_extractor import persist_action_items
+
+    window = _machine_window()
+    db = _FakeDB([window])
+    session = _Session({
+        "actions": [
+            {"action": "Close the project ops window", "owner": "Speaker 1"},
+            {"action": "Send the amended contract to Aaron.", "owner": "Aaron"},
+        ]
+    })
+    assert persist_action_items(db, session) == 2
+    assert persist_action_items(db, session) == 2
+    texts = [row.text for row in db.rows]
+    assert texts.count("Close the project ops window") == 1
+    assert texts.count("Send the amended contract to Aaron.") == 1
+    assert window in db.rows
+    if mode == "shadow":
+        assert window.raw_payload["quality"]["kept"] is False
+        assert window.raw_payload["quality"]["reason"] == "in_call_navigation"
+    else:
+        assert "quality" not in window.raw_payload
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_resummary_still_deletes_a_row_the_new_summary_omits(mode, monkeypatch):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", mode)
+    from services.action_items_extractor import persist_action_items
+
+    window = _machine_window()
+    db = _FakeDB([window])
+    session = _Session({
+        "actions": [
+            {"action": "Send the amended contract to Aaron.", "owner": "Aaron"},
+        ]
+    })
+    assert persist_action_items(db, session) == 1
+    assert window not in db.rows
+    assert [row.text for row in db.rows] == ["Send the amended contract to Aaron."]
+
+
+def test_shadow_persist_stores_a_new_line_the_gate_would_drop(monkeypatch, caplog):
+    monkeypatch.setenv("ACTION_ITEM_GATE_MODE", "shadow")
+    from services.action_items_extractor import persist_action_items
+
+    db = _FakeDB([])
+    session = _Session({
+        "actions": [
+            {"action": "Close the project ops window", "owner": "Speaker 1"},
+            {"action": "Send the amended contract to Aaron.", "owner": "Aaron"},
+        ]
+    })
+    with caplog.at_level(logging.INFO, logger="services.action_item_quality"):
+        assert persist_action_items(db, session) == 2
+    texts = [row.text for row in db.rows]
+    assert texts == [
+        "Close the project ops window",
+        "Send the amended contract to Aaron.",
+    ]
+    window = db.rows[0]
+    assert window.raw_payload["quality"]["kept"] is False
+    assert any("would_drop reason=in_call_navigation" in rec.message for rec in caplog.records)
 
 
 def test_parse_summary_action_items_heading_still_fills_action_items():

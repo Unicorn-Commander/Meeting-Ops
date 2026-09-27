@@ -143,23 +143,7 @@ def _iter_buckets(
         yield "ai_insights", ai_insights
 
 
-def extract_action_items(
-    final_summary: Any,
-    ai_insights: Any,
-    *,
-    quality_source: str = "action_items_extractor",
-) -> List[dict]:
-    """Return a deduplicated, ordered list of action-item dicts ready
-    for INSERT into the `action_items` table.
-
-    Dedup key is the first 120 chars of the text (lowercased + collapsed
-    whitespace), matching the frontend parser's behavior.
-
-    The tier-1 quality gate runs before the list is returned, so navigation,
-    personal errands, and other non-commitments are not inserted. Dropped
-    lines are logged with a reason. Kept dicts carry ``quality`` on
-    ``raw_payload``.
-    """
+def _parsed_action_items(final_summary: Any, ai_insights: Any) -> List[dict]:
     out: List[dict] = []
     seen: set[str] = set()
 
@@ -187,7 +171,45 @@ def extract_action_items(
                 }
             )
 
-    return apply_quality_gate(out, source=quality_source).kept
+    return out
+
+
+def _gate_parsed_action_items(
+    final_summary: Any,
+    ai_insights: Any,
+    *,
+    quality_source: str = "action_items_extractor",
+):
+    """Classify the parsed lines. Shadow keeps every line in ``kept``."""
+    return apply_quality_gate(
+        _parsed_action_items(final_summary, ai_insights),
+        source=quality_source,
+    )
+
+
+def extract_action_items(
+    final_summary: Any,
+    ai_insights: Any,
+    *,
+    quality_source: str = "action_items_extractor",
+) -> List[dict]:
+    """Return a deduplicated, ordered list of action-item dicts ready
+    for INSERT into the `action_items` table.
+
+    Dedup key is the first 120 chars of the text (lowercased + collapsed
+    whitespace), matching the frontend parser's behavior.
+
+    The tier-1 quality gate runs before the list is returned. In enforce
+    mode, navigation, personal errands, and other non-commitments are not
+    included. In shadow mode every parsed line is returned, annotated.
+    Dropped lines are logged with a reason. Dicts carry ``quality`` on
+    ``raw_payload``.
+    """
+    return _gate_parsed_action_items(
+        final_summary,
+        ai_insights,
+        quality_source=quality_source,
+    ).kept
 
 
 def _dedup_key(text: str) -> str:
@@ -309,6 +331,11 @@ def persist_action_items(db, session) -> int:
     place. An untouched machine row with no match is deleted. Anything
     left over is inserted.
 
+    A machine row is not deleted only because the gate would now reject
+    its text. If that sentence is still in the new summary, the row stays
+    in both shadow and enforce mode. A sentence the new summary no longer
+    contains is still removed.
+
     A machine row wins a shared text over a human row, so a hand-added
     duplicate cannot consume the match and drop the stamped machine row.
     The human row still consumes a leftover with its text, which stops
@@ -333,11 +360,26 @@ def persist_action_items(db, session) -> int:
         )
         return 0
 
-    incoming = extract_action_items(
+    classified = _gate_parsed_action_items(
         getattr(session, "final_summary", None),
         getattr(session, "ai_insights", None),
         quality_source=f"persist_action_items session={session.id}",
     )
+    incoming = classified.kept
+    # Lines the summary still contains but the gate rejected. Matching
+    # machine rows must survive the merge in both modes. Shadow also
+    # returns those lines in ``kept``, so they update in place instead.
+    rejected_keys = set()
+    for item in classified.dropped:
+        if isinstance(item, dict):
+            text = item.get("text") or ""
+        elif isinstance(item, str):
+            text = item
+        else:
+            text = ""
+        key = _match_key(text)
+        if key:
+            rejected_keys.add(key)
     existing = (
         db.query(ActionItem)
         .filter(ActionItem.session_id == session.id)
@@ -370,10 +412,14 @@ def persist_action_items(db, session) -> int:
         else:
             machine.append(row)
 
-    kept = updated = removed = 0
+    kept = updated = removed = preserved = 0
     for row in machine:
-        match = _take(getattr(row, "text", "") or "")
+        row_text = getattr(row, "text", "") or ""
+        match = _take(row_text)
         if match is None:
+            if _match_key(row_text) in rejected_keys:
+                preserved += 1
+                continue
             db.delete(row)
             removed += 1
             continue
@@ -405,11 +451,12 @@ def persist_action_items(db, session) -> int:
 
     db.flush()
     logger.info(
-        "action_items: merged session=%s kept=%d updated=%d removed=%d inserted=%d",
+        "action_items: merged session=%s kept=%d updated=%d removed=%d inserted=%d preserved=%d",
         session.id,
         kept,
         updated,
         removed,
         inserted,
+        preserved,
     )
-    return kept + updated + inserted
+    return kept + updated + inserted + preserved

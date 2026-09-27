@@ -12,6 +12,13 @@ Kept dicts gain an additive ``quality`` object ``{kept, reason, confidence}``
 on the item and, when present, on ``raw_payload``. String items cannot carry
 that object; the log is the record.
 
+``ACTION_ITEM_GATE_MODE`` is ``shadow`` (the default) or ``enforce``, read
+from the environment on each call via ``config.features.action_item_gate_mode``.
+Shadow annotates every item, logs and counts what it would drop, and drops
+nothing. Enforce removes the rejected items. Re-summary must not delete a
+stored machine row only because the gate would now reject it; that guard
+lives in the extractor, and it holds in both modes.
+
 ``tier2_llm_verifier`` is an unwired hook. Do not call it from tier 1.
 """
 
@@ -521,15 +528,29 @@ def _format_counts(counts: dict[str, int]) -> str:
     return ",".join(f"{key}:{counts[key]}" for key in sorted(counts))
 
 
+def get_action_item_gate_mode() -> str:
+    """``shadow`` or ``enforce``. Default ``shadow``. See ``config.features``."""
+    from config.features import action_item_gate_mode
+
+    return action_item_gate_mode()
+
+
 def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
-    """Split extracted items into kept and dropped.
+    """Annotate extracted items, and drop them only in enforce mode.
 
     Dicts gain a ``quality`` record. Strings stay strings. Empty input is a
     no-op. This function does not call ``tier2_llm_verifier``.
+
+    Shadow (the default) keeps every item, including ones the record marks
+    ``kept: false``. It still logs and counts those as ``would_drop``.
+    Enforce puts rejected items only in ``dropped``. ``counts`` is the
+    would-drop tally in both modes.
     """
     if not isinstance(items, list) or not items:
         return GateResult(kept=[], dropped=[], counts={})
 
+    mode = get_action_item_gate_mode()
+    shadow = mode != "enforce"
     kept: list[Any] = []
     dropped: list[Any] = []
     counts: dict[str, int] = {}
@@ -544,6 +565,8 @@ def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
             continue
         dropped.append(stamped)
         counts[record.reason] = counts.get(record.reason, 0) + 1
+        if shadow:
+            kept.append(stamped)
         previous = _existing_quality(item)
         already_logged = (
             isinstance(previous, dict)
@@ -553,19 +576,23 @@ def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
         if already_logged:
             continue
         logger.info(
-            "action_item_quality dropped reason=%s confidence=%.2f source=%s owner=%s text=%s",
+            "action_item_quality %s reason=%s confidence=%.2f source=%s owner=%s text=%s mode=%s",
+            "would_drop" if shadow else "dropped",
             record.reason,
             record.confidence,
             source,
             owner or "",
             (text or "")[:500],
+            mode,
         )
 
     if counts:
         logger.info(
-            "action_item_quality gate source=%s kept=%d dropped=%d by_reason=%s",
+            "action_item_quality gate source=%s mode=%s kept=%d %s=%d by_reason=%s",
             source,
+            mode,
             len(kept),
+            "would_drop" if shadow else "dropped",
             len(dropped),
             _format_counts(counts),
         )
@@ -573,10 +600,12 @@ def apply_quality_gate(items: Any, *, source: str = "extract") -> GateResult:
 
 
 def gate_summary_lists(payload: Any, *, source: str = "summary") -> Any:
-    """Filter action-item lists inside a summary dict, in place.
+    """Annotate action-item lists inside a summary dict, in place.
 
     Keys: ``action_items``, ``actions``, ``tasks``, ``action-items``,
     ``actionItems``. Other fields are left alone. Returns ``payload``.
+    Enforce replaces each list with the survivors. Shadow leaves every
+    item in the list and stamps the quality record on dict items.
     """
     if not isinstance(payload, dict):
         return payload
@@ -605,6 +634,7 @@ __all__ = [
     "apply_quality_gate",
     "classify_action_item",
     "gate_summary_lists",
+    "get_action_item_gate_mode",
     "item_owner",
     "item_text",
     "tier2_llm_verifier",
