@@ -387,3 +387,94 @@ def test_commitment_rules_have_no_format_braces_and_prompts_keep_the_json_contra
         )
     )
     assert joined.count("who will do what, by when") >= 6
+
+
+_STANDARD_COMMITMENTS_BRIEF = """\
+1. Main Topics (3-5 concrete bullet points)
+- The retainer transition
+
+2. Key Decisions Made
+- Move Dana's account to a monthly retainer.
+
+3. Commitments only (who will do what, by when; use 'owner not stated' when absent)
+- Send the amended contract to Aaron.
+- Email the signed SOW to the customer by Friday.
+- Close the project ops window
+
+4. Open Questions and Risks
+- Who signs first?
+"""
+
+_EXECUTIVE_COMMITMENTS_BRIEF = """\
+1. Key Decisions (bullet points)
+- Adopt the monthly retainer.
+
+2. Commitments only: who will do what, by when. Use a real name for the owner when the transcript has one, otherwise the speaker label.
+- Send the amended contract to Aaron.
+- Email the signed SOW to the customer by Friday.
+
+3. Strategic Implications
+- Margin improves next quarter.
+
+4. Next Steps
+- Schedule the kickoff.
+"""
+
+_ACTION_ITEMS_BRIEF = """\
+Key Decisions
+- Use the retainer.
+
+Action Items
+- Send the amended contract to Aaron.
+- Email the signed SOW to the customer by Friday.
+"""
+
+
+def test_parse_summary_commitments_only_heading_fills_action_items():
+    """A brief written under the standard prompt lands commitments in action_items."""
+    from services.auto_summarization_service import _parse_summary
+
+    parsed = _parse_summary(_STANDARD_COMMITMENTS_BRIEF)
+    for line in (
+        "Send the amended contract to Aaron.",
+        "Email the signed SOW to the customer by Friday.",
+    ):
+        assert line in parsed["action_items"]
+        assert line not in parsed["key_decisions"]
+    block = parsed["sections"]["action_items"]
+    assert "Send the amended contract to Aaron." in block
+    assert "Email the signed SOW to the customer by Friday." in block
+    # The navigation line was parsed into the action bucket. The gate may
+    # remove it from the list; it must not be filed as a decision.
+    assert "Close the project ops window" in block
+    assert "Close the project ops window" not in parsed["key_decisions"]
+    assert "Move Dana's account to a monthly retainer." in parsed["key_decisions"]
+    assert "Who signs first?" not in parsed["action_items"]
+    assert "Who signs first?" not in block
+
+
+def test_parse_summary_executive_commitments_heading_fills_action_items():
+    """The executive template uses the same parser and the same heading."""
+    from services.auto_summarization_service import _parse_summary
+
+    parsed = _parse_summary(_EXECUTIVE_COMMITMENTS_BRIEF)
+    assert "Send the amended contract to Aaron." in parsed["action_items"]
+    assert "Email the signed SOW to the customer by Friday." in parsed["action_items"]
+    assert "Send the amended contract to Aaron." not in parsed["key_decisions"]
+    assert "Adopt the monthly retainer." in parsed["key_decisions"]
+    assert "Margin improves next quarter." not in parsed["action_items"]
+    assert "Schedule the kickoff." not in parsed["action_items"]
+    assert "Margin improves next quarter." not in parsed["sections"]["action_items"]
+    assert "Schedule the kickoff." not in parsed["sections"]["action_items"]
+
+
+def test_parse_summary_action_items_heading_still_fills_action_items():
+    from services.auto_summarization_service import _parse_summary
+
+    parsed = _parse_summary(_ACTION_ITEMS_BRIEF)
+    assert parsed["action_items"] == [
+        "Send the amended contract to Aaron.",
+        "Email the signed SOW to the customer by Friday.",
+    ]
+    assert parsed["key_decisions"] == ["Use the retainer."]
+    assert "Send the amended contract to Aaron." not in parsed["key_decisions"]
