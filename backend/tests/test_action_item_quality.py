@@ -114,6 +114,80 @@ def test_required_positives_are_commitments():
         assert record.confidence >= 0.8
 
 
+# The reviewer's first table. Every one of these is a real deliverable.
+REVIEW_DELIVERABLES = [
+    ("Send the contract to Marcus by Friday.", "commitment"),
+    ("Set up the client's Strix box before Monday.", "commitment"),
+    ("Stop billing hourly and move Dana's account to a monthly retainer.", "retained"),
+    ("Share the proposal with the client by Thursday.", "commitment"),
+    ("Pull the latest invoices from Accounting-Ops and send them to the bookkeeper.", "commitment"),
+    ("Write a status update on tonight's episode for the sponsor.", "commitment"),
+    ("Mute the alert channel in PagerDuty and document the change.", "commitment"),
+    ("Pull up the Q3 numbers and send them to the board.", "commitment"),
+    ("Set the format of the monthly report to the client template.", "retained"),
+    ("Open a window for the new hire in the payroll system.", "retained"),
+    ("Open the support tab in the client portal and file the bug.", "commitment"),
+    ("Close the browser tab in the runbook and document the incident.", "commitment"),
+    ("Click the link in the DocuSign email and countersign the SOW.", "commitment"),
+    ("See the screen recording and send notes to the client.", "commitment"),
+    ("Share your screen recording of the demo with the client.", "commitment"),
+    ("Review the screen share and send the client a punch list.", "commitment"),
+    ("Play the new track for the client at Thursday's listening session.", "retained"),
+    ("Start the recording of the training video for the client portal.", "retained"),
+    ("Stop the recording of hourly time entries and switch the client to a retainer.", "retained"),
+    ("Prepare a status update on tonight's episode for the sponsor.", "commitment"),
+    ("Draft a status update on tonight's episode for the sponsor.", "commitment"),
+    ("Confirm the trip details with the hotel for the client onsite.", "commitment"),
+    ("Email the dentist the signed website proposal.", "commitment"),
+    ("Install shelves in the client's garage showroom.", "commitment"),
+]
+
+# The reviewer's second table. Junk stays junk; the two real lines stay.
+REVIEW_JUNK = [
+    ("The vendor will email the signed SOW to Aaron.", "third_party_todo"),
+    ("The vendor will send the SOW by Friday.", "third_party_todo"),
+    ("Their lawyer will review the redlines by Monday.", "third_party_todo"),
+    ("The contractor will install the firewall next week.", "third_party_todo"),
+    ("Wait for Dana to send the logo.", "vague_non_commitment"),
+    ("Let us sync later on pricing.", "vague_non_commitment"),
+    ("Book a flight for my vacation.", "personal_errand"),
+    ("Pick up my dry cleaning before the client dinner.", "personal_errand"),
+    ("End the recording and export the WAV for the client.", "meeting_mechanics"),
+    ("Save this segment for the podcast edit.", "meeting_mechanics"),
+    ("Scroll a bit so we can see the footer.", "in_call_navigation"),
+    ("Type that in chat so Dana has the link.", "in_call_navigation"),
+    ("Go back a slide.", "in_call_navigation"),
+    ("Refresh the pricing page before the client demo.", "in_call_navigation"),
+    ("This meeting covered the retainer transition.", "topic_restatement"),
+    ("Today we talked about pricing.", "topic_restatement"),
+    ("Discuss the retainer conversion with Dana on Thursday.", "vague_non_commitment"),
+]
+
+
+def test_review_deliverables_are_kept():
+    assert len(REVIEW_DELIVERABLES) == 24
+    for text, reason in REVIEW_DELIVERABLES:
+        record = classify_action_item(text)
+        assert record.kept is True, (text, record.reason)
+        assert record.reason == reason, (text, record.reason, reason)
+
+
+def test_review_junk_drops_and_the_two_real_lines_stay():
+    for text, reason in REVIEW_JUNK:
+        record = classify_action_item(text)
+        assert record.kept is False, (text, record.reason)
+        assert record.reason == reason, (text, record.reason, reason)
+
+    follow_up = classify_action_item("Follow up with Dana about the retainer.")
+    assert follow_up.kept is True
+    assert follow_up.reason == "retained"
+
+    look_into = classify_action_item("I will look into the billing discrepancy.")
+    assert look_into.kept is True
+    assert look_into.reason == "retained"
+    assert look_into.confidence < 0.8
+
+
 def test_owner_and_due_raise_confidence():
     plain = classify_action_item("Send the amended contract to Aaron.")
     named = classify_action_item(

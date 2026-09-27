@@ -47,7 +47,7 @@ _COMMIT_VERB = (
     r"collect|add|update|file|deliver|ship|implement|fix|deploy|build|"
     r"invoice|prepare|document|finalize|schedule|book|publish|submit|"
     r"configure|migrate|amend|revise|pull|provide|share|review|"
-    r"investigate|debug|export|import|integrate|install"
+    r"investigate|debug|export|import|integrate|install|confirm|countersign"
 )
 _COMMIT_RE = re.compile(
     rf"(?:^|[\n.;]|\b(?:will|to|and|please|must|should)\s+)(?:{_COMMIT_VERB})\b",
@@ -68,14 +68,15 @@ _NAV_RES = [
         r"\bscreen[\s-]?shar(?:e|ing)\b",
         r"\bstop sharing\b",
         r"\b(?:close|open|minimize|maximize)\s+(?:the\s+|a\s+|your\s+)?(?:[\w'-]+\s+){0,4}(?:window|tab|browser|slide)\b",
-        r"\bscroll\s+(?:to|up|down|left|right)\b",
+        r"\bscroll\b",
         r"\bclick\s+(?:on\s+)?(?:the\s+)?(?:button|link|menu|mute|icon|tab|window)\b",
         r"\b(?:mute|unmute)\s+(?:yourself|your\s+mic(?:rophone)?|the\s+mic(?:rophone)?|the\s+call|audio)\b",
-        r"\brefresh\s+(?:the\s+)?(?:page|screen|browser|window|tab)\b",
+        r"\brefresh\s+(?:the\s+)?(?:[\w'-]+\s+){0,3}(?:page|screen|browser|window|tab)\b",
         r"\bpull\s+up\b",
         r"\brecord\s+the\s+screen\b",
         r"\bset\s+(?:the\s+)?format\b",
-        r"\btype\s+(?:it|that|this)\s+in(?:to)?\s+the\s+chat\b",
+        r"\btype\s+(?:it|that|this)\s+in(?:to)?\s+(?:the\s+)?chat\b",
+        r"\bgo\s+back\s+(?:a\s+|one\s+|to\s+(?:the\s+)?)?slide\b",
         r"\b(?:put|paste|drop)\s+(?:it|that|this)\s+in(?:to)?\s+the\s+chat\b",
         r"\bplay\b.{0,40}?\b(?:track|song|clip)\b",
         r"\bplay\s+the\s+(?:second|first)\s+half\b",
@@ -86,10 +87,19 @@ _NAV_RES = [
     )
 ]
 
+# "start the recording of the training video" is a deliverable. "start the
+# recording" with nothing after it is the live session. Exporting the WAV
+# is the same mechanic; exporting a report is not.
 _MECHANICS_RECORDING_RE = re.compile(
-    r"\b(?:stop|start|pause|resume)\s+(?:the\s+)?recording\b"
-    r"|\bsave the segment\b"
+    r"\b(?:stop|start|pause|resume|end)\s+(?:the\s+)?recording\b(?!\s+of\b)"
+    r"|\bsave\s+(?:the|this|that)\s+segment\b"
     r"|\bcutting off at the phrase\b",
+    re.IGNORECASE,
+)
+_NON_RECORDING_DELIVERABLE_RE = re.compile(
+    r"\b(?:and|then)\s+(?:send|e-mail|email|file|document|countersign|submit|"
+    r"publish|deliver|write|draft|prepare|review|switch)\b"
+    r"|\b(?:and|then)\s+export\b(?!\s+(?:the\s+)?(?:wav|recording|audio|segment)\b)",
     re.IGNORECASE,
 )
 _STATUS_UPDATE_RE = re.compile(r"\bstatus update\b", re.IGNORECASE)
@@ -97,10 +107,15 @@ _IN_CALL_CONTEXT_RE = re.compile(
     r"\b(?:episode|segment|script|tonight|this meeting|the call|the session|the recording)\b",
     re.IGNORECASE,
 )
-# A status note that is actually sent or filed is a deliverable. An in-call
-# "provide a status update on tonight's episode" is not.
+# A status note that is actually sent, filed, drafted, prepared, or written
+# is a deliverable. An in-call "provide a status update on tonight's episode"
+# is not.
 _OUTBOUND_STATUS_RE = re.compile(
     r"\b(?:send|e-mail|email|publish|deliver|file|submit|write)\b",
+    re.IGNORECASE,
+)
+_STATUS_DELIVERABLE_RE = re.compile(
+    r"\b(?:draft|prepare|write)\b(?:\s+\S+){0,8}?\s+status\s+update\b",
     re.IGNORECASE,
 )
 
@@ -120,14 +135,30 @@ _PERSONAL_RES = [
         r"\bconfirm (?:the )?trip details\b",
         r"\bwhen the trip is done\b",
         r"\b(?:dentist|haircut|doctor'?s appointment)\b",
+        r"\bbook\s+(?:a\s+|my\s+)?flight\b",
+        r"\bfor my vacation\b",
+        r"\bdry[\s-]?cleaning\b",
     )
 ]
 
-# The third party is the grammatical actor ("a vendor contact will call
-# back"). "Email the vendor the contract" is our deliverable and does not match.
+# Our deliverable, not someone's private errand and not a third party's own
+# to-do. "the client dinner" is a social event, not this shield.
+_COMPANY_DELIVERABLE_RE = re.compile(
+    r"\b(?:proposal|sow|invoice|invoices|contract|portal|retainer|payroll)\b"
+    r"|\bclient(?:'s|s')\b"
+    r"|\bfor the client\b(?!\s+(?:dinner|lunch|breakfast)\b)"
+    r"|\b(?:the|a|our)\s+client\b(?!\s+(?:dinner|lunch|breakfast|meeting|call|demo)\b)"
+    r"|\bclient\s+(?:portal|template|onsite|account|showroom)\b",
+    re.IGNORECASE,
+)
+
+# The third party is the grammatical actor ("the vendor will email the SOW",
+# "their lawyer will review"). "Email the vendor the contract" is our
+# deliverable and does not match, even when the object is a company artifact.
 _THIRD_PARTY_RE = re.compile(
-    r"\b(?:vendor|supplier|contractor)(?:\s+contact)?\b.{0,100}?\bwill\s+"
-    r"(?:call|ring|phone|email|reach out|get back|follow up|text)\b",
+    r"\b(?:vendor|supplier|contractor|lawyer)(?:\s+\w+){0,5}\s+will\s+"
+    r"(?:call|ring|phone|e-mail|email|send|review|install|reach out|get back|"
+    r"follow up|text|deliver|ship|provide|share)\b",
     re.IGNORECASE,
 )
 
@@ -141,16 +172,19 @@ _VAGUE_RE = re.compile(
     r"|\bcircle\s+back\b"
     r"|\btouch\s+base\b"
     r"|\bdiscuss\b"
-    r"|\bponder\b",
+    r"|\bponder\b"
+    r"|\blet(?:'s|\s+us)\s+sync\b"
+    r"|\bsync\s+later\b",
     re.IGNORECASE,
 )
 
 _TOPIC_RE = re.compile(
-    r"^(?:the\s+)?(?:meeting|call|discussion|conversation)\s+"
+    r"^(?:this\s+|the\s+)?(?:meeting|call|discussion|conversation)\s+"
     r"(?:is|was|about|topic|covered|concerns)\b"
     r"|^(?:recap|summary)\s+of\s+(?:the\s+)?(?:meeting|call)\b"
     r"|^(?:continue|resumed?)\s+(?:the\s+)?(?:discussion|meeting|conversation)\b"
-    r"|^(?:talked|spoke|chatted)\s+about\b",
+    r"|^(?:today|yesterday)\s+we\s+(?:talked|spoke|discussed|covered)\b"
+    r"|^(?:we\s+)?(?:talked|spoke|chatted)\s+about\b",
     re.IGNORECASE,
 )
 
@@ -308,18 +342,106 @@ def _keep_confidence(text: str, owner: Optional[str], due: Optional[str], *, com
     return min(score, cap)
 
 
-def _is_meeting_mechanics(text: str) -> bool:
+def _matches_any(patterns: list[re.Pattern[str]], text: str) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+# A coordinated work product. "and pull up" is still navigation. Exporting the
+# recording WAV is the mechanic itself, so it does not count here.
+_DELIVERABLE_CLAUSE_RE = re.compile(
+    r"\b(?:and|then)\s+(?:send|e-mail|email|file|document|countersign|submit|"
+    r"publish|deliver|write|draft|prepare|review)\b"
+    r"|\b(?:and|then)\s+export\b(?!\s+(?:the\s+)?(?:wav|recording|audio|segment)\b)",
+    re.IGNORECASE,
+)
+_RESCUE_DATE_RE = re.compile(
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week)\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+    re.IGNORECASE,
+)
+_NAMED_RECIPIENT_RE = re.compile(
+    r"\b(?:to|for|with)\s+(?:the\s+|our\s+|a\s+)?(?:client|board|sponsor|customer|bookkeeper)\b",
+    re.IGNORECASE,
+)
+# "Open a window for the new hire" is a payroll slot, not a UI window.
+_JOB_WINDOW_RE = re.compile(r"\bopen\s+(?:a|an)\s+window\s+for\b", re.IGNORECASE)
+_INDEPENDENT_DELIVERABLE_RE = re.compile(
+    rf"\b(?:and|then|,)\s+(?:{_COMMIT_VERB})\b",
+    re.IGNORECASE,
+)
+_LEADING_COMMIT_RE = re.compile(
+    rf"^(?:please\s+)?(?:{_COMMIT_VERB})\b",
+    re.IGNORECASE,
+)
+
+
+def _names_company_deliverable(text: str) -> bool:
+    return _COMPANY_DELIVERABLE_RE.search(text) is not None
+
+
+def _has_deliverable_clause(text: str) -> bool:
+    return _DELIVERABLE_CLAUSE_RE.search(text) is not None
+
+
+def _has_nav_rescue(text: str) -> bool:
+    """A pure in-call imperative has none of these. Any one of them keeps the line."""
+    if _has_deliverable_clause(text):
+        return True
+    if _RESCUE_DATE_RE.search(text):
+        return True
+    if _STATUS_DELIVERABLE_RE.search(text):
+        return True
+    if _NAMED_RECIPIENT_RE.search(text):
+        return True
+    if _JOB_WINDOW_RE.search(text):
+        return True
+    return False
+
+
+def _is_pure_in_call_navigation(text: str) -> bool:
+    if not _matches_any(_NAV_RES, text):
+        return False
+    if _has_nav_rescue(text):
+        return False
+    return True
+
+
+def _is_pure_meeting_mechanics(text: str) -> bool:
     if _MECHANICS_RECORDING_RE.search(text):
+        # "for the client" does not turn "end the recording and export the WAV"
+        # into a deliverable. A separate and-send / and-document clause does.
+        if _NON_RECORDING_DELIVERABLE_RE.search(text):
+            return False
         return True
     if _STATUS_UPDATE_RE.search(text) and _IN_CALL_CONTEXT_RE.search(text):
-        if _OUTBOUND_STATUS_RE.search(text):
+        if _STATUS_DELIVERABLE_RE.search(text) or _OUTBOUND_STATUS_RE.search(text):
             return False
         return True
     return False
 
 
-def _matches_any(patterns: list[re.Pattern[str]], text: str) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
+def _is_personal_errand(text: str) -> bool:
+    if not _matches_any(_PERSONAL_RES, text):
+        return False
+    if _names_company_deliverable(text):
+        return False
+    return True
+
+
+def _has_independent_deliverable(text: str) -> bool:
+    """A deliverable we will do, not the infinitive inside "wait for X to send"."""
+    if _INDEPENDENT_DELIVERABLE_RE.search(text):
+        return True
+    return _LEADING_COMMIT_RE.search(text) is not None
+
+
+def _is_vague(text: str) -> bool:
+    if not _VAGUE_RE.search(text):
+        return False
+    if _has_independent_deliverable(text):
+        return False
+    return True
 
 
 def classify_action_item(
@@ -328,21 +450,29 @@ def classify_action_item(
     owner: Optional[str] = None,
     due: Optional[str] = None,
 ) -> QualityRecord:
-    """Classify one extracted line. Does not log and does not call a model."""
+    """Classify one extracted line. Does not log and does not call a model.
+
+    Commitment is decided first. Navigation and mechanics then drop only a
+    pure in-call instruction aimed at the screen, session, recording, or
+    audio: no deliverable clause, no named recipient, no date, and not a
+    status report someone will draft, prepare, or write. Personal errands
+    do not fire on a company deliverable. A third party who will do the
+    thing themselves is still their to-do.
+    """
     normalized = _normalize(text or "")
     if not normalized:
         return QualityRecord(False, "empty", 0.99)
 
-    if _is_meeting_mechanics(normalized):
-        return QualityRecord(False, "meeting_mechanics", 0.90)
-    if _matches_any(_NAV_RES, normalized):
-        return QualityRecord(False, "in_call_navigation", 0.93)
-    if _matches_any(_PERSONAL_RES, normalized):
-        return QualityRecord(False, "personal_errand", 0.91)
     committed = _has_commitment(normalized)
-    if _THIRD_PARTY_RE.search(normalized) and not committed:
+    if _is_pure_in_call_navigation(normalized):
+        return QualityRecord(False, "in_call_navigation", 0.93)
+    if _is_pure_meeting_mechanics(normalized):
+        return QualityRecord(False, "meeting_mechanics", 0.90)
+    if _is_personal_errand(normalized):
+        return QualityRecord(False, "personal_errand", 0.91)
+    if _THIRD_PARTY_RE.search(normalized):
         return QualityRecord(False, "third_party_todo", 0.88)
-    if _VAGUE_RE.search(normalized) and not committed:
+    if _is_vague(normalized):
         return QualityRecord(False, "vague_non_commitment", 0.86)
     if _TOPIC_RE.search(normalized) and not committed:
         return QualityRecord(False, "topic_restatement", 0.80)
