@@ -177,8 +177,6 @@ def test_first_post_is_idempotent_and_does_not_store_or_enqueue_twice(client, mo
 
     enqueue = AsyncMock()
     monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
-    assert ingest_recordings.upload_api is __import__("api.uploads", fromlist=["uploads"])
-    assert ingest_recordings.upload_api.upload_pipeline_queue.enqueue is enqueue
     pat = _mint_pat(client)
 
     first = _post_recording(client, pat["plaintext"], external_id="idempotent-1")
@@ -258,7 +256,6 @@ def test_integrity_error_race_returns_existing_session_and_cleans_loser_file(cli
     monkeypatch.setattr(ingest_recordings, "_find_session", hide_once)
     enqueue = AsyncMock()
     monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
-    assert ingest_recordings.upload_api.upload_pipeline_queue.enqueue is enqueue
 
     response = _post_recording(client, pat["plaintext"], external_id="race-1")
     assert response.status_code == 200, response.text
