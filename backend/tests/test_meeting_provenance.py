@@ -155,3 +155,24 @@ def test_probe_recorded_at_parses_creation_time(monkeypatch):
     monkeypatch.setattr(mp.subprocess, "run", lambda *a, **k: _P())
     dt = mp.probe_recorded_at("/x.m4a")
     assert dt.year == 2026 and dt.hour == 21 and dt.minute == 51
+
+
+def test_recorded_date_time_uses_org_timezone_for_absolute_instants():
+    # 2026-09-03 00:42:34 UTC is 8:42 PM on 09-02 in New York: an evening call
+    # must not land on the next day.
+    sig = {"value": "2026-09-03T00:42:34+00:00", "source": "audio_metadata.creation_time", "confidence": 0.95}
+    assert mp.recorded_date_time(sig, "America/New_York") == (date(2026, 9, 2), time(20, 42, 34))
+    # unset or unknown zone keeps the old UTC behaviour
+    assert mp.recorded_date_time(sig) == (date(2026, 9, 3), time(0, 42, 34))
+    assert mp.recorded_date_time(sig, "Not/AZone") == (date(2026, 9, 3), time(0, 42, 34))
+    # a filename time is already wall clock and is never shifted
+    fn = {"value": "2026-09-02T20:42:34+00:00", "source": "filename", "confidence": 0.7}
+    assert mp.recorded_date_time(fn, "America/New_York") == (date(2026, 9, 2), time(20, 42, 34))
+    fn_day = {"value": "2026-09-02T00:00:00+00:00", "source": "filename", "confidence": 0.7}
+    assert mp.recorded_date_time(fn_day, "America/New_York") == (date(2026, 9, 2), None)
+
+
+def test_wall_clock_converts_naive_utc():
+    assert mp.wall_clock(datetime(2026, 10, 8, 1, 5, 0), "America/New_York") == (date(2026, 10, 7), time(21, 5, 0))
+    assert mp.wall_clock(datetime(2026, 10, 8, 1, 5, 0), None) == (date(2026, 10, 8), time(1, 5, 0))
+    assert mp.wall_clock(None, "America/New_York") == (None, None)

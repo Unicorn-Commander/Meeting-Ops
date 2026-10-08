@@ -247,9 +247,17 @@ function effectiveSessionDate(session: Session, basis: DateBasis): string {
   return session.created_at;
 }
 
+/** Parse a session date for display. A bare 'YYYY-MM-DD' (meeting_date) is a
+ *  local calendar date: new Date('2026-10-07') would be UTC midnight, i.e. the
+ *  evening before in US timezones, which put every meeting under the previous
+ *  day's header. */
+function parseSessionDate(iso: string): Date {
+  return new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
+}
+
 /** Day-header label for date dividers: Today / Yesterday / weekday / full date. */
 function dayHeaderLabel(iso: string): string {
-  const d = new Date(iso);
+  const d = parseSessionDate(iso);
   if (Number.isNaN(d.getTime())) return 'Undated';
   const a = new Date(); a.setHours(0, 0, 0, 0);
   const b = new Date(d); b.setHours(0, 0, 0, 0);
@@ -1219,14 +1227,14 @@ export const Sessions: React.FC = () => {
     const interval = setInterval(() => fetchSessions({ showSpinner: false }), 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTags.join(','), activeOrganization?.slug, autoRefresh, allTenants]);
+  }, [selectedTags.join(','), activeOrganization?.slug, autoRefresh, allTenants, dateBasis]);
 
   useEffect(() => {
     const onInvalidated = () => fetchSessions({ showSpinner: false });
     window.addEventListener('meetingops:sessions-invalidated', onInvalidated);
     return () => window.removeEventListener('meetingops:sessions-invalidated', onInvalidated);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTags.join(','), activeOrganization?.slug]);
+  }, [selectedTags.join(','), activeOrganization?.slug, dateBasis]);
 
   useEffect(() => {
     filterSessions();
@@ -1266,6 +1274,9 @@ export const Sessions: React.FC = () => {
         params.set('all_tenants', 'true');
       }
       params.set('limit', '50');
+      // Page in the order the list shows: by meeting date when the toggle says
+      // so (the server keysets on the same key), otherwise by upload time.
+      params.set('sort', dateBasis === 'meeting' ? 'meeting_date_desc' : 'created_at_desc');
       if (cursor) params.set('cursor', cursor);
       if (selectedTags.length > 0) {
         params.set('tags', selectedTags.map(encodeURIComponent).join(','));
@@ -2892,7 +2903,16 @@ export const Sessions: React.FC = () => {
                   <div className="space-y-2 text-sm text-gray-400">
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4" />
-                      {new Date(session.created_at).toLocaleDateString()}
+                      {(() => {
+                        const d = effectiveSessionDate(session, dateBasis);
+                        if (!d) return '—';
+                        const day = parseSessionDate(d).toLocaleDateString();
+                        if (dateBasis === 'meeting' && session.meeting_date && session.meeting_time) {
+                          const t = parseSessionDate(`${session.meeting_date}T${session.meeting_time}`);
+                          return `${day} · ${t.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+                        }
+                        return day;
+                      })()}
                     </div>
                     {session.duration && (
                       <div className="flex items-center gap-2">

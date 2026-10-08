@@ -474,6 +474,7 @@ class BulkImportPipelineQueue:
             # preserved in meeting_date/meeting_time + the provenance ledger.
             from services.meeting_provenance import (
                 build_meeting_provenance,
+                org_timezone,
                 recorded_date_time,
             )
             _uploaded_at = datetime.now(timezone.utc)
@@ -489,7 +490,7 @@ class BulkImportPipelineQueue:
             _meeting_date = parsed.meeting_date
             _meeting_time = parsed.meeting_time
             if _meeting_date is None:
-                _rd, _rt = recorded_date_time(_recorded)
+                _rd, _rt = recorded_date_time(_recorded, org_timezone(db, org_id))
                 _meeting_date = _rd
                 _meeting_time = _meeting_time or _rt
 

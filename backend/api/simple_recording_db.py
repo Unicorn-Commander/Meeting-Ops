@@ -5,7 +5,7 @@ Fixed version that persists to PostgreSQL
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List, Literal
 from sqlalchemy.orm import Session, defer
 from sqlalchemy import and_, desc, or_, func
@@ -726,20 +726,48 @@ async def create_session(
 _VALID_SORT_KEYS = {"created_at_desc", "meeting_date_desc", "meeting_date_asc"}
 
 
-def _encode_sessions_cursor(session: DBRecordingSession) -> str:
-    payload = json.dumps({
-        "created_at": session.created_at.isoformat() if session.created_at else None,
-        "id": session.id,
-    }, separators=(",", ":")).encode()
+def _effective_meeting_date(session: DBRecordingSession):
+    """Python mirror of the meeting-date sort key used by list_sessions:
+    meeting_date, else the date of started_at, else the date of created_at."""
+    if session.meeting_date:
+        return session.meeting_date
+    if session.started_at:
+        return session.started_at.date()
+    return session.created_at.date() if session.created_at else None
+
+
+def _encode_sessions_cursor(session: DBRecordingSession, sort_key: str = "created_at_desc") -> str:
+    if sort_key in ("meeting_date_desc", "meeting_date_asc"):
+        eff = _effective_meeting_date(session)
+        payload = json.dumps({
+            "sort": sort_key,
+            "eff": eff.isoformat() if eff else None,
+            "id": session.id,
+        }, separators=(",", ":")).encode()
+    else:
+        payload = json.dumps({
+            "created_at": session.created_at.isoformat() if session.created_at else None,
+            "id": session.id,
+        }, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-def _decode_sessions_cursor(cursor: str) -> tuple[datetime, int]:
+def _decode_sessions_cursor_payload(cursor: str) -> dict:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if not isinstance(payload, dict):
+            raise ValueError("cursor is not an object")
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid sessions cursor") from exc
+
+
+def _decode_sessions_cursor(cursor: str) -> tuple[datetime, int]:
+    payload = _decode_sessions_cursor_payload(cursor)
+    try:
         return datetime.fromisoformat(payload["created_at"]), int(payload["id"])
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(status_code=400, detail="Invalid sessions cursor") from exc
 
 
@@ -877,9 +905,36 @@ async def list_sessions(
             # view back, which is the safer fail-open shape here.
             pass
     sort_key = sort if sort in _VALID_SORT_KEYS else "created_at_desc"
-    if cursor and sort_key != "created_at_desc":
-        raise HTTPException(status_code=400, detail="Cursor pagination requires created_at_desc sort")
-    if cursor:
+    # Coalesce so a null meeting_date falls back to started_at and
+    # finally to created_at. Keeps newly-uploaded sessions visible
+    # in date-sorted views even before the user edits a date in.
+    effective = func.coalesce(
+        DBRecordingSession.meeting_date,
+        func.date(DBRecordingSession.started_at),
+        func.date(DBRecordingSession.created_at),
+    )
+    if cursor and sort_key in ("meeting_date_desc", "meeting_date_asc"):
+        # Keyset paging on (effective date, id), the same key the ORDER BY
+        # uses, so "Load more" works when the list is sorted by meeting date.
+        payload = _decode_sessions_cursor_payload(cursor)
+        if payload.get("sort") != sort_key:
+            raise HTTPException(status_code=400, detail="Cursor was issued for a different sort")
+        try:
+            cursor_eff = date.fromisoformat(payload["eff"])
+            cursor_id = int(payload["id"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid sessions cursor") from exc
+        if sort_key == "meeting_date_desc":
+            query = query.filter(or_(
+                effective < cursor_eff,
+                and_(effective == cursor_eff, DBRecordingSession.id < cursor_id),
+            ))
+        else:
+            query = query.filter(or_(
+                effective > cursor_eff,
+                and_(effective == cursor_eff, DBRecordingSession.id < cursor_id),
+            ))
+    elif cursor:
         cursor_created_at, cursor_id = _decode_sessions_cursor(cursor)
         query = query.filter(or_(
             DBRecordingSession.created_at < cursor_created_at,
@@ -889,14 +944,6 @@ async def list_sessions(
             ),
         ))
     if sort_key in ("meeting_date_desc", "meeting_date_asc"):
-        # Coalesce so a null meeting_date falls back to started_at and
-        # finally to created_at. Keeps newly-uploaded sessions visible
-        # in date-sorted views even before the user edits a date in.
-        effective = func.coalesce(
-            DBRecordingSession.meeting_date,
-            func.date(DBRecordingSession.started_at),
-            func.date(DBRecordingSession.created_at),
-        )
         order_clause = desc(effective) if sort_key == "meeting_date_desc" else effective
         query = query.order_by(order_clause, desc(DBRecordingSession.id))
     else:
@@ -975,7 +1022,7 @@ async def list_sessions(
 
     return {
         "items": result,
-        "next_cursor": _encode_sessions_cursor(sessions[-1]) if has_more and sessions else None,
+        "next_cursor": _encode_sessions_cursor(sessions[-1], sort_key) if has_more and sessions else None,
         "has_more": has_more,
     }
 

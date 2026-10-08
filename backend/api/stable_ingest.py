@@ -848,6 +848,8 @@ async def ingest_stable_transcript(
             speaker_count=len(participants_by_id),
         )
 
+    from services.meeting_provenance import org_timezone, wall_clock
+    _wall = wall_clock(started, org_timezone(db, org_id))
     row = RecordingSession(
         session_id=session_uuid,
         name=body.label or f"Stable call · {body.room_name}",
@@ -861,8 +863,9 @@ async def ingest_stable_transcript(
         created_at=_utc(body.exported_at),
         started_at=_naive_utc(started),
         ended_at=_naive_utc(ended),
-        meeting_date=started.date(),
-        meeting_time=started.timetz().replace(tzinfo=None),
+        # Wall clock in the org's timezone (UTC when unset), not the UTC date.
+        meeting_date=_wall[0],
+        meeting_time=_wall[1],
         duration=max(0.0, (ended - started).total_seconds()),
         transcript=plain_text,
         transcript_simple=plain_text,

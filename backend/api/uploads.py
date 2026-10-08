@@ -1489,6 +1489,7 @@ async def _create_upload_session(
     # meeting_time + the provenance ledger (when.recorded_at).
     from services.meeting_provenance import (
         build_meeting_provenance,
+        org_timezone,
         recorded_date_time,
     )
     # Probe the ORIGINAL upload for container tags; the extracted WAV has none.
@@ -1506,7 +1507,9 @@ async def _create_upload_session(
     meeting_date = parsed.meeting_date
     meeting_time = parsed.meeting_time
     if meeting_date is None:
-        rec_d, rec_t = recorded_date_time(recorded)
+        # meeting_date/time are the org's wall clock, not UTC (an evening call
+        # in Eastern time used to land on the next day).
+        rec_d, rec_t = recorded_date_time(recorded, org_timezone(db, job.organization_id))
         meeting_date = rec_d
         meeting_time = meeting_time or rec_t
 

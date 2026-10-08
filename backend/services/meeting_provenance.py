@@ -183,19 +183,76 @@ def choose_recorded_at(candidates: list[dict]) -> Optional[dict]:
     return candidates[0] if candidates else None
 
 
-def recorded_date_time(recorded: Optional[dict]) -> tuple[Optional[date], Optional[time]]:
+def recorded_date_time(
+    recorded: Optional[dict], tz_name: Optional[str] = None,
+) -> tuple[Optional[date], Optional[time]]:
     """Split a chosen recorded-at signal into (date, time) for the
     meeting_date / meeting_time columns. Time is dropped when it's exactly
     midnight from a date-only source (so a date-only filename doesn't assert
-    a fake 00:00 meeting time)."""
+    a fake 00:00 meeting time).
+
+    meeting_date / meeting_time are a WALL-CLOCK pair (the UI shows them
+    as-is), so an absolute instant (container creation_time, mtimes, upload
+    time) is converted to ``tz_name`` first. Without that, a 9 PM Eastern
+    call stored its UTC date and landed on the next day. A filename date is
+    already wall-clock (whatever the person typed or the exporter wrote) and
+    is never shifted. ``tz_name`` None/invalid keeps the old UTC behaviour.
+    """
     if not recorded:
         return None, None
     dt = _parse_iso(str(recorded.get("value")))
     if dt is None:
         return None, None
-    if recorded.get("source") == "filename" and dt.timetz().replace(tzinfo=None) == time(0, 0):
-        return dt.date(), None
+    if recorded.get("source") == "filename":
+        if dt.timetz().replace(tzinfo=None) == time(0, 0):
+            return dt.date(), None
+        return dt.date(), dt.timetz().replace(tzinfo=None)
+    zone = _zone(tz_name)
+    if zone is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(zone)
     return dt.date(), dt.timetz().replace(tzinfo=None)
+
+
+def _zone(tz_name: Optional[str]):
+    if not tz_name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(str(tz_name))
+    except Exception:  # noqa: BLE001  (unknown name / no tzdata -> keep UTC)
+        logger.warning("meeting_provenance: unknown timezone %r, using UTC", tz_name)
+        return None
+
+
+def org_timezone(db, org_id: Optional[int]) -> Optional[str]:
+    """The org's display timezone (organizations.settings["timezone"], an IANA
+    name like "America/New_York"), or None when unset. Never raises."""
+    if not org_id:
+        return None
+    try:
+        from auth.models import Organization
+        org = db.query(Organization).filter(Organization.id == int(org_id)).first()
+        settings = getattr(org, "settings", None) if org is not None else None
+        if isinstance(settings, str):
+            settings = json.loads(settings or "{}")
+        tz = (settings or {}).get("timezone") if isinstance(settings, dict) else None
+        return tz if _zone(tz) is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def wall_clock(dt: Optional[datetime], tz_name: Optional[str]) -> tuple[Optional[date], Optional[time]]:
+    """(date, time) of an absolute instant on the org's wall clock."""
+    if dt is None:
+        return None, None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    zone = _zone(tz_name)
+    if zone is not None:
+        dt = dt.astimezone(zone)
+    return dt.date(), dt.timetz().replace(tzinfo=None, microsecond=0)
 
 
 def build_meeting_provenance(

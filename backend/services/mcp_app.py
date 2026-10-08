@@ -240,7 +240,7 @@ async def search_meetings(query: str, limit: int = 5) -> str:
                     score = 0.0
                 snippet = (item.get("snippet") or "")[:200]
                 sid = item.get("session_id") or ""
-                created = (item.get("created_at") or "")[:10]
+                created = _meeting_when(item, 10)
                 lines.append(
                     f"{i}. **{title}** (score: {score:.3f})\n"
                     f"   Session ID: {sid}\n"
@@ -265,7 +265,7 @@ async def search_meetings(query: str, limit: int = 5) -> str:
     for i, item in enumerate(results, 1):
         title = item.get("title") or item.get("name", "Untitled")
         sid = item.get("session_id") or str(item.get("id", ""))
-        created = str(item.get("created_at", ""))[:10]
+        created = _meeting_when(item, 10)
         status = item.get("status", "")
         lines.append(
             f"{i}. **{title}** ({status})\n"
@@ -315,6 +315,18 @@ async def ask_about_meetings(question: str, limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _meeting_when(item: dict, width: int = 16) -> str:
+    """When the meeting happened: meeting_date + meeting_time (the org's wall
+    clock, what the Sessions page shows). Falls back to the upload time
+    (created_at) for sessions that have no meeting date. Before this, every
+    tool reported created_at, so a call uploaded a week late read as a week late."""
+    d = item.get("meeting_date")
+    if d:
+        t = str(item.get("meeting_time") or "")[:5]
+        return f"{d} {t}".strip() if width > 10 else str(d)[:10]
+    return str(item.get("created_at", ""))[:width]
+
+
 @mcp.tool()
 async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> str:
     """List all recording sessions, optionally filtered by status.
@@ -343,6 +355,8 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
     params: dict[str, Any] = {
         "limit": fetch_limit,
         "include_all_my_orgs": True,
+        # Newest MEETING first (the date each row now shows), not newest upload.
+        "sort": "meeting_date_desc",
     }
 
     data = await _api("get", "/api/simple/recording-sessions", params=params)
@@ -369,7 +383,7 @@ async def list_meetings(status: str = "", limit: int = 20, offset: int = 0) -> s
         title = s.get("title") or s.get("name", "Untitled")
         sid = s.get("session_id") or str(s.get("id", ""))
         status_val = s.get("status", "unknown")
-        created = str(s.get("created_at", ""))[:16]
+        created = _meeting_when(s)
         duration = s.get("duration")
         dur_str = f"{int(duration // 60)}m {int(duration % 60)}s" if duration else "N/A"
         # The list payload defers every transcript column for speed, so the
@@ -401,7 +415,8 @@ async def get_meeting_details(session_id: str) -> str:
 
     title = data.get("title") or data.get("name", "Untitled")
     status = data.get("status", "unknown")
-    created = str(data.get("created_at", ""))[:16]
+    created = _meeting_when(data)
+    uploaded = str(data.get("created_at", ""))[:16]
     duration = data.get("duration")
     dur_str = f"{int(duration // 60)}m {int(duration % 60)}s" if duration else "N/A"
 
@@ -409,6 +424,7 @@ async def get_meeting_details(session_id: str) -> str:
         f"# {title}",
         f"**Status:** {status}",
         f"**Date:** {created}",
+        f"**Uploaded:** {uploaded}",
         f"**Duration:** {dur_str}",
         f"**Session ID:** {session_id}",
     ]

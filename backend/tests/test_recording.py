@@ -62,6 +62,45 @@ def test_list_sessions_cursor_has_no_duplicates(client):
     assert first_ids.isdisjoint(second_ids)
 
 
+
+def test_list_sessions_meeting_date_cursor_pages_in_meeting_order(client):
+    """sort=meeting_date_desc pages with a keyset cursor (it used to 400 on
+    any cursor), in meeting-date order, without duplicates."""
+    headers = _auth_headers(client)
+    mine = {}
+    for index, day in enumerate(["2026-01-05", "2026-03-01", "2026-02-10"]):
+        sid = client.post(
+            "/api/simple/recording-sessions",
+            json={"name": f"Meeting order {index}"},
+            headers=headers,
+        ).json()["id"]
+        r = client.patch(f"/api/simple/recording-sessions/{sid}", json={"meeting_date": day}, headers=headers)
+        assert r.status_code == 200, r.text
+        mine[sid] = day
+
+    order, cursor = [], None
+    for _ in range(200):
+        url = "/api/simple/recording-sessions?limit=1&sort=meeting_date_desc"
+        if cursor:
+            url += f"&cursor={cursor}"
+        page = client.get(url, headers=headers)
+        assert page.status_code == 200, page.text
+        body = page.json()
+        order.extend(item["id"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if not cursor:
+            break
+    assert len(order) == len(set(order))
+    assert [mine[i] for i in order if i in mine] == ["2026-03-01", "2026-02-10", "2026-01-05"]
+
+    # a cursor minted for one sort is refused for another
+    first = client.get("/api/simple/recording-sessions?limit=1&sort=meeting_date_desc", headers=headers).json()
+    bad = client.get(
+        f"/api/simple/recording-sessions?limit=1&sort=meeting_date_asc&cursor={first['next_cursor']}",
+        headers=headers,
+    )
+    assert bad.status_code == 400
+
 def test_get_session_detail(client):
     """GET /{id} returns full session data with expected fields."""
     create_response = client.post(
