@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/auth/pats", tags=["personal-access-tokens"])
 
 class CreatePATRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    scope: Literal["user", "stable.transcript.ingest"] = "user"
+    scope: Literal["user", "stable.transcript.ingest", "recordings.ingest"] = "user"
     organization_slug: Optional[str] = Field(default=None, max_length=128)
     expires_in_days: Optional[int] = Field(default=None, ge=1, le=365)
 
