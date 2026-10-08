@@ -35,14 +35,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ingest", tags=["recording-ingest"])
 
-EXTERNAL_SOURCE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
+# recording_sessions.external_source is VARCHAR(50) (alembic 058).
+EXTERNAL_SOURCE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,49}$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_METADATA_BYTES = 16 * 1024
 FILE_READ_CHUNK_SIZE = 1024 * 1024
 
 
 class IngestStatusResponse(BaseModel):
-    session_id: str
+    # recording_sessions.id, the id the web UI links with (/sessions/<id>)
+    session_id: int
     status: Literal["processing", "completed", "failed"]
     meeting_date: Optional[str] = None
     meeting_time: Optional[str] = None
@@ -55,7 +57,7 @@ class IngestCreateResponse(IngestStatusResponse):
 
 
 class IngestRetryResponse(BaseModel):
-    session_id: str
+    session_id: int
     status: Literal["processing"]
 
 
@@ -162,7 +164,7 @@ def require_recording_ingest_principal(
 def _validate_external_source(value: str) -> str:
     if not EXTERNAL_SOURCE_RE.fullmatch(value or ""):
         _unprocessable(
-            "external_source must match ^[a-z0-9][a-z0-9._-]{1,63}$"
+            "external_source must match ^[a-z0-9][a-z0-9._-]{1,49}$"
         )
     return value
 
@@ -268,7 +270,7 @@ def _status_response(
 ) -> IngestStatusResponse | IngestCreateResponse:
     job = _job_for_session(db, session)
     payload: dict[str, Any] = {
-        "session_id": session.session_id or str(session.id),
+        "session_id": session.id,
         "status": _status_for(session, job),
         "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
         "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
@@ -451,7 +453,7 @@ async def ingest_recording(
             "timezone": timezone_value,
             "metadata": metadata_value,
             "pat_id": principal.token.id,
-            "client": request.headers.get("user-agent"),
+            "client": (request.headers.get("user-agent") or "")[:200] or None,
         }
         session_metadata: dict[str, Any] = {
             "upload_id": str(upload_id),
@@ -639,6 +641,6 @@ async def retry_ingest_recording(
         job.upload_id,
     )
     return IngestRetryResponse(
-        session_id=session.session_id or str(session.id),
+        session_id=session.id,
         status="processing",
     )

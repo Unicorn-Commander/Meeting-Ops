@@ -239,7 +239,7 @@ def test_integrity_error_race_returns_existing_session_and_cleans_loser_file(cli
         )
         db.add(existing)
         db.commit()
-        existing_id = existing.session_id
+        existing_id = existing.id
         upload_root = ingest_recordings.upload_api.UPLOAD_ROOT / org.slug
         before_dirs = {path.name for path in upload_root.iterdir()} if upload_root.exists() else set()
     finally:
@@ -294,7 +294,7 @@ def test_status_mapping_and_retry_reuses_shared_upload_retry(client, monkeypatch
 
     db = SessionLocal()
     try:
-        session = db.query(RecordingSession).filter(RecordingSession.session_id == body["session_id"]).one()
+        session = db.query(RecordingSession).filter(RecordingSession.id == body["session_id"]).one()
         job = db.query(UploadJob).filter(UploadJob.upload_id == uuid.UUID(body["upload_id"])).one()
         session.status = "failed"
         job.stage = "failed"
@@ -461,8 +461,9 @@ async def test_ingest_dates_survive_the_real_upload_pipeline(app, client, monkey
         assert session.meeting_date.isoformat() == "2026-10-07"
         assert session.meeting_time.isoformat() == "21:30:00"
         assert session.started_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 30, tzinfo=timezone.utc)
-        assert session.ended_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 30, 42, tzinfo=timezone.utc)
-        assert session.duration == 42.0
+        # The measured audio duration (900 s from STT) wins over the client's 42 s.
+        assert session.ended_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 45, tzinfo=timezone.utc)
+        assert session.duration == 900.0
         provenance = session.processing_metadata["meeting_provenance"]
         assert provenance["when"]["recorded_at"]["source"] == "ingest.recorded_at"
         assert provenance["when"]["recorded_at"]["confidence"] == 1.0
