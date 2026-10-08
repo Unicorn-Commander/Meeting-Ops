@@ -438,6 +438,7 @@ _load_router(app, "personal_access_tokens", "api.personal_access_tokens")
 # org selection, and session.create RBAC apply; the endpoint never trusts a
 # tenant identifier from the request body.
 _load_router(app, "stable_ingest", "api.stable_ingest", required=True)
+_load_router(app, "ingest_recordings", "api.ingest_recordings", required=True)
 
 # === PUBLIC LANDING PAGE (invite-only beta) ===
 # Single endpoint /api/landing/invite-request, no auth, rate-limited per-IP.

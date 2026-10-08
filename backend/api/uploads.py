@@ -732,6 +732,22 @@ async def cancel_upload(
 MAX_UPLOAD_RETRIES = int(os.getenv("UPLOAD_MAX_RETRIES", "3"))
 
 
+async def _enqueue_retry_job(db: Session, job: UploadJob) -> None:
+    """Reset a failed upload and hand it back to the shared pipeline queue."""
+    job.stage = "queued"
+    job.progress_pct = 0
+    job.error_message = None
+    job.last_completed_stage = None
+    job.retry_count = (job.retry_count or 0) + 1
+    job.job_started_at = None
+    job.job_completed_at = None
+    job.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    await ws_manager.broadcast(str(job.upload_id), _status_payload(job))
+    await upload_pipeline_queue.enqueue(str(job.upload_id))
+
+
 @router.post("/{upload_id}/retry", response_model=UploadStatusResponse)
 async def retry_upload(
     upload_id: str,
@@ -771,18 +787,7 @@ async def retry_upload(
             detail="Upload bytes are no longer on disk; please re-upload.",
         )
 
-    job.stage = "queued"
-    job.progress_pct = 0
-    job.error_message = None
-    job.last_completed_stage = None
-    job.retry_count = (job.retry_count or 0) + 1
-    job.job_started_at = None
-    job.job_completed_at = None
-    job.updated_at = datetime.now(timezone.utc)
-    db.commit()
-
-    await ws_manager.broadcast(upload_id, _status_payload(job))
-    await upload_pipeline_queue.enqueue(upload_id)
+    await _enqueue_retry_job(db, job)
 
     logger.info(
         f"Upload {upload_id} retry #{job.retry_count} enqueued by user {current_user.id} (org {active_org.organization.slug})"
@@ -1034,7 +1039,15 @@ async def run_upload_pipeline(upload_id: str) -> None:
         session = await _resolve_session_for_job(db, job, audio_path, source_path=source_path)
         # Only a session this upload created is ours to fail; an "attach"
         # target already has a life (and usually a transcript) of its own.
-        session_pk = session.id if job.action != "attach" else None
+        # Desktop ingest is the one pre-created attach session whose failure
+        # should still be reflected on the session itself.
+        is_ingest_session = isinstance(
+            session.processing_metadata, dict
+        ) and isinstance(session.processing_metadata.get("ingest"), dict)
+        session_pk = session.id if job.action != "attach" or is_ingest_session else None
+        if is_ingest_session and _apply_ingest_dates(session):
+            db.commit()
+            db.refresh(session)
 
         # --- Kick off diarization CONCURRENTLY with transcription. STT
         # (Parakeet) and diarization (pyannote) read the same audio
@@ -1330,6 +1343,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
         # A successful uploads-path run is this session's newest truth —
         # advance any stale reprocess failure flags so the red "Reprocess
         # failed" banner can't outlive a healthy re-run (see helper).
+        _apply_ingest_dates(session)
         _advance_stale_reprocess_flags(session)
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
@@ -1454,6 +1468,43 @@ def ended_at_from_started(session: RecordingSession) -> Optional[datetime]:
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
     return started + timedelta(seconds=float(duration))
+
+
+def _apply_ingest_dates(session: RecordingSession) -> bool:
+    """Re-assert desktop-ingest timestamps after a shared pipeline stage.
+
+    Desktop ingest creates its session before the worker starts, so it uses
+    the normal ``attach`` branch of the upload pipeline. That branch does not
+    derive dates from the audio file, but this guard makes the invariant
+    explicit at the pipeline boundary and completion boundary. The ingest
+    provenance is the source of truth, never ffprobe, file mtime, or server
+    ingest time.
+    """
+    metadata = session.processing_metadata if isinstance(session.processing_metadata, dict) else {}
+    ingest = metadata.get("ingest")
+    if not isinstance(ingest, dict):
+        return False
+    raw_recorded_at = ingest.get("recorded_at")
+    if not raw_recorded_at:
+        return False
+    from services.meeting_provenance import parse_iso, wall_clock
+
+    recorded_at = parse_iso(str(raw_recorded_at))
+    if recorded_at is None:
+        return False
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    recorded_at = recorded_at.astimezone(timezone.utc)
+    started_at = recorded_at.replace(tzinfo=None)
+    meeting_date, meeting_time = wall_clock(recorded_at, ingest.get("timezone") or "UTC")
+    session.started_at = started_at
+    session.meeting_date = meeting_date
+    session.meeting_time = meeting_time
+    if "duration_seconds" in ingest and ingest.get("duration_seconds") is not None:
+        duration = float(ingest["duration_seconds"])
+        session.duration = duration
+        session.ended_at = started_at + timedelta(seconds=duration)
+    return True
 
 
 async def _create_upload_session(
@@ -2134,12 +2185,22 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     session.transcript_diarized = result
     session.transcript_simple = " ".join(s.get("text", "") for s in segments if s.get("text")).strip()
     session.transcript = json.dumps(result)
+    metadata = dict(session.processing_metadata or {})
+    ingest = metadata.get("ingest") if isinstance(metadata.get("ingest"), dict) else None
+    ingest_duration = (
+        float(ingest["duration_seconds"])
+        if ingest is not None and ingest.get("duration_seconds") is not None
+        else None
+    )
     audio_duration = result.get("audio_duration") or max((float(s.get("end", 0)) for s in segments), default=0)
-    session.duration = float(audio_duration or 0)
+    session.duration = ingest_duration if ingest_duration is not None else float(audio_duration or 0)
     if getattr(session, "source_type", None) == "upload":
-        ended = ended_at_from_started(session)
-        if ended is not None:
-            session.ended_at = ended
+        if ingest_duration is not None:
+            _apply_ingest_dates(session)
+        else:
+            ended = ended_at_from_started(session)
+            if ended is not None:
+                session.ended_at = ended
     db.query(Transcription).filter(Transcription.session_id == session.id).delete()
     for segment in segments:
         text = (segment.get("text") or "").strip()
@@ -2157,7 +2218,6 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     # the UPDATE. Without this, mutating the same dict reference and the
     # following db.refresh() throws the new keys away — meaning
     # word_timestamps never reaches the DB and Re-detect can't run Path 1.
-    metadata = dict(session.processing_metadata or {})
     metadata.update({
         "word_count": len((session.transcript_simple or "").split()),
         "transcription_model": result.get("model", "whisper"),
