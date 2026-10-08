@@ -454,8 +454,19 @@ async def ingest_recording(
             "pat_id": principal.token.id,
             "client": request.headers.get("user-agent"),
         }
+        session_metadata: dict[str, Any] = {
+            "upload_id": str(upload_id),
+            "audio_sha256": actual_sha256,
+            "original_filename": filename,
+            "content_type": file.content_type,
+            "meeting_provenance": provenance,
+            "provenance_probe_file": None,
+            "ingest": ingest_metadata,
+        }
         if duration is not None:
-            ingest_metadata["duration_seconds"] = duration
+            # Keep the public ingest ledger shape exactly as specified while
+            # retaining the optional client duration for the shared pipeline.
+            session_metadata["ingest_duration_seconds"] = duration
 
         session = RecordingSession(
             session_id=str(uuid.uuid4()),
@@ -480,15 +491,7 @@ async def ingest_recording(
             source_type="upload",
             external_source=external_source,
             external_id=external_id,
-            processing_metadata={
-                "upload_id": str(upload_id),
-                "audio_sha256": actual_sha256,
-                "original_filename": filename,
-                "content_type": file.content_type,
-                "meeting_provenance": provenance,
-                "provenance_probe_file": None,
-                "ingest": ingest_metadata,
-            },
+            processing_metadata=session_metadata,
         )
         db.add(session)
         db.flush()

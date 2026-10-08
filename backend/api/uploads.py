@@ -1500,8 +1500,8 @@ def _apply_ingest_dates(session: RecordingSession) -> bool:
     session.started_at = started_at
     session.meeting_date = meeting_date
     session.meeting_time = meeting_time
-    if "duration_seconds" in ingest and ingest.get("duration_seconds") is not None:
-        duration = float(ingest["duration_seconds"])
+    if metadata.get("ingest_duration_seconds") is not None:
+        duration = float(metadata["ingest_duration_seconds"])
         session.duration = duration
         session.ended_at = started_at + timedelta(seconds=duration)
     return True
@@ -2188,8 +2188,8 @@ async def _persist_transcription(db: Session, session: RecordingSession, result:
     metadata = dict(session.processing_metadata or {})
     ingest = metadata.get("ingest") if isinstance(metadata.get("ingest"), dict) else None
     ingest_duration = (
-        float(ingest["duration_seconds"])
-        if ingest is not None and ingest.get("duration_seconds") is not None
+        float(metadata["ingest_duration_seconds"])
+        if metadata.get("ingest_duration_seconds") is not None
         else None
     )
     audio_duration = result.get("audio_duration") or max((float(s.get("end", 0)) for s in segments), default=0)
