@@ -153,6 +153,61 @@ def _job_dir(org_slug: str, upload_id: str) -> Path:
     return UPLOAD_ROOT / org_slug / upload_id
 
 
+def received_chunk_indices(chunks_dir: Path, total_chunks: int) -> list[int]:
+    """Return the valid, persisted chunk indices in ascending order."""
+    if not chunks_dir.is_dir():
+        return []
+    received: list[int] = []
+    for chunk in chunks_dir.glob("*.part"):
+        try:
+            index = int(chunk.stem)
+        except ValueError:
+            continue
+        if 0 <= index < total_chunks and chunk.is_file():
+            received.append(index)
+    return sorted(set(received))
+
+
+def assemble_chunked_upload(
+    job_dir: Path,
+    filename: str,
+    total_chunks: int,
+    total_size: int,
+) -> Path:
+    """Assemble a web-style chunk directory into its final upload file.
+
+    The caller is responsible for deciding whether all chunks are present.
+    This helper repeats that check to keep a concurrent chunk write from
+    producing a partial final file, and assembles through a temporary file so
+    the pipeline never observes an incomplete destination.
+    """
+    chunks_dir = job_dir / "chunks"
+    missing = [
+        index
+        for index in range(total_chunks)
+        if not (chunks_dir / f"{index:08d}.part").is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"missing chunks: {missing}")
+
+    final_path = job_dir / filename
+    temporary_path = job_dir / f".{filename}.{uuid.uuid4().hex}.assembling"
+    try:
+        with temporary_path.open("wb") as output:
+            for index in range(total_chunks):
+                with (chunks_dir / f"{index:08d}.part").open("rb") as source:
+                    shutil.copyfileobj(source, output)
+        if temporary_path.stat().st_size != total_size:
+            raise ValueError(
+                f"size mismatch: expected {total_size}, got {temporary_path.stat().st_size}"
+            )
+        os.replace(temporary_path, final_path)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary_path.unlink()
+    return final_path
+
+
 def _detect_kind(filename: str, content_type: Optional[str]) -> str:
     ext = Path(filename).suffix.lower()
     ctype = (content_type or "").lower()

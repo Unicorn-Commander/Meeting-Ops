@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -61,6 +62,26 @@ def _post_recording(client, plaintext: str, *, external_id=None, **overrides):
         headers=_headers(plaintext),
         data=data,
         files=files,
+    )
+
+
+def _init_chunked(client, plaintext: str, *, external_id=None, **overrides):
+    payload = {
+        "external_source": "meeting-minutes",
+        "external_id": external_id or f"chunked-{uuid.uuid4()}",
+        "recorded_at": "2026-10-08T01:30:00Z",
+        "sha256": hashlib.sha256(b"chunked-test").hexdigest(),
+        "total_size": len(b"chunked-test"),
+        "filename": "meeting.wav",
+        "content_type": "audio/wav",
+        "timezone": "America/New_York",
+        "title": "Chunked test meeting",
+    }
+    payload.update(overrides)
+    return client.post(
+        "/api/ingest/uploads",
+        headers=_headers(plaintext),
+        json=payload,
     )
 
 
@@ -214,6 +235,361 @@ def test_first_post_is_idempotent_and_does_not_store_or_enqueue_twice(client, mo
     assert duplicate.json()["session_id"] == first_body["session_id"]
     assert enqueue.await_count == 1
     assert len(list((uploads.UPLOAD_ROOT / "magic-unicorn").iterdir())) == len(upload_dirs)
+
+
+def test_chunked_happy_path_assembles_three_chunks_and_enqueues_once(client, monkeypatch):
+    from api import ingest_recordings, uploads
+    from database.database import SessionLocal
+    from database.models import RecordingSession, UploadJob
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
+    pat = _mint_pat(client)
+    chunk_size = uploads.DEFAULT_CHUNK_SIZE
+    payload = b"a" * (chunk_size * 2 + 17)
+    digest = hashlib.sha256(payload).hexdigest()
+    initialized = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-happy-1",
+        sha256=digest,
+        total_size=len(payload),
+        duration_seconds=42.0,
+        source_app="MeetingMinutesTest",
+        metadata={"kind": "happy"},
+    )
+    assert initialized.status_code == 201, initialized.text
+    init_body = initialized.json()
+    assert init_body["chunk_size"] == chunk_size
+    assert init_body["total_chunks"] == 3
+    assert init_body["received"] == []
+
+    for index in range(3):
+        start = index * chunk_size
+        chunk_response = client.put(
+            f"/api/ingest/uploads/{init_body['upload_id']}/chunks/{index}",
+            headers=_headers(pat["plaintext"]),
+            content=payload[start:start + chunk_size],
+        )
+        assert chunk_response.status_code == 200, chunk_response.text
+
+    status_response = client.get(
+        f"/api/ingest/uploads/{init_body['upload_id']}",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["received"] == [0, 1, 2]
+
+    completed = client.post(
+        f"/api/ingest/uploads/{init_body['upload_id']}/complete",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert completed.status_code == 201, completed.text
+    body = completed.json()
+    assert body["created"] is True
+    assert body["meeting_date"] == "2026-10-07"
+    assert body["meeting_time"] == "21:30:00"
+    assert enqueue.await_count == 1
+
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.id == body["session_id"]).one()
+        job = db.query(UploadJob).filter(UploadJob.upload_id == uuid.UUID(body["upload_id"])).one()
+        assert job.stage == "queued"
+        assert job.session_id == session.id
+        assert session.started_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 30, tzinfo=timezone.utc)
+        assert session.ended_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 30, 42, tzinfo=timezone.utc)
+        assert session.processing_metadata["ingest"]["metadata"] == {"kind": "happy"}
+        assert session.processing_metadata["ingest"]["source_app"] == "MeetingMinutesTest"
+        assert Path(session.audio_file).read_bytes() == payload
+    finally:
+        db.close()
+
+
+def test_chunked_init_existing_key_returns_existing_without_new_job_or_file(client, monkeypatch):
+    from api import ingest_recordings, uploads
+    from database.database import SessionLocal
+    from database.models import UploadJob
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
+    pat = _mint_pat(client)
+    created = _post_recording(client, pat["plaintext"], external_id="chunk-existing-1")
+    assert created.status_code == 201
+
+    db = SessionLocal()
+    try:
+        before_jobs = db.query(UploadJob).count()
+        before_dirs = {
+            path.name
+            for path in (uploads.UPLOAD_ROOT / "magic-unicorn").iterdir()
+        }
+    finally:
+        db.close()
+
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-existing-1",
+        sha256="0" * 64,
+        total_size=123,
+    )
+    assert init.status_code == 200, init.text
+    assert init.json()["created"] is False
+    db = SessionLocal()
+    try:
+        assert db.query(UploadJob).count() == before_jobs
+    finally:
+        db.close()
+    after_dirs = {
+        path.name
+        for path in (uploads.UPLOAD_ROOT / "magic-unicorn").iterdir()
+    }
+    assert after_dirs == before_dirs
+
+
+def test_chunked_init_resumes_same_upload_and_received_indices(client):
+    from api import uploads
+
+    pat = _mint_pat(client)
+    payload = b"resume-test"
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-resume-1",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        total_size=len(payload),
+    )
+    assert init.status_code == 201, init.text
+    upload_id = init.json()["upload_id"]
+    chunk = client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/0",
+        headers=_headers(pat["plaintext"]),
+        content=payload,
+    )
+    assert chunk.status_code == 200
+    resumed = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-resume-1",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        total_size=len(payload),
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["upload_id"] == upload_id
+    assert resumed.json()["received"] == [0]
+    assert resumed.json()["chunk_size"] == uploads.DEFAULT_CHUNK_SIZE
+
+
+def test_chunked_rejects_wrong_size_and_out_of_range_chunk(client):
+    pat = _mint_pat(client)
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-invalid-1",
+        sha256="1" * 64,
+        total_size=10,
+    )
+    assert init.status_code == 201, init.text
+    upload_id = init.json()["upload_id"]
+    wrong_size = client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/0",
+        headers=_headers(pat["plaintext"]),
+        content=b"short",
+    )
+    assert wrong_size.status_code == 422
+    out_of_range = client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/1",
+        headers=_headers(pat["plaintext"]),
+        content=b"0123456789",
+    )
+    assert out_of_range.status_code == 422
+
+
+def test_chunked_complete_reports_missing_chunks(client):
+    from api import uploads
+
+    pat = _mint_pat(client)
+    payload = b"b" * (uploads.DEFAULT_CHUNK_SIZE + 1)
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-missing-1",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        total_size=len(payload),
+    )
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    sent = client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/0",
+        headers=_headers(pat["plaintext"]),
+        content=payload[:uploads.DEFAULT_CHUNK_SIZE],
+    )
+    assert sent.status_code == 200
+    complete = client.post(
+        f"/api/ingest/uploads/{upload_id}/complete",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert complete.status_code == 409
+    assert complete.json() == {"missing": [1]}
+
+
+def test_chunked_complete_rejects_sha256_mismatch(client):
+    pat = _mint_pat(client)
+    payload = b"sha-mismatch"
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-sha-1",
+        sha256="2" * 64,
+        total_size=len(payload),
+    )
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    sent = client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/0",
+        headers=_headers(pat["plaintext"]),
+        content=payload,
+    )
+    assert sent.status_code == 200
+    complete = client.post(
+        f"/api/ingest/uploads/{upload_id}/complete",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert complete.status_code == 422
+
+
+def test_chunked_upload_is_org_scoped_on_get_put_and_complete(client):
+    from auth.models import Organization, User, UserOrganization
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == "admin").one()
+        other = Organization(
+            name=f"Chunk other {uuid.uuid4()}",
+            slug=f"chunk-other-{uuid.uuid4().hex[:10]}",
+            is_active=True,
+            max_concurrent_uploads=1000,
+        )
+        db.add(other)
+        db.flush()
+        db.add(UserOrganization(user_id=user.id, organization_id=other.id, role="admin"))
+        db.commit()
+        other_slug = other.slug
+    finally:
+        db.close()
+
+    pat_a = _mint_pat(client)
+    pat_b = _mint_pat(client, org=other_slug)
+    init = _init_chunked(client, pat_a["plaintext"], external_id="chunk-org-1")
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    path = f"/api/ingest/uploads/{upload_id}"
+    assert client.get(path, headers=_headers(pat_b["plaintext"])).status_code == 404
+    assert client.put(
+        f"{path}/chunks/0",
+        headers=_headers(pat_b["plaintext"]),
+        content=b"chunked-test",
+    ).status_code == 404
+    assert client.post(
+        f"{path}/complete",
+        headers=_headers(pat_b["plaintext"]),
+    ).status_code == 404
+
+
+def test_chunked_complete_race_returns_existing_and_cleans_upload(client, monkeypatch):
+    from api import ingest_recordings, uploads
+    from auth.models import Organization, User
+    from database.database import SessionLocal
+    from database.models import RecordingSession, UploadJob
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
+    pat = _mint_pat(client)
+    payload = b"race-complete"
+    init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="chunk-race-1",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        total_size=len(payload),
+    )
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    assert client.put(
+        f"/api/ingest/uploads/{upload_id}/chunks/0",
+        headers=_headers(pat["plaintext"]),
+        content=payload,
+    ).status_code == 200
+
+    db = SessionLocal()
+    try:
+        org = db.query(Organization).filter(Organization.slug == "magic-unicorn").one()
+        user = db.query(User).filter(User.username == "admin").one()
+        winner = RecordingSession(
+            session_id=str(uuid.uuid4()),
+            name="race winner",
+            title="race winner",
+            status="processing",
+            user_id=user.id,
+            organization_id=org.id,
+            external_source="meeting-minutes",
+            external_id="chunk-race-1",
+        )
+        db.add(winner)
+        db.commit()
+        winner_id = winner.id
+        upload_dir = uploads._job_dir(org.slug, upload_id)
+    finally:
+        db.close()
+
+    real_find = ingest_recordings._find_session
+    calls = 0
+
+    def hide_first(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else real_find(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_recordings, "_find_session", hide_first)
+    complete = client.post(
+        f"/api/ingest/uploads/{upload_id}/complete",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert complete.status_code == 200, complete.text
+    assert complete.json()["session_id"] == winner_id
+    assert enqueue.await_count == 0
+    assert not upload_dir.exists()
+    db = SessionLocal()
+    try:
+        assert db.query(UploadJob).filter(UploadJob.upload_id == uuid.UUID(upload_id)).count() == 0
+    finally:
+        db.close()
+
+
+def test_chunked_routes_require_recording_ingest_pat(client):
+    valid = _mint_pat(client)
+    init = _init_chunked(client, valid["plaintext"], external_id="chunk-auth-1")
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    generic = _mint_pat(client, scope="user", org=None, expires=None)
+    paths = [
+        ("post", "/api/ingest/uploads", {"json": {
+            "external_source": "meeting-minutes",
+            "external_id": "chunk-auth-nope",
+            "recorded_at": "2026-10-08T01:30:00Z",
+            "sha256": "3" * 64,
+            "total_size": 1,
+        }}),
+        ("get", f"/api/ingest/uploads/{upload_id}", {}),
+        ("put", f"/api/ingest/uploads/{upload_id}/chunks/0", {"content": b"x"}),
+        ("post", f"/api/ingest/uploads/{upload_id}/complete", {}),
+    ]
+    for method, path, kwargs in paths:
+        assert getattr(client, method)(path, headers=_headers(generic["plaintext"]), **kwargs).status_code == 403
+        no_token_headers = {"User-Agent": "MeetingMinutesTest/1.0"}
+        assert getattr(client, method)(path, headers=no_token_headers, **kwargs).status_code == 401
 
 
 def test_integrity_error_race_returns_existing_session_and_cleans_loser_file(client, monkeypatch):
