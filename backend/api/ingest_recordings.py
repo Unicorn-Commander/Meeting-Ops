@@ -830,8 +830,9 @@ async def init_ingest_upload(
     )
     if existing is not None:
         response.status_code = status.HTTP_200_OK
+        existing_body = _status_response(db, existing)
         return {
-            **_status_response(db, existing).dict(),
+            **existing_body.model_dump(),
             "created": False,
         }
 
