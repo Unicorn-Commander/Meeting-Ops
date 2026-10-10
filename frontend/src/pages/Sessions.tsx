@@ -186,6 +186,10 @@ type DateBasis = 'upload' | 'meeting';
 
 const VIEW_MODE_KEY = 'meetingops.sessionsViewMode.v1';
 const DATE_BASIS_KEY = 'meetingops.sessionsDateBasis.v1';
+// One "Load more" page, and the most rows /api/simple/recording-sessions
+// returns per request (limit le=200).
+const SESSIONS_PAGE_SIZE = 50;
+const SESSIONS_MAX_PAGE_SIZE = 200;
 const VALID_SORT_KEYS: ReadonlyArray<SortKey> = ['date', 'name', 'duration', 'speakers', 'status'];
 
 function normalizeTagSummaries(payload: unknown): OrgTagSummary[] {
@@ -858,10 +862,12 @@ export const Sessions: React.FC = () => {
   // the server; rendering all of them (each with avatars) is heavy, so cap the
   // DOM by default with a user-controlled page size ('all' renders everything).
   const [pageSize, setPageSize] = useState<number | 'all'>(25);
+  // Pages of cards on screen; "Load more" adds one.
+  const [revealedPages, setRevealedPages] = useState(1);
   // The capped slice actually rendered (grid / list / mobile all use this).
   const displayedSessions = useMemo(
-    () => (pageSize === 'all' ? filteredSessions : filteredSessions.slice(0, pageSize)),
-    [filteredSessions, pageSize],
+    () => (pageSize === 'all' ? filteredSessions : filteredSessions.slice(0, pageSize * revealedPages)),
+    [filteredSessions, pageSize, revealedPages],
   );
   // All tags used across the org's sessions, plus counts for the folder rail.
   const [orgTagSummaries, setOrgTagSummaries] = useState<OrgTagSummary[]>([]);
@@ -883,6 +889,11 @@ export const Sessions: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // How many server sessions the list holds, including pages added with
+  // "Load more". A refresh re-reads that many rows instead of only the first
+  // page, so the 10-second poll no longer throws the loaded pages away.
+  // A ref, because the poll's interval runs a stale fetchSessions closure.
+  const loadedServerCountRef = useRef(0);
   // Set when the server sessions fetch fails — drives a "couldn't refresh"
   // banner (cached list preserved) instead of a misleading empty state.
   const [serverError, setServerError] = useState<string | null>(null);
@@ -1217,6 +1228,19 @@ export const Sessions: React.FC = () => {
     void refreshOrgTags();
   }, [refreshOrgTags]);
 
+  // A different list (tags, org, tenants, date basis) starts again at one page.
+  // Declared before the fetch effect so it runs first.
+  useEffect(() => {
+    loadedServerCountRef.current = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTags.join(','), activeOrganization?.slug, allTenants, dateBasis]);
+
+  // Any filter change goes back to one page of cards.
+  useEffect(() => {
+    setRevealedPages(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, statusFilter, typeFilter, sourceFilter, orgFilter, selectedFolder, selectedTags.join(','), activeOrganization?.slug, allTenants, dateBasis]);
+
   useEffect(() => {
     // If we already painted from cache, skip the spinner-on path —
     // the user sees yesterday's list (almost always identical) and
@@ -1266,24 +1290,52 @@ export const Sessions: React.FC = () => {
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (activeOrganization?.slug) headers['X-MeetingOps-Org'] = activeOrganization.slug;
 
-      const params = new URLSearchParams();
-      params.set('include_all_my_orgs', 'true');
-      // Platform-admin opt-in: cross every tenant. Backend ignores it for
-      // non-superusers, but only send it when actually toggled on.
-      if (allTenants && isSuperuser) {
-        params.set('all_tenants', 'true');
-      }
-      params.set('limit', '50');
-      // Page in the order the list shows: by meeting date when the toggle says
-      // so (the server keysets on the same key), otherwise by upload time.
-      params.set('sort', dateBasis === 'meeting' ? 'meeting_date_desc' : 'created_at_desc');
-      if (cursor) params.set('cursor', cursor);
-      if (selectedTags.length > 0) {
-        params.set('tags', selectedTags.map(encodeURIComponent).join(','));
-      }
-      const sessionsUrl = `${config.apiBaseUrl}/api/simple/recording-sessions?${params.toString()}`;
+      const sessionsUrl = (limit: number, pageCursor: string | null) => {
+        const params = new URLSearchParams();
+        params.set('include_all_my_orgs', 'true');
+        // Platform-admin opt-in: cross every tenant. Backend ignores it for
+        // non-superusers, but only send it when actually toggled on.
+        if (allTenants && isSuperuser) {
+          params.set('all_tenants', 'true');
+        }
+        params.set('limit', String(limit));
+        // Page in the order the list shows: by meeting date when the toggle says
+        // so (the server keysets on the same key), otherwise by upload time.
+        params.set('sort', dateBasis === 'meeting' ? 'meeting_date_desc' : 'created_at_desc');
+        if (pageCursor) params.set('cursor', pageCursor);
+        if (selectedTags.length > 0) {
+          params.set('tags', selectedTags.map(encodeURIComponent).join(','));
+        }
+        return `${config.apiBaseUrl}/api/simple/recording-sessions?${params.toString()}`;
+      };
+      // "Load more" reads one page after the cursor. Every other fetch re-reads,
+      // from the top, as many rows as the list already holds, in requests of at
+      // most the API's cap.
+      const depthAtStart = loadedServerCountRef.current;
+      const fetchServerSessions = async () => {
+        let remaining = cursor ? SESSIONS_PAGE_SIZE : Math.max(SESSIONS_PAGE_SIZE, depthAtStart);
+        let pageCursor: string | null = cursor;
+        let pageNextCursor: string | null = null;
+        const items: Session[] = [];
+        for (let request = 0; request < 20 && remaining > 0; request += 1) {
+          const limit = Math.min(remaining, SESSIONS_MAX_PAGE_SIZE);
+          const res = await fetch(sessionsUrl(limit, pageCursor), { headers });
+          if (!res.ok) {
+            return { ok: false, status: res.status, statusText: res.statusText, items, nextCursor: null };
+          }
+          const data = await res.json();
+          const page: Session[] = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+          items.push(...page);
+          pageNextCursor = Array.isArray(data) ? null : (data?.next_cursor ?? null);
+          remaining -= page.length;
+          // A short page is the end of the list.
+          if (!pageNextCursor || page.length < limit) break;
+          pageCursor = pageNextCursor;
+        }
+        return { ok: true, status: 200, statusText: 'OK', items, nextCursor: pageNextCursor };
+      };
       const [serverRes, localList, attachCountsRes] = await Promise.allSettled([
-        fetch(sessionsUrl, { headers }),
+        fetchServerSessions(),
         listLocalSessions(),
         // Per-session attachment count for the paperclip icon. Org-scoped
         // by the active-org header; safe to skip on failure (the rest of
@@ -1302,13 +1354,19 @@ export const Sessions: React.FC = () => {
         }
       }
 
+      // A refresh that started before a "Load more" finished holds fewer rows
+      // than the list shows now. Drop it; the next poll re-reads the full depth.
+      if (!append && loadedServerCountRef.current > depthAtStart) return;
+
       let serverSessions: Session[] = [];
       let serverOk = false;
       if (serverRes.status === 'fulfilled' && serverRes.value.ok) {
         serverOk = true;
-        const data = await serverRes.value.json();
-        serverSessions = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
-        setNextCursor(Array.isArray(data) ? null : (data?.next_cursor ?? null));
+        serverSessions = serverRes.value.items;
+        setNextCursor(serverRes.value.nextCursor);
+        loadedServerCountRef.current = append
+          ? loadedServerCountRef.current + serverSessions.length
+          : serverSessions.length;
         setServerError(null);
       } else if (serverRes.status === 'fulfilled') {
         console.error('Failed to fetch sessions:', serverRes.value.status, serverRes.value.statusText);
@@ -1353,6 +1411,16 @@ export const Sessions: React.FC = () => {
         setRefreshing(false);
       }
       setLoadingMore(false);
+    }
+  };
+
+  // "Load more" shows the next page of cards, and fetches the next server page
+  // once the cards already loaded run out.
+  const loadMoreSessions = () => {
+    if (pageSize !== 'all') setRevealedPages((pages) => pages + 1);
+    const wanted = pageSize === 'all' ? Infinity : pageSize * (revealedPages + 1);
+    if (nextCursor && wanted > filteredSessions.length) {
+      void fetchSessions({ showSpinner: false, cursor: nextCursor, append: true });
     }
   };
 
@@ -2688,9 +2756,10 @@ export const Sessions: React.FC = () => {
               <span className="hidden sm:inline">Per page</span>
               <select
                 value={String(pageSize)}
-                onChange={(e) =>
-                  setPageSize(e.target.value === 'all' ? 'all' : Number(e.target.value))
-                }
+                onChange={(e) => {
+                  setPageSize(e.target.value === 'all' ? 'all' : Number(e.target.value));
+                  setRevealedPages(1);
+                }}
                 className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-gray-200 focus:outline-none focus:border-fuchsia-500"
                 title="How many sessions to show at once"
               >
@@ -3063,12 +3132,12 @@ export const Sessions: React.FC = () => {
           )
         )}
 
-        {nextCursor && !searchQuery && (
+        {(nextCursor || displayedSessions.length < filteredSessions.length) && !searchQuery && (
           <div className="my-6 flex justify-center">
             <button
               type="button"
               disabled={loadingMore}
-              onClick={() => fetchSessions({ showSpinner: false, cursor: nextCursor, append: true })}
+              onClick={loadMoreSessions}
               className="rounded-lg border border-gray-700 bg-gray-900 px-5 py-2 text-sm text-gray-200 hover:border-purple-500 hover:text-white disabled:opacity-50"
             >
               {loadingMore ? 'Loading…' : 'Load more sessions'}
