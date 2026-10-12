@@ -124,6 +124,24 @@ def test_import_recording_happy_path_uses_upload_job_and_audit(import_context):
     assert "local_path" not in audit.details
 
 
+def test_import_recording_rejects_invalid_tags_before_creating_session(import_context):
+    db, _user, _active_org, root, submitted = import_context
+    source = root / "invalid-tags.wav"
+    _tiny_wav(source)
+
+    from database.models import RecordingSession, UploadJob
+
+    sessions_before = db.query(RecordingSession).count()
+    jobs_before = db.query(UploadJob).count()
+    with pytest.raises(HTTPException) as caught:
+        _run_import(import_context, source, tags=["ok", 1])  # type: ignore[list-item]
+
+    assert caught.value.status_code == 400
+    assert db.query(RecordingSession).count() == sessions_before
+    assert db.query(UploadJob).count() == jobs_before
+    assert submitted == []
+
+
 def test_import_recording_repeat_returns_same_session(import_context):
     _db, _user, _active_org, root, submitted = import_context
     source = root / "repeat.wav"

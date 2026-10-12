@@ -288,6 +288,7 @@ async def import_recording_for_caller(
     from api import uploads
 
     gate_feature_for_caller(caller, "audio_upload", active_org)
+    normalized_tags = _normalize_tags(tags)
     max_file_bytes = uploads.get_max_file_bytes()
     stage_root = uploads.UPLOAD_ROOT / ".mcp-import"
     stage_root.mkdir(parents=True, exist_ok=True)
@@ -402,7 +403,7 @@ async def import_recording_for_caller(
             session.title = requested_title[:200]
             session.name = session.title
             session.title_user_set = True
-        session.tags = _normalize_tags(tags)
+        session.tags = normalized_tags
         session.source_type = "mcp_import"
         metadata = dict(session.processing_metadata or {})
         metadata["mcp_import"] = {
