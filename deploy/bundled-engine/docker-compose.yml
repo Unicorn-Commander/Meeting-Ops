@@ -33,6 +33,12 @@ services:
       PYANNOTE_DIARIZER_DEVICE: cpu
       SPEAKER_EAGER_LOAD_EMBEDDER: "false"
       SPEAKER_EAGER_LOAD_DIARIZER: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8889/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
   parakeet-openai-shim:
     image: git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:f253e62db40417fe6bccacf4b7d36ae20b084936
     profiles: [bundled-engine]

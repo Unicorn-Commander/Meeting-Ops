@@ -2,7 +2,8 @@
 
 Endpoints
 ---------
-GET  /health                — liveness, model status, GPU info
+GET  /health                — diarizer readiness, model status, GPU info
+GET  /livez                 — process liveness (always 200 once serving)
 GET  /healthz/synthetic     — full-pipeline probe: runs bundled 2-speaker WAV
                               through pyannote + wespeaker, asserts num_speakers == 2.
                               Returns 200 OK on pass, 503 on degraded.
@@ -21,6 +22,7 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -78,6 +80,12 @@ _embedder = None
 _diarizer = None
 _diarizer_backend: Optional[str] = None
 _diarizer_load_error: Optional[str] = None
+# The readiness contract is deliberately separate from the synthetic probe:
+# loading the model is enough to answer /health, while /healthz/synthetic still
+# exercises the full diarization path.  /livez never consults this state.
+_diarizer_state: str = "loading"
+_diarizer_load_lock = threading.Lock()
+_diarizer_load_task: Optional[asyncio.Task] = None
 # Task #79 v2: /diarize request counter, used to gate periodic empty_cache().
 _diarize_request_count: int = 0
 _gpu_semaphore = asyncio.Semaphore(max(1, int(os.getenv("MAX_CONCURRENT_DIARIZATIONS", "1"))))
@@ -127,70 +135,101 @@ def _load_embedder():
     return _embedder
 
 
-def _load_diarizer():
-    """Lazy-load Pyannote community-1 with a 3.1 fallback."""
-    global _diarizer, _diarizer_backend, _diarizer_load_error
+def _load_diarizer_impl():
+    """Load Pyannote community-1 with a 3.1 fallback.
+
+    State transitions and error capture live in :func:`_load_diarizer` so a
+    failed startup load cannot look healthy merely because the HTTP server is
+    accepting requests.
+    """
+    global _diarizer, _diarizer_backend
     if _diarizer is not None:
         return _diarizer
     if not HF_TOKEN:
-        _diarizer_load_error = f"HUGGINGFACE_TOKEN not set; {DIARIZATION_MODEL} unavailable"
-        return None
+        raise RuntimeError(f"HUGGINGFACE_TOKEN not set; {DIARIZATION_MODEL} unavailable")
+
+    from pyannote.audio import Pipeline
+
+    loaded_model = DIARIZATION_MODEL
+    logger.info("Loading %s on %s", DIARIZATION_MODEL, DIARIZER_DEVICE)
     try:
-        from pyannote.audio import Pipeline
-        loaded_model = DIARIZATION_MODEL
-        logger.info("Loading %s on %s", DIARIZATION_MODEL, DIARIZER_DEVICE)
         try:
-            try:
-                pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=HF_TOKEN)
-            except TypeError:
-                pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, use_auth_token=HF_TOKEN)
-            _diarizer_backend = "pyannote-community-1"
-        except Exception as community_exc:  # noqa: BLE001
-            logger.warning(
-                "%s load failed, falling back to %s: %s",
-                DIARIZATION_MODEL,
-                DIARIZATION_FALLBACK_MODEL,
-                community_exc,
-            )
-            loaded_model = DIARIZATION_FALLBACK_MODEL
-            try:
-                pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, token=HF_TOKEN)
-            except TypeError:
-                pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, use_auth_token=HF_TOKEN)
-            _diarizer_backend = "pyannote-3.1"
-        if DIARIZER_DEVICE == "cuda":
-            pipeline.to(torch.device("cuda"))
-            torch.cuda.empty_cache()
-        # Tune clustering + segmentation. Threshold has two failure modes:
-        # - too low (e.g. 0.65 from Meeting Minutes): over-splits one
-        #   speaker's varied speech into multiple clusters. Aaron's
-        #   5-speaker Legacy 21 came back as 14 at 0.65.
-        # - too high (~0.7045 model default): merges similar voices into
-        #   one. The Citadel meeting came back as 1 speaker at default
-        #   before this knob existed.
-        # 0.72 sits a hair above the model default, biasing toward
-        # merging when in doubt. Env-tunable so we can dial per deploy
-        # without rebuilding.
-        clustering_thr = float(os.getenv("PYANNOTE_CLUSTERING_THRESHOLD", "0.72"))
-        min_off = float(os.getenv("PYANNOTE_MIN_DURATION_OFF", "0.5"))
+            pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=HF_TOKEN)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, use_auth_token=HF_TOKEN)
+        _diarizer_backend = "pyannote-community-1"
+    except Exception as community_exc:  # noqa: BLE001
+        logger.warning(
+            "%s load failed, falling back to %s: %s",
+            DIARIZATION_MODEL,
+            DIARIZATION_FALLBACK_MODEL,
+            community_exc,
+        )
+        loaded_model = DIARIZATION_FALLBACK_MODEL
         try:
-            params = pipeline.parameters(instantiated=True)
-            params["clustering"]["threshold"] = clustering_thr
-            params["segmentation"]["min_duration_off"] = min_off
-            pipeline.instantiate(params)
-            logger.info(
-                "Pyannote tuned: clustering.threshold=%.3f, segmentation.min_duration_off=%.3f",
-                clustering_thr, min_off,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Pyannote tuning skipped: %s", exc)
-        _diarizer = pipeline
-        logger.info("Loaded %s as %s", loaded_model, _diarizer_backend)
-        return _diarizer
+            pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, token=HF_TOKEN)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(DIARIZATION_FALLBACK_MODEL, use_auth_token=HF_TOKEN)
+        _diarizer_backend = "pyannote-3.1"
+    if DIARIZER_DEVICE == "cuda":
+        pipeline.to(torch.device("cuda"))
+        torch.cuda.empty_cache()
+    # Tune clustering + segmentation. Threshold has two failure modes:
+    # - too low (e.g. 0.65 from Meeting Minutes): over-splits one
+    #   speaker's varied speech into multiple clusters. Aaron's
+    #   5-speaker Legacy 21 came back as 14 at 0.65.
+    # - too high (~0.7045 model default): merges similar voices into
+    #   one. The Citadel meeting came back as 1 speaker at default
+    #   before this knob existed.
+    # 0.72 sits a hair above the model default, biasing toward
+    # merging when in doubt. Env-tunable so we can dial per deploy
+    # without rebuilding.
+    clustering_thr = float(os.getenv("PYANNOTE_CLUSTERING_THRESHOLD", "0.72"))
+    min_off = float(os.getenv("PYANNOTE_MIN_DURATION_OFF", "0.5"))
+    try:
+        params = pipeline.parameters(instantiated=True)
+        params["clustering"]["threshold"] = clustering_thr
+        params["segmentation"]["min_duration_off"] = min_off
+        pipeline.instantiate(params)
+        logger.info(
+            "Pyannote tuned: clustering.threshold=%.3f, segmentation.min_duration_off=%.3f",
+            clustering_thr, min_off,
+        )
     except Exception as exc:  # noqa: BLE001
-        _diarizer_load_error = f"{type(exc).__name__}: {exc}"
-        logger.warning("Pyannote load failed: %s", _diarizer_load_error)
-        return None
+        logger.warning("Pyannote tuning skipped: %s", exc)
+    _diarizer = pipeline
+    logger.info("Loaded %s as %s", loaded_model, _diarizer_backend)
+    return _diarizer
+
+
+def _load_diarizer():
+    """Load the diarizer once and publish a startup readiness state.
+
+    The lock prevents a request and the startup task from loading two copies
+    of the model.  Once a load fails, requests do not retry it on every poll;
+    the process must be restarted after the operator fixes the dependency.
+    """
+    global _diarizer_state, _diarizer_load_error
+    if _diarizer is not None:
+        _diarizer_state = "loaded"
+        return _diarizer
+    with _diarizer_load_lock:
+        if _diarizer is not None:
+            _diarizer_state = "loaded"
+            return _diarizer
+        if _diarizer_state == "failed":
+            return None
+        _diarizer_state = "loading"
+        _diarizer_load_error = None
+        try:
+            pipeline = _load_diarizer_impl()
+        except Exception as exc:  # noqa: BLE001
+            _diarizer_state = "failed"
+            _diarizer_load_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("Pyannote load failed: %s", _diarizer_load_error)
+            return None
+        _diarizer_state = "loaded"
+        return pipeline
 
 
 def _read_audio(buf: bytes | str) -> tuple[np.ndarray, int]:
@@ -240,6 +279,7 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
 
 class HealthResponse(BaseModel):
     status: str
+    reason: Optional[str] = None
     device: str
     cuda_available: bool
     gpu_name: Optional[str] = None
@@ -297,27 +337,46 @@ class IdentifyResponse(BaseModel):
 # ---------- routes ----------
 
 
-@app.get("/health", response_model=HealthResponse)
-def health():
+def _health_payload() -> dict[str, object]:
     gpu_name = None
     if torch.cuda.is_available():
         try:
             gpu_name = torch.cuda.get_device_name(0)
         except Exception:  # noqa: BLE001
             gpu_name = None
-    diarizer_available = HF_TOKEN is not None
-    return HealthResponse(
-        status="ok",
-        device=DEVICE,
-        cuda_available=torch.cuda.is_available(),
-        gpu_name=gpu_name,
-        embedder_loaded=_embedder is not None,
-        diarizer_available=diarizer_available,
-        diarizer_error=_diarizer_load_error,
-        embedding_dim=256,
-        embedder_device=EMBEDDER_DEVICE,
-        diarizer_device=DIARIZER_DEVICE,
-    )
+    return {
+        "device": DEVICE,
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_name": gpu_name,
+        "embedder_loaded": _embedder is not None,
+        "diarizer_available": _diarizer_state == "loaded",
+        "diarizer_error": _diarizer_load_error,
+        "embedding_dim": 256,
+        "embedder_device": EMBEDDER_DEVICE,
+        "diarizer_device": DIARIZER_DEVICE,
+    }
+
+
+@app.get("/livez")
+def livez():
+    """Process liveness only; never reports model readiness."""
+    return {"status": "ok"}
+
+
+@app.get("/health", response_model=HealthResponse)
+def health():
+    payload = _health_payload()
+    if _diarizer_state != "loaded":
+        reason = _diarizer_load_error or "diarizer_loading"
+        return JSONResponse(
+            status_code=503,
+            content={
+                **payload,
+                "status": "degraded",
+                "reason": reason,
+            },
+        )
+    return HealthResponse(status="ok", **payload)
 
 
 @app.post("/embed", response_model=EmbedResponse)
@@ -662,8 +721,8 @@ def identify(req: IdentifyRequest):
 
 # ---------- synthetic probe (task #105) ----------
 #
-# The standard /health endpoint only confirms the HTTP server is up and reports
-# whether models *can* be loaded. It does not exercise the full diarization
+# The readiness /health endpoint reports whether the diarizer model is loaded.
+# It does not exercise the full diarization
 # pipeline. A few days ago we hit a class of failure where pyannote returned
 # collapsed clusters (everyone-as-one-speaker) and the only fix was a container
 # restart at the SAME clustering threshold — i.e. pipeline-state degradation.
@@ -887,7 +946,8 @@ async def healthz_synthetic():
 
 
 @app.on_event("startup")
-def _warm():
+async def _warm():
+    global _diarizer_load_task
     if EAGER_LOAD_EMBEDDER:
         try:
             _load_embedder()
@@ -896,10 +956,13 @@ def _warm():
             logger.error("wespeaker warm failed: %s", exc)
     else:
         logger.info("wespeaker warm skipped; lazy load enabled")
-    if HF_TOKEN and EAGER_LOAD_DIARIZER:
-        _load_diarizer()  # warm pyannote if explicitly requested
-    elif HF_TOKEN:
-        logger.info("pyannote warm skipped; lazy load enabled")
+    # Readiness must not depend on the first user request.  Start the model
+    # load in the background so /livez remains useful during a cold start,
+    # while /health reports 503/loading until this task publishes loaded or
+    # failed.  This also avoids running model inference on every health poll.
+    if _diarizer_state != "failed":
+        _diarizer_load_task = asyncio.create_task(asyncio.to_thread(_load_diarizer))
+        logger.info("pyannote load scheduled at startup")
 
 
 if __name__ == "__main__":

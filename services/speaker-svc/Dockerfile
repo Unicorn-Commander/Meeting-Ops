@@ -38,9 +38,9 @@ EXPOSE 8889
 
 # Healthcheck runs /healthz/synthetic — the full-pipeline probe that loads the
 # bundled 2-speaker fixture, diarizes it, and asserts speaker_count == 2. This
-# catches pipeline-state degradation that /health (HTTP-up only) misses. See
-# task #105 for context. start-period is 2m so model cold-load on first probe
-# doesn't trip the healthcheck; subsequent probes run on warm models in <60s.
+# catches pipeline-state degradation beyond the cheap model-readiness /health
+# check. /livez is intentionally not used as the container healthcheck: it is
+# process liveness only. start-period is 2m for model cold-load.
 # Compose-level overrides on individual deploys may extend interval/start-period
 # if the host needs more headroom.
 HEALTHCHECK --interval=5m --timeout=60s --retries=2 --start-period=120s \
