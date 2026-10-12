@@ -148,6 +148,15 @@ will work. Set the server URL to `https://<your-host>/mcp` and add an
 | `get_analytics(time_range?)` | Session counts, speaker stats, recent trends. |
 | `get_meeting_insights(session_id)` | AI keywords, topics, sentiment, action items. |
 
+### Tool (server-side recording import)
+
+`import_recording(source_url | local_path, title?, tags?)` accepts exactly one
+HTTPS URL or an absolute server path under `MEETING_OPS_IMPORT_ROOTS` (empty
+means local imports are disabled). It applies the normal audio-upload tier and
+quota gates, queues the existing upload pipeline without a loopback HTTP call,
+and returns `{session_id, status}`. Repeating the same source for the same
+caller returns the existing session by SHA-256.
+
 ### Tools (propose → confirm)
 
 Mutations are two-step: the AI proposes an action, you get a token, and

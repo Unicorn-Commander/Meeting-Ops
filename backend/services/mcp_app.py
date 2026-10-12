@@ -15,10 +15,12 @@ transports:
 * hosted HTTP sets it per-request from the inbound ``Authorization``
   header, then resets it after the response is sent.
 
-The MCP server never touches the database or models directly — it talks
-to the same backend REST API that the SPA + external integrations talk
-to. That is intentional: it means every server-side RBAC check, every
-free-tier gate, every org-scoping rule, applies uniformly.
+Most MCP tools talk to the same backend REST API that the SPA + external
+integrations talk to.  ``import_recording`` is the deliberate exception: the
+hosted MCP process is already inside the backend, so it resolves the PAT and
+calls the shared upload service directly instead of making a loopback HTTP
+request.  Both paths retain the same server-side RBAC, tier, quota, and
+organization scoping rules.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import os
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -104,6 +107,62 @@ def _require_pat() -> str:
 
 def _backend_url() -> str:
     return (_backend_url_var.get() or _default_backend_url()).rstrip("/")
+
+
+def _resolve_mcp_active_organization(db, user, organization_id=None):
+    """Resolve the same member-scoped default workspace used by the API.
+
+    MCP has no browser request headers, so a PAT-bound organization is the
+    explicit preference when present; otherwise use the user's persisted home
+    organization and then their first membership.  The returned object is the
+    same ``ActiveOrganization`` shape consumed by upload tier gates.
+    """
+    from auth.models import Organization, UserOrganization
+    from auth.organization import ActiveOrganization, ensure_default_organization
+
+    membership = None
+    organization = None
+    if organization_id is not None:
+        organization = db.query(Organization).filter(Organization.id == organization_id).first()
+        if organization is None:
+            raise HTTPException(status_code=403, detail="MCP token organization is unavailable.")
+        membership = (
+            db.query(UserOrganization)
+            .filter(
+                UserOrganization.user_id == user.id,
+                UserOrganization.organization_id == organization.id,
+            )
+            .first()
+        )
+        if membership is None and not user.is_superuser:
+            raise HTTPException(status_code=403, detail="MCP caller is not a member of this organization.")
+    else:
+        memberships = (
+            db.query(UserOrganization)
+            .filter(UserOrganization.user_id == user.id)
+            .order_by(UserOrganization.id.asc())
+            .all()
+        )
+        preferred_id = getattr(user, "default_organization_id", None)
+        membership = next(
+            (item for item in memberships if item.organization_id == preferred_id),
+            None,
+        )
+        if membership is None and memberships:
+            membership = memberships[0]
+        if membership is not None:
+            organization = (
+                db.query(Organization)
+                .filter(Organization.id == membership.organization_id)
+                .first()
+            )
+        elif user.is_superuser:
+            organization = ensure_default_organization(db)
+        else:
+            raise HTTPException(status_code=403, detail="MCP caller has no active organization.")
+
+    role = "superuser" if user.is_superuser else (membership.role if membership else "viewer")
+    return ActiveOrganization(organization=organization, membership=membership, role=role)
 
 
 async def _api(method: str, path: str, **kwargs) -> Any:
@@ -747,6 +806,48 @@ async def get_cross_app_hints(session_id: str) -> str:
     })
 
 
+# ── MCP Tools (server-side media import) ───────────────────────────────
+
+
+@mcp.tool()
+async def import_recording(
+    source_url: str | None = None,
+    local_path: str | None = None,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Import one server-side audio/video source through the upload pipeline.
+
+    Provide exactly one HTTPS ``source_url`` or one absolute ``local_path``
+    under the server's ``MEETING_OPS_IMPORT_ROOTS`` allowlist.  The operation
+    is immediately queued and returns a stable session id; it does not make a
+    loopback HTTP request.  Repeating the call for the same caller and source
+    bytes returns the original session.
+    """
+    from auth.pat import resolve_pat_record
+    from database.database import SessionLocal
+    from services.mcp_import import import_recording_for_caller
+
+    token = _require_pat()
+    db = SessionLocal()
+    try:
+        pat = resolve_pat_record(db, plaintext=token)
+        if pat is None or pat.scope != "user":
+            raise HTTPException(status_code=401, detail="A user-scoped MCP PAT is required.")
+        active_org = _resolve_mcp_active_organization(db, pat.user, pat.organization_id)
+        return await import_recording_for_caller(
+            db=db,
+            caller=pat.user,
+            active_org=active_org,
+            source_url=source_url,
+            local_path=local_path,
+            title=title,
+            tags=tags,
+        )
+    finally:
+        db.close()
+
+
 # ── MCP Tools (propose → confirm; mutate-via-confirmation) ─────────────
 
 
@@ -902,4 +1003,5 @@ __all__ = [
     "set_backend_url",
     "reset_backend_url",
     "READONLY_TOOL_NAMES",
+    "import_recording",
 ]

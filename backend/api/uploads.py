@@ -1099,7 +1099,18 @@ async def run_upload_pipeline(upload_id: str) -> None:
         is_ingest_session = isinstance(
             session.processing_metadata, dict
         ) and isinstance(session.processing_metadata.get("ingest"), dict)
-        session_pk = session.id if job.action != "attach" or is_ingest_session else None
+        # MCP imports pre-create their session so the tool can return a stable
+        # id before the expensive pipeline starts.  Treat that row like the
+        # desktop ingest session for failure bookkeeping; a failed import must
+        # not leave a permanently processing placeholder.
+        is_mcp_import_session = isinstance(
+            session.processing_metadata, dict
+        ) and isinstance(session.processing_metadata.get("mcp_import"), dict)
+        session_pk = (
+            session.id
+            if job.action != "attach" or is_ingest_session or is_mcp_import_session
+            else None
+        )
         if is_ingest_session and _apply_ingest_dates(session):
             db.commit()
             db.refresh(session)

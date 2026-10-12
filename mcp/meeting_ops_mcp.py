@@ -22,6 +22,9 @@ Tools (propose → confirm; mutations require confirmation):
     propose_remove_tag, propose_trigger_reprocess,
     propose_draft_followup_email, confirm_action, cancel_action
 
+Tools (server-side import):
+  - import_recording
+
 Resources:
   - meetings://list, meetings://{session_id}
 
