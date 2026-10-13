@@ -49,6 +49,15 @@ def clear_meta_cache():
         delattr(main, "_synthetic_meta_cache")
 
 
+@pytest.fixture(autouse=True)
+def reset_health_state(monkeypatch):
+    """Keep readiness tests isolated from the module-level loader state."""
+    monkeypatch.setattr(main, "_diarizer", None)
+    monkeypatch.setattr(main, "_diarizer_state", "loading")
+    monkeypatch.setattr(main, "_diarizer_load_error", None)
+    yield
+
+
 def _embed_vec(seed: int) -> list[float]:
     """Deterministic unit-norm 256-d embedding for tests."""
     rng = np.random.default_rng(seed)
@@ -114,6 +123,41 @@ def test_fixture_files_present():
     assert meta["expected_speaker_count"] == 2
     assert meta["filename"] == "synthetic_2speaker.wav"
     assert "expected_min_embedding_distance" in meta
+
+
+def test_health_reports_failed_diarizer_and_livez_stays_up(client, monkeypatch):
+    """A loader failure makes readiness 503 without affecting liveness."""
+    def fail_loader():
+        raise RuntimeError("HUGGINGFACE_TOKEN not set; pyannote unavailable")
+
+    monkeypatch.setattr(main, "_load_diarizer_impl", fail_loader)
+    assert main._load_diarizer() is None
+
+    health = client.get("/health")
+    assert health.status_code == 503
+    assert health.json()["status"] == "degraded"
+    assert "HUGGINGFACE_TOKEN not set" in health.json()["reason"]
+    assert health.json()["diarizer_available"] is False
+
+    live = client.get("/livez")
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
+
+
+def test_health_reports_loaded_diarizer_and_livez_stays_up(client, monkeypatch):
+    """A loaded pipeline makes readiness 200, while liveness remains cheap."""
+    pipeline = object()
+    monkeypatch.setattr(main, "_load_diarizer_impl", lambda: pipeline)
+    assert main._load_diarizer() is pipeline
+
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert health.json()["diarizer_available"] is True
+
+    live = client.get("/livez")
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
 
 
 def test_healthz_synthetic_ok(client, monkeypatch):

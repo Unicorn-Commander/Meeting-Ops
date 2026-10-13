@@ -38,8 +38,9 @@ internal network. There is **no** public ingress for this service.
 2. Visit https://huggingface.co/pyannote/segmentation-3.0 and accept the terms (it's a dependency).
 3. Mint a token at https://huggingface.co/settings/tokens (read scope is enough).
 4. Set `HUGGINGFACE_TOKEN=hf_xxx` in the speaker-svc env (e.g. in `.env.bigboy`) and restart.
-5. Verify: `curl http://meet-speaker-svc:8889/health` should now show
-   `"diarizer_available": true` and `"diarizer_error": null`.
+5. Verify: `curl http://meet-speaker-svc:8889/health` returns 200 only after
+   the diarizer has loaded, with `"diarizer_available": true` and
+   `"diarizer_error": null`. During a cold load or failed load it returns 503.
 
 The token is **only** used by speaker-svc — the embeddings/RAG service uses
 `INFINITY_ENDPOINT` and is unrelated.
@@ -67,13 +68,15 @@ All embeddings are 192-d float32 and ship as JSON arrays. The DB column is
 
 | Endpoint | What it checks | Used by |
 |---|---|---|
-| `GET /health` | HTTP server is up, reports cuda + model-load status | bootstrap / quick liveness checks |
+| `GET /livez` | HTTP process is serving; never checks model state | container/process liveness |
+| `GET /health` | Diarizer readiness plus cuda/model status; 503 while loading or after a load failure | readiness / routing |
 | `GET /healthz/synthetic` | Full diarization pipeline: loads bundled 2-speaker WAV, runs it through `_run_diarization_on_wav()`, asserts `num_speakers == 2`, segments > 1, and cosine distance between cluster centroids >= 0.4 | Docker healthcheck + on-call alerting |
 
 The synthetic probe (task #105) catches the pipeline-state-degradation class
 of failure where pyannote returns collapsed clusters (everyone-as-one-speaker)
 and only a container restart at the same clustering threshold fixes it. The
-plain `/health` is HTTP-up-only and can't see this.
+plain `/health` is a cheap model-readiness check; `/livez` is the HTTP-up-only
+probe.
 
 Test fixture lives at `test_fixtures/synthetic_2speaker.wav` with a sibling
 `.meta.json` describing ground truth. Bundled inside the image, no network

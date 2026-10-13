@@ -887,6 +887,36 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "import_recording",
+            "description": (
+                "Import one audio or video recording from exactly one HTTPS "
+                "source_url or an allowlisted server local_path. The source "
+                "is queued through the normal upload pipeline and returns a "
+                "stable session id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_url": {
+                        "type": "string",
+                        "description": "HTTPS URL for the server to download.",
+                    },
+                    "local_path": {
+                        "type": "string",
+                        "description": "Absolute path under MEETING_OPS_IMPORT_ROOTS.",
+                    },
+                    "title": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_create_session",
             "description": (
                 "Propose creating a new meeting session. Returns a "
@@ -1052,6 +1082,41 @@ async def execute_tool(
     safe_args = arguments or {}
     if not isinstance(safe_args, dict):
         return {"error": f"Tool arguments must be an object, got {type(safe_args).__name__}."}
+
+    if name == "import_recording":
+        if current_user is None:
+            return {"error": "Tool 'import_recording' requires an authenticated user context."}
+        try:
+            from auth.organization import ActiveOrganization, load_organization
+            from services.mcp_import import import_recording_for_caller
+
+            organization = load_organization(db, org_id)
+            if organization is None:
+                return {"error": "Import organization not found."}
+            membership = next(
+                (
+                    item
+                    for item in current_user.organizations
+                    if item.organization_id == org_id
+                ),
+                None,
+            )
+            if membership is None and not current_user.is_superuser:
+                return {"error": "Import caller is not a member of this organization."}
+            active_org = ActiveOrganization(
+                organization=organization,
+                membership=membership,
+                role="superuser" if current_user.is_superuser else membership.role,
+            )
+            return await import_recording_for_caller(
+                db=db,
+                caller=current_user,
+                active_org=active_org,
+                **safe_args,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Recording import tool failed")
+            return {"error": f"import_recording failed: {exc}"}
 
     if name in _TOOLS_USING_AGENT_ACTIONS:
         if current_user is None:
