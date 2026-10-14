@@ -2,8 +2,10 @@
 
 Meeting-Ops remains the meeting application; engine implementation and image builds
 belong to Unicorn-Amanuensis. `deploy/amanuensis/images.lock.json` pins all four
-services to main commit `f253e62db40417fe6bccacf4b7d36ae20b084936`, published by
-Forgejo CI run **2496**. Amanuensis PR **#5** includes the live seekable-file media
+services to main commit `76a90de7fccfa3bf38e054711107e02e3656c0e1`, published by
+Forgejo CI run **2538**. Amanuensis PR **#18** adds the speaker-svc readiness `/health`
+(503 until the diarizer is loaded) and `/livez`, ported from Meeting-Ops #43.
+Amanuensis PR **#5** includes the live seekable-file media
 decode patches. The overrides now remove the superseded batch and speaker
 `/app/main.py` binds. Original host files and patches remain available for rollback.
 

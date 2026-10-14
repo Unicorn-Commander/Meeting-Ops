@@ -1,12 +1,12 @@
 {
-  "engine_revision": "f253e62db40417fe6bccacf4b7d36ae20b084936",
+  "engine_revision": "76a90de7fccfa3bf38e054711107e02e3656c0e1",
   "meeting_source_revision": "8a17d4e8c8473ae2e6fc1b0fccc8fd27023a1f3f",
-  "build_run": 2496,
+  "build_run": 2538,
   "images": {
-    "parakeet-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-svc:f253e62db40417fe6bccacf4b7d36ae20b084936",
-    "parakeet-stream-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-stream-svc:f253e62db40417fe6bccacf4b7d36ae20b084936",
-    "speaker-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/speaker-svc:f253e62db40417fe6bccacf4b7d36ae20b084936",
-    "parakeet-openai-shim": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:f253e62db40417fe6bccacf4b7d36ae20b084936"
+    "parakeet-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-svc:76a90de7fccfa3bf38e054711107e02e3656c0e1",
+    "parakeet-stream-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-stream-svc:76a90de7fccfa3bf38e054711107e02e3656c0e1",
+    "speaker-svc": "git.unicorncommander.ai/unicorncommander/amanuensis/speaker-svc:76a90de7fccfa3bf38e054711107e02e3656c0e1",
+    "parakeet-openai-shim": "git.unicorncommander.ai/unicorncommander/amanuensis/parakeet-openai-shim:76a90de7fccfa3bf38e054711107e02e3656c0e1"
   },
   "engine_branch": "main",
   "patch_pull_request": 5
