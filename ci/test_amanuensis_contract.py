@@ -77,8 +77,8 @@ class ImageContract(unittest.TestCase):
             self.assertNotIn('/app/main.py', path.read_text())
         text = (ROOT / 'deploy/midboy1/docker-compose.amanuensis.yml').read_text()
         self.assertRegex(text, r'PARAKEET_MODEL_PRECISION:\s+fp32')
-        self.assertEqual(LOCK['engine_revision'], 'f253e62db40417fe6bccacf4b7d36ae20b084936')
-        self.assertEqual(LOCK['build_run'], 2496)
+        self.assertEqual(LOCK['engine_revision'], '76a90de7fccfa3bf38e054711107e02e3656c0e1')
+        self.assertEqual(LOCK['build_run'], 2538)
 
     def test_bundle_is_opt_in(self):
         doc = compose(ROOT / 'deploy/bundled-engine/docker-compose.yml')
