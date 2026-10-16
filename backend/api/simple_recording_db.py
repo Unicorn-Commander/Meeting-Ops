@@ -28,6 +28,7 @@ from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
 from services.real_whisper_service import real_whisper_service
 from services.unified_agent_service import unified_agent_service
+from utils.time import BUSINESS_TIMEZONE, business_date_from_utc, stored_business_date
 
 
 # Vocabulary replacement helper
@@ -216,6 +217,15 @@ def _safe_iso_or_none(value: Any) -> Optional[str]:
         return None
     try:
         return value.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _safe_date_only_or_none(value: Any) -> Optional[str]:
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return stored_business_date(value).isoformat()
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -507,7 +517,7 @@ def _action_items_payload(db: Session, session: DBRecordingSession) -> List[dict
             "id": item.id,
             "text": item.text,
             "owner": item.owner,
-            "due_date": _safe_iso_or_none(item.due_date),
+            "due_date": _safe_date_only_or_none(item.due_date),
             "status": item.status,
             "sort_order": item.sort_order,
             "source": item.source,
@@ -732,8 +742,33 @@ def _effective_meeting_date(session: DBRecordingSession):
     if session.meeting_date:
         return session.meeting_date
     if session.started_at:
-        return session.started_at.date()
-    return session.created_at.date() if session.created_at else None
+        return business_date_from_utc(session.started_at)
+    return business_date_from_utc(session.created_at) if session.created_at else None
+
+
+def _effective_meeting_date_expression(db: Session):
+    """Build the SQL sort key with the same business-zone semantics.
+
+    ``started_at`` and ``created_at`` are legacy timestamp-without-time-zone
+    columns containing UTC values. PostgreSQL therefore converts them from UTC
+    to New York before truncating to a date. SQLite remains a test/dev fallback
+    and uses its native date expression; the Python cursor mirror above still
+    applies the correct zone to returned rows.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        def local_date(column):
+            utc_instant = column.op("AT TIME ZONE")("UTC")
+            return func.date(func.timezone(BUSINESS_TIMEZONE, utc_instant))
+    else:
+        def local_date(column):
+            return func.date(column)
+
+    return func.coalesce(
+        DBRecordingSession.meeting_date,
+        local_date(DBRecordingSession.started_at),
+        local_date(DBRecordingSession.created_at),
+    )
 
 
 def _encode_sessions_cursor(session: DBRecordingSession, sort_key: str = "created_at_desc") -> str:
@@ -908,11 +943,13 @@ async def list_sessions(
     # Coalesce so a null meeting_date falls back to started_at and
     # finally to created_at. Keeps newly-uploaded sessions visible
     # in date-sorted views even before the user edits a date in.
-    effective = func.coalesce(
-        DBRecordingSession.meeting_date,
-        func.date(DBRecordingSession.started_at),
-        func.date(DBRecordingSession.created_at),
+    effective = _effective_meeting_date_expression(db)
+    python_meeting_sort = (
+        sort_key in ("meeting_date_desc", "meeting_date_asc")
+        and db.get_bind().dialect.name != "postgresql"
     )
+    cursor_effective = None
+    cursor_effective_id = None
     if cursor and sort_key in ("meeting_date_desc", "meeting_date_asc"):
         # Keyset paging on (effective date, id), the same key the ORDER BY
         # uses, so "Load more" works when the list is sorted by meeting date.
@@ -924,7 +961,9 @@ async def list_sessions(
             cursor_id = int(payload["id"])
         except (ValueError, TypeError, KeyError) as exc:
             raise HTTPException(status_code=400, detail="Invalid sessions cursor") from exc
-        if sort_key == "meeting_date_desc":
+        if python_meeting_sort:
+            cursor_effective, cursor_effective_id = cursor_eff, cursor_id
+        elif sort_key == "meeting_date_desc":
             query = query.filter(or_(
                 effective < cursor_eff,
                 and_(effective == cursor_eff, DBRecordingSession.id < cursor_id),
@@ -943,13 +982,57 @@ async def list_sessions(
                 DBRecordingSession.id < cursor_id,
             ),
         ))
-    if sort_key in ("meeting_date_desc", "meeting_date_asc"):
-        order_clause = desc(effective) if sort_key == "meeting_date_desc" else effective
-        query = query.order_by(order_clause, desc(DBRecordingSession.id))
+    if python_meeting_sort:
+        # SQLite has no IANA timezone database. Fetch the test/dev result set
+        # and apply the same Python business-date key used by the cursor
+        # encoder instead of silently sorting by UTC calendar dates.
+        rows = query.all()
+        if cursor_effective is not None:
+            if sort_key == "meeting_date_desc":
+                rows = [
+                    session for session in rows
+                    if (
+                        (_effective_meeting_date(session) or date.min) < cursor_effective
+                        or (
+                            (_effective_meeting_date(session) or date.min) == cursor_effective
+                            and session.id < cursor_effective_id
+                        )
+                    )
+                ]
+            else:
+                rows = [
+                    session for session in rows
+                    if (
+                        (_effective_meeting_date(session) or date.max) > cursor_effective
+                        or (
+                            (_effective_meeting_date(session) or date.max) == cursor_effective
+                            and session.id < cursor_effective_id
+                        )
+                    )
+                ]
+        if sort_key == "meeting_date_desc":
+            rows.sort(
+                key=lambda session: (
+                    _effective_meeting_date(session) or date.min,
+                    session.id,
+                ),
+                reverse=True,
+            )
+        else:
+            rows.sort(
+                key=lambda session: (
+                    _effective_meeting_date(session) or date.max,
+                    -(session.id or 0),
+                )
+            )
+        rows = rows[: limit + 1]
     else:
-        query = query.order_by(desc(DBRecordingSession.created_at), desc(DBRecordingSession.id))
-
-    rows = query.limit(limit + 1).all()
+        if sort_key in ("meeting_date_desc", "meeting_date_asc"):
+            order_clause = desc(effective) if sort_key == "meeting_date_desc" else effective
+            query = query.order_by(order_clause, desc(DBRecordingSession.id))
+        else:
+            query = query.order_by(desc(DBRecordingSession.created_at), desc(DBRecordingSession.id))
+        rows = query.limit(limit + 1).all()
     has_more = len(rows) > limit
     sessions = rows[:limit]
     session_org_ids = sorted({
@@ -2750,7 +2833,7 @@ def _session_action_items_markdown(db: Session, session: DBRecordingSession) -> 
             suffix.append(f"Owner: {item.owner}")
         if item.due_date:
             try:
-                suffix.append(f"Due: {item.due_date.date().isoformat()}")
+                suffix.append(f"Due: {stored_business_date(item.due_date).isoformat()}")
             except Exception:  # noqa: BLE001
                 pass
         if item.status:

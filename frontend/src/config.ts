@@ -1,5 +1,7 @@
 // API Configuration
 
+export const BUSINESS_TIME_ZONE = 'America/New_York';
+
 const isDevelopment = import.meta.env.DEV;
 
 // Make API URL dynamic - evaluated each time it's accessed.

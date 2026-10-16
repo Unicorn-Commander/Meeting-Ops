@@ -432,6 +432,9 @@ class ActionItem(Base):
     # Best-effort parse from the LLM ("Friday", "next week" etc); the
     # original phrasing is preserved in `raw_payload` so the UI can
     # render the fallback string when this is NULL.
+    # Date-only business value encoded at America/New_York noon because this
+    # timestamp column is retained without a schema migration. API/federation
+    # serializers must emit the calendar date, not this storage instant.
     due_date = Column(DateTime(timezone=True), nullable=True)
     # 'todo' | 'doing' | 'done' | 'cancelled' (CHECK constraint enforces)
     status = Column(

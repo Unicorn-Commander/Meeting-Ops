@@ -28,6 +28,7 @@ from auth.models import User
 from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import ActionItem, RecordingSession
+from utils.time import normalize_business_date, stored_business_date
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,16 @@ def _iso_or_none(value: object) -> Optional[str]:
         return None
     try:
         return value.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _date_only_or_none(value: object) -> Optional[str]:
+    """Serialize the timestamp-backed due-date column as a calendar date."""
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return stored_business_date(value).isoformat()
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -186,7 +197,7 @@ def _to_out(item: ActionItem, session: Optional[RecordingSession]) -> ActionItem
         organization_id=item.organization_id,
         text=item.text,
         owner=item.owner,
-        due_date=_iso_or_none(item.due_date),
+        due_date=_date_only_or_none(item.due_date),
         status=item.status,
         sort_order=item.sort_order,
         source=item.source,
@@ -375,7 +386,11 @@ async def create_action_item(
         organization_id=org_id,
         text=payload.text.strip(),
         owner=(payload.owner.strip() if payload.owner else None) or None,
-        due_date=payload.due_date,
+        due_date=(
+            normalize_business_date(payload.due_date)
+            if payload.due_date is not None
+            else None
+        ),
         status="todo",
         sort_order=sort_order,
         source="manual",
@@ -463,7 +478,11 @@ async def update_action_item(
         item.owner = (payload.owner.strip() if payload.owner else None) or None
 
     if "due_date" in fields:
-        item.due_date = payload.due_date
+        item.due_date = (
+            normalize_business_date(payload.due_date)
+            if payload.due_date is not None
+            else None
+        )
 
     db.commit()
     db.refresh(item)

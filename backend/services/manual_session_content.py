@@ -22,6 +22,7 @@ from database.models import (
     SessionCollaborator, SessionGroupMember, UploadJob, SpeakerSessionLink,
     SpeakerVoiceSample, TtsJob, SessionAttachment, SummarizationLease, BulkImportFile,
 )
+from utils.time import business_date_noon
 
 from models.agent_system import AgentSession
 from models.vocabulary import SessionVocabulary
@@ -222,7 +223,9 @@ def replace(db, session, request, user):
     for index, action in enumerate(request.actions):
         db.add(ActionItem(session_id=session.id, organization_id=session.organization_id,
             text=action.text, owner=action.owner,
-            due_date=datetime.combine(date.fromisoformat(action.due_date), datetime.min.time(), tzinfo=timezone.utc) if action.due_date else None,
+            # The schema remains timestamp-backed, so use the same business-
+            # noon date-only convention as extracted action items.
+            due_date=business_date_noon(date.fromisoformat(action.due_date)) if action.due_date else None,
             status="todo", sort_order=index, source="manual", project_ops_link_state="local_only",
             raw_payload={**action.model_dump(), "content_source": "manually_authored"}))
     db.flush()

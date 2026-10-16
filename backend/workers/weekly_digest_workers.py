@@ -1,6 +1,8 @@
 """Scheduled in-app digests; delivery requires account opt-in AND org permission.
 
-Daily: yesterday at 13:00 UTC. Weekly: last Monday–Sunday, Monday 13:15 UTC.
+The arq cron invokes these hooks hourly because arq cron has no timezone. Each
+hook acts only at 09:00 in ``America/New_York`` (daily) or at 09:00 Monday
+(weekly), so the delivery wall-clock time remains stable across DST.
 Generation is independent of email settings. Existing WEEKLY_DIGEST_* paid/cap
 controls apply to both periods; DAILY_DIGEST_ENABLED controls the daily pass.
 See docs/in-app-digests.md for precedence, retries, and rollout.
@@ -13,7 +15,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from utils.time import business_date_from_utc, business_today, utc_to_business
+
 logger = logging.getLogger(__name__)
+
+SCHEDULED_LOCAL_HOUR = 9
 
 
 # ----------------------------- env knobs ---------------------------------- #
@@ -63,10 +69,18 @@ def _last_week_date_str(now: datetime | None = None) -> str:
     ISO week and spans 7 days. Passing any day inside last week yields last
     week's window. We pass last Monday explicitly so the cached digest's
     `date` is stable + human-meaningful (always a Monday)."""
-    now = now or datetime.now(timezone.utc)
-    this_monday = (now - timedelta(days=now.weekday())).date()
+    now = utc_to_business(now or datetime.now(timezone.utc))
+    this_monday = now.date() - timedelta(days=now.weekday())
     last_monday = this_monday - timedelta(days=7)
     return last_monday.strftime("%Y-%m-%d")
+
+
+def _cron_should_run(period: str, now: datetime | None = None) -> bool:
+    """Guard an hourly arq tick with the intended New York wall-clock time."""
+    local_now = utc_to_business(now or datetime.now(timezone.utc))
+    if local_now.hour != SCHEDULED_LOCAL_HOUR or local_now.minute != 0:
+        return False
+    return period == "day" or (period == "week" and local_now.weekday() == 0)
 
 
 # ----------------------------- recipients --------------------------------- #
@@ -217,10 +231,13 @@ async def store_scheduled_digests(
     from database.models import MeetingDigest, RecordingSession
     from api.digests import _get_date_range, _generate_digest
     from sqlalchemy import exists, case, func, or_
-    date_str = date_str or (_last_week_date_str() if period == "week" else
-                            (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d"))
+    date_str = date_str or (
+        _last_week_date_str()
+        if period == "week"
+        else (business_today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    )
     start_dt, end_dt = _get_date_range(period, date_str)
-    date_str = start_dt.strftime("%Y-%m-%d")
+    date_str = business_date_from_utc(start_dt).strftime("%Y-%m-%d")
     summary = {"enabled": True, "period": period, "date": date_str,
                "orgs_considered": 0, "orgs_processed": 0, "generated": 0,
                "skipped_free": 0, "emails_sent": 0, "errors": 0, "dry_run": dry_run}
@@ -291,8 +308,19 @@ async def send_weekly_digests_for_all_orgs(*, date_str=None, dry_run=False):
 
 
 async def weekly_digest_cron(ctx: dict[str, Any]) -> dict[str, Any]:
-    return await send_weekly_digests_for_all_orgs()
+    now = datetime.now(timezone.utc)
+    if not _cron_should_run("week", now):
+        return {"enabled": False, "period": "week", "reason": "outside business schedule"}
+    return await send_weekly_digests_for_all_orgs(
+        date_str=_last_week_date_str(now),
+    )
 
 
 async def daily_digest_cron(ctx: dict[str, Any]) -> dict[str, Any]:
-    return await store_scheduled_digests("day")
+    now = datetime.now(timezone.utc)
+    if not _cron_should_run("day", now):
+        return {"enabled": False, "period": "day", "reason": "outside business schedule"}
+    return await store_scheduled_digests(
+        "day",
+        date_str=(business_today(now) - timedelta(days=1)).strftime("%Y-%m-%d"),
+    )

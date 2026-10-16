@@ -180,11 +180,12 @@ class WorkerSettings:
         cron(media_retention_task, hour={4}, minute={30}),
         cron(data_retention_purge_task, hour={5}, minute={0}),
         cron(session_watchdog_task, minute={0, 30}),
-        # Daily and weekly in-app digests for completed UTC windows (see
-        # workers/weekly_digest_workers.py). Store independently of email;
-        # per-account opt-in plus the org kill-switch govern delivery.
-        cron(daily_digest_cron, hour={13}, minute={0}),
-        cron(weekly_digest_cron, weekday="mon", hour={13}, minute={15}),
+        # arq cron has no timezone, so invoke the digest hooks hourly and let
+        # each hook guard on the intended America/New_York wall-clock hour.
+        # Store independently of email; per-account opt-in plus the org
+        # kill-switch govern delivery.
+        cron(daily_digest_cron, minute={0}),
+        cron(weekly_digest_cron, minute={0}),
     ]
     max_jobs = get_bulk_import_concurrency()
     redis_settings = RedisSettings.from_dsn(

@@ -67,6 +67,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from services.brigade_client import BrigadeClient, BrigadeWriteResult
+from utils.time import stored_business_date
 
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,12 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat()
 
 
+def _date_only(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    return stored_business_date(dt).isoformat()
+
+
 def _extract_topics(final_summary: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pull topic strings out of the summary JSON.
 
@@ -355,7 +362,7 @@ def _build_action_item_properties(
         "owner": item.owner,
         "owner_speaker_id": owner_speaker_id,
         "status": item.status,
-        "due_date": _iso(item.due_date) if item.due_date else None,
+        "due_date": _date_only(item.due_date),
         "source_meeting_id": item.session_id,
         "org_id": org_id,
     }

@@ -5,13 +5,14 @@ The existing `GET /api/digests` response and queued-generation contract are unch
 
 ## Scheduling and eligibility
 
-The existing bulk-import arq worker now runs:
+The existing bulk-import arq worker checks hourly and acts at the intended
+business wall-clock time:
 
-- Daily at 13:00 UTC: store yesterday's completed meetings.
-- Monday at 13:15 UTC: store the previous Monday–Sunday week.
+- Daily at 09:00 `America/New_York`: store the previous local calendar day.
+- Monday at 09:00 `America/New_York`: store the previous local Monday–Sunday week.
 
 Both use the existing summary generator and `MeetingDigest` rows. Only active
-organizations with completed meetings in the UTC window are candidates. The
+organizations with completed meetings in the UTC-converted business window are candidates. The
 existing cron paid gate (paid org **or** non-free member) is preserved. This is
 legacy cron eligibility; interactive generation still uses the stricter existing
 account **and** active-workspace capability gate. Reading stored digests remains
@@ -91,7 +92,7 @@ No existing preferences are enabled and no old email receipts are inferred.
 
 Persephone should apply the migration, rebuild the frontend/API, and restart the
 existing bulk-import worker so it registers both crons. No new service is needed.
-Use a paid dogfood org with completed meetings in the previous UTC day/week;
+Use a paid dogfood org with completed meetings in the previous New York day/week;
 confirm the digest appears with both personal preferences off. To exercise
 email, explicitly enable the org switch, verify the intended user's email, and
 check only that user's desired cadence. Rerun the same window to check no resend.

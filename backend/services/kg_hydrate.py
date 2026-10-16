@@ -25,6 +25,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from database.models import ActionItem, RecordingSession, SpeakerProfile
+from utils.time import stored_business_date
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ def hydrate_nodes(
                 "text": a.text,
                 "owner": a.owner,
                 "status": a.status,
-                "due_date": a.due_date.isoformat() if a.due_date else None,
+                "due_date": stored_business_date(a.due_date).isoformat() if a.due_date else None,
                 "source_session_pk": a.session_id,
             }
 

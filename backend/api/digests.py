@@ -15,6 +15,7 @@ from auth.organization import ActiveOrganization
 from auth.models import User
 from auth.tier import gate_feature_for_caller
 from services.providers.registry import get_provider_registry
+from utils.time import business_today, business_window_utc
 
 router = APIRouter(prefix="/api/digests", tags=["Digests"])
 logger = logging.getLogger(__name__)
@@ -40,39 +41,44 @@ class DigestJobResponse(BaseModel):
 
 
 def _get_date_range(period: str, date_str: str) -> tuple[datetime, datetime]:
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    """Return a half-open UTC window for a business-calendar date.
+
+    The selected date is a New York calendar date; only the resulting query
+    instants are UTC. This keeps a late-evening Eastern meeting in its named
+    day and lets the UTC window change length at DST boundaries.
+    """
+    selected = datetime.strptime(date_str, "%Y-%m-%d").date()
     if period == "day":
-        return dt, dt + timedelta(days=1)
+        start_date, end_date = selected, selected + timedelta(days=1)
     elif period == "week":
-        start = dt - timedelta(days=dt.weekday())
-        return start, start + timedelta(days=7)
+        start_date = selected - timedelta(days=selected.weekday())
+        end_date = start_date + timedelta(days=7)
     elif period == "month":
-        start = dt.replace(day=1)
-        if dt.month == 12:
-            end = dt.replace(year=dt.year + 1, month=1, day=1)
+        start_date = selected.replace(day=1)
+        if selected.month == 12:
+            end_date = selected.replace(year=selected.year + 1, month=1, day=1)
         else:
-            end = dt.replace(month=dt.month + 1, day=1)
-        return start, end
+            end_date = selected.replace(month=selected.month + 1, day=1)
     elif period == "quarter":
-        quarter_start_month = ((dt.month - 1) // 3) * 3 + 1
-        start = dt.replace(month=quarter_start_month, day=1)
+        quarter_start_month = ((selected.month - 1) // 3) * 3 + 1
+        start_date = selected.replace(month=quarter_start_month, day=1)
         if quarter_start_month + 3 > 12:
-            end = dt.replace(year=dt.year + 1, month=1, day=1)
+            end_date = selected.replace(year=selected.year + 1, month=1, day=1)
         else:
-            end = dt.replace(month=quarter_start_month + 3, day=1)
-        return start, end
+            end_date = selected.replace(month=quarter_start_month + 3, day=1)
     elif period == "year":
-        start = dt.replace(month=1, day=1)
-        end = dt.replace(year=dt.year + 1, month=1, day=1)
-        return start, end
+        start_date = selected.replace(month=1, day=1)
+        end_date = selected.replace(year=selected.year + 1, month=1, day=1)
     else:
         raise ValueError(f"Invalid period: {period}")
+    return business_window_utc(start_date, end_date)
 
 
 def _week_range_label(date_str: str) -> str:
-    start, end = _get_date_range("week", date_str)
-    last_day = (end - timedelta(days=1)).strftime("%b %-d, %Y")
-    return f"{start.strftime('%b %-d')}–{last_day}"
+    selected = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start = selected - timedelta(days=selected.weekday())
+    last_day = start + timedelta(days=6)
+    return f"{start.strftime('%b %-d')}–{last_day.strftime('%b %-d, %Y')}"
 
 
 async def _generate_digest(
@@ -225,7 +231,7 @@ async def get_digest(
         raise HTTPException(status_code=400, detail="Invalid period")
     # Default date to today if not provided
     if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date = business_today().isoformat()
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError:

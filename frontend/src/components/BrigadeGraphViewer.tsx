@@ -37,6 +37,7 @@ import ForceGraph3D from 'react-force-graph-3d';
 import { ExternalLink, RefreshCw } from 'lucide-react';
 import { config } from '../config';
 import { useOrg } from '../contexts/OrgContext';
+import { formatDateOnly } from '../utils/businessTime';
 
 // ---------------------------------------------------------------------------
 // Wire types — mirror the backend response in api/recording.py
@@ -157,6 +158,7 @@ const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({
 
 function fmtDate(v: unknown): string | null {
   if (typeof v !== 'string') return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return formatDateOnly(v);
   const d = new Date(v);
   return Number.isNaN(d.getTime())
     ? null

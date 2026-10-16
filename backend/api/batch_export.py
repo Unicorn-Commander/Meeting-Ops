@@ -21,6 +21,7 @@ from auth.organization import ActiveOrganization
 from auth.models import Organization, User
 from auth.tier import gate_feature_for_caller
 from database.models import RecordingSession
+from utils.time import stored_business_date
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
 logger = logging.getLogger(__name__)
@@ -850,7 +851,7 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
                         "owner": item.owner or "",
                         "status": item.status or "todo",
                         "due_date": (
-                            item.due_date.strftime("%b %d, %Y")
+                            stored_business_date(item.due_date).strftime("%b %d, %Y")
                             if item.due_date
                             else ""
                         ),

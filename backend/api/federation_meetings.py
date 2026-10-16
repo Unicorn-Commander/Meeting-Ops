@@ -60,6 +60,7 @@ from sqlalchemy.orm import Session
 from auth.models import Organization
 from database.database import get_db
 from database.models import ActionItem, RecordingSession
+from utils.time import stored_business_date
 from services.brigade_jwt_verifier import (
     extract_scopes,
     verify_brigade_jwt_with_reason,
@@ -182,6 +183,12 @@ def _require_transcript_scope(ctx: FederationContext) -> None:
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if isinstance(dt, datetime) else None
+
+
+def _date_only(dt: Optional[datetime]) -> Optional[str]:
+    if not isinstance(dt, datetime):
+        return None
+    return stored_business_date(dt).isoformat()
 
 
 def _clamp_limit(limit: Optional[int]) -> int:
@@ -479,7 +486,7 @@ def _actions_by_session(
                 "text": item.text,
                 "status": _AI_STATUS_MAP.get(item.status, item.status),
                 "assignee_contact_id": None,
-                "due_at": _iso(item.due_date),
+                "due_at": _date_only(item.due_date),
                 "project_ops_task_id": task_id,
                 "created_at": _iso(item.created_at),
             }
@@ -711,7 +718,7 @@ def list_action_items_for_contact(
                 # owner is free-text today; we do not resolve owner ->
                 # contact_id yet, so this is null until that lands.
                 "assignee_contact_id": None,
-                "due_at": _iso(it.due_date),
+                "due_at": _date_only(it.due_date),
                 "project_ops_task_id": task_id,
                 "created_at": _iso(it.created_at),
             }

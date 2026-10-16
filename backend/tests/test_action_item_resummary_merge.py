@@ -8,6 +8,7 @@ summary still contains, have to survive that pass.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from database.models import ActionItem
 from services.action_items_extractor import persist_action_items
@@ -297,7 +298,7 @@ def test_untouched_machine_item_missing_from_the_new_summary_is_removed():
 
 
 def test_second_persist_does_not_duplicate_rows_or_change_ids():
-    due = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    due = datetime(2026, 9, 30, 12, tzinfo=ZoneInfo("America/New_York"))
     session = _Session(_summary(
         {"action": "Send the redline", "owner": "Ada", "due_date": "2026-09-30"},
         {"action": "Book the studio", "owner": "Mei"},

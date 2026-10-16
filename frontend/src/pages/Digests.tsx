@@ -5,6 +5,7 @@ import { useOrg } from '../contexts/OrgContext';
 import { config } from '../config';
 import { pollJob, JobPollError } from '../services/jobPoller';
 import DigestEmailPreferences from '../components/settings/DigestEmailPreferences';
+import { businessDateString } from '../utils/businessTime';
 
 interface DigestData {
   id?: number;
@@ -37,7 +38,7 @@ export default function DigestsPage() {
 function DigestWorkspace({ slug }: { slug?: string }) {
   const [tab, setTab] = useState('day');
   const [period, setPeriod] = useState('day');
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(businessDateString());
   const [digest, setDigest] = useState<DigestData | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -147,7 +148,7 @@ function DigestWorkspace({ slug }: { slug?: string }) {
   return (
     <div className="h-full overflow-y-auto bg-zinc-950 p-4 sm:p-6 text-zinc-100 space-y-5">
       <h1 className="flex items-center gap-3 text-lg font-semibold"><FileText className="h-5 w-5 text-fuchsia-400" />Meeting Digests</h1>
-      <p className="text-sm text-zinc-400">Daily and weekly summaries are saved here for eligible workspaces with completed meetings. Scheduled windows use UTC.</p>
+      <p className="text-sm text-zinc-400">Daily and weekly summaries are saved here for eligible workspaces with completed meetings. Scheduled windows use America/New_York calendar days.</p>
       <DigestEmailPreferences />
       <section aria-label="Generate a digest" className="flex flex-wrap items-end gap-3">
         <label className="text-sm">Period<select aria-label="Period" value={period} onChange={event => setPeriod(event.target.value)} className={`${buttonStyle} block mt-1`}>

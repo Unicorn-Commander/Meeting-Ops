@@ -56,11 +56,12 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 import httpx
 
+from utils.time import stored_business_date
 
 logger = logging.getLogger(__name__)
 
@@ -137,14 +138,28 @@ def _looks_like_uuid(value: str) -> bool:
 
 def _normalize_due_date(due_date: Any) -> Optional[str]:
     """Project-Ops' dueDate is validated by class-validator's IsDateString,
-    which accepts any ISO-8601 string. Accept a ``datetime`` (the
-    ActionItem.due_date column type) or an already-formatted string."""
+    which accepts a date-only ISO string. Action-item due dates are calendar
+    dates even though Meeting-Ops stores them in a timestamp column, so emit
+    ``YYYY-MM-DD`` and never the noon encoding or a UTC-midnight instant."""
     if due_date is None:
         return None
     if isinstance(due_date, datetime):
+        return stored_business_date(due_date).isoformat()
+    if isinstance(due_date, date):
         return due_date.isoformat()
     text = str(due_date).strip()
-    return text or None
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            return date.fromisoformat(text).isoformat()
+        except ValueError:
+            return text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    return stored_business_date(parsed).isoformat()
 
 
 def _decode_jwt_exp(token: str) -> Optional[float]:

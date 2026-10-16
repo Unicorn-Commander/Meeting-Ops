@@ -24,7 +24,7 @@ Returns a list of dicts with the shape consumed by the new
     {
         "text": str,                # required, non-empty
         "owner": str | None,
-        "due_date": datetime | None,
+        "due_date": datetime | None,  # date-only value encoded at business noon
         "source": "final_summary" | "ai_insights",
         "raw_payload": dict,        # original LLM blob for audit
     }
@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime
 from typing import Any, Iterable, List, Optional
 
 from services.action_item_quality import apply_quality_gate
+from utils.time import BUSINESS_ZONE, business_date_noon, stored_business_date
 
 
 logger = logging.getLogger(__name__)
@@ -90,12 +91,15 @@ _REL_DAY_RX = re.compile(
 
 
 def _coerce_due(raw: Any) -> Optional[datetime]:
-    """Best-effort parse of LLM-extracted due strings into a timestamp.
+    """Best-effort parse of LLM-extracted due strings into a date-only value.
 
     The summarizer emits "Not specified", "Next Thursday", "Friday",
-    ISO dates, sometimes nothing. We accept ISO-shaped strings and
-    leave the rest as NULL — the original phrasing is preserved in
-    `raw_payload` for the UI to render verbatim if it wants."""
+    ISO dates, sometimes nothing. The existing schema is a timestamp, so
+    calendar dates are encoded at noon in the business zone; this avoids
+    UTC-midnight becoming the prior date in Eastern displays. The original
+    phrasing is preserved in ``raw_payload`` for the UI to render verbatim
+    if it wants.
+    """
     if not isinstance(raw, dict):
         return None
     for k in ("due_date", "dueDate", "deadline", "due"):
@@ -105,19 +109,19 @@ def _coerce_due(raw: Any) -> Optional[datetime]:
         s = v.strip()
         if not s or s.lower() in {"not specified", "n/a", "tbd", "none", "null"}:
             continue
+        # Date-only values are calendar dates, never UTC instants.
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            try:
+                return business_date_noon(date.fromisoformat(s))
+            except ValueError:
+                continue
         # Try ISO 8601 first; tolerate trailing Z.
         try:
             iso = s[:-1] + "+00:00" if s.endswith("Z") else s
             dt = datetime.fromisoformat(iso)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            pass
-        # Date-only YYYY-MM-DD
-        try:
-            dt = datetime.strptime(s[:10], "%Y-%m-%d")
-            return dt.replace(tzinfo=timezone.utc)
+                return business_date_noon(dt.date())
+            return business_date_noon(dt.astimezone(BUSINESS_ZONE).date())
         except ValueError:
             pass
         # Relative phrases get left as NULL; we keep the string in
@@ -231,19 +235,13 @@ def _match_key(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def _due_matches(stored: Optional[datetime], extracted: Optional[datetime]) -> bool:
     if stored is None and extracted is None:
         return True
     if stored is None or extracted is None:
         return False
     try:
-        return abs((_as_utc(stored) - _as_utc(extracted)).total_seconds()) < 1
+        return stored_business_date(stored) == stored_business_date(extracted)
     except (TypeError, ValueError, OverflowError):
         return False
 
