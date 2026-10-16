@@ -62,12 +62,22 @@ def stored_business_date(value: datetime) -> date:
     """Read the calendar date represented by a stored date-only timestamp.
 
     New values are stored at business noon. A naive value therefore means
-    business-local wall time at this boundary (as SQLite returns it), while an
-    aware value is converted from its stored instant.
+    business-local wall time at this boundary (as SQLite returns it). Aware
+    values are normally converted from their stored instant, except for the
+    legacy UTC-midnight encoding: exactly ``00:00:00Z`` is a date-only value,
+    so its UTC calendar date must be preserved.
     """
     if value.tzinfo is None:
         return value.date()
-    return value.astimezone(BUSINESS_ZONE).date()
+    utc_value = value.astimezone(timezone.utc)
+    if (
+        utc_value.hour == 0
+        and utc_value.minute == 0
+        and utc_value.second == 0
+        and utc_value.microsecond == 0
+    ):
+        return utc_value.date()
+    return utc_value.astimezone(BUSINESS_ZONE).date()
 
 
 def business_window_utc(start: date, end: date) -> tuple[datetime, datetime]:
