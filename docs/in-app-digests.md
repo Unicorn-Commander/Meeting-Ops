@@ -8,8 +8,8 @@ The existing `GET /api/digests` response and queued-generation contract are unch
 The existing bulk-import arq worker checks hourly and acts at the intended
 business wall-clock time:
 
-- Daily at 09:00 `America/New_York`: store the previous local calendar day.
-- Monday at 09:00 `America/New_York`: store the previous local Monday–Sunday week.
+- During 09:00–09:59 `America/New_York` daily: store the previous local calendar day.
+- During 09:00–09:59 `America/New_York` Monday: store the previous local Monday–Sunday week.
 
 Both use the existing summary generator and `MeetingDigest` rows. Only active
 organizations with completed meetings in the UTC-converted business window are candidates. The

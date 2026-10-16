@@ -124,6 +124,33 @@ async def test_only_personally_opted_in_and_idempotent(cohort, period, date):
 
 
 @pytest.mark.asyncio
+async def test_repeated_nine_am_cron_start_uses_delivery_unique_key(cohort, monkeypatch):
+    from database.database import SessionLocal
+    from database.models import DigestDelivery
+    from workers import weekly_digest_workers as worker
+
+    opt_in(cohort)
+    # 09:01 ET on 2026-08-13 covers the seeded 2026-08-12 daily window.
+    start = datetime(2026, 8, 13, 13, 1, tzinfo=timezone.utc)
+
+    class FrozenDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return start
+
+    monkeypatch.setattr(worker, "datetime", FrozenDateTime)
+    first = await worker.daily_digest_cron({})
+    second = await worker.daily_digest_cron({})
+
+    assert first["date"] == second["date"] == "2026-08-12"
+    cohort["sender"].assert_called_once()
+    with SessionLocal() as db:
+        assert db.query(DigestDelivery).filter_by(
+            organization_id=cohort["org"], period="day", date="2026-08-12"
+        ).count() == 1
+
+
+@pytest.mark.asyncio
 async def test_org_kill_switch_wins_but_still_stores(cohort):
     from workers.weekly_digest_workers import store_scheduled_digests
     opt_in(cohort, kill=True)

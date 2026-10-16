@@ -1,8 +1,8 @@
 """Scheduled in-app digests; delivery requires account opt-in AND org permission.
 
 The arq cron invokes these hooks hourly because arq cron has no timezone. Each
-hook acts only at 09:00 in ``America/New_York`` (daily) or at 09:00 Monday
-(weekly), so the delivery wall-clock time remains stable across DST.
+hook acts during 09:00–09:59 in ``America/New_York`` (daily) or on that hour
+Monday (weekly), so the delivery wall-clock time remains stable across DST.
 Generation is independent of email settings. Existing WEEKLY_DIGEST_* paid/cap
 controls apply to both periods; DAILY_DIGEST_ENABLED controls the daily pass.
 See docs/in-app-digests.md for precedence, retries, and rollout.
@@ -76,9 +76,9 @@ def _last_week_date_str(now: datetime | None = None) -> str:
 
 
 def _cron_should_run(period: str, now: datetime | None = None) -> bool:
-    """Guard an hourly arq tick with the intended New York wall-clock time."""
+    """Guard an hourly arq tick with the intended New York wall-clock hour."""
     local_now = utc_to_business(now or datetime.now(timezone.utc))
-    if local_now.hour != SCHEDULED_LOCAL_HOUR or local_now.minute != 0:
+    if local_now.hour != SCHEDULED_LOCAL_HOUR:
         return False
     return period == "day" or (period == "week" and local_now.weekday() == 0)
 
