@@ -44,6 +44,7 @@ def test_no_speech_marks_the_session_failed_with_a_plain_reason(app):
         fresh = db.query(RecordingSession).filter(RecordingSession.id == row.id).first()
         assert fresh.status == "failed"
         assert fresh.processing_metadata["no_speech"] is True
+        assert fresh.processing_metadata["skip_reason"] == "no_speech"
         assert fresh.processing_metadata["upload_error"] == uploads.NO_SPEECH_MESSAGE
         assert fresh.processing_metadata["kept"] == 1
         assert fresh.processing_metadata["upload_failed_at"]

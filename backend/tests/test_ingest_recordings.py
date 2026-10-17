@@ -348,6 +348,82 @@ def test_chunked_init_existing_key_returns_existing_without_new_job_or_file(clie
     assert after_dirs == before_dirs
 
 
+def test_no_speech_is_skipped_terminal_and_repeat_init_returns_existing_session(client, monkeypatch):
+    from api import ingest_recordings, uploads
+    from database.database import SessionLocal
+    from database.models import RecordingSession, UploadJob
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
+    pat = _mint_pat(client)
+    created = _post_recording(client, pat["plaintext"], external_id="skipped-1")
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    db = SessionLocal()
+    try:
+        session = db.query(RecordingSession).filter(RecordingSession.id == body["session_id"]).one()
+        job = db.query(UploadJob).filter(UploadJob.upload_id == uuid.UUID(body["upload_id"])).one()
+        session.status = "failed"
+        metadata = dict(session.processing_metadata or {})
+        metadata.update({
+            "no_speech": True,
+            "skip_reason": "no_speech",
+            "upload_error": "No speech detected in this recording.",
+        })
+        session.processing_metadata = metadata
+        job.stage = "failed"
+        job.error_message = "No speech detected in this recording."
+        db.commit()
+        before_jobs = db.query(UploadJob).count()
+        before_dirs = {
+            path.name
+            for path in (uploads.UPLOAD_ROOT / "magic-unicorn").iterdir()
+        }
+    finally:
+        db.close()
+
+    status_response = client.get(
+        "/api/ingest/recordings/meeting-minutes/skipped-1",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["status"] == "skipped"
+    assert status_response.json()["skip_reason"] == "no_speech"
+
+    retry = client.post(
+        "/api/ingest/recordings/meeting-minutes/skipped-1/retry",
+        headers=_headers(pat["plaintext"]),
+    )
+    assert retry.status_code == 409, retry.text
+    assert retry.json() == {"detail": "skipped: no_speech"}
+
+    repeat_init = _init_chunked(
+        client,
+        pat["plaintext"],
+        external_id="skipped-1",
+        sha256="0" * 64,
+        total_size=123,
+    )
+    assert repeat_init.status_code == 200, repeat_init.text
+    assert repeat_init.json()["created"] is False
+    assert repeat_init.json()["session_id"] == body["session_id"]
+    assert repeat_init.json()["status"] == "skipped"
+    assert repeat_init.json()["skip_reason"] == "no_speech"
+    assert enqueue.await_count == 1
+
+    db = SessionLocal()
+    try:
+        assert db.query(UploadJob).count() == before_jobs
+    finally:
+        db.close()
+    after_dirs = {
+        path.name
+        for path in (uploads.UPLOAD_ROOT / "magic-unicorn").iterdir()
+    }
+    assert after_dirs == before_dirs
+
+
 def test_chunked_init_resumes_same_upload_and_received_indices(client):
     from api import uploads
 
@@ -775,6 +851,7 @@ async def test_ingest_dates_survive_the_real_upload_pipeline(app, client, monkey
         pat["plaintext"],
         external_id="pipeline-dates-1",
         duration_seconds="42.0",
+        title="Call with Diesal",
     )
     assert created.status_code == 201, created.text
     body = created.json()
@@ -798,7 +875,8 @@ async def test_ingest_dates_survive_the_real_upload_pipeline(app, client, monkey
             "model": "test-stt",
         }
 
-    async def fake_summary(*_args, **_kwargs):
+    async def fake_summary(_db, session, *_args, **_kwargs):
+        session.title = "Summary retitle"
         return None
 
     async def fake_insights(*_args, **_kwargs):
@@ -840,6 +918,8 @@ async def test_ingest_dates_survive_the_real_upload_pipeline(app, client, monkey
         # The measured audio duration (900 s from STT) wins over the client's 42 s.
         assert session.ended_at.replace(tzinfo=timezone.utc) == datetime(2026, 10, 8, 1, 45, tzinfo=timezone.utc)
         assert session.duration == 900.0
+        assert session.title == "Diesal · Summary retitle"
+        assert session.processing_metadata["ingest"]["title"] == "Call with Diesal"
         provenance = session.processing_metadata["meeting_provenance"]
         assert provenance["when"]["recorded_at"]["source"] == "ingest.recorded_at"
         assert provenance["when"]["recorded_at"]["confidence"] == 1.0

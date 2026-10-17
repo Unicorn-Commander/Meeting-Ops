@@ -266,6 +266,36 @@ def _clear_stage_needs_retry(session, stage: str) -> None:
     session.processing_metadata = metadata
 
 
+def _ingest_self_names() -> set[str]:
+    return {
+        name.strip().casefold()
+        for name in os.getenv("NOTES_SYNC_SELF_NAMES", "Aaron Stransky").split(",")
+        if name.strip()
+    }
+
+
+def _apply_ingest_person_title(session: RecordingSession) -> Optional[dict[str, str]]:
+    """Keep the person from an ingest title when the summary retitles a session."""
+    metadata = session.processing_metadata if isinstance(session.processing_metadata, dict) else {}
+    ingest = metadata.get("ingest")
+    original_title = ingest.get("title") if isinstance(ingest, dict) else None
+    match = re.match(r"(?i)^\s*call with\s+(.+?)\s*$", original_title or "")
+    person = match.group(1) if match else ""
+    current = (session.title or "").strip()
+    if (
+        not person
+        or person.casefold() in _ingest_self_names()
+        or getattr(session, "title_user_set", False)
+        or session.status != "completed"
+        or person.casefold() in current.casefold()
+    ):
+        return None
+    before = current
+    session.title = (f"{person} · {current}" if current else f"Call with {person}")[:200]
+    session.updated_at = datetime.now(timezone.utc)
+    return {"id": str(session.id), "before": before, "after": session.title}
+
+
 def _flag_summary_needs_retry(session, exc: Exception) -> None:
     """Summary-specific degraded-stage marker (``needs_summary`` /
     ``summary_error``). The session watchdog + a manual reprocess both honor it
@@ -1412,6 +1442,7 @@ async def run_upload_pipeline(upload_id: str) -> None:
         _apply_ingest_dates(session)
         _advance_stale_reprocess_flags(session)
         session.status = "completed"
+        _apply_ingest_person_title(session)
         session.updated_at = datetime.now(timezone.utc)
         job.stage = "done"
         job.progress_pct = 100
@@ -1819,6 +1850,10 @@ def _mark_session_failed(db: Session, session_pk: Optional[int], exc: BaseExcept
         md = dict(session.processing_metadata or {})
         md["upload_error"] = NO_SPEECH_MESSAGE if no_speech else str(exc)[:500]
         md["no_speech"] = no_speech
+        if no_speech:
+            md["skip_reason"] = "no_speech"
+        else:
+            md.pop("skip_reason", None)
         md["upload_failed_at"] = datetime.now(timezone.utc).isoformat()
         session.processing_metadata = md
         session.status = "failed"

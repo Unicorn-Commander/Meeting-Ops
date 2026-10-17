@@ -48,10 +48,11 @@ INGEST_METADATA_FILENAME = "ingest.json"
 class IngestStatusResponse(BaseModel):
     # recording_sessions.id, the id the web UI links with (/sessions/<id>)
     session_id: int
-    status: Literal["processing", "completed", "failed"]
+    status: Literal["processing", "completed", "failed", "skipped"]
     meeting_date: Optional[str] = None
     meeting_time: Optional[str] = None
     error: Optional[str] = None
+    skip_reason: Optional[str] = None
 
 
 class IngestCreateResponse(IngestStatusResponse):
@@ -309,9 +310,21 @@ def _validate_ingest_fields(
     )
 
 
+def _skip_reason_for(session: RecordingSession, job: Optional[UploadJob]) -> Optional[str]:
+    metadata = session.processing_metadata if isinstance(session.processing_metadata, dict) else {}
+    reason = metadata.get("skip_reason")
+    if reason:
+        return str(reason)
+    if metadata.get("no_speech") is True:
+        return "no_speech"
+    return None
+
+
 def _status_for(session: RecordingSession, job: Optional[UploadJob]) -> str:
+    if session.status == "skipped" or (job is not None and job.stage == "skipped"):
+        return "skipped"
     if session.status == "failed" or (job is not None and job.stage in {"failed", "cancelled"}):
-        return "failed"
+        return "skipped" if _skip_reason_for(session, job) else "failed"
     if session.status == "completed" or (job is not None and job.stage == "done"):
         return "completed"
     return "processing"
@@ -345,12 +358,14 @@ def _status_response(
     upload_id: Optional[str] = None,
 ) -> IngestStatusResponse | IngestCreateResponse:
     job = _job_for_session(db, session)
+    status_value = _status_for(session, job)
     payload: dict[str, Any] = {
         "session_id": session.id,
-        "status": _status_for(session, job),
+        "status": status_value,
         "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
         "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
         "error": _error_for(session, job),
+        "skip_reason": _skip_reason_for(session, job) if status_value == "skipped" else None,
     }
     if created is not None:
         payload["created"] = created
@@ -560,6 +575,7 @@ async def _create_ingest_session_and_job(
         "external_source": fields.external_source,
         "external_id": fields.external_id,
         "source_app": fields.source_app,
+        "title": fields.title,
         "recorded_at": fields.recorded_at.isoformat(),
         "timezone": fields.timezone,
         "metadata": fields.metadata,
@@ -1172,7 +1188,13 @@ async def retry_ingest_recording(
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
     job = _job_for_session(db, session)
-    if _status_for(session, job) != "failed":
+    current_status = _status_for(session, job)
+    if current_status == "skipped":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"skipped: {_skip_reason_for(session, job) or 'unknown'}",
+        )
+    if current_status != "failed":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only failed recordings can be retried",
@@ -1195,7 +1217,7 @@ async def retry_ingest_recording(
 
     session.status = "processing"
     metadata = dict(session.processing_metadata or {})
-    for key in ("upload_error", "no_speech", "upload_failed_at"):
+    for key in ("upload_error", "no_speech", "skip_reason", "upload_failed_at"):
         metadata.pop(key, None)
     session.processing_metadata = metadata
     db.commit()
