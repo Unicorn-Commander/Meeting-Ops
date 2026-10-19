@@ -774,9 +774,7 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "session_id": {
                         "type": "string",
-                        "description": (
-                            "Session UUID or integer id of the meeting."
-                        ),
+                        "description": ("Session UUID or integer id of the meeting."),
                     },
                 },
                 "required": ["session_id"],
@@ -890,9 +888,13 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
             "name": "import_recording",
             "description": (
                 "Import one audio or video recording from exactly one HTTPS "
-                "source_url or an allowlisted server local_path. The source "
-                "is queued through the normal upload pipeline and returns a "
-                "stable session id."
+                "source_url, an allowlisted server local_path, or a caller-owned "
+                "upload_id. For uploads, POST /api/uploads/start with "
+                "action=transcribe, send all chunks to "
+                "POST /api/uploads/{upload_id}/chunk (chunk_index and data), "
+                "then call this tool instead of /finalize, as the same user/org. "
+                "The source is queued through the normal upload pipeline and "
+                "returns a stable session id."
             ),
             "parameters": {
                 "type": "object",
@@ -904,6 +906,10 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
                     "local_path": {
                         "type": "string",
                         "description": "Absolute path under MEETING_OPS_IMPORT_ROOTS.",
+                    },
+                    "upload_id": {
+                        "type": "string",
+                        "description": "Fully uploaded file from /api/uploads/start.",
                     },
                     "title": {"type": "string"},
                     "tags": {

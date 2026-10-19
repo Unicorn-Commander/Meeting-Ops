@@ -815,14 +815,21 @@ async def import_recording(
     local_path: str | None = None,
     title: str | None = None,
     tags: list[str] | None = None,
+    upload_id: str | None = None,
 ) -> dict[str, Any]:
-    """Import one server-side audio/video source through the upload pipeline.
+    """Import one audio/video source through the upload pipeline.
 
-    Provide exactly one HTTPS ``source_url`` or one absolute ``local_path``
-    under the server's ``MEETING_OPS_IMPORT_ROOTS`` allowlist.  The operation
-    is immediately queued and returns a stable session id; it does not make a
-    loopback HTTP request.  Repeating the call for the same caller and source
-    bytes returns the original session.
+    Provide exactly one HTTPS ``source_url``, an absolute ``local_path`` under
+    ``MEETING_OPS_IMPORT_ROOTS``, or a caller-owned ``upload_id``. To stage a file
+    without server filesystem access, POST /api/uploads/start (action=transcribe)
+    and send every chunk to POST /api/uploads/{upload_id}/chunk (multipart fields
+    chunk_index and data), then call this tool instead of /finalize. Use the
+    same user and active organization for the upload and this tool.
+
+    The operation queues the normal pipeline and returns a stable session id.
+    Repeating an upload_id, or the same local/URL source bytes for the same
+    caller, returns the original session without requeuing it. Prepared ingest
+    uploads use their own /api/ingest completion route.
     """
     from auth.pat import resolve_pat_record
     from database.database import SessionLocal
@@ -833,7 +840,9 @@ async def import_recording(
     try:
         pat = resolve_pat_record(db, plaintext=token)
         if pat is None or pat.scope != "user":
-            raise HTTPException(status_code=401, detail="A user-scoped MCP PAT is required.")
+            raise HTTPException(
+                status_code=401, detail="A user-scoped MCP PAT is required."
+            )
         active_org = _resolve_mcp_active_organization(db, pat.user, pat.organization_id)
         return await import_recording_for_caller(
             db=db,
@@ -841,6 +850,7 @@ async def import_recording(
             active_org=active_org,
             source_url=source_url,
             local_path=local_path,
+            upload_id=upload_id,
             title=title,
             tags=tags,
         )

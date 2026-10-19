@@ -25,6 +25,7 @@ import os
 import tempfile
 import wave
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -136,6 +137,64 @@ async def _post_audio_with_retry(
         label, STT_MAX_ATTEMPTS, audio_path,
     )
     return None, last_error
+
+
+def _endpoint_for_log(endpoint: str) -> str:
+    """Identify the serving endpoint without exposing URL credentials/tokens."""
+    try:
+        parsed = urlsplit(endpoint)
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
+        )
+    except ValueError:
+        return "<invalid STT endpoint>"
+
+
+async def _post_audio_with_fallback(
+    *,
+    endpoint: str,
+    route: str,
+    **kwargs: Any,
+) -> tuple[httpx.Response | None, str | None]:
+    """Try compatible endpoint bases in operator-configured order.
+
+    MEETING_OPS_STT_FALLBACK_URLS is a comma-separated list of bases using the
+    selected provider's protocol: native /transcribe or OpenAI-compatible
+    /audio/transcriptions (include /v1 in each OpenAI base when required).
+    Model, headers, multipart fields, timeouts and retries are unchanged.
+    Only exhausted transient failures advance to the next endpoint; permanent
+    request errors and successful silence retain their existing semantics.
+    """
+    fallbacks = [
+        value.strip().rstrip("/")
+        for value in os.getenv("MEETING_OPS_STT_FALLBACK_URLS", "").split(",")
+        if value.strip()
+    ]
+    if not fallbacks:
+        # Preserve legacy requests, results and logs exactly when not enabled.
+        return await _post_audio_with_retry(url=f"{endpoint}{route}", **kwargs)
+
+    endpoints = list(dict.fromkeys([endpoint, *fallbacks]))
+    for index, candidate in enumerate(endpoints):
+        response, error = await _post_audio_with_retry(
+            url=f"{candidate}{route}", **kwargs
+        )
+        if response is not None:
+            if response.status_code == 200:
+                logger.info(
+                    "STT served audio=%s endpoint=%s",
+                    kwargs["audio_path"],
+                    _endpoint_for_log(candidate),
+                )
+            return response, error
+        if index + 1 < len(endpoints):
+            logger.warning(
+                "STT endpoint=%s unavailable for audio=%s; trying endpoint=%s",
+                _endpoint_for_log(candidate),
+                kwargs["audio_path"],
+                _endpoint_for_log(endpoints[index + 1]),
+            )
+    return response, error
 
 
 def _http_timeout_for_path(file_path: str, base: float = 120.0, per_mb: float = 20.0) -> float:
@@ -460,8 +519,9 @@ class LocalParakeetProvider:
             "language": language or "en",
             "return_word_timestamps": "true" if self.return_word_timestamps else "false",
         }
-        resp, error = await _post_audio_with_retry(
-            url=f"{self.endpoint}/transcribe",
+        resp, error = await _post_audio_with_fallback(
+            endpoint=self.endpoint,
+            route="/transcribe",
             audio_path=audio_path,
             file_field="audio",
             timeout=timeout,
@@ -563,8 +623,9 @@ class OpenAITranscriptionProvider:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        resp, error = await _post_audio_with_retry(
-            url=f"{self.endpoint}/audio/transcriptions",
+        resp, error = await _post_audio_with_fallback(
+            endpoint=self.endpoint,
+            route="/audio/transcriptions",
             audio_path=audio_path,
             file_field="file",
             timeout=timeout,

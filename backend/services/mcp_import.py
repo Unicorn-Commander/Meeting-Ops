@@ -70,7 +70,12 @@ def _resolve_local_source(local_path: str) -> Path:
     if not roots:
         raise HTTPException(
             status_code=403,
-            detail=f"Local imports are disabled; configure {IMPORT_ROOTS_ENV}.",
+            detail=(
+                f"Local imports are disabled; configure {IMPORT_ROOTS_ENV}, or "
+                "POST /api/uploads/start with action=transcribe, send all chunks "
+                "to POST /api/uploads/{upload_id}/chunk, then call "
+                "import_recording(upload_id=...)."
+            ),
         )
     try:
         resolved = candidate.resolve(strict=True)
@@ -267,6 +272,146 @@ def _session_status(db: Session, session: RecordingSession) -> str:
     return str(job.stage if job is not None else session.status or "unknown")
 
 
+async def _queue_import_job(
+    *,
+    db: Session,
+    caller: User,
+    active_org: ActiveOrganization,
+    job: UploadJob,
+    target_path: Path,
+    title: str | None,
+    tags: list[str],
+    source_kind: str,
+    source_host: str | None = None,
+) -> dict[str, Any]:
+    """Create the stable session and submit an already materialized upload."""
+    from api import uploads
+
+    upload_id = job.upload_id
+    source_sha256 = job.audio_sha256
+    safe_filename = job.filename
+    # This helper is the same session construction path used by the UI
+    # upload pipeline.  The job is already persisted as ``attach`` so a
+    # crash after this helper commits cannot make recovery create a second
+    # session.  The caller receives a stable session_id before expensive
+    # STT/diarization work begins.
+    session = await uploads._create_upload_session(
+        db, job, target_path, source_path=target_path
+    )
+    requested_title = (title or "").strip()
+    if requested_title:
+        session.title = requested_title[:200]
+        session.name = session.title
+        session.title_user_set = True
+    session.tags = tags
+    session.source_type = "mcp_import"
+    metadata = dict(session.processing_metadata or {})
+    metadata["mcp_import"] = {
+        "caller_id": caller.id,
+        "source_sha256": source_sha256,
+        "source_kind": source_kind,
+        "source_name": safe_filename,
+    }
+    session.processing_metadata = metadata
+    job.stage = "queued"
+    job.progress_pct = 0
+    db.add(
+        AuditLog(
+            user_id=caller.id,
+            organization_id=active_org.organization.id,
+            action="mcp_import_recording",
+            resource_type="recording_session",
+            resource_id=str(session.id),
+            details={
+                "source_kind": source_kind,
+                "source_sha256": source_sha256,
+                "source_name": safe_filename,
+                "source_host": source_host,
+                "upload_id": str(upload_id),
+            },
+        )
+    )
+    db.commit()
+
+    try:
+        await uploads.upload_pipeline_queue.enqueue(str(upload_id))
+    except Exception:  # noqa: BLE001
+        # The persisted queued job is recoverable on backend startup.  A
+        # queue hiccup must not turn a successful source import into a
+        # false failure after the caller already has a session handle.
+        logger.exception("MCP import queue submission failed for upload=%s", upload_id)
+
+    return {"session_id": session.id, "status": str(job.stage)}
+
+
+async def _import_uploaded_recording(
+    *,
+    db: Session,
+    caller: User,
+    active_org: ActiveOrganization,
+    upload_id: str,
+    title: str | None,
+    tags: list[str],
+) -> dict[str, Any]:
+    """Finish a caller-owned regular upload without authorizing local paths.
+
+    POST /api/uploads/start has already reserved quota for this job. Rechecking
+    the concurrency quota here would count the same upload twice.
+    """
+    from api import uploads
+
+    job = uploads._get_job(db, upload_id, active_org.organization.id)
+    if job.user_id != caller.id:
+        raise HTTPException(status_code=403, detail="Upload belongs to another user.")
+    if job.session_id is not None:
+        return {"session_id": job.session_id, "status": str(job.stage)}
+    if job.stage != "uploading" or job.action != "transcribe":
+        raise HTTPException(
+            status_code=409,
+            detail="Use an uploading job from POST /api/uploads/start "
+            "with action=transcribe; use the upload status/retry API for started jobs.",
+        )
+    if job.chunks_received != job.total_chunks:
+        raise HTTPException(
+            status_code=400, detail="Not all chunks have been received."
+        )
+    if job.total_size > uploads.get_max_file_bytes():
+        raise HTTPException(status_code=413, detail="Upload exceeds the upload limit.")
+
+    # Use the canonical ID from the scoped row, never a caller-supplied path.
+    job_dir = uploads._job_dir(active_org.organization.slug, str(job.upload_id))
+    try:
+        target_path = uploads.assemble_chunked_upload(
+            job_dir, job.filename, int(job.total_chunks), int(job.total_size)
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    source_sha256 = await _sha256_file(target_path)
+
+    # Another caller may have finished the same upload while hashing. Lock and
+    # reload after that await; session construction below commits without yielding.
+    db.refresh(job, with_for_update=True)
+    if job.session_id is not None:
+        return {"session_id": job.session_id, "status": str(job.stage)}
+    if job.stage != "uploading" or job.action != "transcribe":
+        raise HTTPException(status_code=409, detail=f"Upload is already {job.stage}.")
+    job.audio_sha256 = source_sha256
+    job.action = "attach"
+    job.stage = "queued"
+    job.progress_pct = 0
+    job.error_message = None
+    return await _queue_import_job(
+        db=db,
+        caller=caller,
+        active_org=active_org,
+        job=job,
+        target_path=target_path,
+        title=title,
+        tags=tags,
+        source_kind="upload",
+    )
+
+
 async def import_recording_for_caller(
     *,
     db: Session,
@@ -276,10 +421,14 @@ async def import_recording_for_caller(
     local_path: Optional[str] = None,
     title: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    upload_id: str | None = None,
 ) -> dict[str, Any]:
     """Materialize and queue one recording through the normal upload pipeline."""
-    if bool(source_url) == bool(local_path):
-        raise HTTPException(status_code=400, detail="Provide exactly one of source_url or local_path.")
+    if sum(bool(source) for source in (source_url, local_path, upload_id)) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of source_url, local_path, or upload_id.",
+        )
 
     # These are the same checks made by POST /api/uploads/start.  Keep them
     # before any durable row is created, and do not weaken them for MCP.
@@ -289,6 +438,15 @@ async def import_recording_for_caller(
 
     gate_feature_for_caller(caller, "audio_upload", active_org)
     normalized_tags = _normalize_tags(tags)
+    if upload_id:
+        return await _import_uploaded_recording(
+            db=db,
+            caller=caller,
+            active_org=active_org,
+            upload_id=upload_id,
+            title=title,
+            tags=normalized_tags,
+        )
     max_file_bytes = uploads.get_max_file_bytes()
     stage_root = uploads.UPLOAD_ROOT / ".mcp-import"
     stage_root.mkdir(parents=True, exist_ok=True)
@@ -390,58 +548,17 @@ async def import_recording_for_caller(
         db.add(job)
         db.flush()
 
-        # This helper is the same session construction path used by the UI
-        # upload pipeline.  The job is already persisted as ``attach`` so a
-        # crash after this helper commits cannot make recovery create a second
-        # session.  The caller receives a stable session_id before expensive
-        # STT/diarization work begins.
-        session = await uploads._create_upload_session(
-            db, job, target_path, source_path=target_path
+        return await _queue_import_job(
+            db=db,
+            caller=caller,
+            active_org=active_org,
+            job=job,
+            target_path=target_path,
+            title=title,
+            tags=normalized_tags,
+            source_kind=source_kind,
+            source_host=source_host,
         )
-        requested_title = (title or "").strip()
-        if requested_title:
-            session.title = requested_title[:200]
-            session.name = session.title
-            session.title_user_set = True
-        session.tags = normalized_tags
-        session.source_type = "mcp_import"
-        metadata = dict(session.processing_metadata or {})
-        metadata["mcp_import"] = {
-            "caller_id": caller.id,
-            "source_sha256": source_sha256,
-            "source_kind": source_kind,
-            "source_name": safe_filename,
-        }
-        session.processing_metadata = metadata
-        job.stage = "queued"
-        job.progress_pct = 0
-        db.add(
-            AuditLog(
-                user_id=caller.id,
-                organization_id=active_org.organization.id,
-                action="mcp_import_recording",
-                resource_type="recording_session",
-                resource_id=str(session.id),
-                details={
-                    "source_kind": source_kind,
-                    "source_sha256": source_sha256,
-                    "source_name": safe_filename,
-                    "source_host": source_host,
-                    "upload_id": str(upload_id),
-                },
-            )
-        )
-        db.commit()
-
-        try:
-            await uploads.upload_pipeline_queue.enqueue(str(upload_id))
-        except Exception:  # noqa: BLE001
-            # The persisted queued job is recoverable on backend startup.  A
-            # queue hiccup must not turn a successful source import into a
-            # false failure after the caller already has a session handle.
-            logger.exception("MCP import queue submission failed for upload=%s", upload_id)
-
-        return {"session_id": session.id, "status": str(job.stage)}
     finally:
         try:
             stage_path.unlink(missing_ok=True)
