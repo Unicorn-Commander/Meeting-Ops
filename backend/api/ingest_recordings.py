@@ -22,8 +22,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from api import uploads as upload_api
+from auth.dependencies import get_current_user_optional
 from auth.models import Organization, PersonalAccessToken, User, UserOrganization
+from auth.organization import ORG_HEADER_NAME, get_requested_org_slug
 from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat_record
+from auth.utils import check_permission
 from database.database import get_db
 from database.models import RecordingSession, UploadJob
 from services.meeting_provenance import (
@@ -105,15 +108,15 @@ class ValidatedIngest:
 @dataclass
 class IngestPrincipal:
     user: User
-    token: PersonalAccessToken
     organization: Organization
     membership: UserOrganization
+    token: Optional[PersonalAccessToken] = None
 
 
 def _unauthorized() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="A recording ingest PAT is required",
+        detail="A recording ingest PAT or signed-in member session is required",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -124,51 +127,124 @@ def _unprocessable(detail: str) -> None:
 
 def require_recording_ingest_principal(
     request: Request,
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> IngestPrincipal:
-    """Resolve only an org-bound, active ``recordings.ingest`` PAT.
+    """Resolve an ingest PAT or a member session in an explicit org.
 
-    This dependency intentionally does not call the browser/JWT auth stack or
-    resolve a default organization. The token's organization is the only
-    tenant boundary for every route in this router.
+    Integration PATs keep their token-bound organization and do not need an
+    org header. Session callers must name an active organization explicitly;
+    the general app resolver intentionally falls back from stale selectors,
+    which is not safe for this tenant-bound upload API.
     """
     authorization = request.headers.get("Authorization") or ""
     scheme, _, plaintext = authorization.partition(" ")
     plaintext = plaintext.strip()
-    if (
-        scheme.lower() != "bearer"
-        or not plaintext
-        or not plaintext.startswith(PAT_PREFIX)
-    ):
+    token: Optional[PersonalAccessToken] = None
+    if scheme.lower() == "bearer" and plaintext.startswith(PAT_PREFIX):
+        token = resolve_pat_record(db, plaintext=plaintext)
+        if token is None:
+            raise _unauthorized()
+
+        # A user PAT is deliberately not treated as an ingest PAT. The
+        # current-user dependency has already resolved it to ``current_user``
+        # and it continues through the explicit org + membership branch
+        # below. Other capability PATs remain denied here.
+        if token.scope == "recordings.ingest":
+            if token.organization_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="PAT is not authorized for recording ingestion",
+                )
+
+            organization = (
+                db.query(Organization)
+                .filter(
+                    Organization.id == token.organization_id,
+                    Organization.is_active.is_(True),
+                )
+                .first()
+            )
+            if organization is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="PAT organization is not active",
+                )
+
+            membership = (
+                db.query(UserOrganization)
+                .filter(
+                    UserOrganization.user_id == token.user_id,
+                    UserOrganization.organization_id == organization.id,
+                )
+                .first()
+            )
+            if membership is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="PAT user is no longer a member of its organization",
+                )
+
+            logger.debug(
+                "recording ingest authenticated pat_id=%s user_id=%s org_id=%s",
+                token.id,
+                token.user_id,
+                organization.id,
+            )
+            return IngestPrincipal(
+                user=token.user,
+                token=token,
+                organization=organization,
+                membership=membership,
+            )
+
+        if token.scope != "user":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="PAT is not authorized for recording ingestion",
+            )
+        # The shared current-user dependency also honors trusted proxy SSO
+        # headers. For a user PAT, bind the member branch to the PAT owner so
+        # another credential on the same request cannot change the uploader.
+        current_user = token.user
+
+    if current_user is None:
         raise _unauthorized()
 
-    token = resolve_pat_record(db, plaintext=plaintext)
-    if token is None:
-        raise _unauthorized()
-    if token.scope != "recordings.ingest" or token.organization_id is None:
+    raw_org_slug = request.headers.get(ORG_HEADER_NAME)
+    if not raw_org_slug or not raw_org_slug.strip():
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="PAT is not authorized for recording ingestion",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{ORG_HEADER_NAME} header is required for recording ingestion",
+        )
+    try:
+        org_slug = get_requested_org_slug(request)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{ORG_HEADER_NAME} must be a valid organization slug",
+        )
+    if org_slug is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{ORG_HEADER_NAME} header is required for recording ingestion",
         )
 
     organization = (
         db.query(Organization)
         .filter(
-            Organization.id == token.organization_id,
+            Organization.slug == org_slug,
             Organization.is_active.is_(True),
         )
         .first()
     )
     if organization is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="PAT organization is not active",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
 
     membership = (
         db.query(UserOrganization)
         .filter(
-            UserOrganization.user_id == token.user_id,
+            UserOrganization.user_id == current_user.id,
             UserOrganization.organization_id == organization.id,
         )
         .first()
@@ -176,18 +252,24 @@ def require_recording_ingest_principal(
     if membership is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="PAT user is no longer a member of its organization",
+            detail="You do not have access to this organization",
+        )
+
+    role = "superuser" if current_user.is_superuser else (membership.role or "").strip().lower()
+    if not check_permission(role, "session.create"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions. Required: session.create",
         )
 
     logger.debug(
-        "recording ingest authenticated pat_id=%s user_id=%s org_id=%s",
-        token.id,
-        token.user_id,
+        "recording ingest authenticated session user_id=%s org_id=%s role=%s",
+        current_user.id,
         organization.id,
+        role,
     )
     return IngestPrincipal(
-        user=token.user,
-        token=token,
+        user=current_user,
         organization=organization,
         membership=membership,
     )
@@ -579,7 +661,11 @@ async def _create_ingest_session_and_job(
         "recorded_at": fields.recorded_at.isoformat(),
         "timezone": fields.timezone,
         "metadata": fields.metadata,
-        "pat_id": pat_id if pat_id is not None else principal.token.id,
+        "pat_id": (
+            pat_id
+            if pat_id is not None
+            else (principal.token.id if principal.token is not None else None)
+        ),
         "client": client,
     }
     session_metadata: dict[str, Any] = {
@@ -798,9 +884,9 @@ async def ingest_whoami(
         organization_id=principal.organization.id,
         organization_slug=principal.organization.slug,
         organization_name=principal.organization.name,
-        scope=principal.token.scope,
-        expires_at=principal.token.expires_at,
-        token_prefix=principal.token.token_prefix,
+        scope=principal.token.scope if principal.token is not None else "user",
+        expires_at=principal.token.expires_at if principal.token is not None else None,
+        token_prefix=principal.token.token_prefix if principal.token is not None else "session",
     )
 
 
@@ -895,7 +981,7 @@ async def init_ingest_upload(
                 filename=filename,
                 content_type=payload.content_type,
                 total_size=payload.total_size,
-                pat_id=principal.token.id,
+                pat_id=principal.token.id if principal.token is not None else None,
                 client=(http_request.headers.get("user-agent") or "")[:200] or None,
             ),
         )
@@ -1046,7 +1132,7 @@ async def complete_ingest_upload(
         pat_id=(
             int(sidecar["pat_id"])
             if sidecar.get("pat_id") is not None
-            else principal.token.id
+            else (principal.token.id if principal.token is not None else None)
         ),
         job=job,
     )
@@ -1224,7 +1310,7 @@ async def retry_ingest_recording(
     await upload_api._enqueue_retry_job(db, job)
     logger.info(
         "recording ingest retry pat_id=%s org_id=%s external_source=%s external_id=%s session_id=%s upload_id=%s",
-        principal.token.id,
+        principal.token.id if principal.token is not None else None,
         principal.organization.id,
         external_source,
         external_id,
