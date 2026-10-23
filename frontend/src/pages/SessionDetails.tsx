@@ -2669,7 +2669,7 @@ export const SessionDetails: React.FC = () => {
                     <div className="border-b border-gray-100 px-4 pb-3">
                       <p className="text-sm font-semibold text-gray-900">Branded meeting report</p>
                       <p className="mt-0.5 text-xs text-gray-500">
-                        Executive summary, decisions, and action items.
+                        Executive summary, action items, decisions, and the meeting minutes.
                       </p>
                       <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-gray-700">
                         <input

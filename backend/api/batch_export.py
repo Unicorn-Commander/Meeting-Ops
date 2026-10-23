@@ -780,6 +780,7 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
         "bullets": [],
         "actions": [],
         "decisions": [],
+        "minutes": "",
         "participants": (
             session.participants
             if isinstance(getattr(session, "participants", None), list)
@@ -803,6 +804,7 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
             summary_data["bullets"] = final.get("bullets", [])
             summary_data["actions"] = final.get("actions", [])
             summary_data["decisions"] = final.get("decisions", [])
+            summary_data["minutes"] = final.get("minutes") or ""
             if final.get("title"):
                 summary_data["title"] = final["title"]
             # Continue below so first-class ActionItem rows can replace the
@@ -823,6 +825,7 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
             summary_data["bullets"] = source.get("bullets", [])
             summary_data["actions"] = source.get("actions", [])
             summary_data["decisions"] = source.get("decisions", [])
+            summary_data["minutes"] = source.get("minutes") or ""
             if source.get("title"):
                 summary_data["title"] = source["title"]
 
@@ -863,6 +866,95 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
         logger.exception("Could not load canonical action items for report")
 
     return summary_data
+
+
+# The summarizer's minutes repeat the executive summary and an action table.
+# Reports render those from structured data (the editable ActionItem rows win
+# over the frozen table), so the Meeting Minutes section skips them.
+_MINUTES_SECTIONS_RENDERED_ELSEWHERE = {"executive summary", "action items"}
+
+
+def _minutes_markdown(minutes: Any) -> str:
+    """Minutes markdown minus the sections the report already shows."""
+    if not isinstance(minutes, str) or not minutes.strip():
+        return ""
+    kept: list[str] = []
+    skipping = False
+    for line in minutes.strip().splitlines():
+        heading = re.match(r"^#{1,6}\s+(.*)$", line)
+        if heading:
+            name = heading.group(1).strip().strip("*").strip().lower()
+            skipping = name in _MINUTES_SECTIONS_RENDERED_ELSEWHERE
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _minutes_blocks(minutes: Any) -> list[dict[str, Any]]:
+    """Parse minutes markdown into blocks the PDF and Word renderers share.
+
+    Handles what the summarizer writes: headings, numbered and bulleted lists
+    (one nesting level), block quotes, pipe tables and paragraphs.
+    """
+    blocks: list[dict[str, Any]] = []
+    table: list[list[str]] = []
+
+    def flush_table() -> None:
+        if table:
+            blocks.append({"kind": "table", "rows": list(table)})
+            table.clear()
+
+    for raw in _minutes_markdown(minutes).splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if not all(re.fullmatch(r":?-{2,}:?", cell) for cell in cells):
+                table.append(cells)
+            continue
+        flush_table()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        heading = re.match(r"^#{1,6}\s+(.*)$", stripped)
+        numbered = re.match(r"^(\d+)[.)]\s+(.*)$", stripped)
+        bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+        if heading:
+            blocks.append({"kind": "heading", "text": heading.group(1).strip()})
+        elif numbered:
+            blocks.append({
+                "kind": "item", "level": 1 if indent >= 2 else 0,
+                "marker": f"{numbered.group(1)}.", "text": numbered.group(2),
+            })
+        elif bullet:
+            blocks.append({
+                "kind": "item", "level": 1 if indent >= 2 else 0,
+                "marker": "\u2022", "text": bullet.group(1),
+            })
+        elif stripped.startswith(">"):
+            blocks.append({"kind": "quote", "text": stripped.lstrip("> ").strip()})
+        else:
+            blocks.append({"kind": "paragraph", "text": stripped})
+    flush_table()
+    return blocks
+
+
+def _minutes_inline_html(text: str) -> str:
+    """Escape for ReportLab and turn **bold** / *italic* / `code` into tags."""
+    safe = html.escape(text, quote=False)
+    safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
+    safe = re.sub(r"(?<![*\w])\*(?!\s)(.+?)(?<!\s)\*(?![*\w])", r"<i>\1</i>", safe)
+    safe = re.sub(r"`([^`]+)`", r"<font face='Courier'>\1</font>", safe)
+    return safe
+
+
+def _minutes_inline_runs(text: str) -> list[tuple[str, bool]]:
+    """Split **bold** spans into (text, bold) runs for Word."""
+    runs: list[tuple[str, bool]] = []
+    for index, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
+        if part:
+            runs.append((part.replace("`", ""), index % 2 == 1))
+    return runs
 
 
 def _get_transcript_segments(session: RecordingSession) -> list:
@@ -1036,6 +1128,27 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
         fontName="Helvetica-Bold",
         textColor=HexColor("#FFFFFF"),
     ))
+    styles.add(ParagraphStyle(
+        "MinutesHeading",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=11.5,
+        textColor=dark_gray,
+        spaceBefore=10,
+        spaceAfter=4,
+    ))
+    styles.add(ParagraphStyle(
+        "MinutesSubBullet",
+        parent=styles["BulletText"],
+        leftIndent=32,
+    ))
+    styles.add(ParagraphStyle(
+        "MinutesQuote",
+        parent=styles["BodyText2"],
+        fontName="Helvetica-Oblique",
+        leftIndent=16,
+        textColor=medium_gray,
+    ))
 
     story = []
     summary_data = _get_summary_data(session)
@@ -1159,6 +1272,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     has_summary = bool(
         summary_data["executive"] or summary_data["bullets"]
         or summary_data["actions"] or summary_data["decisions"]
+        or summary_data.get("minutes")
     )
 
     # --- Executive Summary ---
@@ -1229,6 +1343,44 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
         for decision in summary_data["decisions"]:
             safe = str(decision).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             story.append(Paragraph(f"\u2713  {safe}", styles["BulletText"]))
+        story.append(Spacer(1, 8))
+
+    # --- Meeting Minutes (always, when the summarizer wrote them) ---
+    minutes_blocks = _minutes_blocks(summary_data.get("minutes"))
+    if minutes_blocks:
+        story.append(Paragraph("Meeting Minutes", styles["SectionHeading"]))
+        for block in minutes_blocks:
+            if block["kind"] == "heading":
+                story.append(Paragraph(_minutes_inline_html(block["text"]), styles["MinutesHeading"]))
+            elif block["kind"] == "item":
+                style = styles["MinutesSubBullet"] if block["level"] else styles["BulletText"]
+                story.append(Paragraph(
+                    f"{block['marker']}  {_minutes_inline_html(block['text'])}", style,
+                ))
+            elif block["kind"] == "quote":
+                story.append(Paragraph(_minutes_inline_html(block["text"]), styles["MinutesQuote"]))
+            elif block["kind"] == "table":
+                width = max(len(row) for row in block["rows"])
+                rows = [
+                    [
+                        Paragraph(
+                            _minutes_inline_html(row[i] if i < len(row) else ""),
+                            styles["TableHeaderText"] if r == 0 else styles["TableText"],
+                        )
+                        for i in range(width)
+                    ]
+                    for r, row in enumerate(block["rows"])
+                ]
+                minutes_table = Table(rows, colWidths=[6.5 * inch / width] * width, repeatRows=1)
+                minutes_table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), purple),
+                    ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#D1D5DB")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]))
+                story.append(minutes_table)
+                story.append(Spacer(1, 6))
+            else:
+                story.append(Paragraph(_minutes_inline_html(block["text"]), styles["BodyText2"]))
         story.append(Spacer(1, 8))
 
     # --- Optional transcript appendix ---
@@ -1431,6 +1583,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     has_summary = bool(
         summary_data["executive"] or summary_data["bullets"]
         or summary_data["actions"] or summary_data["decisions"]
+        or summary_data.get("minutes")
     )
 
     # --- Executive Summary ---
@@ -1489,6 +1642,38 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
         doc.add_heading("Important Decisions", level=2)
         for decision in summary_data["decisions"]:
             doc.add_paragraph(str(decision), style="List Bullet")
+
+    # --- Meeting Minutes (always, when the summarizer wrote them) ---
+    minutes_blocks = _minutes_blocks(summary_data.get("minutes"))
+    if minutes_blocks:
+        doc.add_heading("Meeting Minutes", level=2)
+        for block in minutes_blocks:
+            if block["kind"] == "heading":
+                doc.add_heading(block["text"].replace("**", ""), level=3)
+                continue
+            if block["kind"] == "table":
+                width = max(len(row) for row in block["rows"])
+                minutes_table = doc.add_table(rows=len(block["rows"]), cols=width)
+                minutes_table.style = "Table Grid"
+                for r, row in enumerate(block["rows"]):
+                    for i in range(width):
+                        cell = minutes_table.cell(r, i)
+                        cell.text = (row[i] if i < len(row) else "").replace("**", "")
+                        if r == 0:
+                            for run in cell.paragraphs[0].runs:
+                                run.bold = True
+                continue
+            if block["kind"] == "item":
+                para = doc.add_paragraph(
+                    style="List Bullet 2" if block["level"] else "List Bullet",
+                )
+            else:
+                para = doc.add_paragraph()
+            for text, bold in _minutes_inline_runs(block["text"]):
+                run = para.add_run(text)
+                run.bold = bold
+                if block["kind"] == "quote":
+                    run.italic = True
 
     # --- Optional transcript appendix ---
     segments = _get_transcript_segments(session) if options.includeTranscript else []
@@ -1681,11 +1866,11 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
                 lines.append(f"- {q}")
         lines.append("")
 
-    minutes = (fs.get("minutes") or "").strip()
+    minutes = _minutes_markdown(fs.get("minutes"))
     if minutes:
         lines.append("## Meeting Minutes")
         lines.append("")
-        lines.append(minutes)
+        lines.append(re.sub(r"(?m)^(#{1,5})(\s)", r"#\1\2", minutes))
         lines.append("")
 
     # Optional transcript

@@ -463,3 +463,115 @@ def test_branded_report_renderers_read_transcript_only_when_included(
     )
     assert len(output) > 500
     assert calls == {"segments": 1, "plain": 1}
+
+
+_MINUTES = """## Executive Summary
+Duplicate brief that the report already shows.
+
+## Key Discussion Points
+
+1. **Lead Generation Economics**
+   - Jessie pays $0.55 per lead & converts ~10% ([Jessie]).
+
+## Action Items
+
+| Owner | Action |
+| :--- | :--- |
+| Aaron | Frozen table row |
+
+## Key Quotes
+
+> "Bounce knowledge off each other."
+
+## Next Steps
+- Schedule the Chuck Sunderland intro.
+"""
+
+
+def test_minutes_markdown_drops_sections_the_report_renders_elsewhere():
+    from api import batch_export
+
+    kept = batch_export._minutes_markdown(_MINUTES)
+    assert "Duplicate brief" not in kept
+    assert "Frozen table row" not in kept
+    assert "## Key Discussion Points" in kept
+    assert "## Key Quotes" in kept
+    assert "## Next Steps" in kept
+
+
+def test_minutes_blocks_parse_lists_quotes_and_tables():
+    from api import batch_export
+
+    blocks = batch_export._minutes_blocks(
+        _MINUTES + "\n## Extra\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    )
+    kinds = [(b["kind"], b.get("level")) for b in blocks]
+    assert ("item", 0) in kinds and ("item", 1) in kinds
+    assert ("quote", None) in kinds
+    table = next(b for b in blocks if b["kind"] == "table")
+    assert table["rows"] == [["A", "B"], ["1", "2"]]
+    assert batch_export._minutes_inline_html("**Lead** & <x>") == "<b>Lead</b> &amp; &lt;x&gt;"
+
+
+def _report_text(renderer_name, output):
+    from io import BytesIO
+
+    if renderer_name == "export_to_docx":
+        from docx import Document
+
+        doc = Document(BytesIO(output))
+        parts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            parts.extend(cell.text for row in table.rows for cell in row.cells)
+        return "\n".join(parts)
+    import base64
+    import re
+    import zlib
+
+    text = []
+    for stream in re.findall(rb"stream\r?\n(.*?)endstream", output, re.S):
+        data = stream.strip()
+        if data.endswith(b"~>"):
+            data = base64.a85decode(data[:-2])
+        try:
+            text.append(zlib.decompress(data).decode("latin-1"))
+        except zlib.error:
+            text.append(data.decode("latin-1"))
+    return "".join(text)
+
+
+@pytest.mark.parametrize("renderer_name", ["export_to_pdf", "export_to_docx"])
+def test_branded_report_always_includes_meeting_minutes(monkeypatch, renderer_name):
+    """Aaron 2026-10-23: the report always carries the meeting minutes, with or
+    without the transcript appendix, minus the duplicated brief and table."""
+    from types import SimpleNamespace
+    from api import batch_export
+
+    monkeypatch.setattr(
+        batch_export,
+        "_get_summary_data",
+        lambda _session: {
+            "title": "Board Review",
+            "executive": "A concise executive brief.",
+            "bullets": ["Revenue grew."],
+            "actions": [{"action": "Send forecast", "owner": "Alex"}],
+            "decisions": [],
+            "minutes": _MINUTES,
+            "participants": ["Alex"],
+        },
+    )
+    session = SimpleNamespace(
+        meeting_date=None, meeting_time=None, started_at=None,
+        created_at=None, duration=95,
+    )
+    for include_transcript in (False, True):
+        monkeypatch.setattr(batch_export, "_get_transcript_segments", lambda _s: [])
+        monkeypatch.setattr(batch_export, "_get_plain_transcript", lambda _s: "")
+        output = getattr(batch_export, renderer_name)(
+            session, batch_export.ExportOptions(includeTranscript=include_transcript),
+        )
+        text = _report_text(renderer_name, output)
+        assert "Meeting Minutes" in text
+        assert "Next Steps" in text
+        assert "Duplicate brief" not in text
+        assert "Frozen table row" not in text
