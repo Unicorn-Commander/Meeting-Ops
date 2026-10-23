@@ -319,11 +319,10 @@ except Exception as e:  # pragma: no cover - import-time failure
 
 # === Phase B.5: Prometheus /metrics endpoint ===
 # Mounted as an ASGI sub-app so prometheus_client owns the text-format
-# response + Content-Type header. Exposed unauthenticated by design:
-# scraped by the centerdeep Prometheus on the internal Tailscale net.
-# If you ever expose meeting-ops directly to the public internet, gate
-# this behind oauth2-proxy via the ingress config (we run behind it on
-# meetingops.magicunicorn.dev, so /metrics is already gated there).
+# response + Content-Type header. The handler itself is unauthenticated.
+# The public native-OIDC host meeting-ops.unicorncommander.ai does not
+# route /metrics; that ring has no oauth2-proxy. Scrape it on the
+# internal network only.
 app.mount("/metrics", make_asgi_app())
 
 # === REQUIRED ROUTERS (fail fast if missing) ===

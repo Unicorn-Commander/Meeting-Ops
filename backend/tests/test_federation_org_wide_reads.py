@@ -98,6 +98,92 @@ def test_search_treats_wildcards_literally(seeded):
     assert _call(seeded["db"], _ctx(seeded["org"]), "search_meetings", {"query": "%"})["count"] == 0
 
 
+def _search_ids(seeded, query):
+    out = _call(seeded["db"], _ctx(seeded["org"]), "search_meetings", {"query": query})
+    return {m["id"] for m in out["meetings"]}, out["count"]
+
+
+def test_summary_preview_is_searchable_only_when_approved(seeded):
+    """An unapproved or stale summary must not confirm that a phrase exists."""
+    db = seeded["db"]
+    tag = seeded["tag"]
+    hidden = seeded["unapproved"]
+    hidden_phrase = f"unapproved-only-{tag}"
+    hidden.final_summary = {"executive": hidden_phrase, "decisions": [{"text": "Hidden decision"}]}
+    hidden.title = f"Budget sync {tag}"
+    hidden.name = hidden.title
+    hidden.description = None
+    db.commit()
+    db.refresh(hidden)
+    assert hidden_phrase in (hidden.summary_preview or "")
+    assert fm.approved_summary_payload(hidden)[0] == "unapproved"
+    ids, count = _search_ids(seeded, hidden_phrase)
+    assert count == 0 and hidden.id not in ids
+    echoed = _call(db, _ctx(seeded["org"]), "search_meetings", {"query": hidden_phrase})
+    assert echoed["meetings"] == [] and echoed["query"] == hidden_phrase
+
+    approved = seeded["approved"]
+    stale_phrase = f"stale-only-{tag}"
+    approved.final_summary = {
+        "executive": stale_phrase,
+        "key_points": ["replaced"],
+        "decisions": [{"text": "Replaced decision"}],
+    }
+    approved.title = f"GFL NDA review {tag}"
+    approved.name = approved.title
+    approved.description = None
+    db.commit()
+    db.refresh(approved)
+    assert stale_phrase in (approved.summary_preview or "")
+    assert fm.approved_summary_payload(approved)[0] == "stale"
+    ids, count = _search_ids(seeded, stale_phrase)
+    assert count == 0 and approved.id not in ids
+
+    live_phrase = f"approved-only-{tag}"
+    approved.final_summary = {
+        "executive": live_phrase,
+        "key_points": ["mutual NDA"],
+        "decisions": [{"text": "Sign the mutual NDA"}],
+    }
+    approved.federation_summary_approved_digest = fm.summary_approval_digest(approved)
+    approved.federation_summary_approved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(approved)
+    assert live_phrase in (approved.summary_preview or "")
+    assert live_phrase not in (approved.title or "")
+    assert live_phrase not in (approved.name or "")
+    assert not approved.description
+    assert fm.approved_summary_payload(approved)[0] == "approved"
+    ids, count = _search_ids(seeded, live_phrase)
+    assert count == 1 and ids == {approved.id}
+
+
+def test_title_and_description_stay_searchable_without_approval(seeded):
+    db = seeded["db"]
+    tag = seeded["tag"]
+    hidden = seeded["unapproved"]
+    title_phrase = f"title-only-{tag}"
+    hidden.title = title_phrase
+    hidden.name = f"Budget sync {tag}"
+    hidden.description = None
+    db.commit()
+    db.refresh(hidden)
+    assert title_phrase not in (hidden.summary_preview or "")
+    ids, count = _search_ids(seeded, title_phrase)
+    assert count == 1 and ids == {hidden.id}
+
+    desc_phrase = f"desc-only-{tag}"
+    hidden.description = desc_phrase
+    hidden.title = f"Budget sync {tag}"
+    db.commit()
+    db.refresh(hidden)
+    assert desc_phrase not in (hidden.summary_preview or "")
+    assert desc_phrase not in (hidden.title or "")
+    assert desc_phrase not in (hidden.name or "")
+    ids, count = _search_ids(seeded, desc_phrase)
+    assert count == 1 and ids == {hidden.id}
+
+
 def test_details_release_summary_and_decisions_only_when_approved(seeded):
     db, ctx = seeded["db"], _ctx(seeded["org"])
     ok = _call(db, ctx, "get_meeting_details", {"session_id": str(seeded["approved"].id)})

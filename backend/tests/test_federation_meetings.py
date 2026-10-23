@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import time
+import uuid
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -199,6 +200,51 @@ def test_require_token_workspace_not_provisioned(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         fm.require_brigade_token(_req("Bearer xyz"), db=object())
     assert ei.value.status_code == 403
+
+
+def test_org_for_workspace_id_binds_only_active_organizations(canonical_db_schema, monkeypatch):
+    """A deactivated org must not keep serving federation reads."""
+    from auth.models import Organization
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        suffix = uuid.uuid4().hex[:8]
+        workspace_id = f"ws-active-{suffix}"
+        org = Organization(
+            name=f"Fed Active {suffix}",
+            slug=f"fed-active-{suffix}",
+            is_active=True,
+            workspace_id=workspace_id,
+        )
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+        assert fm.org_for_workspace_id(db, workspace_id).id == org.id
+
+        org.is_active = False
+        db.commit()
+        assert fm.org_for_workspace_id(db, workspace_id) is None
+        assert fm.org_for_workspace_id(db, "") is None
+
+        monkeypatch.setattr(
+            fm,
+            "verify_brigade_jwt_with_reason",
+            lambda _t: BrigadeJWTVerificationResult(
+                True,
+                {
+                    "sub": "brigade-caller",
+                    "workspace_id": workspace_id,
+                    "scope": "meetings:read",
+                },
+                None,
+            ),
+        )
+        with pytest.raises(HTTPException) as ei:
+            fm.require_brigade_token(_req("Bearer deactivated"), db=db)
+        assert ei.value.status_code == 403
+    finally:
+        db.close()
 
 
 def test_require_token_binds_org(monkeypatch):

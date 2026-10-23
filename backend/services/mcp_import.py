@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urljoin, urlsplit
 
+import httpcore
 import httpx
 from fastapi import HTTPException
 from sqlalchemy import Text
@@ -35,6 +36,73 @@ logger = logging.getLogger("meeting-ops-mcp-import")
 IMPORT_ROOTS_ENV = "MEETING_OPS_IMPORT_ROOTS"
 MAX_REDIRECTS = 5
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+CGNAT_NETWORK = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Connect a request's original host through one already-validated IP."""
+
+    def __init__(
+        self,
+        *,
+        hostname: str,
+        address: str,
+        delegate: httpcore.AsyncNetworkBackend,
+    ) -> None:
+        self._hostname = hostname.casefold()
+        self._address = address
+        self._delegate = delegate
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.casefold() != self._hostname:
+            raise httpcore.ConnectError("Pinned transport received an unexpected host.")
+        return await self._delegate.connect_tcp(
+            self._address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._delegate.connect_unix_socket(
+            path,
+            timeout=timeout,
+            socket_options=socket_options,
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+class _PinnedHTTPTransport(httpx.AsyncHTTPTransport):
+    """Keep HTTPX's TLS/SNI and Host behavior while pinning TCP destination."""
+
+    def __init__(self, *, hostname: str, address: str) -> None:
+        # Do not let environment proxy settings replace the validated direct
+        # connection.  The pool still owns normal certificate verification.
+        super().__init__(trust_env=False, retries=0)
+        self._pool._network_backend = _PinnedNetworkBackend(
+            hostname=hostname,
+            address=address,
+            delegate=self._pool._network_backend,
+        )
+
+
+def _url_import_transport(hostname: str, address: str) -> httpx.AsyncBaseTransport:
+    return _PinnedHTTPTransport(hostname=hostname, address=address)
 
 
 def _configured_import_roots() -> tuple[Path, ...]:
@@ -94,10 +162,12 @@ def _resolve_local_source(local_path: str) -> Path:
     return resolved
 
 
-def _public_ip_addresses(host: str, port: int) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def _public_ip_addresses(
+    host: str, port: int
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
     try:
         literal = ipaddress.ip_address(host)
-        return {literal}
+        return (getattr(literal, "ipv4_mapped", None) or literal,)
     except ValueError:
         pass
 
@@ -106,20 +176,41 @@ def _public_ip_addresses(host: str, port: int) -> set[ipaddress.IPv4Address | ip
     except OSError as exc:
         raise HTTPException(status_code=400, detail="source_url host could not be resolved.") from exc
 
-    resolved: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    resolved: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    seen: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     for address in addresses:
         try:
             ip = ipaddress.ip_address(address[4][0])
         except (IndexError, ValueError):
             continue
         # IPv4-mapped IPv6 addresses inherit the IPv4 address's network class.
-        resolved.add(ip.ipv4_mapped or ip)
+        normalized = getattr(ip, "ipv4_mapped", None) or ip
+        if normalized not in seen:
+            seen.add(normalized)
+            resolved.append(normalized)
     if not resolved:
         raise HTTPException(status_code=400, detail="source_url host has no usable address.")
-    return resolved
+    return tuple(resolved)
 
 
-def _validate_public_https_url(raw_url: str) -> None:
+def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an address is safe to use as an outbound URL target."""
+    return bool(
+        address.is_global
+        and not address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
+        and not (
+            address.version == 4
+            and address in CGNAT_NETWORK
+        )
+    )
+
+
+def _validate_public_https_url(raw_url: str) -> str:
     try:
         parsed = urlsplit(raw_url)
         port = parsed.port or 443
@@ -129,12 +220,15 @@ def _validate_public_https_url(raw_url: str) -> None:
         raise HTTPException(status_code=400, detail="source_url must use https.")
     if parsed.username or parsed.password or not parsed.hostname:
         raise HTTPException(status_code=400, detail="source_url must have a public host and no credentials.")
-    for address in _public_ip_addresses(parsed.hostname, port):
-        if not address.is_global:
-            raise HTTPException(
-                status_code=400,
-                detail="source_url must not resolve to a private or local network.",
-            )
+    addresses = _public_ip_addresses(parsed.hostname, port)
+    if any(not _is_public_address(address) for address in addresses):
+        raise HTTPException(
+            status_code=400,
+            detail="source_url must not resolve to a private or local network.",
+        )
+    # The caller must use this exact answer for the TCP connection.  It must
+    # not resolve the hostname again after this validation step.
+    return str(addresses[0])
 
 
 def _url_filename(raw_url: str, content_type: Optional[str]) -> str:
@@ -152,8 +246,17 @@ async def _download_url(raw_url: str, destination: Path, max_bytes: int) -> tupl
         # Validate every hop, including the final URL.  Automatic client
         # redirects are disabled so a public URL cannot redirect to localhost
         # or another private network without this check seeing it.
-        _validate_public_https_url(current_url)
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        validated_address = _validate_public_https_url(current_url)
+        parsed_url = urlsplit(current_url)
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=False,
+            trust_env=False,
+            transport=_url_import_transport(
+                hostname=parsed_url.hostname or "",
+                address=validated_address,
+            ),
+        ) as client:
             async with client.stream("GET", current_url) as response:
                 if 300 <= response.status_code < 400:
                     location = response.headers.get("location")
@@ -433,8 +536,20 @@ async def import_recording_for_caller(
     # These are the same checks made by POST /api/uploads/start.  Keep them
     # before any durable row is created, and do not weaken them for MCP.
     from auth.tier import gate_feature_for_caller
+    from auth.utils import check_permission
     from services.quotas import check_upload_quota
     from api import uploads
+
+    role = "superuser" if caller.is_superuser else (
+        (active_org.membership.role or "")
+        if active_org.membership is not None
+        else ""
+    ).strip().lower()
+    if not check_permission(role, "session.create"):
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient permissions. Required: session.create",
+        )
 
     gate_feature_for_caller(caller, "audio_upload", active_org)
     normalized_tags = _normalize_tags(tags)

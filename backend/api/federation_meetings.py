@@ -54,7 +54,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from auth.models import Organization
@@ -101,13 +101,17 @@ def org_for_workspace_id(db: Session, workspace_id: str) -> Optional[Organizatio
 
     Meeting-Ops tenancy is an integer ``organization_id``; the suite
     identity is the ``workspace_id`` UUID. ``Organization.workspace_id``
-    (alembic 041) is the join. Returns None when the workspace is not
-    provisioned here — the caller fails closed (403)."""
+    (alembic 041) is the join. Only an active organization binds. Returns
+    None when the workspace is not provisioned here or the organization
+    has been deactivated — the caller fails closed (403)."""
     if not workspace_id:
         return None
     return (
         db.query(Organization)
-        .filter(Organization.workspace_id == workspace_id)
+        .filter(
+            Organization.workspace_id == workspace_id,
+            Organization.is_active.is_(True),
+        )
         .first()
     )
 
@@ -1141,6 +1145,26 @@ def _session_for(db: Session, org_id: int, raw_id: Any) -> RecordingSession:
     return session
 
 
+def _contains_literal(value: Optional[str], needle: str) -> bool:
+    if not isinstance(value, str) or not needle:
+        return False
+    return needle.casefold() in value.casefold()
+
+
+def _non_summary_search_hit(
+    session: RecordingSession, needle: str, *, include_transcript: bool
+) -> bool:
+    if (
+        _contains_literal(session.title, needle)
+        or _contains_literal(session.name, needle)
+        or _contains_literal(session.description, needle)
+    ):
+        return True
+    return bool(
+        include_transcript and _contains_literal(session.transcript_simple, needle)
+    )
+
+
 def search_meetings(
     db: Session, org_id: int, query: str, *, limit: Optional[int] = None,
     include_transcript: bool = False,
@@ -1150,26 +1174,47 @@ def search_meetings(
         raise HTTPException(status_code=400, detail="query is required")
     n = min(_clamp_limit(limit), 20)
     pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-    fields = [
+    text_fields = [
         RecordingSession.title,
         RecordingSession.name,
         RecordingSession.description,
-        RecordingSession.summary_preview,
     ]
     if include_transcript:
-        fields.append(RecordingSession.transcript_simple)
-    rows = (
-        db.query(RecordingSession)
-        .filter(
-            RecordingSession.organization_id == org_id,
-            or_(*[f.ilike(pattern, escape="\\") for f in fields]),
-        )
-        .order_by(RecordingSession.id.desc())
-        .limit(n)
-        .all()
+        text_fields.append(RecordingSession.transcript_simple)
+    text_match = or_(*[f.ilike(pattern, escape="\\") for f in text_fields])
+    # summary_preview is filled from summary text with no approval check.
+    # It is a hit only when the snippet serializer would currently release
+    # that summary. Stamp presence is required in SQL; a stale digest is
+    # dropped by approved_summary_payload before the row counts.
+    preview_match = and_(
+        RecordingSession.summary_preview.ilike(pattern, escape="\\"),
+        RecordingSession.federation_summary_approved_at.isnot(None),
+        RecordingSession.federation_summary_approved_digest.isnot(None),
     )
-    counts = _action_item_counts(db, org_id, [s.id for s in rows])
-    items = [_meeting_item(s, counts.get(s.id, 0)) for s in rows]
+    kept: list[RecordingSession] = []
+    last_id: Optional[int] = None
+    while len(kept) < n:
+        q = db.query(RecordingSession).filter(
+            RecordingSession.organization_id == org_id,
+            or_(text_match, preview_match),
+        )
+        if last_id is not None:
+            q = q.filter(RecordingSession.id < last_id)
+        batch = q.order_by(RecordingSession.id.desc()).limit(n).all()
+        if not batch:
+            break
+        for session in batch:
+            last_id = session.id
+            if _non_summary_search_hit(
+                session, text, include_transcript=include_transcript
+            ) or approved_summary_payload(session)[0] == "approved":
+                kept.append(session)
+            if len(kept) >= n:
+                break
+        if len(batch) < n:
+            break
+    counts = _action_item_counts(db, org_id, [s.id for s in kept])
+    items = [_meeting_item(s, counts.get(s.id, 0)) for s in kept]
     return {"query": text, "meetings": items, "count": len(items)}
 
 
