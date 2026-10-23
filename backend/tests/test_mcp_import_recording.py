@@ -124,6 +124,40 @@ def test_import_recording_happy_path_uses_upload_job_and_audit(import_context):
     assert "local_path" not in audit.details
 
 
+def test_import_recording_requires_session_create_before_creating_rows(import_context):
+    db, _user, active_org, root, submitted = import_context
+    source = root / "role-gated.wav"
+    _tiny_wav(source)
+
+    from database.models import RecordingSession, UploadJob
+
+    active_org.membership.role = "viewer"
+    active_org.role = "viewer"
+    db.commit()
+    sessions_before = db.query(RecordingSession).count()
+    jobs_before = db.query(UploadJob).count()
+
+    with pytest.raises(HTTPException) as caught:
+        _run_import(import_context, source)
+
+    assert caught.value.status_code == 403
+    assert caught.value.detail == "Insufficient permissions. Required: session.create"
+    assert db.query(RecordingSession).count() == sessions_before
+    assert db.query(UploadJob).count() == jobs_before
+    assert submitted == []
+
+    active_org.membership.role = "user"
+    active_org.role = "user"
+    db.commit()
+    result = _run_import(import_context, source)
+
+    assert result["session_id"] > 0
+    assert result["status"] == "queued"
+    assert db.query(RecordingSession).count() == sessions_before + 1
+    assert db.query(UploadJob).count() == jobs_before + 1
+    assert len(submitted) == 1
+
+
 def test_import_recording_rejects_invalid_tags_before_creating_session(import_context):
     db, _user, _active_org, root, submitted = import_context
     source = root / "invalid-tags.wav"

@@ -433,8 +433,20 @@ async def import_recording_for_caller(
     # These are the same checks made by POST /api/uploads/start.  Keep them
     # before any durable row is created, and do not weaken them for MCP.
     from auth.tier import gate_feature_for_caller
+    from auth.utils import check_permission
     from services.quotas import check_upload_quota
     from api import uploads
+
+    role = "superuser" if caller.is_superuser else (
+        (active_org.membership.role or "")
+        if active_org.membership is not None
+        else ""
+    ).strip().lower()
+    if not check_permission(role, "session.create"):
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient permissions. Required: session.create",
+        )
 
     gate_feature_for_caller(caller, "audio_upload", active_org)
     normalized_tags = _normalize_tags(tags)
