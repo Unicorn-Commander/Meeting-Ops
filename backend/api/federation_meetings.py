@@ -101,13 +101,17 @@ def org_for_workspace_id(db: Session, workspace_id: str) -> Optional[Organizatio
 
     Meeting-Ops tenancy is an integer ``organization_id``; the suite
     identity is the ``workspace_id`` UUID. ``Organization.workspace_id``
-    (alembic 041) is the join. Returns None when the workspace is not
-    provisioned here — the caller fails closed (403)."""
+    (alembic 041) is the join. Only an active organization binds. Returns
+    None when the workspace is not provisioned here or the organization
+    has been deactivated — the caller fails closed (403)."""
     if not workspace_id:
         return None
     return (
         db.query(Organization)
-        .filter(Organization.workspace_id == workspace_id)
+        .filter(
+            Organization.workspace_id == workspace_id,
+            Organization.is_active.is_(True),
+        )
         .first()
     )
 
