@@ -12,19 +12,27 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-def _login(client):
+def _login(client, *, username="admin", password="admin123"):
     response = client.post(
         "/api/auth/login",
-        data={"username": "admin", "password": "admin123"},
+        data={"username": username, "password": password},
     )
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
 
 
-def _mint_pat(client, *, scope="recordings.ingest", org="magic-unicorn", expires=90):
+def _mint_pat(
+    client,
+    *,
+    scope="recordings.ingest",
+    org="magic-unicorn",
+    expires=90,
+    username="admin",
+    password="admin123",
+):
     response = client.post(
         "/api/auth/pats",
-        headers={"Authorization": f"Bearer {_login(client)}"},
+        headers={"Authorization": f"Bearer {_login(client, username=username, password=password)}"},
         json={
             "name": f"desktop-test-{uuid.uuid4()}",
             "scope": scope,
@@ -36,14 +44,62 @@ def _mint_pat(client, *, scope="recordings.ingest", org="magic-unicorn", expires
     return response.json()
 
 
-def _headers(plaintext: str) -> dict[str, str]:
-    return {
+def _headers(plaintext: str, *, org: str | None = None) -> dict[str, str]:
+    headers = {
         "Authorization": f"Bearer {plaintext}",
         "User-Agent": "MeetingMinutesTest/1.0",
     }
+    if org is not None:
+        headers["X-MeetingOps-Org"] = org
+    return headers
 
 
-def _post_recording(client, plaintext: str, *, external_id=None, **overrides):
+def _seed_member(*, role="user"):
+    from auth.models import Organization, User, UserOrganization
+    from auth.utils import get_password_hash
+    from database.database import SessionLocal
+
+    suffix = uuid.uuid4().hex[:12]
+    username = f"ingest_member_{suffix}"
+    password = "Member123!"
+    db = SessionLocal()
+    try:
+        user = User(
+            email=f"{username}@example.com",
+            username=username,
+            hashed_password=get_password_hash(password),
+            is_active=True,
+            is_verified=True,
+            is_superuser=False,
+        )
+        organization = Organization(
+            name=f"Ingest org {suffix}",
+            slug=f"ingest-org-{suffix}",
+            is_active=True,
+            max_concurrent_uploads=1000,
+        )
+        db.add_all([user, organization])
+        db.flush()
+        db.add(
+            UserOrganization(
+                user_id=user.id,
+                organization_id=organization.id,
+                role=role,
+            )
+        )
+        db.commit()
+        return {
+            "username": username,
+            "password": password,
+            "user_id": user.id,
+            "org_id": organization.id,
+            "org_slug": organization.slug,
+        }
+    finally:
+        db.close()
+
+
+def _post_recording(client, plaintext: str, *, external_id=None, org=None, **overrides):
     files = overrides.pop("files", None) or {
         "file": ("meeting.wav", b"synthetic audio", "audio/wav"),
     }
@@ -59,7 +115,7 @@ def _post_recording(client, plaintext: str, *, external_id=None, **overrides):
         data["metadata"] = json.dumps(data["metadata"])
     return client.post(
         "/api/ingest/recordings",
-        headers=_headers(plaintext),
+        headers=_headers(plaintext, org=org),
         data=data,
         files=files,
     )
@@ -130,10 +186,10 @@ def test_scope_creation_requires_org_and_expiry_and_whoami_never_returns_token(c
     assert created["plaintext"] not in response.text
 
 
-def test_auth_is_pat_only_and_membership_is_rechecked(client):
+def test_pat_auth_is_rechecked_and_session_tokens_need_an_org(client):
     generic = _mint_pat(client, scope="user", org=None, expires=None)
     response = client.get("/api/ingest/whoami", headers=_headers(generic["plaintext"]))
-    assert response.status_code == 403
+    assert response.status_code == 400
 
     expired = _mint_pat(client)
     from auth.models import PersonalAccessToken
@@ -146,6 +202,7 @@ def test_auth_is_pat_only_and_membership_is_rechecked(client):
         db.commit()
     finally:
         db.close()
+
     assert client.get("/api/ingest/whoami", headers=_headers(expired["plaintext"])).status_code == 401
 
     revoked = _mint_pat(client)
@@ -187,6 +244,181 @@ def test_auth_is_pat_only_and_membership_is_rechecked(client):
         db.commit()
     finally:
         db.close()
+
+
+def test_signed_in_member_ingest_is_org_bound_and_replay_does_not_enqueue_twice(client, monkeypatch):
+    from api import ingest_recordings
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    member = _seed_member()
+    access_token = _login(
+        client,
+        username=member["username"],
+        password=member["password"],
+    )
+    enqueue = AsyncMock()
+    monkeypatch.setattr(ingest_recordings.upload_api.upload_pipeline_queue, "enqueue", enqueue)
+
+    first = _post_recording(
+        client,
+        access_token,
+        external_id="member-replay-1",
+        org=member["org_slug"],
+    )
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+    assert first_body["created"] is True
+
+    replay = _post_recording(
+        client,
+        access_token,
+        external_id="member-replay-1",
+        org=member["org_slug"],
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["session_id"] == first_body["session_id"]
+    assert enqueue.await_count == 1
+
+    db = SessionLocal()
+    try:
+        organization = db.query(Organization).filter(Organization.id == member["org_id"]).one()
+        session = (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.organization_id == organization.id,
+                RecordingSession.external_source == "meeting-minutes",
+                RecordingSession.external_id == "member-replay-1",
+            )
+            .one()
+        )
+        assert session.user_id == member["user_id"]
+        assert session.organization_id == member["org_id"]
+    finally:
+        db.close()
+
+
+def test_member_of_org_a_cannot_ingest_into_org_b(client):
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from database.models import RecordingSession
+
+    member = _seed_member()
+    db = SessionLocal()
+    try:
+        org_b = Organization(
+            name=f"Ingest foreign org {uuid.uuid4().hex[:12]}",
+            slug=f"ingest-foreign-{uuid.uuid4().hex[:12]}",
+            is_active=True,
+            max_concurrent_uploads=1000,
+        )
+        db.add(org_b)
+        db.commit()
+        org_b_slug = org_b.slug
+        org_b_id = org_b.id
+    finally:
+        db.close()
+
+    access_token = _login(
+        client,
+        username=member["username"],
+        password=member["password"],
+    )
+    response = _post_recording(
+        client,
+        access_token,
+        external_id="cross-tenant-ingest-1",
+        org=org_b_slug,
+    )
+    assert response.status_code == 403, response.text
+
+    db = SessionLocal()
+    try:
+        assert (
+            db.query(RecordingSession)
+            .filter(
+                RecordingSession.organization_id == org_b_id,
+                RecordingSession.external_id == "cross-tenant-ingest-1",
+            )
+            .count()
+            == 0
+        )
+    finally:
+        db.close()
+
+
+def test_viewer_role_cannot_ingest_when_session_create_is_not_allowed(client):
+    viewer = _seed_member(role="viewer")
+    access_token = _login(
+        client,
+        username=viewer["username"],
+        password=viewer["password"],
+    )
+    response = client.get(
+        "/api/ingest/whoami",
+        headers=_headers(access_token, org=viewer["org_slug"]),
+    )
+    assert response.status_code == 403, response.text
+    assert "session.create" in response.text
+
+
+def test_session_ingest_requires_a_known_org_header(client):
+    member = _seed_member()
+    access_token = _login(
+        client,
+        username=member["username"],
+        password=member["password"],
+    )
+    missing = client.get(
+        "/api/ingest/whoami",
+        headers=_headers(access_token),
+    )
+    assert missing.status_code == 400, missing.text
+
+    unknown = client.get(
+        "/api/ingest/whoami",
+        headers=_headers(access_token, org="does-not-exist"),
+    )
+    assert unknown.status_code == 404, unknown.text
+
+
+def test_user_pat_uses_member_session_branch_and_requires_membership(client):
+    member = _seed_member()
+    member_pat = _mint_pat(
+        client,
+        scope="user",
+        org=None,
+        expires=None,
+        username=member["username"],
+        password=member["password"],
+    )
+    allowed = client.get(
+        "/api/ingest/whoami",
+        headers=_headers(member_pat["plaintext"], org=member["org_slug"]),
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["organization_slug"] == member["org_slug"]
+
+    from auth.models import UserOrganization
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.query(UserOrganization).filter(
+            UserOrganization.user_id == member["user_id"],
+            UserOrganization.organization_id == member["org_id"],
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
+    refused = client.get(
+        "/api/ingest/whoami",
+        headers=_headers(member_pat["plaintext"], org=member["org_slug"]),
+    )
+    assert refused.status_code == 403, refused.text
 
 
 def test_first_post_is_idempotent_and_does_not_store_or_enqueue_twice(client, monkeypatch):
@@ -649,7 +881,7 @@ def test_chunked_routes_require_recording_ingest_pat(client):
     init = _init_chunked(client, valid["plaintext"], external_id="chunk-auth-1")
     assert init.status_code == 201
     upload_id = init.json()["upload_id"]
-    generic = _mint_pat(client, scope="user", org=None, expires=None)
+    generic = _mint_pat(client, scope="stable.transcript.ingest", org="magic-unicorn")
     paths = [
         ("post", "/api/ingest/uploads", {"json": {
             "external_source": "meeting-minutes",
