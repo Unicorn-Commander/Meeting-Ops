@@ -847,15 +847,34 @@ def list_meeting_summaries_v1(
 async def _resolved_contact_ids(
     ctx: FederationContext,
     contact_id: str,
+    db: Session,
 ) -> list[str]:
-    """Return canonical + historical aliases within the token workspace."""
+    """Return canonical + historical aliases within the Contact-Ops workspace.
+
+    Inbound tenancy stays ``Organization.workspace_id`` (the token claim).
+    The outbound Contact-Ops resolve uses the per-target override when set.
+    """
 
     requested = contact_id.strip()
     if not requested:
         return []
+    from services.integrations.org_config import (
+        INTEGRATION_CONTACT_OPS,
+        federation_workspace_for,
+        get_organization,
+    )
+
+    org = get_organization(db, ctx.org_id)
+    workspace_id = federation_workspace_for(org, INTEGRATION_CONTACT_OPS)
+    if not workspace_id:
+        logger.debug(
+            "federation: no resolvable contact_ops workspace org=%s — skip outbound",
+            ctx.org_id,
+        )
+        return []
     resolution = await contact_ops_resolver.resolve_person_id(
         requested,
-        ctx.workspace_id,
+        workspace_id,
     )
     if resolution is None:
         # The contact id is only meaningful after the Contact-Ops workspace
@@ -885,7 +904,7 @@ async def rest_meetings(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id, db)
     if not contact_ids:
         return _tool_envelope(
             "list_meetings_for_contact",
@@ -911,7 +930,7 @@ async def rest_summaries(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id, db)
     if not contact_ids:
         return _tool_envelope("list_summaries_for_contact", [])
     return _tool_envelope(
@@ -928,7 +947,7 @@ async def rest_action_items(
     db: Session = Depends(get_db),
 ):
     _require_read_scope(ctx)
-    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id, db)
     if not contact_ids:
         return _tool_envelope("list_action_items_for_contact", [])
     return _tool_envelope(
@@ -950,7 +969,7 @@ async def rest_meeting_summaries_v1(
     _require_read_scope(ctx)
     if include_transcript:
         _require_transcript_scope(ctx)
-    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id, db)
     return list_meeting_summaries_v1(
         db,
         ctx.org_id,
@@ -1326,7 +1345,7 @@ async def _dispatch_tool(
     if not contact_id:
         raise HTTPException(status_code=400, detail="contact_id is required")
     limit = args.get("limit")
-    contact_ids = await _resolved_contact_ids(ctx, contact_id)
+    contact_ids = await _resolved_contact_ids(ctx, contact_id, db)
     if name == "list_meeting_summaries_v1":
         include_transcript = args.get("include_transcript") is True
         if include_transcript:

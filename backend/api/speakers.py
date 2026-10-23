@@ -46,6 +46,10 @@ from database.models import (
     Transcription,
 )
 from services import contact_ops_resolver
+from services.integrations.org_config import (
+    INTEGRATION_CONTACT_OPS,
+    federation_workspace_for,
+)
 from services.providers.registry import get_provider_registry
 from services.speaker_self_intro import extract_self_intro_names
 from services.speaker_service import (
@@ -728,7 +732,7 @@ async def _attach_picked_contact(
         .filter(Organization.id == session.organization_id)
         .first()
     )
-    workspace_id = (getattr(org, "workspace_id", None) or "").strip() if org else ""
+    workspace_id = federation_workspace_for(org, INTEGRATION_CONTACT_OPS) or ""
     if not workspace_id:
         raise HTTPException(
             status_code=409,

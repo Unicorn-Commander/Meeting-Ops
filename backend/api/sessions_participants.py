@@ -24,6 +24,10 @@ from auth.organization import ActiveOrganization
 from database.database import get_db
 from database.models import RecordingSession
 from services import contact_ops_resolver
+from services.integrations.org_config import (
+    INTEGRATION_CONTACT_OPS,
+    federation_workspace_for,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -208,9 +212,10 @@ async def add_participant(
             contact_id=payload.contact_id.strip(),
             confidence=payload.contact_match_confidence,
             basis=payload.contact_match_basis,
-            workspace_id=(
-                getattr(active_org.organization, "workspace_id", None) or ""
-            ).strip(),
+            workspace_id=federation_workspace_for(
+                active_org.organization, INTEGRATION_CONTACT_OPS
+            )
+            or "",
         )
     new = {
         "id": str(uuid.uuid4()),
@@ -259,14 +264,11 @@ async def update_participant(
                             contact_id=payload.contact_id.strip(),
                             confidence=payload.contact_match_confidence,
                             basis=payload.contact_match_basis,
-                            workspace_id=(
-                                getattr(
-                                    active_org.organization,
-                                    "workspace_id",
-                                    None,
-                                )
-                                or ""
-                            ).strip(),
+                            workspace_id=federation_workspace_for(
+                                active_org.organization,
+                                INTEGRATION_CONTACT_OPS,
+                            )
+                            or "",
                         )
                     )
                 else:

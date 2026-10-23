@@ -788,12 +788,10 @@ async def submit_action_items_to_triage(
                 ok=False, mode="error", detail="session not found"
             )
 
-        # Resolve the meeting org's workspace_id (the uc-registry tenant uuid)
-        # so the triage push can carry it via a Brigade-vouched federation
-        # token and PO routes the proposals to the correct tenant. Mirrors the
-        # recorder-autostamp path in api.recording (load Organization by
-        # session.organization_id, read org.workspace_id). Tenant routing is
-        # fail-closed: no workspace binding means no cross-app write.
+        # Resolve the meeting org's Project-Ops workspace (per-target override
+        # or Organization.workspace_id) so the triage push carries a
+        # Brigade-vouched federation token and PO routes to the correct tenant.
+        # No resolvable workspace: skip quietly, no outbound, never another org.
         from auth.models import Organization
 
         org = (
@@ -801,11 +799,16 @@ async def submit_action_items_to_triage(
             .filter(Organization.id == session.organization_id)
             .first()
         )
-        workspace_id = getattr(org, "workspace_id", None) if org else None
+        from services.integrations.org_config import (
+            INTEGRATION_PROJECT_OPS,
+            federation_workspace_for,
+            resolve_project_ops,
+        )
+
+        workspace_id = federation_workspace_for(org, INTEGRATION_PROJECT_OPS)
 
         # Per-org integration toggle (same guarantee as the direct writer):
         # an org that turned project_ops OFF never leaks to a shared PO.
-        from services.integrations.org_config import resolve_project_ops
 
         po_cfg = resolve_project_ops(db, session.organization_id)
         if not po_cfg.enabled and po_cfg.source == "disabled":
@@ -911,30 +914,16 @@ async def submit_action_items_to_triage(
 
             # Obtain a Brigade-exchanged, workspace-bound federation token
             # (aud=project-ops) so Project-Ops routes proposals to the exact
-            # tenant. Never fall back to a default service tenant: a delayed
-            # proposal is recoverable; a cross-tenant task is not.
+            # tenant. Never fall back to a default service tenant or another
+            # org: no resolvable workspace means skip quietly, no outbound.
             if not workspace_id:
-                detail = "Project-Ops sync blocked: workspace is not provisioned"
-                logger.error(
-                    "projectops_triage session=%s org=%s: %s",
+                logger.debug(
+                    "projectops_triage session=%s org=%s: no resolvable "
+                    "project_ops workspace — skip outbound",
                     session_pk,
                     session.organization_id,
-                    detail,
                 )
-                _stamp_session_push_failure(
-                    db, session, mode=completion_mode, detail=detail
-                )
-                from services.projectops_lifecycle import mark_sync_failed
-
-                for item in pending:
-                    mark_sync_failed(item, "WORKSPACE_NOT_PROVISIONED")
-                db.commit()
-                return ProjectOpsWriteResult(
-                    ok=False,
-                    mode="error",
-                    skipped=already,
-                    detail=detail,
-                )
+                return ProjectOpsWriteResult(ok=True, mode="no-op")
 
             from services.projectops_token import projectops_federation_token
 

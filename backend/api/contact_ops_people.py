@@ -17,6 +17,10 @@ from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
 from auth.organization import ActiveOrganization
 from services import contact_ops_resolver
+from services.integrations.org_config import (
+    INTEGRATION_CONTACT_OPS,
+    federation_workspace_for,
+)
 
 router = APIRouter(prefix="/api/contact-ops", tags=["contact-ops"])
 
@@ -41,7 +45,9 @@ async def search_people(
     current_user: User = Depends(get_current_user),
     active_org: ActiveOrganization = Depends(get_current_organization),
 ):
-    workspace_id = (getattr(active_org.organization, "workspace_id", None) or "").strip()
+    workspace_id = federation_workspace_for(
+        active_org.organization, INTEGRATION_CONTACT_OPS
+    ) or ""
     if not workspace_id:
         raise HTTPException(
             status_code=400,

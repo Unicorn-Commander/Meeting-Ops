@@ -287,14 +287,17 @@ def _apply_lifecycle_record(item: Any, record: dict[str, Any]) -> None:
 
 def _organization_workspace(db: Session, organization_id: int) -> Optional[str]:
     from auth.models import Organization
+    from services.integrations.org_config import (
+        INTEGRATION_PROJECT_OPS,
+        federation_workspace_for,
+    )
 
     org = (
         db.query(Organization)
         .filter(Organization.id == organization_id)
         .first()
     )
-    workspace_id = getattr(org, "workspace_id", None) if org else None
-    return workspace_id.strip() if isinstance(workspace_id, str) else None
+    return federation_workspace_for(org, INTEGRATION_PROJECT_OPS)
 
 
 def _project_ops_client(db: Session, organization_id: int, client: Any = None):

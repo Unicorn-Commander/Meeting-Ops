@@ -2488,7 +2488,18 @@ async def _autostamp_recorder_participant(session_pk: int) -> None:
                 .filter(Organization.id == session.organization_id)
                 .first()
             )
-            workspace_id = getattr(org, "workspace_id", None) if org else None
+            from services.integrations.org_config import (
+                INTEGRATION_CONTACT_OPS,
+                federation_workspace_for,
+            )
+
+            workspace_id = federation_workspace_for(org, INTEGRATION_CONTACT_OPS)
+            if not workspace_id:
+                logger.debug(
+                    "autostamp: no resolvable contact_ops workspace org=%s "
+                    "— skip outbound resolver",
+                    session.organization_id,
+                )
             contact_id = await resolve_email(email, workspace_id) if workspace_id else None
 
             participants = (

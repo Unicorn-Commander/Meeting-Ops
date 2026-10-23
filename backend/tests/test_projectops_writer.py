@@ -41,8 +41,9 @@ Covers the contract for ``services.projectops_writer``:
   18-20. triage federation token     — the workspace-bound, aud=project-ops
                                        push: uses the Brigade-exchanged token
                                        as bearer_override when the org's
-                                       workspace_id resolves, and fails closed
-                                       when the binding/token is unavailable.
+                                       workspace_id resolves, skips quietly
+                                       when no workspace is resolvable, and
+                                       fails closed when the token is unavailable.
 
 The PO HTTP client is replaced by an injected stub (``_FakeProjectOpsClient``)
 passed via ``write_action_items_to_projectops(client=...)`` — the same
@@ -1221,7 +1222,7 @@ def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
     from database.database import SessionLocal
 
     # Federation token would mint if asked — but it must NOT be asked when the
-    # org has no workspace_id.
+    # org has no workspace_id. Skip quietly: no outbound, no sync_failed stamp.
     asked = _patch_federation_token(monkeypatch, returns="should-not-be-used")
 
     org_id, session_id = _seed(workspace_id=None)  # no tenant on the org
@@ -1229,7 +1230,7 @@ def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
 
     db = SessionLocal()
     try:
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             result = _run(
                 submit_action_items_to_triage(
                     db=db, session_pk=session_id, client=stub
@@ -1238,9 +1239,8 @@ def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
     finally:
         db.close()
 
-    assert result.ok is False
-    assert result.mode == "error"
-    assert "workspace is not provisioned" in (result.detail or "")
+    assert result.ok is True
+    assert result.mode == "no-op"
     # No workspace_id -> never mint a federation token.
     assert asked == []
     assert stub.submitted == []
@@ -1249,11 +1249,10 @@ def test_triage_fails_closed_when_no_workspace_id(client, monkeypatch, caplog):
         for item in _items_for_session(session_id)
     )
     assert all(
-        item.project_ops_link_state == "sync_failed"
-        and item.project_ops_sync_error == "WORKSPACE_NOT_PROVISIONED"
+        item.project_ops_link_state == "local_only"
         for item in _items_for_session(session_id)
     )
-    assert any("workspace is not provisioned" in rec.getMessage() for rec in caplog.records)
+    assert any("no resolvable project_ops workspace" in rec.getMessage() for rec in caplog.records)
 
 
 def test_triage_fails_closed_when_federation_token_unavailable(

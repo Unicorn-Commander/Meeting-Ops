@@ -180,6 +180,28 @@ async def _project_ops_token(
 # ── public API ─────────────────────────────────────────────────────────
 
 
+async def projectops_federation_token_for_org(org) -> Optional[str]:
+    """Mint a Project-Ops federation token for ``org``'s target workspace.
+
+    Uses ``federation_workspace_for(org, project_ops)``. When that returns
+    None, skip quietly (no KC mint, no Brigade exchange). Never falls back
+    to another org or a global default.
+    """
+    from services.integrations.org_config import (
+        INTEGRATION_PROJECT_OPS,
+        federation_workspace_for,
+    )
+
+    workspace_id = federation_workspace_for(org, INTEGRATION_PROJECT_OPS)
+    if not workspace_id:
+        logger.debug(
+            "projectops_token skip: no resolvable project_ops workspace org=%s",
+            getattr(org, "id", None),
+        )
+        return None
+    return await projectops_federation_token(workspace_id)
+
+
 async def projectops_federation_token(workspace_id: str) -> Optional[str]:
     """Mint a Brigade-vouched, ``workspace_id``-bound token for the MO ->
     Project-Ops triage push (``audience=project-ops``, ``scope=triage:write``).
@@ -210,4 +232,8 @@ async def projectops_federation_token(workspace_id: str) -> Optional[str]:
         return None
 
 
-__all__ = ["projectops_federation_token", "is_configured"]
+__all__ = [
+    "projectops_federation_token",
+    "projectops_federation_token_for_org",
+    "is_configured",
+]

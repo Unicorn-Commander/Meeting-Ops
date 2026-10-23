@@ -642,7 +642,16 @@ async def test_unavailable_contact_resolution_returns_no_legacy_data(monkeypatch
     async def unavailable(_contact_id, _workspace_id):
         return None
 
+    class _FakeOrg:
+        id = 7
+        workspace_id = "w"
+        integrations = {}
+
     monkeypatch.setattr(fm.contact_ops_resolver, "resolve_person_id", unavailable)
+    monkeypatch.setattr(
+        "services.integrations.org_config.get_organization",
+        lambda *_a, **_k: _FakeOrg(),
+    )
     assert await fm._dispatch_tool(
         object(), ctx, "list_meetings_for_contact", {"contact_id": "unverified"}
     ) == {"items": [], "count": 0, "next_cursor": None}
