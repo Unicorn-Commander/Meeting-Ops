@@ -247,6 +247,62 @@ class TestPutRequiresAdmin:
             db.rollback()
             db.close()
 
+    def test_workspace_id_must_be_uuid_and_round_trips(self, client):
+        _, _, _, SessionLocal = _current_models()
+        db = SessionLocal()
+        try:
+            u_slug = _unique("ws-admin")
+            o_slug = _unique("ws-org")
+            user = _seed_user(db, u_slug)
+            org = _seed_org(db, o_slug)
+            _seed_membership(db, user.id, org.id, "admin")
+            headers = _login_headers(client, u_slug, "test123", o_slug)
+
+            bad = client.put(
+                "/api/integrations/me/contact_ops",
+                json={"workspace_id": "not-a-uuid"},
+                headers=headers,
+            )
+            assert bad.status_code == 400, bad.text
+            assert "UUID" in bad.json()["detail"]
+
+            override = "019EC30C-7dbb-7d29-be7e-47b08b6ec59e"
+            good = client.put(
+                "/api/integrations/me/contact_ops",
+                json={"enabled": True, "workspace_id": override},
+                headers=headers,
+            )
+            assert good.status_code == 200, good.text
+            assert (
+                good.json()["extra"]["workspace_id"]
+                == "019ec30c-7dbb-7d29-be7e-47b08b6ec59e"
+            )
+
+            po = client.put(
+                "/api/integrations/me/project_ops",
+                json={
+                    "enabled": True,
+                    "workspace_id": "019e50a3-d995-723f-ab66-0f765f92c0f4",
+                },
+                headers=headers,
+            )
+            assert po.status_code == 200, po.text
+            assert (
+                po.json()["extra"]["workspace_id"]
+                == "019e50a3-d995-723f-ab66-0f765f92c0f4"
+            )
+
+            cleared = client.put(
+                "/api/integrations/me/contact_ops",
+                json={"workspace_id": ""},
+                headers=headers,
+            )
+            assert cleared.status_code == 200, cleared.text
+            assert cleared.json()["extra"]["workspace_id"] == ""
+        finally:
+            db.rollback()
+            db.close()
+
 
 class TestDelete:
     def test_delete_clears_creds_and_disables(self, client):

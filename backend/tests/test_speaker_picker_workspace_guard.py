@@ -22,7 +22,7 @@ def _models():
     return Organization, User, UserOrganization, SessionLocal, RecordingSession, SpeakerProfile, SpeakerSessionLink
 
 
-def _seed(*, workspace_id: str | None = "set"):
+def _seed(*, workspace_id: str | None = "set", integrations=None):
     Organization, User, UserOrganization, SessionLocal, RecordingSession, _, SpeakerSessionLink = _models()
     suffix = uuid.uuid4().hex[:8]
     ws = f"ws-{suffix}" if workspace_id == "set" else workspace_id
@@ -31,6 +31,7 @@ def _seed(*, workspace_id: str | None = "set"):
         org = Organization(
             name=f"Picker guard {suffix}", slug=f"picker-guard-{suffix}",
             is_active=True, plan="pro", workspace_id=ws,
+            integrations=integrations or {},
         )
         db.add(org)
         db.flush()
@@ -246,6 +247,28 @@ def test_assign_rejects_when_session_workspace_is_unmapped(client, monkeypatch):
     assert "not mapped" in resp.json()["detail"]
     assert seen["calls"] == 0
     assert _speaker_contact(speaker_id) == (None, False)
+
+
+def test_assign_uses_contact_ops_workspace_override(client, monkeypatch):
+    """Picker resolve must send the contact_ops override, not org.workspace_id."""
+    override = "019ec30c-7dbb-7d29-be7e-47b08b6ec59e"
+    org_ws = "0190a000-7e57-7000-8000-00000000c007"
+    seeded = _seed(
+        workspace_id=org_ws,
+        integrations={"contact_ops": {"workspace_id": override}},
+    )
+    speaker_id = _add_speaker(seeded["org_id"], "Jules Whitman")
+    seen = _mock_resolver(monkeypatch, status="canonical", canonical=CANONICAL)
+    resp = client.patch(
+        f"/api/sessions/{seeded['session_pk']}/speaker-links/{seeded['link_id']}",
+        headers=_headers(client, seeded["username"], seeded["slug"]),
+        json={"speaker_id": speaker_id, "confirmed": True, "contact_id": FOREIGN},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen["calls"] == 1
+    assert seen["workspace_id"] == override
+    assert seen["workspace_id"] != org_ws
+    assert _speaker_contact(speaker_id) == (CANONICAL, True)
 
 
 def test_assign_stores_redirected_canonical_id(client, monkeypatch):

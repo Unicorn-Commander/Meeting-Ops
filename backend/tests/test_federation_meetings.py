@@ -293,7 +293,7 @@ async def test_dispatch_routes_each_tool(monkeypatch):
     ctx = fm.FederationContext(org_id=7, workspace_id="w", sub="s", scopes={fm.READ_SCOPE})
     calls = {}
 
-    async def resolved(_ctx, contact_id):
+    async def resolved(_ctx, contact_id, _db=None):
         return [f"canonical-{contact_id}", f"alias-{contact_id}"]
 
     monkeypatch.setattr(fm, "_resolved_contact_ids", resolved)
@@ -324,7 +324,7 @@ async def test_legacy_rest_and_mcp_use_all_resolved_ids_and_minimized_shape(monk
     ctx = fm.FederationContext(org_id=7, workspace_id="w", sub="s", scopes={fm.READ_SCOPE})
     seen: list[list[str]] = []
 
-    async def resolved(_ctx, _contact_id):
+    async def resolved(_ctx, _contact_id, _db=None):
         return ["canonical", "merged-alias"]
 
     def meetings(_db, _org, contact_ids, **_kwargs):

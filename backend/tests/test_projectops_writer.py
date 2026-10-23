@@ -210,6 +210,7 @@ def _clear_projectops_env(monkeypatch):
         "PROJECTOPS_KC_CLIENT_ID",
         "PROJECTOPS_KC_CLIENT_SECRET",
         "PROJECTOPS_AUTO_PUSH_ACTION_ITEMS",
+        "PROJECTOPS_AUTO_PUSH_ENV_FALLBACK",
         "PROJECTOPS_WRITE_PATH",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -1068,6 +1069,50 @@ def _patch_federation_token(monkeypatch, *, returns):
 
     monkeypatch.setattr(fed, "projectops_federation_token", _fake)
     return asked
+
+
+def test_triage_uses_project_ops_workspace_override(client, monkeypatch):
+    """Outbound exchange must send integrations.project_ops.workspace_id,
+    not Organization.workspace_id, when the override is set."""
+    from auth.models import Organization
+    from database.database import SessionLocal
+    from services.projectops_writer import submit_action_items_to_triage
+    from sqlalchemy.orm.attributes import flag_modified
+
+    asked = _patch_federation_token(monkeypatch, returns="fed-override-tok")
+    org_id, session_id = _seed(workspace_id="ws-org-column")
+    override = "019e50a3-d995-723f-ab66-0f765f92c0f4"
+
+    db = SessionLocal()
+    try:
+        org = db.query(Organization).filter(Organization.id == org_id).one()
+        org.integrations = {
+            "project_ops": {
+                "enabled": True,
+                "auto_push_action_items": True,
+                "workspace_id": override,
+            }
+        }
+        flag_modified(org, "integrations")
+        db.commit()
+    finally:
+        db.close()
+
+    stub = _FakeProjectOpsClient()
+    db = SessionLocal()
+    try:
+        result = _run(
+            submit_action_items_to_triage(
+                db=db, session_pk=session_id, client=stub
+            )
+        )
+    finally:
+        db.close()
+
+    assert result.ok is True
+    assert asked == [override]
+    assert len(stub.submitted) == 1
+    assert stub.submitted[0]["bearer_override"] == "fed-override-tok"
 
 
 def test_triage_uses_federation_bearer_when_workspace_resolves(client, monkeypatch):

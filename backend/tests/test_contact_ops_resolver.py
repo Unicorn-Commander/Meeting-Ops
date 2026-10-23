@@ -148,6 +148,24 @@ async def test_http_500_returns_none(monkeypatch):
 async def test_blank_email_returns_none(monkeypatch):
     _enable(monkeypatch)
     assert await r.resolve_email("", "ws-1") is None
+
+
+@pytest.mark.asyncio
+async def test_blank_workspace_skips_outbound(monkeypatch):
+    """Global switch on + secret set still must not hit Contact-Ops without
+    a resolvable per-org workspace."""
+    called = {"n": 0}
+
+    async def _boom(*_a, **_k):
+        called["n"] += 1
+        return "x"
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(r, "_contact_ops_token", _boom)
+    assert await r.resolve_email("a@b.com", "") is None
+    assert await r.search_people("ab", "") == []
+    assert await r.resolve_person_id("p-1", "") is None
+    assert called["n"] == 0
     assert await r.resolve_email("a@b.com", "") is None
 
 
