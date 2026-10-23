@@ -1,0 +1,142 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meetingops
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; run ./install-meeting-ops.sh}"
+      POSTGRES_DB: meeting_sessions
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${MEETING_OPS_POSTGRES_PORT:-5434}:5432"
+    networks:
+      - meeting-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meetingops -d meeting_sessions"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./install-meeting-ops.sh}"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./install-meeting-ops.sh}"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:${MEETING_OPS_REDIS_PORT:-6381}:6379"
+    networks:
+      - meeting-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: "postgresql://meetingops:${POSTGRES_PASSWORD}@postgres:5432/meeting_sessions"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      SECRET_KEY: "${SECRET_KEY:?SECRET_KEY is required; run ./install-meeting-ops.sh}"
+      ENVIRONMENT: production
+      APP_BASE_URL: "${APP_BASE_URL:-http://127.0.0.1:7777}"
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:7777}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://127.0.0.1:7777,http://localhost:7777}"
+      DISABLE_LOCAL_AUDIO: "true"
+      MEDIA_STORAGE_DISABLED: "true"
+      MCP_HOSTED_ENABLED: "true"
+      MCP_BACKEND_URL: http://127.0.0.1:9050
+      MEETING_OPS_URL: http://127.0.0.1:9050
+      WS_REQUIRE_AUTH: "true"
+      # Self-host has local email/password identity. This local OIDC value
+      # prevents an accidental fallback to a hosted identity provider; OIDC
+      # is not required for the quickstart.
+      KEYCLOAK_URL: http://127.0.0.1:9050/oidc
+      KEYCLOAK_REALM: local
+      KEYCLOAK_CLIENT_ID: meeting-ops-local
+      # Optional providers intentionally point at loopback until configured.
+      # Set their env names in .env before restarting the stack when needed.
+      LITELLM_API_BASE: "${LITELLM_API_BASE:-http://127.0.0.1:4000/v1}"
+      INFINITY_ENDPOINT: "${INFINITY_ENDPOINT:-http://127.0.0.1:8086/v1}"
+      INFINITY_EMBEDDING_ENDPOINT: "${INFINITY_EMBEDDING_ENDPOINT:-http://127.0.0.1:8086/v1}"
+      INFINITY_RERANKER_ENDPOINT: "${INFINITY_RERANKER_ENDPOINT:-http://127.0.0.1:8086/v1}"
+      KOKORO_ENDPOINT: "${KOKORO_ENDPOINT:-http://127.0.0.1:8880}"
+      PARAKEET_SERVER_URL: "${PARAKEET_SERVER_URL:-http://127.0.0.1:8881}"
+      SPEAKER_SVC_URL: "${SPEAKER_SVC_URL:-http://127.0.0.1:8889}"
+      BRIGADE_API_BASE_URL: "${BRIGADE_API_BASE_URL:-http://127.0.0.1:8100}"
+      PROJECTOPS_BASE_URL: "${PROJECTOPS_BASE_URL:-http://127.0.0.1:3201/api/v1}"
+      CONTACT_OPS_MCP_URL: "${CONTACT_OPS_MCP_URL:-http://127.0.0.1:8501/mcp}"
+    volumes:
+      - ./data:/app/data
+      - ./recordings:/app/recordings
+    ports:
+      - "127.0.0.1:${MEETING_OPS_API_PORT:-9050}:9050"
+    networks:
+      - meeting-ops
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # The historical Alembic chain starts from an already-created baseline.
+    # On a new self-host volume, create the current model schema once and stamp
+    # that baseline; existing installations continue through Alembic normally.
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -eu
+      schema_state="$$(python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; from sqlalchemy import inspect; from database.database import engine; print("empty" if "alembic_version" not in inspect(engine).get_table_names() else "existing")')"
+      if [ "$$schema_state" = "empty" ]; then
+        python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; import init_db'
+        alembic stamp head
+      else
+        alembic upgrade head
+      fi
+      exec python -m uvicorn main:app --host 0.0.0.0 --port 9050 --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:-*}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9050/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${MEETING_OPS_WEB_PORT:-7777}:7777"
+    networks:
+      - meeting-ops
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    # The checked-in Nginx config is also used by HTTPS deployments and adds
+    # upgrade-insecure-requests there. The public self-host UI is HTTP on
+    # loopback, so remove only that directive at container start.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sed -i 's/; upgrade-insecure-requests//g' /etc/nginx/conf.d/default.conf
+        exec nginx -g 'daemon off;'
+
+networks:
+  meeting-ops:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
