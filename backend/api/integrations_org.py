@@ -47,6 +47,7 @@ from database.database import get_db
 from services.integrations.org_config import (
     VALID_INTEGRATION_KEYS,
     empty_integration_block,
+    parse_federation_workspace_id,
     INTEGRATION_BRIGADE,
     INTEGRATION_PROJECT_OPS,
     INTEGRATION_CONTACT_OPS,
@@ -103,6 +104,9 @@ class IntegrationUpdate(BaseModel):
     # meeting completion. Default OFF (opt-in) to avoid task noise; the
     # writer only fires the automatic push when this is True.
     auto_push_action_items: Optional[bool] = None
+    # Per-target Brigade workspace UUID for outbound exchanges
+    # (contact_ops / project_ops). Empty string clears the override.
+    workspace_id: Optional[str] = None
 
 
 class TestResult(BaseModel):
@@ -267,6 +271,9 @@ def _mask_block(integration_key: str, block: dict[str, Any]) -> IntegrationView:
         extra["auto_push_action_items"] = bool(
             block.get("auto_push_action_items", False)
         )
+        extra["workspace_id"] = block.get("workspace_id") or ""
+    elif integration_key == INTEGRATION_CONTACT_OPS:
+        extra["workspace_id"] = block.get("workspace_id") or ""
     return IntegrationView(
         key=integration_key,
         enabled=bool(block.get("enabled")),
@@ -400,6 +407,20 @@ async def update_integration(
             block["default_project_number"] = payload.default_project_number.strip()
         if payload.auto_push_action_items is not None:
             block["auto_push_action_items"] = bool(payload.auto_push_action_items)
+
+    if integration in (INTEGRATION_PROJECT_OPS, INTEGRATION_CONTACT_OPS):
+        if payload.workspace_id is not None:
+            supplied = payload.workspace_id.strip()
+            if not supplied:
+                block["workspace_id"] = ""
+            else:
+                parsed = parse_federation_workspace_id(supplied)
+                if parsed is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="workspace_id must be a UUID",
+                    )
+                block["workspace_id"] = parsed
 
     _write_block(org, integration, block)
     db.commit()

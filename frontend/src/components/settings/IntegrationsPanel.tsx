@@ -96,6 +96,7 @@ interface FormState {
   shared_agent_id: string;
   default_project_number: string;
   auto_push_action_items: boolean;
+  workspace_id: string;
   showKey: boolean;
 }
 
@@ -109,6 +110,7 @@ function defaultFormFromView(view: IntegrationView): FormState {
     shared_agent_id: (extra.shared_agent_id as string) || '',
     default_project_number: (extra.default_project_number as string) || '',
     auto_push_action_items: Boolean(extra.auto_push_action_items),
+    workspace_id: (extra.workspace_id as string) || '',
     showKey: false,
   };
 }
@@ -192,6 +194,9 @@ export default function IntegrationsPanel() {
       } else if (key === 'project_ops') {
         payload.default_project_number = form.default_project_number;
         payload.auto_push_action_items = form.auto_push_action_items;
+        payload.workspace_id = form.workspace_id;
+      } else if (key === 'contact_ops') {
+        payload.workspace_id = form.workspace_id;
       }
       const next = await updateIntegration(key, payload);
       setViews((prev) => ({ ...prev, [key]: next }));
@@ -397,6 +402,16 @@ export default function IntegrationsPanel() {
                       />
                     )}
                   </>
+                )}
+
+                {(card.key === 'project_ops' || card.key === 'contact_ops') && (
+                  <Field
+                    label="Federation workspace ID (optional)"
+                    value={form.workspace_id}
+                    onChange={(v) => updateForm(card.key, { workspace_id: v })}
+                    placeholder="00000000-0000-0000-0000-000000000000"
+                    disabled={!isAdmin || busy}
+                  />
                 )}
 
                 {card.key === 'project_ops' && (

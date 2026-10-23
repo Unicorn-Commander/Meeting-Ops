@@ -51,6 +51,11 @@ export interface IntegrationUpdatePayload {
    * the Project-Ops triage inbox (propose-only). Default false (opt-in).
    */
   auto_push_action_items?: boolean;
+  /**
+   * Per-target Brigade workspace UUID for outbound exchanges
+   * (contact_ops / project_ops). Empty string clears the override.
+   */
+  workspace_id?: string;
 }
 
 export interface TestResult {
