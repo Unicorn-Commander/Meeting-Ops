@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -62,6 +63,13 @@ VALID_INTEGRATION_KEYS = (
     INTEGRATION_CONTACT_OPS,
     INTEGRATION_ACCOUNTING_OPS,
     INTEGRATION_STABLE,
+)
+
+# Outbound Brigade exchanges that may carry a per-target workspace override
+# under Organization.integrations[<key>].workspace_id. Inbound federation
+# still binds exclusively on Organization.workspace_id.
+_FEDERATION_WORKSPACE_TARGETS = frozenset(
+    {INTEGRATION_PROJECT_OPS, INTEGRATION_CONTACT_OPS}
 )
 
 
@@ -103,6 +111,13 @@ def empty_integration_block(integration_key: str) -> dict[str, Any]:
         # OFF) so model-flagged noise doesn't create task spam. Manual /
         # on-demand pushes are unaffected by this flag.
         base["auto_push_action_items"] = False
+        # Per-target Brigade workspace for the MO -> Project-Ops exchange.
+        # Empty -> fall through to Organization.workspace_id.
+        base["workspace_id"] = ""
+    elif integration_key == INTEGRATION_CONTACT_OPS:
+        # Per-target Brigade workspace for the MO -> Contact-Ops exchange.
+        # Empty -> fall through to Organization.workspace_id.
+        base["workspace_id"] = ""
     return base
 
 
@@ -138,6 +153,63 @@ def _block_for(organization: Any, integration_key: str) -> Optional[dict[str, An
     if not isinstance(block, dict):
         return None
     return block
+
+
+def parse_federation_workspace_id(value: Any) -> Optional[str]:
+    """Canonical UUID string, or None when empty / not a UUID.
+
+    Used to validate ``integrations.<target>.workspace_id`` on write and
+    to ignore a corrupt override on read. ``Organization.workspace_id``
+    is not required to be a UUID (tests and some deploys use other
+    strings), so the org-column fallback does not go through this.
+    """
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def federation_workspace_for(org: Any, target: str) -> Optional[str]:
+    """Workspace id for an outbound Brigade exchange to ``target``.
+
+    Returns ``integrations.<target>.workspace_id`` when that override is
+    a valid UUID, else ``Organization.workspace_id``, else None. Never
+    falls back to another org or a global default. ``target`` is an
+    integration key (``contact_ops`` / ``project_ops``). Unknown targets
+    return None so a typo cannot silently send the org column.
+    """
+    if org is None:
+        return None
+    key = (target or "").strip()
+    if key not in _FEDERATION_WORKSPACE_TARGETS:
+        logger.debug(
+            "federation_workspace_for: unknown target %r org=%s",
+            target,
+            getattr(org, "id", None),
+        )
+        return None
+    block = _block_for(org, key)
+    if block is not None:
+        raw_override = block.get("workspace_id")
+        if isinstance(raw_override, str) and raw_override.strip():
+            override = parse_federation_workspace_id(raw_override)
+            if override:
+                return override
+            logger.debug(
+                "federation_workspace_for: ignoring invalid %s "
+                "workspace_id override org=%s",
+                key,
+                getattr(org, "id", None),
+            )
+    org_ws = getattr(org, "workspace_id", None)
+    if isinstance(org_ws, str) and org_ws.strip():
+        return org_ws.strip()
+    return None
 
 
 def get_organization(db: Session, organization_id: int) -> Optional[Any]:
@@ -240,10 +312,15 @@ def resolve_project_ops(
     so model-flagged items don't create task noise; an org admin opts in
     per-org. For orgs on the env-default path (no integration block) the
     default comes from the ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS`` deploy
-    flag (also OFF by default). This flag does NOT affect extraction,
-    storage, in-app display, read-only lifecycle reconciliation, or any
-    future explicit review-then-push — only the auto-push. Meeting-Ops never
-    writes Project-Ops Task status.
+    flag (also OFF by default) **only when**
+    ``PROJECTOPS_AUTO_PUSH_ENV_FALLBACK`` is true (dogfood default). When
+    that fallback is false (prod multi-tenant compose), orgs that never
+    set a project_ops block never inherit the env flag — pushing happens
+    only when the org's own ``integrations.project_ops`` says enabled +
+    auto_push. This flag does NOT affect extraction, storage, in-app
+    display, read-only lifecycle reconciliation, or any future explicit
+    review-then-push — only the auto-push. Meeting-Ops never writes
+    Project-Ops Task status.
     """
     block: Optional[dict[str, Any]] = None
     legacy_default: Optional[str] = None
@@ -294,20 +371,28 @@ def resolve_project_ops(
 
     # Env-default fallback. Orgs without an integration block inherit the
     # deploy-level auto-push default (PROJECTOPS_AUTO_PUSH_ACTION_ITEMS,
-    # itself OFF by default) so the push stays deliberate out of the box.
-    from config.features import PROJECTOPS_AUTO_PUSH_ACTION_ITEMS
+    # itself OFF by default) only when PROJECTOPS_AUTO_PUSH_ENV_FALLBACK
+    # is on. Prod compose turns the fallback off so a global env cannot
+    # enable push for every tenant.
+    from config.features import (
+        projectops_auto_push_action_items,
+        projectops_auto_push_env_fallback,
+    )
 
     env_key = os.getenv("PROJECTOPS_API_KEY")
     env_url = os.getenv("PROJECTOPS_BASE_URL") or os.getenv(
         "PROJECTOPS_API_BASE_URL"
     )
+    env_auto_push = False
+    if projectops_auto_push_env_fallback():
+        env_auto_push = projectops_auto_push_action_items()
     return IntegrationConfig(
         enabled=bool(env_key),
         api_base_url=env_url,
         api_key=env_key,
         extra={
             "default_project_number": legacy_default,
-            "auto_push_action_items": bool(PROJECTOPS_AUTO_PUSH_ACTION_ITEMS),
+            "auto_push_action_items": bool(env_auto_push),
         },
         source="env_default",
     )
@@ -397,6 +482,8 @@ __all__ = [
     "INTEGRATION_STABLE",
     "VALID_INTEGRATION_KEYS",
     "empty_integration_block",
+    "parse_federation_workspace_id",
+    "federation_workspace_for",
     "resolve_brigade",
     "resolve_project_ops",
     "resolve_contact_ops",

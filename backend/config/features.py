@@ -24,6 +24,14 @@ PROJECTOPS_AUTO_PUSH_ACTION_ITEMS:
     this gate only controls the automatic OUTBOUND push. Set this to true
     in compose only on deploys that want the legacy always-push behavior.
 
+PROJECTOPS_AUTO_PUSH_ENV_FALLBACK:
+    Whether orgs with no ``integrations.project_ops`` block inherit
+    ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS``. Defaults ON so dogfood (single
+    tenant, env-driven) stays unchanged. Multi-tenant prod compose sets
+    this false: auto-push then happens only when the org's own
+    ``integrations.project_ops`` block says enabled + auto_push. Never
+    turns pushing on for a customer org that never opted in.
+
 Add new flags here, then pass them through the per-deploy compose
 ``environment:`` block (see ``deploy/*/docker-compose.*.yml``).
 """
@@ -51,6 +59,28 @@ ROOM_MODE_ENABLED: bool = _bool("ROOM_MODE_ENABLED", True)
 PROJECTOPS_AUTO_PUSH_ACTION_ITEMS: bool = _bool(
     "PROJECTOPS_AUTO_PUSH_ACTION_ITEMS", False
 )
+
+# Whether the env auto-push flag applies to orgs that never set a
+# project_ops integration block. Default ON (dogfood). Prod compose
+# sets this false so a global env cannot enable push for every tenant.
+PROJECTOPS_AUTO_PUSH_ENV_FALLBACK: bool = _bool(
+    "PROJECTOPS_AUTO_PUSH_ENV_FALLBACK", True
+)
+
+
+def projectops_auto_push_action_items() -> bool:
+    """Live ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS``. Default False."""
+    return _bool("PROJECTOPS_AUTO_PUSH_ACTION_ITEMS", False)
+
+
+def projectops_auto_push_env_fallback() -> bool:
+    """Live ``PROJECTOPS_AUTO_PUSH_ENV_FALLBACK``. Default True.
+
+    True: orgs without an ``integrations.project_ops`` block inherit
+    ``PROJECTOPS_AUTO_PUSH_ACTION_ITEMS`` (dogfood). False: those orgs
+    never auto-push; only an explicit per-org opt-in turns it on.
+    """
+    return _bool("PROJECTOPS_AUTO_PUSH_ENV_FALLBACK", True)
 
 
 def action_item_gate_mode() -> str:
