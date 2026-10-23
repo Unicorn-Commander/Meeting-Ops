@@ -11,10 +11,32 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from auth.utils import get_password_hash
 
 CONTACT_A = "3f6c2a8e-1d4b-4c1e-9a52-6b0f1e7d2c01"
 CONTACT_B = "9b1d7e44-5a0c-4f3e-8e21-2c6a9d0b4f02"
+
+
+@pytest.fixture(autouse=True)
+def _resolver_accepts_picked_ids(monkeypatch):
+    """These tests cover picker landing rules. Workspace rejection is
+    test_speaker_picker_workspace_guard.py. A configured resolver that
+    echoes the picked id lets the existing landing assertions run."""
+    from api import speakers as speakers_api
+
+    monkeypatch.setattr(speakers_api.contact_ops_resolver, "is_configured", lambda: True)
+
+    async def resolve(person_id, _workspace_id):
+        return {
+            "requested_person_id": person_id,
+            "canonical_person_id": person_id,
+            "alias_ids": [],
+            "status": "canonical",
+        }
+
+    monkeypatch.setattr(speakers_api.contact_ops_resolver, "resolve_person_id", resolve)
 
 
 def _models():
@@ -30,7 +52,10 @@ def _seed(role: str = "admin"):
     suffix = uuid.uuid4().hex[:8]
     db = SessionLocal()
     try:
-        org = Organization(name=f"Picker {suffix}", slug=f"picker-{suffix}", is_active=True, plan="pro")
+        org = Organization(
+            name=f"Picker {suffix}", slug=f"picker-{suffix}", is_active=True, plan="pro",
+            workspace_id=f"ws-{suffix}",
+        )
         db.add(org)
         db.flush()
         user = User(

@@ -33,7 +33,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_organization, get_current_user
-from auth.models import AuditLog, User, UserOrganization
+from auth.models import AuditLog, Organization, User, UserOrganization
 from auth.organization import ActiveOrganization
 from auth.tier import gate_feature_for_caller
 from database.database import get_db
@@ -45,6 +45,7 @@ from database.models import (
     SpeakerVoiceSample,
     Transcription,
 )
+from services import contact_ops_resolver
 from services.providers.registry import get_provider_registry
 from services.speaker_self_intro import extract_self_intro_names
 from services.speaker_service import (
@@ -700,22 +701,60 @@ def _find_speaker_for_pick(
     )
 
 
-def _attach_picked_contact(
+async def _attach_picked_contact(
+    db: Session,
+    session: RecordingSession,
     speaker: SpeakerProfile,
     contact_id: Optional[str],
     current_user: User,
 ) -> None:
-    """Link a profile to the Contact-Ops person the user picked in the
-    speaker picker. Only FILLS an empty link (or re-confirms the same one):
-    the picker is open to every speaker editor, so it never re-points a
-    profile that already belongs to a different contact — that stays an
-    admin action in the Speaker Library. 409 instead of a silent overwrite.
+    """Link a profile to the Contact-Ops person the user picked.
+
+    The picker-supplied id is accepted only when Contact-Ops resolves it
+    as canonical or redirected in the session's workspace — the same trust
+    decision as ``sessions_participants._verified_contact_link``. An
+    unresolved id, an id from another workspace, a missing workspace
+    mapping, or an unreachable resolver fails closed: this raises and
+    writes nothing. Only FILLS an empty link (or re-confirms the same
+    canonical one). Re-pointing a profile that already belongs to a
+    different contact stays an admin action in the Speaker Library.
     """
     contact_id = (contact_id or "").strip()
     if not contact_id:
         return
+
+    org = (
+        db.query(Organization)
+        .filter(Organization.id == session.organization_id)
+        .first()
+    )
+    workspace_id = (getattr(org, "workspace_id", None) or "").strip() if org else ""
+    if not workspace_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Session organization is not mapped to a federation workspace",
+        )
+    if not contact_ops_resolver.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contact-Ops identity resolver is not configured",
+        )
+    resolution = await contact_ops_resolver.resolve_person_id(contact_id, workspace_id)
+    if resolution is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Contact-Ops identity resolution is unavailable",
+        )
+    canonical = resolution.get("canonical_person_id")
+    if resolution.get("status") not in {"canonical", "redirected"} or not canonical:
+        raise HTTPException(
+            status_code=422,
+            detail="Contact-Ops person is not linkable in this workspace",
+        )
+    canonical = str(canonical)
+
     current = (speaker.contact_id or "").strip()
-    if current and current != contact_id:
+    if current and current != canonical:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -723,9 +762,9 @@ def _attach_picked_contact(
                 "Change it in the Speaker Library."
             ),
         )
-    if current == contact_id and speaker.contact_link_confirmed:
+    if current == canonical and speaker.contact_link_confirmed:
         return
-    speaker.contact_id = contact_id
+    speaker.contact_id = canonical
     speaker.contact_link_confirmed = True
     speaker.contact_link_confirmed_by_user_id = current_user.id
     speaker.contact_link_confirmed_at = datetime.now(timezone.utc)
@@ -1647,7 +1686,7 @@ async def update_speaker_link(
             # v3.36.0 "My Voice": bind the profile to the caller (409 if it
             # already belongs to someone else).
             _apply_is_me_claim(speaker, current_user)
-        _attach_picked_contact(speaker, payload.contact_id, current_user)
+        await _attach_picked_contact(db, session, speaker, payload.contact_id, current_user)
         link.speaker_id = speaker.id
     else:
         link.speaker_id = None
@@ -1852,7 +1891,7 @@ async def create_speaker_for_link(
         )
         db.add(speaker)
         db.flush()
-    _attach_picked_contact(speaker, payload.contact_id, current_user)
+    await _attach_picked_contact(db, session, speaker, payload.contact_id, current_user)
 
     if payload.is_me:
         # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
@@ -2432,7 +2471,7 @@ async def enroll_speaker_from_session(
         db.add(speaker)
         db.flush()
         created_new = True
-    _attach_picked_contact(speaker, payload.contact_id, current_user)
+    await _attach_picked_contact(db, session, speaker, payload.contact_id, current_user)
 
     if payload.is_me:
         # v3.36.0 "My Voice": bind the (new or reused) profile to the caller.
