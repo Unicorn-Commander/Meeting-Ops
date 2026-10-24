@@ -3,6 +3,8 @@ name = "unicorn-commander-npu"
 version = "1.0.0"
 description = "Unicorn Commander Meeting Ops with NPU acceleration and MLIR-AIE2 kernel support"
 authors = ["Unicorn Commander Team"]
+license = "Apache-2.0"
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 packages = [{include = ".", from = "."}]
 
 [tool.poetry.dependencies]

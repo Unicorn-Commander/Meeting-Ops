@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="./VERSION"><img src="https://img.shields.io/badge/version-3.58.0-6f42c1.svg" alt="Version 3.58.0"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="AGPL-3.0 licence"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
   <a href="./backend"><img src="https://img.shields.io/badge/backend-FastAPI-009688.svg" alt="FastAPI backend"></a>
   <a href="./frontend"><img src="https://img.shields.io/badge/frontend-React-61DAFB.svg" alt="React frontend"></a>
   <a href="./docker-compose.selfhost.yml"><img src="https://img.shields.io/badge/deploy-Docker%20Compose-2496ED.svg" alt="Docker Compose deployment"></a>
@@ -302,6 +302,6 @@ Please report vulnerabilities privately to [security@magicunicorn.tech](mailto:s
 
 ## Licence
 
-Meeting-Ops is licensed under the GNU Affero General Public License, version 3, or any later version (AGPL-3.0-or-later), as stated in [`NOTICE`](NOTICE). The license text is [`LICENSE`](LICENSE).
+Meeting-Ops is licensed under the [Apache License 2.0](LICENSE). You can use, change and redistribute it, including commercially, under its terms. Our names and logos are covered by [TRADEMARKS.md](TRADEMARKS.md).
 
 Built by [Magic Unicorn](https://magicunicorn.tech) · part of [Unicorn Commander](https://unicorncommander.ai)

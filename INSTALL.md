@@ -104,4 +104,4 @@ keep Postgres/Redis private, and use a separate secret-management system.
 
 ## License
 
-The repository's license is AGPL-3.0. This lane does not modify `LICENSE`.
+The repository's license is Apache-2.0. See `LICENSE` and `TRADEMARKS.md`.
