@@ -57,6 +57,13 @@ Meeting-Ops is a self-hosted workspace for recording meetings, processing audio 
 
 The session page shows the summary, including decisions, with the transcript, speakers, audio, action items, per-meeting chat, and downloads. Follow-up work can be reviewed from that record and, when configured, linked to Project-Ops.
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/session-transcript.webp" alt="The diarized transcript of a meeting"><br><sub>Diarized transcript</sub></td>
+    <td width="50%"><img src="docs/screenshots/action-items.webp" alt="Action items across meetings, with owners and due dates"><br><sub>Action items across meetings</sub></td>
+  </tr>
+</table>
+
 ### Record with live context
 
 <p align="center">
@@ -69,21 +76,9 @@ The recording surface uses browser capture, in-browser live transcription, progr
 
 ### Connect the dots
 
-<p align="center">
-  <img src="docs/screenshots/knowledge-graph.webp" width="1100" alt="Knowledge graph showing connections across meetings">
-</p>
-
-*Knowledge graph across meetings.*
-
 Start with a person and follow their meetings, co-speakers, topics, decisions, and action items. The API resolves the speaker inside the active organization, then hydrates display fields from Meeting-Ops records. Brigade supplies the graph when that integration is enabled. The self-host web build shows the nav item only when `VITE_KNOWLEDGE_GRAPH_PAGE_ENABLED=true`.
 
 ### Ask across the archive
-
-<p align="center">
-  <img src="docs/screenshots/ask.webp" width="1100" alt="Ask interface for questions across every meeting">
-</p>
-
-*Ask questions across the meetings in the workspace.*
 
 The dashboard ask bar calls the Meeting Assistant (`meeting-rag`) through `POST /api/agents/chat`. AI Chat uses the same assistant by default. Responses stream as server-sent events and can include meeting sources. AI Chat's agent picker can also list Brigade agents when that integration is configured. The base self-host stack does not start a completion provider, so these calls need one before they can answer.
 
@@ -149,12 +144,10 @@ The authenticated `/api/agents` dispatcher lists the local Meeting Assistant (`m
 The maintained self-host path is Docker-only. [`install-meeting-ops.sh`](install-meeting-ops.sh) requires Docker Engine, Docker Compose v2, `curl`, and `openssl`, and it checks those before it changes anything. The installer does not download a speech or summary model. The host does not need a GPU, Node.js, or Python, an external identity provider, or another suite service. [INSTALL.md](INSTALL.md) documents Linux as the supported host.
 
 ```bash
-git clone https://github.com/Unicorn-Commander/meeting-ops-community.git
-cd meeting-ops-community
+git clone https://github.com/Unicorn-Commander/Meeting-Ops.git
+cd Meeting-Ops
 ./install-meeting-ops.sh
 ```
-
-That clone URL is the public name recorded in this repository. It was not in the public Unicorn-Commander repository list when this page was checked. The separate public snapshot [Meeting-Ops-OSS](https://github.com/Unicorn-Commander/Meeting-Ops-OSS) does not contain `docker-compose.selfhost.yml`. Run the installer from a checkout of this source tree.
 
 The installer builds the checked-in backend and web images, starts PostgreSQL, Redis, the FastAPI backend, and the web container, initializes the database schema on an empty volume, and creates a local bootstrap admin. Sign in with the generated local username and password. No external identity provider is required for this path.
 
@@ -272,12 +265,12 @@ flowchart LR
 | App | What it does |
 |---|---|
 | Brigade | Optional agents and the person-centered knowledge graph this repository can call |
-| [Unicorn Stable](https://github.com/Unicorn-Commander/unicorn-stable-oss) | Humans and agents in the same room |
-| [Accounting-Ops](https://github.com/Unicorn-Commander/accounting-ops-oss) | Agent-native accounting and books |
-| [Contact-Ops](https://github.com/Unicorn-Commander/contact-ops-community) | Shared contact and identity layer |
-| [Customer-Ops](https://github.com/Unicorn-Commander/customer-ops-community) | Customer relationships and pipeline |
-| [Email-Ops](https://github.com/Unicorn-Commander/email-ops-community) | Agent-governed email with a human approval inbox |
-| [Project-Ops](https://github.com/Unicorn-Commander/project-ops-community) | Projects and tasks |
+| [Unicorn Stable](https://github.com/Unicorn-Commander/Unicorn-Stable) | Humans and agents in the same room |
+| [Accounting-Ops](https://github.com/Unicorn-Commander/Accounting-Ops) | Agent-native accounting and books |
+| [Contact-Ops](https://github.com/Unicorn-Commander/Contact-Ops) | Shared contact and identity layer |
+| [Customer-Ops](https://github.com/Unicorn-Commander/Customer-Ops) | Customer relationships and pipeline |
+| [Email-Ops](https://github.com/Unicorn-Commander/Email-Ops) | Agent-governed email with a human approval inbox |
+| [Project-Ops](https://github.com/Unicorn-Commander/Project-Ops) | Projects and tasks |
 | **Meeting-Ops** | **Recordings, transcripts, summaries, and action items** |
 
 Meeting-Ops reaches the rest of the suite through organization-scoped records and the optional Brigade, Project-Ops, and Contact-Ops paths implemented in this repository.
