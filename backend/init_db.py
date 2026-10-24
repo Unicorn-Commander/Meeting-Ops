@@ -14,4 +14,13 @@ with engine.begin() as conn:
 print("Creating all tables...")
 AuthBase.metadata.create_all(bind=engine)
 AppBase.metadata.create_all(bind=engine)
+# The caller stamps head next. Alembic would create alembic_version as
+# VARCHAR(32); revision ids here run longer (039_widen_alembic_ver widens it on
+# the upgrade path), so create it at the widened size first.
+with engine.begin() as conn:
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(255) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    ))
 print("All tables created successfully.")
