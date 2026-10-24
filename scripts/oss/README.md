@@ -1,7 +1,7 @@
 # OSS release gate
 
 `Meeting-Ops-OSS` (Forgejo, mirrored to GitHub) is the **full product source** under
-AGPL-3.0. It is *generated* from this private repo — never edited directly.
+Apache-2.0. It is *generated* from this private repo — never edited directly.
 
 ```bash
 git clone <this repo> /tmp/ossbuild

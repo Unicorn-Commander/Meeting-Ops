@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Changed
+- Licence: Apache-2.0 (was AGPL-3.0-or-later).
+
 ### Fixed
 - **Parakeet no longer drops the only line in a long, mostly silent recording.** Parakeet
   TDT 1.1B returned NOTHING for a 116 s call holding one 2 s line ("Rook, say ready,

@@ -40,8 +40,7 @@ No third-party AI, no per-audio-minute meter.
 This is the full product source, not a reduced edition. The Free / Pro / Enterprise
 tiers are runtime entitlements enforced server-side, not separate codebases.
 
-Licensed AGPL-3.0-or-later. A commercial license is available for organizations
-that cannot meet the network-copyleft terms — licensing@unicorncommander.ai.
+Licensed Apache-2.0.
 
 Sanitized snapshot of the private development repo at $SRC.
 Omitted from the public tree:
