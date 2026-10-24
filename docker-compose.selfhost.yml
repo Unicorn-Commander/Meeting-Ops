@@ -94,16 +94,19 @@ services:
     # On a new self-host volume, create the current model schema once and stamp
     # that baseline; existing installations continue through Alembic normally.
     entrypoint: ["/bin/sh", "-c"]
-    command: |
-      set -eu
-      schema_state="$$(python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; from sqlalchemy import inspect; from database.database import engine; print("empty" if "alembic_version" not in inspect(engine).get_table_names() else "existing")')"
-      if [ "$$schema_state" = "empty" ]; then
-        python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; import init_db'
-        alembic stamp head
-      else
-        alembic upgrade head
-      fi
-      exec python -m uvicorn main:app --host 0.0.0.0 --port 9050 --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:-*}"
+    # One list element: Compose splits a plain string into words, so `sh -c` would
+    # run only `set` (which dumps every variable, secrets included) and exit 0.
+    command:
+      - |
+        set -eu
+        schema_state="$$(python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; from sqlalchemy import inspect; from database.database import engine; print("empty" if "alembic_version" not in inspect(engine).get_table_names() else "existing")')"
+        if [ "$$schema_state" = "empty" ]; then
+          python -c 'import database.models_rooms, models.vocabulary, models.agent_system, models.unified_agent; import init_db'
+          alembic stamp head
+        else
+          alembic upgrade head
+        fi
+        exec python -m uvicorn main:app --host 0.0.0.0 --port 9050 --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:-*}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9050/health >/dev/null"]
       interval: 10s
