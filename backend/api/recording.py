@@ -229,6 +229,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _always_on_meeting_dates(
+    db: Session,
+    organization_id: int,
+    started_at: Optional[datetime],
+    created_at: Optional[datetime],
+):
+    """Return the org-wall-clock date/time for an always-on session.
+
+    Always-on rows normally have ``started_at`` at creation time. Keep the
+    ``created_at`` fallback explicit for older/internal creation paths, and
+    use the same conversion helper as uploads so evening UTC timestamps stay
+    on the meeting's local calendar day.
+    """
+    from services.meeting_provenance import org_timezone, wall_clock
+
+    return wall_clock(
+        started_at or created_at,
+        org_timezone(db, organization_id),
+    )
+
+
 def _aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
@@ -767,7 +788,14 @@ async def start_always_on(
         )
         return _session_payload(existing, idempotent_reuse=True)
 
-    started_at = _now()
+    created_at = _now()
+    started_at = created_at
+    meeting_date, meeting_time = _always_on_meeting_dates(
+        db,
+        active_org.organization.id,
+        started_at,
+        created_at,
+    )
     title = f"Always-on {started_at.strftime('%Y-%m-%d %H:%M')}"
     session = RecordingSession(
         session_id=str(uuid.uuid4()),
@@ -776,8 +804,10 @@ async def start_always_on(
         description="Browser always-on recording",
         meeting_type="always_on",
         mode="always_on",
-        created_at=started_at,
+        created_at=created_at,
         started_at=started_at,
+        meeting_date=meeting_date,
+        meeting_time=meeting_time,
         status="recording",
         duration=0.0,
         user_id=current_user.id,
