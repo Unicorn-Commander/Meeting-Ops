@@ -241,14 +241,62 @@ function readDateBasis(): DateBasis {
   }
 }
 
-/** Pull the comparable date string for sort + display, honoring dateBasis.
- *  When dateBasis = 'meeting' and meeting_date is null, falls back to
- *  created_at so a session never disappears from the date column. */
-function effectiveSessionDate(session: Session, basis: DateBasis): string {
-  if (basis === 'meeting' && session.meeting_date) {
-    return session.meeting_date;
+const CALENDAR_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+interface SessionDateInfo {
+  /** The local calendar day used by the divider and day-level sort. */
+  dayKey: string | null;
+  /** A local wall-clock meeting time or a browser-local created_at instant. */
+  instant: Date | null;
+  /** True when the day is explicit (meeting_date, or upload-basis created_at). */
+  isDated: boolean;
+}
+
+/** Parse a backend timestamp. Naive created_at values are stored UTC by the
+ * backend, so make that zone explicit before converting to browser-local time.
+ * ISO values with an explicit offset keep their supplied offset. */
+function parseUtcTimestamp(iso: string | null | undefined): Date | null {
+  const value = typeof iso === 'string' ? iso.trim() : '';
+  if (!value) return null;
+  const hasOffset = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(value);
+  const parsed = new Date(hasOffset ? value : `${value}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function parseLocalCalendarTimestamp(day: string, time?: string | null): Date | null {
+  const parsed = new Date(`${day}T${time ? time.slice(0, 12) : '00:00:00'}`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function localDayKey(value: Date): string {
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+}
+
+function sessionDateInfo(session: Session, basis: DateBasis): SessionDateInfo {
+  const meetingDate = basis === 'meeting' ? session.meeting_date?.trim() : null;
+  if (meetingDate && CALENDAR_DATE_RE.test(meetingDate)) {
+    return {
+      dayKey: meetingDate,
+      instant: parseLocalCalendarTimestamp(meetingDate, session.meeting_time),
+      isDated: true,
+    };
   }
-  return session.created_at;
+
+  const createdAt = parseUtcTimestamp(session.created_at);
+  return {
+    dayKey: createdAt ? localDayKey(createdAt) : null,
+    instant: createdAt,
+    isDated: basis === 'upload',
+  };
+}
+
+/** Pull the comparable local calendar date for sort + display. When the
+ * meeting date is absent, created_at is converted from its stored UTC instant
+ * into the browser's local day instead of being treated as a UTC calendar
+ * date. */
+function effectiveSessionDate(session: Session, basis: DateBasis): string {
+  return sessionDateInfo(session, basis).dayKey || '';
 }
 
 /** Parse a session date for display. A bare 'YYYY-MM-DD' (meeting_date) is a
@@ -275,7 +323,10 @@ function dayHeaderLabel(iso: string): string {
 /** The group a session falls under for the active sort, or null when the sort
  *  mode isn't grouped (name / duration stay a flat list). */
 function sessionGroupLabel(session: Session, sortBy: SortKey, basis: DateBasis): string | null {
-  if (sortBy === 'date') return dayHeaderLabel(effectiveSessionDate(session, basis));
+  if (sortBy === 'date') {
+    const dayKey = sessionDateInfo(session, basis).dayKey;
+    return dayKey ? dayHeaderLabel(dayKey) : 'Undated';
+  }
   if (sortBy === 'speakers') {
     const bucket = SPEAKER_BUCKETS.find((bk) => bk.test(deriveSpeakerCount(session)));
     return bucket ? bucket.label : 'Speakers';
@@ -296,6 +347,40 @@ function sessionDividerLabel(
   if (!label) return null;
   const prev = i > 0 ? sessionGroupLabel(list[i - 1], sortBy, basis) : null;
   return label !== prev ? label : null;
+}
+
+/** Compare date-sorted sessions. A meeting_date is a deliberate wall-clock
+ * value, so it always stays ahead of a created_at fallback within the same
+ * day. This prevents an undated session from appearing above a dated call
+ * merely because its UTC creation timestamp is later than local midnight. */
+export function compareSessionDates(
+  a: Session,
+  b: Session,
+  basis: DateBasis,
+  order: 'asc' | 'desc',
+): number {
+  const aInfo = sessionDateInfo(a, basis);
+  const bInfo = sessionDateInfo(b, basis);
+
+  if (aInfo.dayKey !== bInfo.dayKey) {
+    if (!aInfo.dayKey) return 1;
+    if (!bInfo.dayKey) return -1;
+    const dayOrder = aInfo.dayKey.localeCompare(bInfo.dayKey);
+    return order === 'asc' ? dayOrder : -dayOrder;
+  }
+
+  if (basis === 'meeting' && aInfo.isDated !== bInfo.isDated) {
+    return aInfo.isDated ? -1 : 1;
+  }
+
+  const aTime = aInfo.instant?.getTime() ?? 0;
+  const bTime = bInfo.instant?.getTime() ?? 0;
+  if (aTime === bTime) return 0;
+  return order === 'asc' ? aTime - bTime : bTime - aTime;
+}
+
+export function sessionDateGroupKey(session: Session, basis: DateBasis): string | null {
+  return sessionDateInfo(session, basis).dayKey;
 }
 
 function deriveSpeakerCount(session: Session): number {
@@ -1272,7 +1357,8 @@ export const Sessions: React.FC = () => {
   //
   // Local-only sessions (privacy mode) live in IndexedDB and are merged
   // in here so the rest of the UI is unaware of the split. The merge
-  // sorts by created_at descending so the chronological mix is correct.
+  // sorts by the stored UTC created_at instant so the chronological mix is
+  // correct even when the backend omits a timezone suffix.
   const fetchSessions = async ({
     showSpinner = true,
     cursor = null,
@@ -1397,9 +1483,11 @@ export const Sessions: React.FC = () => {
         seen.add(s.id);
         merged.push(s);
       }
-      merged.sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      );
+      merged.sort((a, b) => {
+        const aCreated = parseUtcTimestamp(a.created_at)?.getTime() ?? 0;
+        const bCreated = parseUtcTimestamp(b.created_at)?.getTime() ?? 0;
+        return bCreated - aCreated;
+      });
       setSessions(merged);
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -1495,13 +1583,7 @@ export const Sessions: React.FC = () => {
           break;
         case 'date':
         default: {
-          // Sort by upload (created_at) or meeting (meeting_date with
-          // created_at fallback) depending on the dateBasis toggle.
-          const aRaw = effectiveSessionDate(a, dateBasis);
-          const bRaw = effectiveSessionDate(b, dateBasis);
-          aValue = aRaw ? new Date(aRaw.length === 10 ? aRaw + 'T00:00:00' : aRaw).getTime() : 0;
-          bValue = bRaw ? new Date(bRaw.length === 10 ? bRaw + 'T00:00:00' : bRaw).getTime() : 0;
-          break;
+          return compareSessionDates(a, b, dateBasis, sortOrder);
         }
       }
 

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { Sessions } from '../pages/Sessions';
+import { compareSessionDates, sessionDateGroupKey, Sessions } from '../pages/Sessions';
 
 vi.mock('../components/SessionCreator', () => ({
   SessionCreator: () => <div>Session Creator</div>,
@@ -115,6 +115,52 @@ describe('Sessions', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('groups naive UTC created_at values in the browser-local day', () => {
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      const undated = {
+        id: 'undated',
+        created_at: '2026-10-23T01:15:00',
+        meeting_date: null,
+      } as any;
+      // 01:15 UTC on 10/23 is 21:15 ET on 10/22.
+      expect(sessionDateGroupKey(undated, 'meeting')).toBe('2026-10-22');
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTz;
+    }
+  });
+
+  it('keeps dated sessions ahead of undated fallbacks within one day', () => {
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      const dated = {
+        id: 'dated',
+        created_at: '2026-10-22T12:00:00',
+        meeting_date: '2026-10-22',
+        meeting_time: '23:58:00',
+      } as any;
+      const undated = {
+        id: 'undated',
+        created_at: '2026-10-23T01:15:00Z',
+        meeting_date: null,
+      } as any;
+
+      expect(sessionDateGroupKey(dated, 'meeting')).toBe(
+        sessionDateGroupKey(undated, 'meeting'),
+      );
+      const sorted = [undated, dated].sort((a, b) =>
+        compareSessionDates(a, b, 'meeting', 'desc'),
+      );
+      expect(sorted.map((session) => session.id)).toEqual(['dated', 'undated']);
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTz;
+    }
   });
 
   it('renders sessions page', async () => {
