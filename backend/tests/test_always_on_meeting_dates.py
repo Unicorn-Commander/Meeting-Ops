@@ -87,6 +87,8 @@ def test_start_always_on_stamps_org_wall_clock_and_created_fallback(
         json={"client_session_key": f"test-{uuid.uuid4().hex}"},
     )
     assert response.status_code == 200, response.text
+    assert response.json()["meeting_date"] == "2026-10-21"
+    assert response.json()["meeting_time"] == "21:15:00"
 
     db = SessionLocal()
     try:

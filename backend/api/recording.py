@@ -417,6 +417,8 @@ def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) 
         "created_at": session.created_at.isoformat() if session.created_at else None,
         "started_at": session.started_at.isoformat() if session.started_at else None,
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
+        "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
         "duration": float(session.duration or 0),
         "transcript_simple": session.transcript_simple or "",
         "transcript_diarized": hydrate_diarized_for_response(session) or {"segments": []},
