@@ -15,6 +15,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { TagChip } from './TagChip';
+import { formatMeetingTime } from '../utils/meetingTime';
 
 interface Participant {
   id?: string;
@@ -29,6 +30,9 @@ interface MobileSession {
   title?: string;
   description?: string;
   created_at: string;
+  meeting_date?: string | null;
+  meeting_time?: string | null;
+  organization_timezone?: string | null;
   duration?: number;
   status: string;
   participants?: Participant[];
@@ -59,6 +63,7 @@ interface Props {
   folderSummaries: Array<{ tag: string; count: number }>;
   totalSessions: number;
   untaggedSessions: number;
+  dateBasis: 'upload' | 'meeting';
   selectedFolder: string;
   onSelectFolder: (folder: string) => void;
   onNewFolder: () => void;
@@ -151,6 +156,7 @@ const MobileSessionsList: React.FC<Props> = ({
   folderSummaries,
   totalSessions,
   untaggedSessions,
+  dateBasis,
   selectedFolder,
   onSelectFolder,
   onNewFolder,
@@ -372,6 +378,16 @@ const MobileSessionsList: React.FC<Props> = ({
               const visibleTags = tags.slice(0, 3);
               const hiddenTagCount = tags.length - visibleTags.length;
               const titleText = session.title || session.name || 'Untitled';
+              const meetingTime = dateBasis === 'meeting'
+                ? formatMeetingTime({
+                    meetingDate: session.meeting_date,
+                    meetingTime: session.meeting_time,
+                    organizationTimezone: session.organization_timezone,
+                  })
+                : null;
+              const meetingDay = dateBasis === 'meeting' && session.meeting_date
+                ? new Date(`${session.meeting_date}T00:00:00`).toLocaleDateString()
+                : null;
               return (
                 <li key={session.id}>
                   <button
@@ -426,7 +442,10 @@ const MobileSessionsList: React.FC<Props> = ({
                     <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
                       <span className="inline-flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5" />
-                        {formatRelativeDate(session.created_at)}
+                        {meetingDay || formatRelativeDate(session.created_at)}
+                        {meetingTime?.text && (
+                          <span title={meetingTime.title}>· {meetingTime.text}</span>
+                        )}
                       </span>
                       <span className="inline-flex items-center gap-1">
                         <Clock className="w-3.5 h-3.5" />

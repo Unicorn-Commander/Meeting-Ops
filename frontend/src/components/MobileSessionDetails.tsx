@@ -16,6 +16,7 @@ import { FederationSummaryApproval } from './FederationSummaryApproval';
 import { Briefcase, AlertTriangle } from 'lucide-react';
 import { config } from '../config';
 import { formatLifecycleDate, formatLifecycleTimestamp } from '../utils/lifecycleTimestamp';
+import { formatMeetingTime } from '../utils/meetingTime';
 
 type TabKey =
   | 'summary'
@@ -266,6 +267,13 @@ export default function MobileSessionDetails(props: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
   const segmentRefs = useRef<Array<HTMLDivElement | null>>([]);
   const navigate = useNavigate();
+  const meetingTimeDisplay = session?.meeting_time
+    ? formatMeetingTime({
+        meetingDate: session.meeting_date,
+        meetingTime: session.meeting_time,
+        organizationTimezone: session.organization_timezone,
+      })
+    : null;
 
   // v3.36 duplicate detection: dismissible "{recorded_by} also recorded
   // this meeting" banner, ported from the desktop page. Component-state
@@ -414,7 +422,14 @@ export default function MobileSessionDetails(props: Props) {
               {session?.created_at && (
                 <span className="flex items-center gap-1">
                   <Calendar className="w-3 h-3" />
-                  {formatDate(session.created_at)}
+                  {session.meeting_date
+                    ? new Date(`${session.meeting_date}T00:00:00`).toLocaleDateString()
+                    : formatDate(session.created_at)}
+                  {session.meeting_time && (
+                    <span title={meetingTimeDisplay?.title}>
+                      · {meetingTimeDisplay?.text || session.meeting_time.slice(0, 5)}
+                    </span>
+                  )}
                 </span>
               )}
               {session?.duration ? (

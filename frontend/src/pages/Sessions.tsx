@@ -34,6 +34,7 @@ import {
 } from '../services/localSessionStore';
 import { showToast } from '../components/Toast';
 import { showConfirm } from '../utils/notifications';
+import { formatMeetingTime } from '../utils/meetingTime';
 import CombineSessionsDialog, { type CombinePart } from '../components/CombineSessionsDialog';
 import { CombinedBadge, PartOfLinks } from '../components/CombinedMeetingBadges';
 
@@ -78,6 +79,7 @@ interface Session {
   project_slug?: string | null;
   organization_id?: number | null;
   organization_name?: string | null;
+  organization_timezone?: string | null;
   // Provenance: whose account captured/uploaded this session (workspaces
   // are shared; two members can record the same call).
   recorded_by?: string | null;
@@ -733,7 +735,23 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                         const parsed = d.length === 10
                           ? new Date(d + 'T00:00:00')
                           : new Date(d);
-                        return parsed.toLocaleDateString();
+                        const meetingTime = dateBasis === 'meeting'
+                          ? formatMeetingTime({
+                              meetingDate: session.meeting_date,
+                              meetingTime: session.meeting_time,
+                              organizationTimezone: session.organization_timezone,
+                            })
+                          : null;
+                        return (
+                          <>
+                            {parsed.toLocaleDateString()}
+                            {meetingTime?.text && (
+                              <span className="ml-1" title={meetingTime.title}>
+                                · {meetingTime.text}
+                              </span>
+                            )}
+                          </>
+                        );
                       })()}
                     </td>
                     <td className="px-4 py-3 align-middle whitespace-nowrap text-gray-300 tabular-nums">
@@ -2234,6 +2252,7 @@ export const Sessions: React.FC = () => {
         folderSummaries={orgTagSummaries}
         totalSessions={orgTagStats.totalSessions}
         untaggedSessions={orgTagStats.untaggedSessions}
+        dateBasis={dateBasis}
         selectedFolder={selectedFolder}
         onSelectFolder={selectFolder}
         onNewFolder={handleNewFolder}
@@ -3058,11 +3077,24 @@ export const Sessions: React.FC = () => {
                         const d = effectiveSessionDate(session, dateBasis);
                         if (!d) return '—';
                         const day = parseSessionDate(d).toLocaleDateString();
-                        if (dateBasis === 'meeting' && session.meeting_date && session.meeting_time) {
-                          const t = parseSessionDate(`${session.meeting_date}T${session.meeting_time}`);
-                          return `${day} · ${t.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
-                        }
-                        return day;
+                        const meetingTime = dateBasis === 'meeting'
+                          ? formatMeetingTime({
+                              meetingDate: session.meeting_date,
+                              meetingTime: session.meeting_time,
+                              organizationTimezone: session.organization_timezone,
+                            })
+                          : null;
+                        return (
+                          <>
+                            {day}
+                            {meetingTime?.text && (
+                              <>
+                                {' · '}
+                                <span title={meetingTime.title}>{meetingTime.text}</span>
+                              </>
+                            )}
+                          </>
+                        );
                       })()}
                     </div>
                     {session.duration && (

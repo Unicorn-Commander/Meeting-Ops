@@ -23,6 +23,7 @@ import remarkGfm from 'remark-gfm';
 import { toast } from 'react-toastify';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
+import { formatMeetingTime } from '../utils/meetingTime';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
 import {
   TranscriptionOptionsPanel,
@@ -211,6 +212,7 @@ interface Session {
   project_slug?: string | null;
   organization_id?: number | null;
   organization_name?: string | null;
+  organization_timezone?: string | null;
   /** Provenance: whose account captured/uploaded this session. */
   recorded_by?: string | null;
   participants?: Participant[];
@@ -2130,6 +2132,13 @@ export const SessionDetails: React.FC = () => {
     session.final_summary ?? null,
     session.summary ?? null,
   ]);
+  const meetingTimeDisplay = session.meeting_time
+    ? formatMeetingTime({
+        meetingDate: session.meeting_date,
+        meetingTime: session.meeting_time,
+        organizationTimezone: session.organization_timezone,
+      })
+    : null;
 
   const mobileProps = {
     session,
@@ -2389,8 +2398,8 @@ export const SessionDetails: React.FC = () => {
                           })
                         : formatDate(session.created_at)}
                       {session.meeting_time && (
-                        <span className="text-gray-400 tabular-nums">
-                          {session.meeting_time.slice(0, 5)}
+                        <span className="text-gray-400 tabular-nums" title={meetingTimeDisplay?.title}>
+                          {meetingTimeDisplay?.text || session.meeting_time.slice(0, 5)}
                         </span>
                       )}
                       <Edit2 className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400" />
