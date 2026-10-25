@@ -263,6 +263,21 @@ def wall_clock(dt: Optional[datetime], tz_name: Optional[str]) -> tuple[Optional
     return dt.date(), dt.timetz().replace(tzinfo=None, microsecond=0)
 
 
+def isoformat_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize a persisted timestamp with an explicit UTC offset.
+
+    SQLAlchemy ``DateTime`` columns in the legacy schema are commonly returned
+    as naive values even though the application stores UTC.  Keeping that
+    boundary explicit prevents browser clients from interpreting the value in
+    their own local timezone.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 def build_meeting_provenance(
     *,
     audio_path: Optional[str | Path],

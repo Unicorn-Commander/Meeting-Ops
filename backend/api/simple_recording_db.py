@@ -28,7 +28,7 @@ from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
 from services.real_whisper_service import real_whisper_service
 from services.unified_agent_service import unified_agent_service
-from services.meeting_provenance import organization_timezone, org_timezone
+from services.meeting_provenance import isoformat_utc, organization_timezone, org_timezone
 from utils.time import BUSINESS_TIMEZONE, business_date_from_utc, stored_business_date
 
 
@@ -218,7 +218,7 @@ def _safe_iso_or_none(value: Any) -> Optional[str]:
     if not isinstance(value, datetime):
         return None
     try:
-        return value.isoformat()
+        return isoformat_utc(value)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -318,7 +318,7 @@ def _related_sessions(db: Session, session: DBRecordingSession) -> List[dict]:
                         "id": cand.id,
                         "name": cand.name or cand.title or f"Session {cand.id}",
                         "recorded_by": _recorded_by_name(db, cand.user_id),
-                        "started_at": c_start.isoformat(),
+                        "started_at": isoformat_utc(c_start),
                         "duration": c_duration,
                     }
                 )
@@ -684,7 +684,7 @@ async def create_session(
             id=existing.session_id or str(existing.id),
             name=existing.name,
             description=existing.description or "",
-            created_at=existing.created_at.isoformat() if existing.created_at else "",
+            created_at=isoformat_utc(existing.created_at) or "",
             status=existing.status,
             duration=float(existing.duration or 0),
         )
@@ -730,7 +730,7 @@ async def create_session(
         id=session_id,
         name=db_session.name,
         description=db_session.description or "",
-        created_at=db_session.created_at.isoformat(),
+        created_at=isoformat_utc(db_session.created_at) or "",
         status=db_session.status,
         duration=0.0
     )
@@ -1090,7 +1090,7 @@ async def list_sessions(
             name=session.name or session.title or f"Session {session.id}",
             title=session.title,
             description=session.description or "",
-            created_at=session.created_at.isoformat() if session.created_at else datetime.now(timezone.utc).isoformat(),
+            created_at=isoformat_utc(session.created_at) or isoformat_utc(datetime.now(timezone.utc)),
             status=session.status or "completed",
             duration=session.duration or 0.0,
             audio_file=session.audio_file,
@@ -1206,7 +1206,7 @@ async def search_sessions(
             id=session.session_id or str(session.id),
             name=session.name or session.title or f"Session {session.id}",
             description=session.description or "",
-            created_at=session.created_at.isoformat() if session.created_at else "",
+            created_at=isoformat_utc(session.created_at) or "",
             status=session.status or "completed",
             duration=session.duration or 0.0,
             snippet=snippet,
@@ -1431,9 +1431,9 @@ async def get_session(
             "name": session.name or session.title or f"Session {session.id}",
             "title": session.title or session.name or f"Session {session.id}",
             "description": session.description or "",
-            "created_at": session.created_at.isoformat() if session.created_at else None,
-            "started_at": session.started_at.isoformat() if session.started_at else None,
-            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+            "created_at": isoformat_utc(session.created_at),
+            "started_at": isoformat_utc(session.started_at),
+            "ended_at": isoformat_utc(session.ended_at),
             # User-editable meeting date/time. ISO date / 24h time. Null
             # only if backfill (alembic 027) found no started_at / created_at
             # to pull from, or the user explicitly cleared the value.
@@ -1473,7 +1473,7 @@ async def get_session(
                 _related_sessions(db, session) if caller_is_org_member else []
             ),
             "meeting_type": session.meeting_type,
-            "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+            "updated_at": isoformat_utc(session.updated_at),
             # Project linking (Phase 2)
             "project_app": session.project_app,
             "project_id": session.project_id,
@@ -2420,7 +2420,7 @@ async def process_recording(session_id: str, audio_file: str, db_session_id: int
                     title=session.title or session.name or "",
                     transcript=_index_transcript,
                     summary=session.summary or "",
-                    created_at=session.created_at.isoformat() if session.created_at else "",
+                    created_at=isoformat_utc(session.created_at) or "",
                     organization_id=session.organization_id,
                 )
                 logger.info(f"   Indexed in vector store for semantic search (speaker-aware)")
@@ -3397,7 +3397,7 @@ async def cleanup_old_recordings(
         results.append({
             "session_id": session.session_id,
             "name": session.name,
-            "created_at": session.created_at.isoformat() if session.created_at else None,
+            "created_at": isoformat_utc(session.created_at),
             "file_size_mb": round(file_size / (1024 * 1024), 1),
             "action": "deleted" if not dry_run else "would_delete"
         })

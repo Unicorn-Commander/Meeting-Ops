@@ -37,6 +37,7 @@ from services.summary_slices import (
     get_slices,
     maybe_auto_trigger_slice,
 )
+from services.meeting_provenance import isoformat_utc
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["always-on-recording"])
@@ -414,9 +415,9 @@ def _session_payload(session: RecordingSession, idempotent_reuse: bool = False) 
         "name": session.name or session.title or f"Always-on Session {session.id}",
         "status": session.status,
         "mode": getattr(session, "mode", "upload"),
-        "created_at": session.created_at.isoformat() if session.created_at else None,
-        "started_at": session.started_at.isoformat() if session.started_at else None,
-        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "created_at": isoformat_utc(session.created_at),
+        "started_at": isoformat_utc(session.started_at),
+        "ended_at": isoformat_utc(session.ended_at),
         "meeting_date": session.meeting_date.isoformat() if session.meeting_date else None,
         "meeting_time": session.meeting_time.isoformat() if session.meeting_time else None,
         "duration": float(session.duration or 0),
@@ -798,7 +799,7 @@ async def start_always_on(
         started_at,
         created_at,
     )
-    title = f"Always-on {started_at.strftime('%Y-%m-%d %H:%M')}"
+    title = f"Always-on {meeting_date:%Y-%m-%d} {meeting_time:%H:%M}"
     session = RecordingSession(
         session_id=str(uuid.uuid4()),
         name=title,
@@ -2372,7 +2373,7 @@ async def _run_session_reprocess(session_pk: int) -> None:
                 title=session.title or session.name or "",
                 transcript=_index_transcript,
                 summary=_index_summary,
-                created_at=session.created_at.isoformat() if session.created_at else "",
+                created_at=isoformat_utc(session.created_at) or "",
                 organization_id=session.organization_id,
             )
             logger.info(

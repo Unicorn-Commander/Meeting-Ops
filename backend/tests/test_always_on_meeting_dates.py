@@ -89,6 +89,7 @@ def test_start_always_on_stamps_org_wall_clock_and_created_fallback(
     assert response.status_code == 200, response.text
     assert response.json()["meeting_date"] == "2026-10-21"
     assert response.json()["meeting_time"] == "21:15:00"
+    assert response.json()["title"] == "Always-on 2026-10-21 21:15"
 
     db = SessionLocal()
     try:
@@ -100,6 +101,7 @@ def test_start_always_on_stamps_org_wall_clock_and_created_fallback(
         # 01:15 UTC is 21:15 on the prior day in the org's timezone.
         assert session.meeting_date == date(2026, 10, 21)
         assert session.meeting_time == time(21, 15)
+        assert session.title == "Always-on 2026-10-21 21:15"
 
         # The helper keeps the creation-path fallback explicit for callers that
         # have a created_at but no started_at.

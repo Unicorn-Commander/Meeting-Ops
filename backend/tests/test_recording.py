@@ -168,12 +168,14 @@ def test_get_session_detail(client):
         headers=_auth_headers(client),
     )
     session_id = create_response.json()["id"]
+    assert create_response.json()["created_at"].endswith("+00:00")
 
     response = client.get(f"/api/simple/recording-sessions/{session_id}", headers=_auth_headers(client))
     assert response.status_code == 200
     data = response.json()
     assert data["id"] == session_id
     assert data["name"] == "Detail Test Session"
+    assert data["created_at"].endswith("+00:00")
 
 
 def test_get_session_not_found(client):
