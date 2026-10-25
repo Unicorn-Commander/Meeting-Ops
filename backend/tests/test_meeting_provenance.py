@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -176,3 +177,13 @@ def test_wall_clock_converts_naive_utc():
     assert mp.wall_clock(datetime(2026, 10, 8, 1, 5, 0), "America/New_York") == (date(2026, 10, 7), time(21, 5, 0))
     assert mp.wall_clock(datetime(2026, 10, 8, 1, 5, 0), None) == (date(2026, 10, 8), time(1, 5, 0))
     assert mp.wall_clock(None, "America/New_York") == (None, None)
+
+
+def test_organization_timezone_reuses_validated_settings_rule():
+    assert mp.organization_timezone(
+        SimpleNamespace(settings={"timezone": "America/Chicago"})
+    ) == "America/Chicago"
+    assert mp.organization_timezone(
+        SimpleNamespace(settings={"timezone": "Not/AZone"})
+    ) is None
+    assert mp.organization_timezone(SimpleNamespace(settings={})) is None

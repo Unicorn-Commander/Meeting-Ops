@@ -14,6 +14,7 @@ import re
 import uuid
 from pathlib import Path
 from sqlalchemy.orm.attributes import flag_modified
+from zoneinfo import ZoneInfo
 
 from database.database import get_db
 from auth.dependencies import get_current_organization, get_current_user
@@ -21,6 +22,7 @@ from auth.organization import ActiveOrganization
 from auth.models import Organization, User
 from auth.tier import gate_feature_for_caller
 from database.models import RecordingSession
+from services.meeting_provenance import organization_timezone
 from utils.time import stored_business_date
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
@@ -222,6 +224,56 @@ def _report_organization(session: RecordingSession) -> Optional[Organization]:
     except Exception:  # noqa: BLE001 - detached/test rows use safe defaults
         logger.debug("Could not resolve report organization", exc_info=True)
         return None
+
+
+_REPORT_US_TIMEZONE_LABELS = {
+    "America/New_York": "ET",
+    "America/Chicago": "CT",
+    "America/Denver": "MT",
+    "America/Los_Angeles": "PT",
+}
+
+
+def _report_timezone_label(
+    session: RecordingSession,
+    meeting_day,
+) -> Optional[str]:
+    """Return the org zone label for a server-rendered report header.
+
+    Reports have no browser timezone to compare against, so a valid org
+    timezone is always shown when the meeting has a wall-clock time. The
+    common US zones use the same compact labels as the frontend; other zones
+    use Python's short zone name.
+    """
+    organization = _report_organization(session)
+    timezone_name = organization_timezone(organization)
+    meeting_time = getattr(session, "meeting_time", None)
+    if not timezone_name or meeting_day is None or meeting_time is None:
+        return None
+    try:
+        zone = ZoneInfo(timezone_name)
+        meeting_at = datetime.combine(meeting_day, meeting_time, tzinfo=zone)
+        return _REPORT_US_TIMEZONE_LABELS.get(timezone_name) or meeting_at.tzname()
+    except Exception:  # noqa: BLE001 - a bad setting must not break exports
+        return None
+
+
+def _report_meeting_date(session: RecordingSession) -> str:
+    """Format the report's meeting wall-clock date/time header."""
+    meeting_day = (
+        getattr(session, "meeting_date", None)
+        or (session.started_at.date() if getattr(session, "started_at", None) else None)
+        or (session.created_at.date() if getattr(session, "created_at", None) else None)
+    )
+    date_str = meeting_day.strftime("%B %d, %Y") if meeting_day else "N/A"
+    meeting_time = getattr(session, "meeting_time", None)
+    if meeting_time:
+        time_str = meeting_time.strftime("%I:%M %p").lstrip("0")
+        timezone_label = _report_timezone_label(session, meeting_day)
+        if timezone_label:
+            time_str += f" {timezone_label}"
+        date_str += f" at {time_str}"
+    return date_str
 
 
 def _resolve_report_brand(
@@ -1208,14 +1260,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
 
     # Meeting metadata uses the user-corrected meeting date rather than the
     # ingestion timestamp whenever it is available.
-    meeting_day = (
-        session.meeting_date
-        or (session.started_at.date() if session.started_at else None)
-        or (session.created_at.date() if session.created_at else None)
-    )
-    date_str = meeting_day.strftime("%B %d, %Y") if meeting_day else "N/A"
-    if session.meeting_time:
-        date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
+    date_str = _report_meeting_date(session)
     duration_secs = session.duration or 0
     duration_str = "Manually authored; no verified timing" if (getattr(session, "processing_metadata", None) or {}).get("manual_content") else (f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A")
     participants = summary_data["participants"]
@@ -1522,14 +1567,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
         run.font.color.rgb = dark_gray_rgb
 
     # --- Metadata ---
-    meeting_day = (
-        session.meeting_date
-        or (session.started_at.date() if session.started_at else None)
-        or (session.created_at.date() if session.created_at else None)
-    )
-    date_str = meeting_day.strftime("%B %d, %Y") if meeting_day else "N/A"
-    if session.meeting_time:
-        date_str += f" at {session.meeting_time.strftime('%I:%M %p')}"
+    date_str = _report_meeting_date(session)
     duration_secs = session.duration or 0
     duration_str = "Manually authored; no verified timing" if (getattr(session, "processing_metadata", None) or {}).get("manual_content") else (f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s" if duration_secs else "N/A")
     participants = summary_data["participants"]
@@ -1741,7 +1779,7 @@ def export_to_txt(session: RecordingSession, options: ExportOptions) -> str:
         return f"Meeting: {session.name}\nManually authored content; no audio or verified timing.\n\n" + ("\n".join((f"{seg.get('speaker', '')}: " if options.includeSpeakers else "") + seg.get("text", "") for seg in _get_transcript_segments(session)) if options.includeTranscript else "")
     lines = []
     lines.append(f"Meeting: {session.name or 'Untitled'}")
-    lines.append(f"Date: {session.created_at}")
+    lines.append(f"Date: {_report_meeting_date(session)}")
     lines.append(f"Duration: {session.duration or 0} seconds")
     lines.append("-" * 50)
     lines.append("")
@@ -1788,7 +1826,7 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
     brand = _resolve_report_brand(session, options)
     title = session.title or session.name or "Untitled Meeting"
     duration_min = round((session.duration or 0) / 60, 1)
-    created = session.created_at.strftime("%Y-%m-%d %H:%M") if session.created_at else "(unknown date)"
+    created = _report_meeting_date(session)
 
     # Pull the summary payload — final_summary is canonical (JSON column).
     fs = session.final_summary if isinstance(session.final_summary, dict) else {}

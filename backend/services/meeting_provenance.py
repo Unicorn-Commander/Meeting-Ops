@@ -226,6 +226,18 @@ def _zone(tz_name: Optional[str]):
         return None
 
 
+def organization_timezone(organization: Any) -> Optional[str]:
+    """Return a validated organization display timezone, if configured."""
+    try:
+        settings = getattr(organization, "settings", None)
+        if isinstance(settings, str):
+            settings = json.loads(settings or "{}")
+        tz = (settings or {}).get("timezone") if isinstance(settings, dict) else None
+        return tz if isinstance(tz, str) and _zone(tz) is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def org_timezone(db, org_id: Optional[int]) -> Optional[str]:
     """The org's display timezone (organizations.settings["timezone"], an IANA
     name like "America/New_York"), or None when unset. Never raises."""
@@ -234,11 +246,7 @@ def org_timezone(db, org_id: Optional[int]) -> Optional[str]:
     try:
         from auth.models import Organization
         org = db.query(Organization).filter(Organization.id == int(org_id)).first()
-        settings = getattr(org, "settings", None) if org is not None else None
-        if isinstance(settings, str):
-            settings = json.loads(settings or "{}")
-        tz = (settings or {}).get("timezone") if isinstance(settings, dict) else None
-        return tz if _zone(tz) is not None else None
+        return organization_timezone(org)
     except Exception:  # noqa: BLE001
         return None
 

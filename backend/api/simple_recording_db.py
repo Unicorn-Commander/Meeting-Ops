@@ -28,6 +28,7 @@ from services.working_audio_service import audio_service
 from services.transcription_service import transcription_service
 from services.real_whisper_service import real_whisper_service
 from services.unified_agent_service import unified_agent_service
+from services.meeting_provenance import organization_timezone, org_timezone
 from utils.time import BUSINESS_TIMEZONE, business_date_from_utc, stored_business_date
 
 
@@ -149,6 +150,7 @@ class SessionResponse(BaseModel):
     project_slug: Optional[str] = None
     organization_id: Optional[int] = None
     organization_name: Optional[str] = None
+    organization_timezone: Optional[str] = None
     # User-editable "when the meeting actually happened". ISO date /
     # 24h time. Backfilled from started_at / created_at by alembic 027.
     meeting_date: Optional[str] = None
@@ -843,6 +845,7 @@ async def list_sessions(
     """List all recording sessions from database"""
 
     org_names_by_id: dict[int, str] = {}
+    org_timezones_by_id: dict[int, Optional[str]] = {}
     is_super = bool(getattr(current_user, "is_superuser", False))
     if all_tenants and is_super:
         # Explicit, opt-in PLATFORM-ADMIN god-view: every org's sessions. This is
@@ -1041,11 +1044,18 @@ async def list_sessions(
         if session.organization_id is not None
     })
     if session_org_ids:
-        org_names_by_id = {
-            int(org.id): org.name
+        organizations_by_id = {
+            int(org.id): org
             for org in db.query(Organization)
             .filter(Organization.id.in_(session_org_ids))
             .all()
+        }
+        org_names_by_id = {
+            org_id: org.name for org_id, org in organizations_by_id.items()
+        }
+        org_timezones_by_id = {
+            org_id: organization_timezone(org)
+            for org_id, org in organizations_by_id.items()
         }
 
     # One query for the whole page's named speakers (avoids an N+1 — see
@@ -1091,6 +1101,7 @@ async def list_sessions(
             project_slug=session.project_slug,
             organization_id=session.organization_id,
             organization_name=org_names_by_id.get(session.organization_id),
+            organization_timezone=org_timezones_by_id.get(session.organization_id),
             meeting_date=session.meeting_date.isoformat() if session.meeting_date else None,
             meeting_time=session.meeting_time.isoformat() if session.meeting_time else None,
             recorded_by=(
@@ -1470,6 +1481,7 @@ async def get_session(
                 .filter(Organization.id == session.organization_id)
                 .scalar()
             ),
+            "organization_timezone": org_timezone(db, session.organization_id),
             # Conference Room linkage. `room_id` is the canonical "this is a
             # room session" signal — non-null means the live-summary UI
             # should pull slices from the server-rolled store instead of

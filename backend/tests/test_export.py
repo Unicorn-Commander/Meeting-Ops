@@ -1,5 +1,7 @@
 """Tests for export/download endpoints"""
 import uuid
+from datetime import date, time
+from types import SimpleNamespace
 
 import pytest
 
@@ -538,6 +540,46 @@ def _report_text(renderer_name, output):
         except zlib.error:
             text.append(data.decode("latin-1"))
     return "".join(text)
+
+
+def test_report_header_includes_org_timezone(monkeypatch):
+    from api import batch_export
+
+    monkeypatch.setattr(
+        batch_export,
+        "_report_organization",
+        lambda _session: SimpleNamespace(
+            name="Chicago Org", settings={"timezone": "America/Chicago"}
+        ),
+    )
+    session = SimpleNamespace(
+        name="Timezone Report",
+        title="Timezone Report",
+        description="",
+        meeting_date=date(2026, 7, 15),
+        meeting_time=time(14, 15),
+        started_at=None,
+        created_at=None,
+        duration=95,
+        participants=[],
+        final_summary={},
+        summary=None,
+        processing_metadata=None,
+        transcript=None,
+        transcript_simple=None,
+        organization_id=1,
+    )
+
+    assert batch_export._report_meeting_date(session) == (
+        "July 15, 2026 at 2:15 PM CT"
+    )
+    options = batch_export.ExportOptions(includeTranscript=False)
+    assert "Date: July 15, 2026 at 2:15 PM CT" in batch_export.export_to_txt(
+        session, options
+    )
+    assert "**Date:** July 15, 2026 at 2:15 PM CT" in batch_export.export_to_markdown(
+        session, options
+    )
 
 
 @pytest.mark.parametrize("renderer_name", ["export_to_pdf", "export_to_docx"])

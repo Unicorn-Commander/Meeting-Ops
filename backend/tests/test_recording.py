@@ -2,6 +2,8 @@
 import uuid
 from unittest.mock import AsyncMock, patch
 
+from auth.utils import get_password_hash
+
 
 def _auth_headers(client):
     response = client.post(
@@ -40,6 +42,63 @@ def test_list_sessions(client):
     assert isinstance(data["items"], list)
     assert len(data["items"]) >= 1
     assert "transcription" not in data["items"][0]
+
+
+def test_session_list_and_detail_include_organization_timezone(client):
+    from auth.models import Organization, User, UserOrganization
+    from database.database import SessionLocal
+
+    slug = f"timezone-payload-{uuid.uuid4().hex[:10]}"
+    db = SessionLocal()
+    try:
+        org = Organization(
+            name=slug,
+            slug=slug,
+            is_active=True,
+            settings={"timezone": "America/Chicago"},
+        )
+        user = User(
+            email=f"{slug}@meeting-ops.local",
+            username=slug,
+            hashed_password=get_password_hash("admin123"),
+            is_active=True,
+            is_verified=True,
+            tier="enterprise",
+        )
+        db.add_all([org, user])
+        db.flush()
+        db.add(UserOrganization(user_id=user.id, organization_id=org.id, role="admin"))
+        db.commit()
+    finally:
+        db.close()
+
+    login = client.post(
+        "/api/auth/login",
+        data={"username": slug, "password": "admin123"},
+    )
+    assert login.status_code == 200, login.text
+    headers = {
+        "Authorization": f"Bearer {login.json()['access_token']}",
+        "X-MeetingOps-Org": slug,
+    }
+    created = client.post(
+        "/api/simple/recording-sessions",
+        json={"name": "Timezone payload session"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["id"]
+
+    listing = client.get("/api/simple/recording-sessions", headers=headers)
+    assert listing.status_code == 200, listing.text
+    row = next(item for item in listing.json()["items"] if item["id"] == session_id)
+    assert row["organization_timezone"] == "America/Chicago"
+
+    detail = client.get(
+        f"/api/simple/recording-sessions/{session_id}", headers=headers
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["organization_timezone"] == "America/Chicago"
 
 
 def test_list_sessions_cursor_has_no_duplicates(client):
