@@ -1043,6 +1043,9 @@ async def list_sessions(
         for session in sessions
         if session.organization_id is not None
     })
+    organizations_by_id = {}
+    org_names_by_id = {}
+    org_timezones_by_id = {}
     if session_org_ids:
         organizations_by_id = {
             int(org.id): org
