@@ -23,7 +23,11 @@ import remarkGfm from 'remark-gfm';
 import { toast } from 'react-toastify';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { ErrorMessage } from '../components/ErrorMessage';
-import { formatMeetingTime } from '../utils/meetingTime';
+import {
+  formatMeetingTime,
+  formatMeetingTimestamp,
+  parseApiTimestamp,
+} from '../utils/meetingTime';
 import { ProjectLinkPicker, type ProjectLink } from '../components/ProjectLinkPicker';
 import {
   TranscriptionOptionsPanel,
@@ -1568,7 +1572,8 @@ export const SessionDetails: React.FC = () => {
   };
 
   const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleString();
+    const parsed = parseApiTimestamp(dateStr);
+    return parsed ? parsed.toLocaleString() : '';
   };
 
   const downloadTranscript = () => {
@@ -2139,6 +2144,12 @@ export const SessionDetails: React.FC = () => {
         organizationTimezone: session.organization_timezone,
       })
     : null;
+  const fallbackTimestampDisplay = !session.meeting_date && !session.meeting_time
+    ? formatMeetingTimestamp({
+        timestamp: session.created_at,
+        organizationTimezone: session.organization_timezone,
+      })
+    : null;
 
   const mobileProps = {
     session,
@@ -2396,8 +2407,8 @@ export const SessionDetails: React.FC = () => {
                             month: 'short',
                             day: 'numeric',
                           })
-                        : formatDate(session.created_at)}
-                      {session.meeting_time && (
+                        : fallbackTimestampDisplay?.text || formatDate(session.created_at)}
+                      {!fallbackTimestampDisplay && session.meeting_time && (
                         <span className="text-gray-400 tabular-nums" title={meetingTimeDisplay?.title}>
                           {meetingTimeDisplay?.text || session.meeting_time.slice(0, 5)}
                         </span>

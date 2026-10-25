@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { formatMeetingTime } from '../utils/meetingTime';
+import {
+  calendarDateForTimestamp,
+  formatMeetingTime,
+  formatMeetingTimestamp,
+  parseApiTimestamp,
+} from '../utils/meetingTime';
 
 describe('formatMeetingTime', () => {
   it('keeps a July Chicago wall clock and labels it CT for an Eastern viewer', () => {
@@ -36,5 +41,23 @@ describe('formatMeetingTime', () => {
     expect(formatMeetingTime({ ...input, organizationTimezone: 'Not/AZone' })).toEqual({
       text: '2:15 PM',
     });
+  });
+
+  it('treats zone-less API timestamps as UTC and formats the fallback in org time', () => {
+    expect(parseApiTimestamp('2026-07-15T19:15:00')?.toISOString()).toBe(
+      '2026-07-15T19:15:00.000Z',
+    );
+    expect(calendarDateForTimestamp(
+      '2026-07-16T01:15:00',
+      'America/New_York',
+    )).toBe('2026-07-15');
+
+    const display = formatMeetingTimestamp({
+      timestamp: '2026-07-15T19:15:00',
+      organizationTimezone: 'America/Chicago',
+      browserTimezone: 'America/New_York',
+    });
+    expect(display.text).toBe('7/15/2026, 2:15 PM CT');
+    expect(display.title).toBe('3:15 PM your time (ET)');
   });
 });

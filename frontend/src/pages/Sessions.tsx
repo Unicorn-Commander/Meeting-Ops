@@ -34,7 +34,12 @@ import {
 } from '../services/localSessionStore';
 import { showToast } from '../components/Toast';
 import { showConfirm } from '../utils/notifications';
-import { formatMeetingTime } from '../utils/meetingTime';
+import {
+  calendarDateForTimestamp,
+  formatMeetingTime,
+  formatMeetingTimestamp,
+  parseApiTimestamp,
+} from '../utils/meetingTime';
 import CombineSessionsDialog, { type CombinePart } from '../components/CombineSessionsDialog';
 import { CombinedBadge, PartOfLinks } from '../components/CombinedMeetingBadges';
 
@@ -246,33 +251,17 @@ function readDateBasis(): DateBasis {
 const CALENDAR_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 interface SessionDateInfo {
-  /** The local calendar day used by the divider and day-level sort. */
+  /** The organization calendar day used by the divider and day-level sort. */
   dayKey: string | null;
-  /** A local wall-clock meeting time or a browser-local created_at instant. */
+  /** A local wall-clock meeting time or an absolute created_at instant. */
   instant: Date | null;
   /** True when the day is explicit (meeting_date, or upload-basis created_at). */
   isDated: boolean;
 }
 
-/** Parse a backend timestamp. Naive created_at values are stored UTC by the
- * backend, so make that zone explicit before converting to browser-local time.
- * ISO values with an explicit offset keep their supplied offset. */
-function parseUtcTimestamp(iso: string | null | undefined): Date | null {
-  const value = typeof iso === 'string' ? iso.trim() : '';
-  if (!value) return null;
-  const hasOffset = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(value);
-  const parsed = new Date(hasOffset ? value : `${value}Z`);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 function parseLocalCalendarTimestamp(day: string, time?: string | null): Date | null {
   const parsed = new Date(`${day}T${time ? time.slice(0, 12) : '00:00:00'}`);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function localDayKey(value: Date): string {
-  const pad = (part: number) => String(part).padStart(2, '0');
-  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
 }
 
 function sessionDateInfo(session: Session, basis: DateBasis): SessionDateInfo {
@@ -285,17 +274,19 @@ function sessionDateInfo(session: Session, basis: DateBasis): SessionDateInfo {
     };
   }
 
-  const createdAt = parseUtcTimestamp(session.created_at);
+  const createdAt = parseApiTimestamp(session.created_at);
   return {
-    dayKey: createdAt ? localDayKey(createdAt) : null,
+    dayKey: createdAt
+      ? calendarDateForTimestamp(session.created_at, session.organization_timezone)
+      : null,
     instant: createdAt,
     isDated: basis === 'upload',
   };
 }
 
-/** Pull the comparable local calendar date for sort + display. When the
- * meeting date is absent, created_at is converted from its stored UTC instant
- * into the browser's local day instead of being treated as a UTC calendar
+/** Pull the comparable calendar date for sort + display. When the meeting
+ * date is absent, created_at is converted from its stored UTC instant into the
+ * organization's display zone instead of being treated as a UTC calendar
  * date. */
 function effectiveSessionDate(session: Session, basis: DateBasis): string {
   return sessionDateInfo(session, basis).dayKey || '';
@@ -735,6 +726,12 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                         const parsed = d.length === 10
                           ? new Date(d + 'T00:00:00')
                           : new Date(d);
+                        const fallbackTimestamp = !session.meeting_date && !session.meeting_time
+                          ? formatMeetingTimestamp({
+                              timestamp: session.created_at,
+                              organizationTimezone: session.organization_timezone,
+                            })
+                          : null;
                         const meetingTime = dateBasis === 'meeting'
                           ? formatMeetingTime({
                               meetingDate: session.meeting_date,
@@ -744,8 +741,8 @@ const SessionsTable: React.FC<SessionsTableProps> = ({
                           : null;
                         return (
                           <>
-                            {parsed.toLocaleDateString()}
-                            {meetingTime?.text && (
+                            {fallbackTimestamp?.text || parsed.toLocaleDateString()}
+                            {!fallbackTimestamp && meetingTime?.text && (
                               <span className="ml-1" title={meetingTime.title}>
                                 · {meetingTime.text}
                               </span>
@@ -1502,8 +1499,8 @@ export const Sessions: React.FC = () => {
         merged.push(s);
       }
       merged.sort((a, b) => {
-        const aCreated = parseUtcTimestamp(a.created_at)?.getTime() ?? 0;
-        const bCreated = parseUtcTimestamp(b.created_at)?.getTime() ?? 0;
+        const aCreated = parseApiTimestamp(a.created_at)?.getTime() ?? 0;
+        const bCreated = parseApiTimestamp(b.created_at)?.getTime() ?? 0;
         return bCreated - aCreated;
       });
       setSessions(merged);
@@ -1525,7 +1522,20 @@ export const Sessions: React.FC = () => {
   const loadMoreSessions = () => {
     if (pageSize !== 'all') setRevealedPages((pages) => pages + 1);
     const wanted = pageSize === 'all' ? Infinity : pageSize * (revealedPages + 1);
-    if (nextCursor && wanted > filteredSessions.length) {
+    const hasClientFilters = Boolean(
+      searchQuery
+      || statusFilter !== 'all'
+      || typeFilter !== 'all'
+      || sourceFilter !== 'all'
+      || orgFilter !== 'all'
+      || selectedFolder !== 'all'
+    );
+    // A server refresh updates `sessions` before the filtering effect updates
+    // `filteredSessions`. Use the authoritative loaded rows when no client
+    // filter is active so an immediate first click only reveals the next
+    // already-loaded cards instead of fetching the cursor page early.
+    const loadedForPagination = hasClientFilters ? filteredSessions.length : sessions.length;
+    if (nextCursor && wanted > loadedForPagination) {
       void fetchSessions({ showSpinner: false, cursor: nextCursor, append: true });
     }
   };
@@ -2149,7 +2159,10 @@ export const Sessions: React.FC = () => {
     let content = `MEETING SUMMARY\n`;
     content += `===============\n\n`;
     content += `Meeting: ${session.title || session.name}\n`;
-    content += `Date: ${new Date(session.created_at).toLocaleDateString()}\n`;
+    content += `Date: ${formatMeetingTimestamp({
+      timestamp: session.created_at,
+      organizationTimezone: session.organization_timezone,
+    }).text || ''}\n`;
     content += `Duration: ${session.duration ? formatDuration(session.duration) : 'N/A'}\n\n`;
     
     if (session.summary.analysis?.executive) {
@@ -3077,6 +3090,12 @@ export const Sessions: React.FC = () => {
                         const d = effectiveSessionDate(session, dateBasis);
                         if (!d) return '—';
                         const day = parseSessionDate(d).toLocaleDateString();
+                        const fallbackTimestamp = !session.meeting_date && !session.meeting_time
+                          ? formatMeetingTimestamp({
+                              timestamp: session.created_at,
+                              organizationTimezone: session.organization_timezone,
+                            })
+                          : null;
                         const meetingTime = dateBasis === 'meeting'
                           ? formatMeetingTime({
                               meetingDate: session.meeting_date,
@@ -3086,8 +3105,8 @@ export const Sessions: React.FC = () => {
                           : null;
                         return (
                           <>
-                            {day}
-                            {meetingTime?.text && (
+                            {fallbackTimestamp?.text || day}
+                            {!fallbackTimestamp && meetingTime?.text && (
                               <>
                                 {' · '}
                                 <span title={meetingTime.title}>{meetingTime.text}</span>

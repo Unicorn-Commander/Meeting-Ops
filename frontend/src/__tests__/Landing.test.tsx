@@ -25,14 +25,9 @@ describe('Landing', () => {
       </MemoryRouter>,
     );
 
-    // Hero — product-page rework (2026-06-22): the category claim is now
-    // "the open standard for conversation intelligence."
-    expect(
-      screen.getByRole('heading', {
-        level: 1,
-        name: /the open standard for conversation intelligence\./i,
-      }),
-    ).toBeInTheDocument();
+    // The hero headline intentionally rotates once per page load, so assert
+    // the stable semantic contract rather than one member of that set.
+    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
 
     // Section signals from the 2026 product-page rework: how-it-works,
     // the privacy/moat contrast, and the pricing promise.

@@ -15,7 +15,11 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { TagChip } from './TagChip';
-import { formatMeetingTime } from '../utils/meetingTime';
+import {
+  formatMeetingTime,
+  formatMeetingTimestamp,
+  parseApiTimestamp,
+} from '../utils/meetingTime';
 
 interface Participant {
   id?: string;
@@ -95,8 +99,8 @@ function formatDuration(seconds?: number): string {
 
 function formatRelativeDate(iso: string): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
+  const d = parseApiTimestamp(iso);
+  if (!d) return '';
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffMin = Math.floor(diffMs / 60000);
@@ -388,6 +392,14 @@ const MobileSessionsList: React.FC<Props> = ({
               const meetingDay = dateBasis === 'meeting' && session.meeting_date
                 ? new Date(`${session.meeting_date}T00:00:00`).toLocaleDateString()
                 : null;
+              const fallbackTimestamp = dateBasis === 'meeting'
+                && !session.meeting_date
+                && !session.meeting_time
+                ? formatMeetingTimestamp({
+                    timestamp: session.created_at,
+                    organizationTimezone: session.organization_timezone,
+                  })
+                : null;
               return (
                 <li key={session.id}>
                   <button
@@ -442,8 +454,8 @@ const MobileSessionsList: React.FC<Props> = ({
                     <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
                       <span className="inline-flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5" />
-                        {meetingDay || formatRelativeDate(session.created_at)}
-                        {meetingTime?.text && (
+                        {meetingDay || fallbackTimestamp?.text || formatRelativeDate(session.created_at)}
+                        {!fallbackTimestamp && meetingTime?.text && (
                           <span title={meetingTime.title}>· {meetingTime.text}</span>
                         )}
                       </span>
