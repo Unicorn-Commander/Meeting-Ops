@@ -85,6 +85,9 @@ def _contact_ops_mcp_url() -> str:
     ).strip()
 
 
+READ_PERSONAL_SCOPE = "contacts:read_personal"
+
+
 def _resolver_scope() -> str:
     # contacts:read is an OPTIONAL client scope on the meeting-ops KC client, so
     # it must be requested explicitly; CO maps it to person:read + CLIENT.
@@ -148,14 +151,14 @@ async def _subject_token(client: httpx.AsyncClient) -> Optional[str]:
     # what was ACTUALLY granted). If contacts:read isn't on the meeting-ops
     # client's optional scopes, the mint looks fine here but the downstream
     # Brigade exchange / CO read fails opaquely. Surface it at the source.
-    requested = _resolver_scope()
+    requested = set(_resolver_scope().split())
     granted = set((j.get("scope") or "").split())
-    if requested and requested not in granted:
+    if requested - granted:
         logger.warning(
             "resolver client-credentials mint missing requested scope %r "
             "(granted=%s); the meeting-ops KC client likely does not grant it "
             "as an optional client scope — downstream contact-ops calls will 401/403",
-            requested,
+            " ".join(sorted(requested - granted)),
             sorted(granted) or "<none>",
         )
     _store("subject", j["access_token"], j.get("expires_in", 300))
@@ -340,22 +343,42 @@ async def resolve_email(email: str, workspace_id: str) -> Optional[str]:
     if not email or not workspace_id:
         return None
 
-    structured = await _call_contact_ops_tool(
-        workspace_id,
-        "find_person_by_identifier",
-        {"identifiers": [{"namespace": "email", "value": email}]},
-        label="find_person",
-    )
-    if not structured:
+    matches = await _find_by_email(workspace_id, email, None)
+    if matches is None:
         return None
-    matches = structured.get("matches") or []
-    if structured.get("ambiguous") or len(matches) != 1:
-        # ambiguous or no/multi match -> don't guess
+    if not matches and READ_PERSONAL_SCOPE in _resolver_scope().split():
+        # Contact-Ops shows a service caller PROSPECT contacts unless it asks for
+        # PERSONAL explicitly (and holds contacts:read_personal). People a human
+        # adds by hand default to PERSONAL, so look there second.
+        matches = await _find_by_email(workspace_id, email, "PERSONAL")
+        if matches is None:
+            return None
+    if len(matches) != 1:
+        # no/multi match -> don't guess
         return None
     m = matches[0]
     # CO IdentifierMatchOutput spreads PersonSummary, whose id field is person_id.
     pid = m.get("person_id") or m.get("id")
     return str(pid) if pid else None
+
+
+async def _find_by_email(
+    workspace_id: str, email: str, category: Optional[str]
+) -> Optional[list]:
+    """find_person_by_identifier for one email. Returns the match list, or
+    ``None`` on error or an ambiguous answer (callers must not guess)."""
+    args: dict = {"identifiers": [{"namespace": "email", "value": email}]}
+    if category:
+        args["category"] = category
+    structured = await _call_contact_ops_tool(
+        workspace_id,
+        "find_person_by_identifier",
+        args,
+        label="find_person" if not category else f"find_person_{category.lower()}",
+    )
+    if not structured or structured.get("ambiguous"):
+        return None
+    return list(structured.get("matches") or [])
 
 
 async def search_people(query: str, workspace_id: str, limit: int = 10) -> list[dict]:

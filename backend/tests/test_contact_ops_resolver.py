@@ -19,6 +19,7 @@ def _clear_cache(monkeypatch):
     for k in (
         "CONTACT_OPS_RESOLVER_ENABLED",
         "MEETING_OPS_KC_CLIENT_SECRET",
+        "CONTACT_OPS_RESOLVER_SCOPE",
     ):
         monkeypatch.delenv(k, raising=False)
     yield
@@ -118,6 +119,50 @@ async def test_ambiguous_returns_none(monkeypatch):
     _wire(monkeypatch, _envelope({"matches": [{"person_id": "p1"}, {"person_id": "p2"}],
                                   "ambiguous": True}))
     assert await r.resolve_email("a@b.com", "ws-1") is None
+
+
+def _wire_by_category(monkeypatch, by_category):
+    """Answer find_person_by_identifier per requested category (None = default)."""
+    _enable(monkeypatch)
+    calls = []
+
+    async def _call(_ws, tool, args, label=""):
+        calls.append(args.get("category"))
+        return by_category.get(args.get("category"), {"matches": [], "ambiguous": False})
+
+    monkeypatch.setattr(r, "_call_contact_ops_tool", _call)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_personal_fallback_needs_read_personal_scope(monkeypatch):
+    # Default scope (contacts:read only): a PERSONAL contact stays invisible.
+    calls = _wire_by_category(monkeypatch, {"PERSONAL": {"matches": [{"person_id": "p-me"}], "ambiguous": False}})
+    assert await r.resolve_email("me@x.com", "ws-1") is None
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_personal_fallback_with_read_personal_scope(monkeypatch):
+    monkeypatch.setenv("CONTACT_OPS_RESOLVER_SCOPE", "contacts:read contacts:read_personal")
+    calls = _wire_by_category(monkeypatch, {"PERSONAL": {"matches": [{"person_id": "p-me"}], "ambiguous": False}})
+    assert await r.resolve_email("me@x.com", "ws-1") == "p-me"
+    assert calls == [None, "PERSONAL"]
+
+
+@pytest.mark.asyncio
+async def test_prospect_match_skips_personal_lookup(monkeypatch):
+    monkeypatch.setenv("CONTACT_OPS_RESOLVER_SCOPE", "contacts:read contacts:read_personal")
+    calls = _wire_by_category(monkeypatch, {None: {"matches": [{"person_id": "p-lead"}], "ambiguous": False}})
+    assert await r.resolve_email("lead@x.com", "ws-1") == "p-lead"
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_personal_ambiguous_returns_none(monkeypatch):
+    monkeypatch.setenv("CONTACT_OPS_RESOLVER_SCOPE", "contacts:read contacts:read_personal")
+    _wire_by_category(monkeypatch, {"PERSONAL": {"matches": [{"person_id": "a"}, {"person_id": "b"}], "ambiguous": True}})
+    assert await r.resolve_email("dup@x.com", "ws-1") is None
 
 
 @pytest.mark.asyncio
