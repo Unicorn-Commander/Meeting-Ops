@@ -43,6 +43,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import Organization, User
 from auth.organization import ActiveOrganization
+from utils.url_redaction import redact_url
 from database.database import get_db
 from services.integrations.org_config import (
     VALID_INTEGRATION_KEYS,
@@ -277,7 +278,11 @@ def _mask_block(integration_key: str, block: dict[str, Any]) -> IntegrationView:
     return IntegrationView(
         key=integration_key,
         enabled=bool(block.get("enabled")),
-        api_base_url=block.get("api_base_url") or "",
+        api_base_url=(
+            redact_url(block.get("api_base_url"))
+            if block.get("api_base_url")
+            else ""
+        ),
         has_api_key=has_key,
         api_key_last4=last4,
         extra=extra,

@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 from sqlalchemy import text
 
-from utils.url_redaction import redact_url
+from utils.url_redaction import redact_text, redact_url
 
 PROBE_TIMEOUT_SECONDS = float(os.getenv("READINESS_TIMEOUT_SECONDS", "4"))
 
@@ -91,7 +91,7 @@ async def _probe_tts() -> dict[str, Any]:
                     models_url, headers={"Authorization": f"Bearer {api_key}"}
                 )
                 if resp.status_code == 200:
-                    return {"ok": True, "url": models_url}
+                    return {"ok": True, "url": redact_url(models_url)}
         except Exception:  # noqa: BLE001 - fall back to /health below
             pass
     return await _http_health(f"{endpoint}/health")
@@ -120,7 +120,7 @@ async def _probe_infinity() -> dict[str, Any]:
                     models_url, headers={"Authorization": f"Bearer {api_key}"}
                 )
                 if resp.status_code == 200:
-                    return {"ok": True, "url": models_url}
+                    return {"ok": True, "url": redact_url(models_url)}
         except Exception:  # noqa: BLE001 - fall back to /health below
             pass
     base = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
@@ -144,7 +144,11 @@ async def _run_probe(name: str, probe: Callable[[], Awaitable[dict[str, Any]]]) 
         result = await asyncio.wait_for(probe(), timeout=PROBE_TIMEOUT_SECONDS + 1)
         return name, {"status": "ok", **result}
     except Exception as exc:  # noqa: BLE001
-        return name, {"status": "down", "ok": False, "error": str(exc)[:500]}
+        return name, {
+            "status": "down",
+            "ok": False,
+            "error": redact_text(str(exc))[:500],
+        }
 
 
 async def run_readiness_checks() -> dict[str, Any]:

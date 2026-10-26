@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import BinaryIO, Optional
 
 from secret_config import get_secret
+from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,15 @@ def _get_s3_client():
         )
         logger.info(
             "attachment_storage: garage client ready, endpoint=%s bucket=%s",
-            GARAGE_ENDPOINT_URL,
+            redact_url(GARAGE_ENDPOINT_URL),
             GARAGE_ATTACHMENTS_BUCKET,
         )
         return _s3_client
     except Exception as e:
-        logger.warning("attachment_storage: garage client init failed: %s", e)
+        logger.warning(
+            "attachment_storage: garage client init failed: %s",
+            redact_text(str(e)),
+        )
         return None
 
 
@@ -159,7 +163,7 @@ def write_stream(
             logger.warning(
                 "attachment_storage: garage upload failed for key=%s, falling back to local: %s",
                 storage_key,
-                e,
+                redact_text(str(e)),
             )
             # Rewind the stream if possible so the local fallback can re-read.
             try:
@@ -255,7 +259,7 @@ def delete_object(*, storage_backend: str, storage_key: str) -> None:
             logger.warning(
                 "attachment_storage: garage delete failed for key=%s: %s",
                 storage_key,
-                e,
+                redact_text(str(e)),
             )
     elif storage_backend == "local":
         path = LOCAL_ATTACH_ROOT / storage_key
@@ -273,7 +277,7 @@ def delete_object(*, storage_backend: str, storage_key: str) -> None:
             logger.warning(
                 "attachment_storage: local delete failed for key=%s: %s",
                 storage_key,
-                e,
+                redact_text(str(e)),
             )
     else:
         logger.warning(

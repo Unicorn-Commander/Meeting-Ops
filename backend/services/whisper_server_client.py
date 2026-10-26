@@ -9,6 +9,8 @@ import logging
 import httpx
 from typing import Optional, Dict, Any
 
+from utils.url_redaction import redact_text
+
 logger = logging.getLogger(__name__)
 
 WHISPER_SERVER_URL = os.getenv("WHISPER_SERVER_URL", "http://localhost:8178")
@@ -71,7 +73,11 @@ class WhisperServerClient:
                     )
 
             if resp.status_code != 200:
-                logger.error(f"Whisper server returned {resp.status_code}: {resp.text[:200]}")
+                logger.error(
+                    "Whisper server returned %s: %s",
+                    resp.status_code,
+                    redact_text(resp.text[:200]),
+                )
                 return None
 
             result = resp.json()
@@ -99,7 +105,7 @@ class WhisperServerClient:
             logger.error(f"Whisper server timeout transcribing {file_path}")
             return None
         except Exception as e:
-            logger.error(f"Whisper server client error: {e}")
+            logger.error("Whisper server client error: %s", redact_text(str(e)))
             return None
 
 

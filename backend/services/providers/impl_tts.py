@@ -18,6 +18,8 @@ import logging
 import os
 from typing import Optional
 
+from utils.url_redaction import redact_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,10 +70,10 @@ class KokoroProvider:
                 logger.error(
                     "Kokoro TTS error %s: %s",
                     response.status_code,
-                    response.text[:200],
+                    redact_text(response.text[:200]),
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Kokoro TTS failed: %s", exc)
+            logger.error("Kokoro TTS failed: %s", redact_text(str(exc)))
         return b""
 
     async def synthesize_podcast(
@@ -96,7 +98,7 @@ class KokoroProvider:
                     voices = payload.get("voices", [])
                     return [{"voice_id": v, "label": v} for v in voices]
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Kokoro voices listing failed: %s", exc)
+            logger.warning("Kokoro voices listing failed: %s", redact_text(str(exc)))
         return [{"voice_id": "af_bella", "label": "af_bella"}]
 
     async def health(self) -> dict:
@@ -108,7 +110,11 @@ class KokoroProvider:
                 if response.status_code == 200:
                     return {"ok": True, "provider": self.name}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "provider": self.name, "error": str(exc)}
+            return {
+                "ok": False,
+                "provider": self.name,
+                "error": redact_text(str(exc)),
+            }
         return {"ok": False, "provider": self.name}
 
 
@@ -166,10 +172,10 @@ class VibeVoiceProvider:
                 logger.error(
                     "VibeVoice TTS error %s: %s",
                     response.status_code,
-                    response.text[:200],
+                    redact_text(response.text[:200]),
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.error("VibeVoice TTS failed: %s", exc)
+            logger.error("VibeVoice TTS failed: %s", redact_text(str(exc)))
         return b""
 
     async def synthesize_podcast(
@@ -204,10 +210,10 @@ class VibeVoiceProvider:
                 logger.error(
                     "VibeVoice podcast error %s: %s",
                     response.status_code,
-                    response.text[:200],
+                    redact_text(response.text[:200]),
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.error("VibeVoice podcast failed: %s", exc)
+            logger.error("VibeVoice podcast failed: %s", redact_text(str(exc)))
         return b""
 
     async def list_voices(self) -> list[dict]:
@@ -223,7 +229,7 @@ class VibeVoiceProvider:
                         for v in payload.get("voices", [])
                     ]
         except Exception as exc:  # noqa: BLE001
-            logger.warning("VibeVoice voices listing failed: %s", exc)
+            logger.warning("VibeVoice voices listing failed: %s", redact_text(str(exc)))
         return [{"voice_id": self.DEFAULT_VOICE, "label": self.DEFAULT_VOICE}]
 
     async def health(self) -> dict:
@@ -242,5 +248,9 @@ class VibeVoiceProvider:
                         "voices": body.get("voices_available"),
                     }
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "provider": self.name, "error": str(exc)}
+            return {
+                "ok": False,
+                "provider": self.name,
+                "error": redact_text(str(exc)),
+            }
         return {"ok": False, "provider": self.name}

@@ -34,6 +34,9 @@ _SECRET_QUERY_PARTS = _SECRET_QUERY_NAMES | {
     "apikey",
 }
 _QUERY_NAME_PART_RE = re.compile(r"[a-z0-9]+")
+_URL_IN_TEXT_RE = re.compile(
+    r"(?P<url>[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s'\"]+)"
+)
 
 
 def _is_secret_query_name(raw_name: str) -> bool:
@@ -86,8 +89,10 @@ def redact_url(url: str) -> str:
     replaced with the same marker.  Invalid or non-string values never escape
     into a response or log: a fixed placeholder is returned instead.
     """
-    if not isinstance(url, str) or not url:
-        return URL_REDACTION_PLACEHOLDER if url else ""
+    if url == "":
+        return ""
+    if not isinstance(url, str):
+        return URL_REDACTION_PLACEHOLDER
 
     try:
         parsed = urlsplit(url)
@@ -112,4 +117,23 @@ def redact_url(url: str) -> str:
             )
         )
     except Exception:  # noqa: BLE001 - redaction must never break the caller
+        return URL_REDACTION_PLACEHOLDER
+
+
+def redact_text(text: str) -> str:
+    """Redact URL-looking substrings embedded in an error or log message."""
+    if not isinstance(text, str) or not text:
+        return "" if text == "" else URL_REDACTION_PLACEHOLDER
+
+    def replace(match: re.Match[str]) -> str:
+        raw_url = match.group("url")
+        trailing = ""
+        while raw_url and raw_url[-1] in ".,;:!?)]}":
+            trailing = raw_url[-1] + trailing
+            raw_url = raw_url[:-1]
+        return redact_url(raw_url) + trailing
+
+    try:
+        return _URL_IN_TEXT_RE.sub(replace, text)
+    except Exception:  # noqa: BLE001 - logging must never break the caller
         return URL_REDACTION_PLACEHOLDER

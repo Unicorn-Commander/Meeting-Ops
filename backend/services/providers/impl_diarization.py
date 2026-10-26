@@ -19,6 +19,7 @@ from typing import Any, Optional
 import httpx
 
 from .protocols import DiarizationProvider  # noqa: F401  (re-exported)
+from utils.url_redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -148,9 +149,13 @@ class LocalSpeakerSvcProvider:
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.error("speaker-svc /embed HTTP %s: %s", exc.response.status_code, exc.response.text[:200])
+            logger.error(
+                "speaker-svc /embed HTTP %s: %s",
+                exc.response.status_code,
+                redact_text(exc.response.text[:200]),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("speaker-svc /embed failed: %s", exc)
+            logger.error("speaker-svc /embed failed: %s", redact_text(str(exc)))
         return {"embedding": [], "embedding_dim": 0, "duration_seconds": 0.0, "model": ""}
 
     async def embed_bytes(self, audio_bytes: bytes, filename: str = "clip.wav") -> dict:
@@ -162,9 +167,15 @@ class LocalSpeakerSvcProvider:
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.error("speaker-svc /embed (bytes) HTTP %s: %s", exc.response.status_code, exc.response.text[:200])
+            logger.error(
+                "speaker-svc /embed (bytes) HTTP %s: %s",
+                exc.response.status_code,
+                redact_text(exc.response.text[:200]),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("speaker-svc /embed (bytes) failed: %s", exc)
+            logger.error(
+                "speaker-svc /embed (bytes) failed: %s", redact_text(str(exc))
+            )
         return {"embedding": [], "embedding_dim": 0, "duration_seconds": 0.0, "model": ""}
 
     # ---------- identify ----------
@@ -184,9 +195,13 @@ class LocalSpeakerSvcProvider:
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.error("speaker-svc /identify HTTP %s: %s", exc.response.status_code, exc.response.text[:200])
+            logger.error(
+                "speaker-svc /identify HTTP %s: %s",
+                exc.response.status_code,
+                redact_text(exc.response.text[:200]),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("speaker-svc /identify failed: %s", exc)
+            logger.error("speaker-svc /identify failed: %s", redact_text(str(exc)))
         return {"matches": [], "best_match": None}
 
     # ---------- health ----------
@@ -198,8 +213,10 @@ class LocalSpeakerSvcProvider:
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("speaker-svc /health failed: %s", exc)
-            return {"status": "unreachable", "error": str(exc)}
+            logger.warning(
+                "speaker-svc /health failed: %s", redact_text(str(exc))
+            )
+            return {"status": "unreachable", "error": redact_text(str(exc))}
 
 
 DEFAULT_SORTFORMER_URL = os.getenv("SORTFORMER_URL", "http://meet-sortformer-svc:8896")
@@ -286,10 +303,13 @@ class SortformerSpeakerSvcProvider:
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "sortformer-svc /diarize-file-upload HTTP %s: %s",
-                exc.response.status_code, exc.response.text[:200],
+                exc.response.status_code, redact_text(exc.response.text[:200]),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error("sortformer-svc /diarize-file-upload failed: %s", exc)
+            logger.error(
+                "sortformer-svc /diarize-file-upload failed: %s",
+                redact_text(str(exc)),
+            )
         return []
 
     # ---------- embed / identify / health delegate to wespeaker ----------
@@ -312,8 +332,10 @@ class SortformerSpeakerSvcProvider:
                 resp.raise_for_status()
                 out = resp.json()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("sortformer-svc /health failed: %s", exc)
-            out = {"status": "unreachable", "error": str(exc)}
+            logger.warning(
+                "sortformer-svc /health failed: %s", redact_text(str(exc))
+            )
+            out = {"status": "unreachable", "error": redact_text(str(exc))}
         out["speaker_svc"] = await self._speaker_svc.health()
         return out
 

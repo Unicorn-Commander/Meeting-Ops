@@ -7,6 +7,8 @@ import os
 import logging
 import requests
 
+from utils.url_redaction import redact_text
+
 logger = logging.getLogger(__name__)
 
 # Single backend configuration - Granite 3.3 2B for all tasks
@@ -30,7 +32,7 @@ def check_backend_health(backend_config: dict) -> bool:
         response = requests.get(url, timeout=2)
         return response.status_code == 200
     except Exception as e:
-        logger.debug(f"Backend health check failed: {e}")
+        logger.debug("Backend health check failed: %s", redact_text(str(e)))
         return False
 
 def get_backend_for_task(task_type: str = "progressive"):

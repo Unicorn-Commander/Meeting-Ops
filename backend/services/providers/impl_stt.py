@@ -29,7 +29,7 @@ from typing import Any, Optional
 import httpx
 
 from .protocols import STTProvider  # noqa: F401  (re-exported)
-from utils.url_redaction import redact_url
+from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -111,16 +111,19 @@ async def _post_audio_with_retry(
                 label, audio_path, timeout, attempt, STT_MAX_ATTEMPTS,
             )
         except Exception as exc:  # noqa: BLE001
-            last_error = f"Could not reach the transcription service: {exc}"
+            last_error = (
+                "Could not reach the transcription service: "
+                f"{redact_text(str(exc))}"
+            )
             logger.error(
                 "%s client error (attempt %s/%s): %s",
-                label, attempt, STT_MAX_ATTEMPTS, exc,
+                label, attempt, STT_MAX_ATTEMPTS, redact_text(str(exc)),
             )
         else:
             if resp.status_code == 200 or not _is_transient_status(resp.status_code):
                 # Success, or a permanent failure the caller must surface as-is.
                 return resp, None
-            detail = (resp.text or "").strip()[:300]
+            detail = redact_text((resp.text or "").strip()[:300])
             last_error = f"Transcription service error {resp.status_code}: {detail}"
             logger.error(
                 "%s returned %s (attempt %s/%s): %s",
@@ -256,10 +259,11 @@ class LocalWhisperProvider:
             return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
-            logger.error("Whisper returned %s: %s", resp.status_code, resp.text[:200])
+            detail = redact_text((resp.text or "").strip()[:300])
+            logger.error("Whisper returned %s: %s", resp.status_code, detail)
             return _empty_result(
                 self.model, language or "en",
-                error=f"Transcription service error {resp.status_code}: {(resp.text or '').strip()[:300]}",
+                error=f"Transcription service error {resp.status_code}: {detail}",
             )
 
         result = resp.json()
@@ -526,7 +530,7 @@ class LocalParakeetProvider:
             return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
-            detail = (resp.text or "").strip()[:300]
+            detail = redact_text((resp.text or "").strip()[:300])
             logger.error("Parakeet returned %s: %s", resp.status_code, detail)
             return _empty_result(
                 self.model, language or "en",
@@ -631,7 +635,7 @@ class OpenAITranscriptionProvider:
             return _empty_result(self.model, language or "en", error=error)
 
         if resp.status_code != 200:
-            detail = (resp.text or "").strip()[:300]
+            detail = redact_text((resp.text or "").strip()[:300])
             logger.error("Gateway STT returned %s: %s", resp.status_code, detail)
             return _empty_result(
                 self.model, language or "en",

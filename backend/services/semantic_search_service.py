@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 import json
 import re
 
+from utils.url_redaction import redact_text, redact_url
+
 logger = logging.getLogger(__name__)
 
 # Qdrant connection. Production deploys set QDRANT_URL=http://host:port; older
@@ -123,7 +125,7 @@ class SemanticSearchService:
             )
             logger.info(
                 "Dense embeddings via Infinity (endpoint=%s model=%s)",
-                INFINITY_EMBED_ENDPOINT, DENSE_MODEL,
+                redact_url(INFINITY_EMBED_ENDPOINT), DENSE_MODEL,
             )
         return self._dense_embedder
 
@@ -137,7 +139,9 @@ class SemanticSearchService:
                 self._dense_dim = len(vec[0]) if vec and vec[0] else DENSE_DIM
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Dense-dim probe failed (%s); falling back to %s", exc, DENSE_DIM
+                    "Dense-dim probe failed (%s); falling back to %s",
+                    redact_text(str(exc)),
+                    DENSE_DIM,
                 )
                 self._dense_dim = DENSE_DIM
         return self._dense_dim
@@ -150,7 +154,9 @@ class SemanticSearchService:
                 self._sparse_embedder = SparseTextEmbedding(SPARSE_MODEL)
                 logger.info(f"Loaded sparse embedding model: {SPARSE_MODEL}")
             except Exception as e:
-                logger.warning(f"Failed to load sparse embedder: {e}")
+                logger.warning(
+                    "Failed to load sparse embedder: %s", redact_text(str(e))
+                )
                 self._sparse_embedder = None
         return self._sparse_embedder
 
@@ -251,7 +257,8 @@ class SemanticSearchService:
         if not vecs or len(vecs) != len(texts):
             raise RuntimeError(
                 f"Infinity dense embedding returned {len(vecs) if vecs else 0}/"
-                f"{len(texts)} vectors (endpoint {INFINITY_EMBED_ENDPOINT} unreachable?)"
+                f"{len(texts)} vectors (endpoint {redact_url(INFINITY_EMBED_ENDPOINT)} "
+                "unreachable?)"
             )
         return vecs
 
@@ -267,7 +274,7 @@ class SemanticSearchService:
         try:
             return list(embedder.embed(texts))
         except Exception as e:
-            logger.warning(f"Sparse embedding failed: {e}")
+            logger.warning("Sparse embedding failed: %s", redact_text(str(e)))
             return None
 
     def ensure_collection(self):
@@ -683,7 +690,8 @@ class SemanticSearchService:
 
             except Exception as e:
                 logger.warning(
-                    f"Hybrid query failed, falling back to dense-only: {e}"
+                    "Hybrid query failed, falling back to dense-only: %s",
+                    redact_text(str(e)),
                 )
 
         # Fallback: dense-only search
@@ -845,7 +853,7 @@ class SemanticSearchService:
         except Exception as e:
             return {
                 "initialized": False,
-                "error": str(e),
+                "error": redact_text(str(e)),
             }
 
     def reindex_all(self, db_session, organization_id: Optional[int] = None) -> Dict:

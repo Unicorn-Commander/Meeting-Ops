@@ -24,6 +24,8 @@ import os
 import re
 from typing import Any
 
+from utils.url_redaction import redact_url
+
 # ── Sibling app URLs ───────────────────────────────────────────────────
 #
 # Override via env in deployments where the canonical hostnames differ
@@ -95,7 +97,7 @@ def _contact_ops_hint(*, name: str | None, email: str | None) -> dict[str, str]:
         query = ""
     return {
         "app": "contact-ops",
-        "url": CONTACT_OPS_URL,
+        "url": redact_url(CONTACT_OPS_URL),
         "query": query,
     }
 
@@ -114,7 +116,7 @@ def _project_ops_hint(*, name: str | None, slug: str | None = None) -> dict[str,
         query = ""
     return {
         "app": "project-ops",
-        "url": PROJECT_OPS_URL,
+        "url": redact_url(PROJECT_OPS_URL),
         "query": query,
     }
 
@@ -124,7 +126,7 @@ def _crisis_ops_hint(*, name: str | None) -> dict[str, str]:
     query = f"name:{name}" if name else ""
     return {
         "app": "crisis-ops",
-        "url": CRISIS_OPS_URL,
+        "url": redact_url(CRISIS_OPS_URL),
         "query": query,
     }
 

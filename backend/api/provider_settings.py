@@ -13,6 +13,7 @@ from auth.dependencies import get_current_organization, get_current_user, requir
 from auth.organization import ActiveOrganization
 from auth.models import User
 from services.providers.crypto import encrypt_api_key, decrypt_api_key
+from utils.url_redaction import redact_url
 
 router = APIRouter(prefix="/api/providers", tags=["Provider Settings"])
 
@@ -62,7 +63,7 @@ def _mask_settings(row: OrgProviderSettings) -> ProviderSettingsResponse:
         organization_id=row.organization_id,
         service_kind=row.service_kind,
         provider_name=row.provider_name,
-        endpoint_url=row.endpoint_url,
+        endpoint_url=redact_url(row.endpoint_url) if row.endpoint_url else None,
         has_api_key=bool(row.api_key_encrypted),
         model_name=row.model_name,
         overrides=row.overrides,

@@ -16,6 +16,7 @@ from models.agent_system import AgentType, AgentPermission
 from auth.dependencies import get_current_user
 from auth.models import User
 from auth.organization import resolve_active_organization
+from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +411,7 @@ async def get_model_performance(
             org_id = active_org.organization.id
             org_slug = active_org.organization.slug
         except Exception as exc:
-            logger.debug(f"Per-org context resolution failed: {exc}")
+            logger.debug("Per-org context resolution failed: %s", redact_text(str(exc)))
 
     try:
         provider = registry.get_llm(org_id=org_id, task="quality") if org_id else registry.default_llm()
@@ -418,13 +419,13 @@ async def get_model_performance(
         llm_available = bool(health.get("available"))
         per_org_provider = {
             "org_slug": org_slug,
-            "endpoint": health.get("endpoint", ""),
+            "endpoint": redact_url(health.get("endpoint", "")),
             "model": health.get("model", ""),
         }
     except HTTPException:
         raise
     except Exception as exc:
-        logger.debug(f"Provider health probe failed: {exc}")
+        logger.debug("Provider health probe failed: %s", redact_text(str(exc)))
         llm_available = False
         per_org_provider = None
 
@@ -440,7 +441,7 @@ async def get_model_performance(
                 "context_window": 8192,
                 "vram_usage": "~1.5GB",
                 "best_for": "Summaries, chat, insights, sentiment analysis",
-                "endpoint": base_endpoint,
+                "endpoint": redact_url(base_endpoint),
                 "backend": "llama.cpp Vulkan",
                 "status": "active" if llm_available else "unavailable",
             }

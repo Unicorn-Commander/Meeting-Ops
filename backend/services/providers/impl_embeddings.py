@@ -4,6 +4,7 @@ import os
 import httpx
 
 from .protocols import EmbeddingsProvider
+from utils.url_redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,5 +53,5 @@ class InfinityProvider:
                 result = response.json()
                 return [item["embedding"] for item in result.get("data", [])]
         except Exception as e:
-            logger.error(f"Embedding API sync error: {e}")
+            logger.error("Embedding API sync error: %s", redact_text(str(e)))
         return []
