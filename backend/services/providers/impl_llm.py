@@ -7,6 +7,7 @@ from typing import Optional, AsyncGenerator
 import httpx
 
 from .protocols import LLMProvider
+from utils.url_redaction import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -222,17 +223,17 @@ class LiteLLMProvider:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{self.endpoint}/models", headers=headers)
                 if resp.status_code == 200:
-                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                    return {"available": True, "endpoint": redact_url(self.endpoint), "model": self.model, "error": None}
                 # Fall back to /health (some llama.cpp builds expose it without auth)
                 base = self.endpoint.rsplit("/v1", 1)[0]
                 resp2 = await client.get(f"{base}/health")
                 if resp2.status_code == 200:
-                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                    return {"available": True, "endpoint": redact_url(self.endpoint), "model": self.model, "error": None}
                 return {
                     "available": False,
-                    "endpoint": self.endpoint,
+                    "endpoint": redact_url(self.endpoint),
                     "model": self.model,
                     "error": f"HTTP {resp.status_code}",
                 }
         except Exception as exc:
-            return {"available": False, "endpoint": self.endpoint, "model": self.model, "error": str(exc)}
+            return {"available": False, "endpoint": redact_url(self.endpoint), "model": self.model, "error": str(exc)}

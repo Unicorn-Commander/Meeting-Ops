@@ -25,11 +25,11 @@ import os
 import tempfile
 import wave
 from typing import Any, Optional
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from .protocols import STTProvider  # noqa: F401  (re-exported)
+from utils.url_redaction import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +141,7 @@ async def _post_audio_with_retry(
 
 def _endpoint_for_log(endpoint: str) -> str:
     """Identify the serving endpoint without exposing URL credentials/tokens."""
-    try:
-        parsed = urlsplit(endpoint)
-        return urlunsplit(
-            (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
-        )
-    except ValueError:
-        return "<invalid STT endpoint>"
+    return redact_url(endpoint)
 
 
 async def _post_audio_with_fallback(

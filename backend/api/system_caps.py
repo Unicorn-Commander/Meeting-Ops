@@ -15,6 +15,8 @@ from typing import Any, Optional
 import httpx
 from fastapi import APIRouter
 
+from utils.url_redaction import redact_url
+
 router = APIRouter(prefix="/api/system", tags=["System"])
 
 
@@ -83,7 +85,7 @@ async def get_pipeline_status() -> dict[str, Any]:
         stt_block = {
             "engine": "parakeet",
             "model": (parakeet_health or {}).get("model", "nvidia/parakeet-tdt-1.1b"),
-            "endpoint": parakeet_url,
+            "endpoint": redact_url(parakeet_url),
             "ready": bool((parakeet_health or {}).get("model_loaded")),
             "gpu": (parakeet_health or {}).get("gpu_name"),
             "label": "NeMo Parakeet-TDT 1.1B",
@@ -92,7 +94,7 @@ async def get_pipeline_status() -> dict[str, Any]:
         stt_block = {
             "engine": "whisper",
             "model": "whisper-large-v3-turbo",
-            "endpoint": whisper_url or "(WHISPER_SERVER_URL unset)",
+            "endpoint": redact_url(whisper_url) if whisper_url else "(WHISPER_SERVER_URL unset)",
             "ready": bool(whisper_health),
             "gpu": None,
             "label": "whisper.cpp large-v3-turbo",
@@ -101,7 +103,7 @@ async def get_pipeline_status() -> dict[str, Any]:
     pyannote_ok = bool((speaker_health or {}).get("diarizer_available"))
     diarization_block = {
         "backend": "pyannote-3.1" if pyannote_ok else "ecapa-cluster-fallback",
-        "endpoint": speaker_url,
+        "endpoint": redact_url(speaker_url),
         "ready": bool(speaker_health),
         "gpu": (speaker_health or {}).get("gpu_name"),
         "label": (
@@ -119,7 +121,7 @@ async def get_pipeline_status() -> dict[str, Any]:
         llm_block = {
             "route": "direct",
             "model": direct_model,
-            "endpoint": direct_url,
+            "endpoint": redact_url(direct_url),
             "ready": bool(llm_health),
             "label": direct_model,
             "thinking": False,
@@ -130,7 +132,7 @@ async def get_pipeline_status() -> dict[str, Any]:
         llm_block = {
             "route": "litellm",
             "model": model,
-            "endpoint": litellm_url,
+            "endpoint": redact_url(litellm_url),
             "ready": True,
             "label": model,
             "thinking": False,

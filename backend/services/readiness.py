@@ -8,6 +8,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 from sqlalchemy import text
 
+from utils.url_redaction import redact_url
+
 PROBE_TIMEOUT_SECONDS = float(os.getenv("READINESS_TIMEOUT_SECONDS", "4"))
 
 
@@ -48,7 +50,7 @@ async def _http_health(url: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
         response = await client.get(url)
         response.raise_for_status()
-    return {"ok": True, "url": url}
+    return {"ok": True, "url": redact_url(url)}
 
 
 async def _probe_llm() -> dict[str, Any]:
