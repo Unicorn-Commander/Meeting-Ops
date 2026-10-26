@@ -19,6 +19,7 @@ from database.database import get_db
 from auth.dependencies import get_current_user
 from auth.models import User
 from auth.organization import resolve_active_organization
+from utils.url_redaction import redact_text, redact_url
 
 router = APIRouter(prefix="/api", tags=["ai-settings"])
 logger = logging.getLogger(__name__)
@@ -44,12 +45,12 @@ def _per_org_llm_overlay(
         provider = registry.get_llm(org_id=active_org.organization.id, task="quality")
         return {
             "org_slug": active_org.organization.slug,
-            "endpoint": getattr(provider, "endpoint", ""),
+            "endpoint": redact_url(getattr(provider, "endpoint", "")),
             "model": getattr(provider, "model", ""),
             "task": "quality",
         }
     except Exception as exc:
-        logger.debug(f"Per-org LLM overlay failed: {exc}")
+        logger.debug("Per-org LLM overlay failed: %s", redact_text(str(exc)))
         return None
 
 
@@ -89,13 +90,13 @@ async def get_model_info(
         health = await provider.health()
         llm_info = {
             "llamacpp_available": bool(health.get("available")),
-            "base_url": health.get("endpoint", ""),
+            "base_url": redact_url(health.get("endpoint", "")),
             "model": health.get("model", active["model_id"]),
         }
         if health.get("error"):
-            llm_info["error"] = health["error"]
+            llm_info["error"] = redact_text(str(health["error"]))
     except Exception as e:
-        llm_info["error"] = str(e)
+        llm_info["error"] = redact_text(str(e))
 
     org_llm = _per_org_llm_overlay(request, current_user, db)
 
@@ -108,12 +109,12 @@ async def get_model_info(
             "available": ws_available,
             "model": "large-v3-turbo",
             "backend": "whisper.cpp Vulkan (780M iGPU)",
-            "endpoint": whisper_server_client.base_url,
+            "endpoint": redact_url(whisper_server_client.base_url),
             "speed": "~9.6x realtime",
             "rtf": 0.104,
         }
     except Exception as e:
-        whisper_server_info["error"] = str(e)
+        whisper_server_info["error"] = redact_text(str(e))
 
     # Get fallback STT model info from transcription_service
     stt_fallback: Dict[str, Any] = {}
@@ -121,13 +122,16 @@ async def get_model_info(
         from services.transcription_service import transcription_service
         stt_fallback = transcription_service.get_current_model_info()
     except Exception as e:
-        stt_fallback = {"error": str(e)}
+        stt_fallback = {"error": redact_text(str(e))}
 
     return {
         "llm": {
             "model": (org_llm and org_llm.get("model")) or active["model_id"],
             "model_label": active["display_name"],
-            "endpoint": (org_llm and org_llm.get("endpoint")) or llm_info.get("base_url", "http://localhost:11437"),
+            "endpoint": redact_url(
+                (org_llm and org_llm.get("endpoint"))
+                or llm_info.get("base_url", "http://localhost:11437")
+            ),
             "available": llm_info.get("llamacpp_available", False),
             "active_engine": llm_info.get("active_engine", "none"),
             "backend": "llama.cpp Vulkan",
@@ -151,7 +155,7 @@ async def get_model_info(
                 "vram_usage": entry.get("vram_estimate", "unknown"),
                 "best_for": entry.get("best_for", ""),
                 "max_tokens_multiplier": entry.get("max_tokens_multiplier", 1.0),
-                "endpoint": "http://localhost:11437",
+                "endpoint": redact_url("http://localhost:11437"),
                 "status": "active" if model_id == active["model_id"] else "available",
             }
             for model_id, entry in MODEL_REGISTRY.items()
@@ -221,7 +225,7 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
         all_settings = settings_manager.get_all_settings()
         return all_settings.get("ai", {})
     except Exception as e:
-        logger.warning(f"Could not load AI settings: {e}")
+        logger.warning("Could not load AI settings: %s", redact_text(str(e)))
         return {}
 
 
@@ -239,4 +243,4 @@ async def update_ai_settings(settings: Dict[str, Any], current_user: User = Depe
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=redact_text(str(e)))

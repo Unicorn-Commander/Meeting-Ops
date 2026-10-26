@@ -5,6 +5,8 @@ Reads active model from model_registry, exposes llama.cpp Vulkan backend config.
 import os
 import logging
 
+from utils.url_redaction import redact_text, redact_url
+
 logger = logging.getLogger(__name__)
 
 # Default to GPU-accelerated backend
@@ -49,7 +51,11 @@ def get_ai_backend(backend_name: str = None):
 
     # Rebuild to pick up any model changes
     backend = _build_llamacpp_config() if backend_name == "llamacpp" else AI_BACKENDS[backend_name].copy()
-    logger.info(f"Using AI backend: {backend['name']} at {backend['url']}")
+    logger.info(
+        "Using AI backend: %s at %s",
+        backend["name"],
+        redact_url(backend["url"]),
+    )
     return backend
 
 
@@ -61,7 +67,7 @@ def check_backend_health(backend_config: dict) -> bool:
         response = requests.get(url, timeout=2)
         return response.status_code == 200
     except Exception as e:
-        logger.debug(f"Backend health check failed: {e}")
+        logger.debug("Backend health check failed: %s", redact_text(str(e)))
         return False
 
 

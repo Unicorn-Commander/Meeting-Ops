@@ -7,6 +7,7 @@ from typing import Optional, AsyncGenerator
 import httpx
 
 from .protocols import LLMProvider
+from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,9 @@ class LiteLLMProvider:
         except LLMUnavailable:
             raise
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-            raise LLMUnavailable(f"LLM request failed: {exc}") from exc
+            raise LLMUnavailable(
+                f"LLM request failed: {redact_text(str(exc))}"
+            ) from exc
 
     def chat_sync(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7, extra_params: Optional[dict] = None) -> str:
         """Synchronous chat call. Safe to invoke from sync code or via run_in_executor."""
@@ -184,10 +187,14 @@ class LiteLLMProvider:
                         content = (msg.get("reasoning_content") or "").strip()
                     return content
                 else:
-                    logger.error(f"LLM API error: {response.status_code} - {response.text[:200]}")
+                    logger.error(
+                        "LLM API error: %s - %s",
+                        response.status_code,
+                        redact_text(response.text[:200]),
+                    )
                     return ""
         except Exception as e:
-            logger.error(f"LLM sync call failed: {e}")
+            logger.error("LLM sync call failed: %s", redact_text(str(e)))
             return ""
 
     async def chat_stream(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7) -> AsyncGenerator[str, None]:
@@ -212,7 +219,9 @@ class LiteLLMProvider:
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 continue
         except httpx.HTTPError as exc:
-            raise LLMUnavailable(f"LLM stream failed: {exc}") from exc
+            raise LLMUnavailable(
+                f"LLM stream failed: {redact_text(str(exc))}"
+            ) from exc
 
     async def health(self) -> dict:
         """Probe upstream availability via /v1/models, falling back to /health.
@@ -222,17 +231,22 @@ class LiteLLMProvider:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{self.endpoint}/models", headers=headers)
                 if resp.status_code == 200:
-                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                    return {"available": True, "endpoint": redact_url(self.endpoint), "model": self.model, "error": None}
                 # Fall back to /health (some llama.cpp builds expose it without auth)
                 base = self.endpoint.rsplit("/v1", 1)[0]
                 resp2 = await client.get(f"{base}/health")
                 if resp2.status_code == 200:
-                    return {"available": True, "endpoint": self.endpoint, "model": self.model, "error": None}
+                    return {"available": True, "endpoint": redact_url(self.endpoint), "model": self.model, "error": None}
                 return {
                     "available": False,
-                    "endpoint": self.endpoint,
+                    "endpoint": redact_url(self.endpoint),
                     "model": self.model,
                     "error": f"HTTP {resp.status_code}",
                 }
         except Exception as exc:
-            return {"available": False, "endpoint": self.endpoint, "model": self.model, "error": str(exc)}
+            return {
+                "available": False,
+                "endpoint": redact_url(self.endpoint),
+                "model": self.model,
+                "error": redact_text(str(exc)),
+            }

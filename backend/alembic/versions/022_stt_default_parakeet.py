@@ -35,6 +35,7 @@ import logging
 
 from alembic import op
 from sqlalchemy import text
+from utils.url_redaction import redact_url
 
 
 # revision identifiers
@@ -70,7 +71,8 @@ def upgrade() -> None:
         for row in matching:
             logger.info("  org_id=%s prev=%s endpoint=%s model=%s",
                         row.organization_id, row.provider_name,
-                        row.endpoint_url, row.model_name)
+                        redact_url(row.endpoint_url) if row.endpoint_url else "",
+                        row.model_name)
     else:
         logger.info("No legacy local_whisper STT rows to migrate; no-op.")
 

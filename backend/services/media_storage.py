@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import BinaryIO, Iterator, Optional
 
 from secret_config import get_secret
+from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +91,13 @@ def _client():
         )
         logger.info(
             "media_storage: garage client ready, endpoint=%s bucket=%s",
-            GARAGE_ENDPOINT_URL, GARAGE_AUDIO_BUCKET,
+            redact_url(GARAGE_ENDPOINT_URL), GARAGE_AUDIO_BUCKET,
         )
         return _s3_client
     except Exception as e:  # noqa: BLE001
-        logger.warning("media_storage: garage client init failed: %s", e)
+        logger.warning(
+            "media_storage: garage client init failed: %s", redact_text(str(e))
+        )
         return None
 
 
@@ -116,7 +119,7 @@ def ensure_bucket() -> bool:
         _bucket_ensured = True
         return True
     except Exception as e:  # noqa: BLE001
-        msg = str(e)
+        msg = redact_text(str(e))
         if "AlreadyOwned" in msg or "AlreadyExists" in msg or "BucketAlreadyOwnedByYou" in msg:
             _bucket_ensured = True
             return True
@@ -156,7 +159,11 @@ def _upload_file_to_garage(local_path: str | Path, key: str, content_type: Optio
         client.upload_file(str(local_path), GARAGE_AUDIO_BUCKET, key, ExtraArgs=extra)
         return True
     except Exception as e:  # noqa: BLE001
-        logger.warning("media_storage: garage upload failed key=%s, keeping local: %s", key, e)
+        logger.warning(
+            "media_storage: garage upload failed key=%s, keeping local: %s",
+            key,
+            redact_text(str(e)),
+        )
         return False
 
 
@@ -220,7 +227,11 @@ def object_size(*, key: str) -> Optional[int]:
             if o["Key"] == key:
                 return o["Size"]
     except Exception as e:  # noqa: BLE001
-        logger.warning("media_storage: object_size failed key=%s: %s", key, e)
+        logger.warning(
+            "media_storage: object_size failed key=%s: %s",
+            key,
+            redact_text(str(e)),
+        )
     return None
 
 
@@ -296,7 +307,11 @@ def delete_object(*, backend: str, key: str) -> None:
             try:
                 client.delete_object(Bucket=GARAGE_AUDIO_BUCKET, Key=key)
             except Exception as e:  # noqa: BLE001
-                logger.warning("media_storage: garage delete failed key=%s: %s", key, e)
+                logger.warning(
+                    "media_storage: garage delete failed key=%s: %s",
+                    key,
+                    redact_text(str(e)),
+                )
     # always also clear any local cache copy
     try:
         (MEDIA_CACHE_ROOT / key).unlink(missing_ok=True)
@@ -319,7 +334,11 @@ def delete_prefix(*, prefix: str) -> int:
                     client.delete_objects(Bucket=GARAGE_AUDIO_BUCKET, Delete={"Objects": objs})
                     deleted += len(objs)
         except Exception as e:  # noqa: BLE001
-            logger.warning("media_storage: delete_prefix failed prefix=%s: %s", prefix, e)
+            logger.warning(
+                "media_storage: delete_prefix failed prefix=%s: %s",
+                prefix,
+                redact_text(str(e)),
+            )
     # clear local cache subtree
     try:
         cache_dir = MEDIA_CACHE_ROOT / prefix

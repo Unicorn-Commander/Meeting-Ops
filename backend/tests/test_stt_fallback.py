@@ -226,6 +226,6 @@ async def test_success_log_redacts_url_credentials_and_query(
     transport(lambda req: httpx.Response(200, json=PAYLOAD))
     with caplog.at_level(logging.INFO, logger=impl_stt.__name__):
         await stt_case.provider.transcribe(str(stt_case.audio))
-    assert "http://primary/v1" in caplog.text
+    assert "http://***@primary/v1?token=***" in caplog.text
     assert "placeholder" not in caplog.text
     assert "user:" not in caplog.text

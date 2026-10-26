@@ -20,6 +20,7 @@ from prometheus_client import make_asgi_app
 # Auth dependency for the few endpoints defined directly on `app` here in
 # main.py (the routers in api/ import their own). Used to gate /api/system-info.
 from auth.dependencies import get_current_user
+from utils.url_redaction import redact_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,13 +70,16 @@ def _load_router(app: FastAPI, name: str, module_path: str, router_attr: str = "
         loaded_routers.append(name)
         logger.info(f"Loaded router: {name}")
     except Exception as e:
-        entry = {"name": name, "error": str(e)}
+        safe_error = redact_text(str(e))
+        entry = {"name": name, "error": safe_error}
         failed_routers.append(entry)
         if required:
-            logger.error(f"REQUIRED router failed: {name} - {e}")
-            raise RuntimeError(f"Required router '{name}' failed to load: {e}")
+            logger.error(f"REQUIRED router failed: {name} - {safe_error}")
+            raise RuntimeError(
+                f"Required router '{name}' failed to load: {safe_error}"
+            )
         else:
-            logger.warning(f"Optional router skipped: {name} - {e}")
+            logger.warning(f"Optional router skipped: {name} - {safe_error}")
 
 
 @asynccontextmanager
@@ -95,7 +99,7 @@ async def lifespan(app: FastAPI):
         from api.mcp_http import open_mcp_lifespan
         _mcp_session_cm = await open_mcp_lifespan()
     except Exception as e:  # pragma: no cover - hosted MCP is optional
-        logger.warning(f"Hosted MCP session manager not started: {e}")
+        logger.warning("Hosted MCP session manager not started: %s", redact_text(str(e)))
 
     # Initialize database
     try:
@@ -103,7 +107,7 @@ async def lifespan(app: FastAPI):
         init_database()
         logger.info("Database initialized")
     except Exception as e:
-        logger.warning(f"Database initialization failed: {e}")
+        logger.warning("Database initialization failed: %s", redact_text(str(e)))
 
     # Clean up stale sessions (created but never started)
     try:
@@ -124,7 +128,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"Cleaned up {len(stale)} stale sessions")
         cleanup_db.close()
     except Exception as e:
-        logger.warning(f"Stale session cleanup failed: {e}")
+        logger.warning("Stale session cleanup failed: %s", redact_text(str(e)))
 
     # Check transcription service. The legacy local NPU path stays inert when
     # DISABLE_LOCAL_AUDIO is set (cloud build); STT then routes through
@@ -139,7 +143,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("Local transcription service not ready")
     except Exception as e:
-        logger.warning(f"Transcription service check failed: {e}")
+        logger.warning("Transcription service check failed: %s", redact_text(str(e)))
 
     try:
         from api.uploads import (
@@ -152,21 +156,21 @@ async def lifespan(app: FastAPI):
         await cleanup_stale_uploads()
         logger.info("Upload pipeline initialized")
     except Exception as e:
-        logger.warning(f"Upload pipeline initialization failed: {e}")
+        logger.warning("Upload pipeline initialization failed: %s", redact_text(str(e)))
 
     try:
         from services.tts_jobs import tts_queue
         await tts_queue.start()
         logger.info("TTS render queue initialized")
     except Exception as e:
-        logger.warning(f"TTS render queue initialization failed: {e}")
+        logger.warning("TTS render queue initialization failed: %s", redact_text(str(e)))
 
     try:
         from workers.bulk_import_worker import start_arq_worker
         await start_arq_worker()
         logger.info("Bulk import queue initialized")
     except Exception as e:
-        logger.warning(f"Bulk import queue initialization failed: {e}")
+        logger.warning("Bulk import queue initialization failed: %s", redact_text(str(e)))
 
     logger.info(f"Routers loaded: {len(loaded_routers)}, failed: {len(failed_routers)}")
 
@@ -180,7 +184,10 @@ async def lifespan(app: FastAPI):
             from api.mcp_http import close_mcp_lifespan
             await close_mcp_lifespan(_mcp_session_cm)
         except Exception as e:
-            logger.warning(f"Hosted MCP session manager shutdown failed: {e}")
+            logger.warning(
+                "Hosted MCP session manager shutdown failed: %s",
+                redact_text(str(e)),
+            )
 
     # Phase B.5 streaming-drain: send a server_shutdown JSON frame + 1001
     # close to every active WS session on /ws/sessions/{id}/live so the
@@ -213,14 +220,22 @@ async def lifespan(app: FastAPI):
                         timeout=1.0,
                     )
                 except Exception as exc:
-                    logger.debug("drain send_json failed sid=%s err=%s", sid, exc)
+                    logger.debug(
+                        "drain send_json failed sid=%s err=%s",
+                        sid,
+                        redact_text(str(exc)),
+                    )
                 try:
                     await asyncio.wait_for(
                         ws.close(code=1001, reason="going_away"),
                         timeout=1.0,
                     )
                 except Exception as exc:
-                    logger.debug("drain close failed sid=%s err=%s", sid, exc)
+                    logger.debug(
+                        "drain close failed sid=%s err=%s",
+                        sid,
+                        redact_text(str(exc)),
+                    )
 
             # Run all drains in parallel and cap the overall wait at 5 s.
             try:
@@ -236,23 +251,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         # api.streaming may have failed to import (optional router); log
         # and continue without blocking the rest of shutdown.
-        logger.debug(f"Streaming drain skipped: {e}")
+        logger.debug("Streaming drain skipped: %s", redact_text(str(e)))
 
     try:
         from api.uploads import stop_upload_pipeline_queue
         await stop_upload_pipeline_queue()
     except Exception as e:
-        logger.warning(f"Upload pipeline shutdown failed: {e}")
+        logger.warning("Upload pipeline shutdown failed: %s", redact_text(str(e)))
     try:
         from services.tts_jobs import tts_queue
         await tts_queue.stop()
     except Exception as e:
-        logger.warning(f"TTS render queue shutdown failed: {e}")
+        logger.warning("TTS render queue shutdown failed: %s", redact_text(str(e)))
     try:
         from workers.bulk_import_worker import stop_arq_worker
         await stop_arq_worker()
     except Exception as e:
-        logger.warning(f"Bulk import queue shutdown failed: {e}")
+        logger.warning("Bulk import queue shutdown failed: %s", redact_text(str(e)))
     if audio_monitor_task and not audio_monitor_task.done():
         audio_monitor_task.cancel()
         try:
@@ -533,8 +548,9 @@ try:
     mount_mcp_app(app)
     loaded_routers.append("mcp_http")
 except Exception as e:  # pragma: no cover - import-time failure
-    failed_routers.append({"name": "mcp_http", "error": str(e)})
-    logger.warning(f"Optional mount skipped: mcp_http - {e}")
+    safe_error = redact_text(str(e))
+    failed_routers.append({"name": "mcp_http", "error": safe_error})
+    logger.warning("Optional mount skipped: mcp_http - %s", safe_error)
 
 
 
@@ -622,7 +638,7 @@ async def get_status():
             audio_service = WorkingAudioService()
             audio_devices = audio_service.get_audio_devices()
         except Exception as e:
-            logger.error(f"Failed to get audio devices: {e}")
+            logger.error("Failed to get audio devices: %s", redact_text(str(e)))
 
         return {
             "status": "healthy" if readiness["ready"] else "degraded",
@@ -656,9 +672,10 @@ async def get_status():
             }
         }
     except Exception as e:
-        logger.error(f"Error getting status: {e}")
+        safe_error = redact_text(str(e))
+        logger.error("Error getting status: %s", safe_error)
         return JSONResponse(
-            {"status": "error", "error": str(e)},
+            {"status": "error", "error": safe_error},
             status_code=503,
         )
 
@@ -672,8 +689,9 @@ async def get_audio_devices():
         devices = audio_service.get_audio_devices()
         return {"devices": devices, "status": "success"}
     except Exception as e:
-        logger.error(f"Failed to get audio devices: {e}")
-        return {"devices": [], "status": "error", "message": str(e)}
+        safe_error = redact_text(str(e))
+        logger.error("Failed to get audio devices: %s", safe_error)
+        return {"devices": [], "status": "error", "message": safe_error}
 
 
 @app.get("/api/system-info")
@@ -719,8 +737,9 @@ async def get_system_info(current_user=Depends(get_current_user)):
             "build": "production"
         }
     except Exception as e:
-        logger.error(f"Error getting system info: {e}")
-        return {"error": str(e)}
+        safe_error = redact_text(str(e))
+        logger.error("Error getting system info: %s", safe_error)
+        return {"error": safe_error}
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from auth.dependencies import get_current_user
 from auth.models import User
 from models.unified_agent import UnifiedMeetingAgent
 from services.unified_agent_service import unified_agent_service
+from utils.url_redaction import redact_url
 
 router = APIRouter(prefix="/api/unified-agent", tags=["Unified Agent"])
 
@@ -181,14 +182,16 @@ async def get_available_providers(current_user: User = Depends(get_current_user)
         providers.append({
             "type": "direct",
             "name": "Direct LLM route",
-            "endpoint": direct_url,
+            "endpoint": redact_url(direct_url),
             "models": {task: direct_model for task in task_models},
             "active": True,
         })
     providers.append({
         "type": "litellm",
         "name": "LiteLLM gateway",
-        "endpoint": os.getenv("OPENAI_API_BASE", "http://unicorn-litellm:4000/v1"),
+        "endpoint": redact_url(
+            os.getenv("OPENAI_API_BASE", "http://unicorn-litellm:4000/v1")
+        ),
         "models": task_models,
         "active": not use_direct,
     })
