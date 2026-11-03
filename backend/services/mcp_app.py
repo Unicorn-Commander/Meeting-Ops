@@ -5,15 +5,17 @@ prompt definition. Both the stdio entry point (``mcp/meeting_ops_mcp.py``)
 and the hosted streamable-HTTP transport (``backend/api/mcp_http.py``)
 import the same instance from here.
 
-The tools forward every backend call as ``Authorization: Bearer
-mops_pat_...`` so the existing PAT auth + per-user RBAC in
-``backend/api/`` does all the scoping. The PAT itself is read from a
+The tools forward every backend call as the same ``Authorization: Bearer``
+credential supplied to the hosted endpoint (a ``mops_pat_...`` PAT or a
+verified Keycloak access token), so the existing auth + per-user RBAC in
+``backend/api/`` does all the scoping. The credential is read from a
 :class:`contextvars.ContextVar` so the same code path works for both
 transports:
 
 * stdio sets the ContextVar once from ``MEETING_OPS_PAT`` at startup.
 * hosted HTTP sets it per-request from the inbound ``Authorization``
-  header, then resets it after the response is sent.
+  header, pins the resolved local user, then resets both after the response
+  is sent.
 
 Most MCP tools talk to the same backend REST API that the SPA + external
 integrations talk to.  ``import_recording`` is the deliberate exception: the
@@ -64,6 +66,9 @@ _pat_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _backend_url_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "meeting_ops_mcp_backend_url", default=None
 )
+_user_var: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "meeting_ops_mcp_user", default=None
+)
 
 
 def set_pat(token: str | None) -> contextvars.Token:
@@ -87,6 +92,20 @@ def reset_backend_url(token: contextvars.Token) -> None:
     _backend_url_var.reset(token)
 
 
+def set_mcp_user(user: object | None) -> contextvars.Token:
+    """Pin the resolved local Meeting-Ops user for direct MCP tools."""
+    return _user_var.set(user)
+
+
+def reset_mcp_user(token: contextvars.Token) -> None:
+    _user_var.reset(token)
+
+
+def get_mcp_user() -> object | None:
+    """Return the local user pinned by the hosted HTTP auth middleware."""
+    return _user_var.get()
+
+
 def _default_backend_url() -> str:
     return os.getenv("MEETING_OPS_URL", "http://localhost:9050").rstrip("/")
 
@@ -95,13 +114,13 @@ def _default_backend_url() -> str:
 
 
 def _require_pat() -> str:
-    pat = _pat_var.get()
-    if pat:
-        return pat
+    credential = _pat_var.get()
+    if credential:
+        return credential
     raise RuntimeError(
-        "Meeting-Ops MCP: no Personal Access Token bound to this call. "
-        "For stdio, set MEETING_OPS_PAT. For hosted MCP, include "
-        "Authorization: Bearer mops_pat_... on the request."
+        "Meeting-Ops MCP: no bearer credential bound to this call. "
+        "For stdio, set MEETING_OPS_PAT. For hosted MCP, include an "
+        "Authorization: Bearer token on the request."
     )
 
 
@@ -118,7 +137,11 @@ def _resolve_mcp_active_organization(db, user, organization_id=None):
     same ``ActiveOrganization`` shape consumed by upload tier gates.
     """
     from auth.models import Organization, UserOrganization
-    from auth.organization import ActiveOrganization, ensure_default_organization
+    from auth.organization import (
+        DEFAULT_ORG_SLUG,
+        ActiveOrganization,
+        ensure_default_organization,
+    )
 
     membership = None
     organization = None
@@ -148,6 +171,15 @@ def _resolve_mcp_active_organization(db, user, organization_id=None):
             (item for item in memberships if item.organization_id == preferred_id),
             None,
         )
+        if membership is None:
+            membership = next(
+                (
+                    item
+                    for item in memberships
+                    if item.organization and item.organization.slug == DEFAULT_ORG_SLUG
+                ),
+                None,
+            )
         if membership is None and memberships:
             membership = memberships[0]
         if membership is not None:
@@ -831,7 +863,7 @@ async def import_recording(
     caller, returns the original session without requeuing it. Prepared ingest
     uploads use their own /api/ingest completion route.
     """
-    from auth.pat import resolve_pat_record
+    from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat_record
     from database.database import SessionLocal
     from services.mcp_import import import_recording_for_caller
 
@@ -839,14 +871,22 @@ async def import_recording(
     db = SessionLocal()
     try:
         pat = resolve_pat_record(db, plaintext=token)
-        if pat is None or pat.scope != "user":
-            raise HTTPException(
-                status_code=401, detail="A user-scoped MCP PAT is required."
-            )
-        active_org = _resolve_mcp_active_organization(db, pat.user, pat.organization_id)
+        if pat is not None or token.startswith(PAT_PREFIX):
+            if pat is None or pat.scope != "user":
+                raise HTTPException(
+                    status_code=401, detail="A user-scoped MCP PAT is required."
+                )
+            caller = pat.user
+            organization_id = pat.organization_id
+        else:
+            caller = get_mcp_user()
+            if caller is None:
+                raise HTTPException(status_code=401, detail="A verified MCP user is required.")
+            organization_id = None
+        active_org = _resolve_mcp_active_organization(db, caller, organization_id)
         return await import_recording_for_caller(
             db=db,
-            caller=pat.user,
+            caller=caller,
             active_org=active_org,
             source_url=source_url,
             local_path=local_path,
@@ -1012,6 +1052,9 @@ __all__ = [
     "reset_pat",
     "set_backend_url",
     "reset_backend_url",
+    "set_mcp_user",
+    "reset_mcp_user",
+    "get_mcp_user",
     "READONLY_TOOL_NAMES",
     "import_recording",
 ]

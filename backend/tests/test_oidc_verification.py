@@ -96,6 +96,35 @@ def test_valid_via_azp_when_aud_is_other(patch_jwks):
     assert claims["azp"] == _oidc().KC_CLIENT_ID
 
 
+def test_expected_audience_env_is_accepted_on_aud_or_azp(patch_jwks, monkeypatch):
+    priv, _ = patch_jwks
+    monkeypatch.setenv("KEYCLOAK_EXPECTED_AUDIENCES", "meeting-ops-oauth")
+    claims = _oidc().verify_kc_bearer_token(
+        _token(
+            priv,
+            typ="Bearer",
+            aud="meeting-ops-oauth",
+            azp="other-client",
+        )
+    )
+    assert claims["aud"] == "meeting-ops-oauth"
+
+
+def test_bearer_wrong_issuer_is_rejected(patch_jwks):
+    priv, _ = patch_jwks
+    assert _oidc().verify_kc_bearer_token(
+        _token(priv, iss="https://evil.example/realms/x")
+    ) is None
+
+
+def test_bearer_expired_is_rejected(patch_jwks):
+    priv, _ = patch_jwks
+    past = int(time.time()) - 3600
+    assert _oidc().verify_kc_bearer_token(
+        _token(priv, exp=past, iat=past)
+    ) is None
+
+
 def test_wrong_issuer_rejected(patch_jwks):
     priv, _ = patch_jwks
     with pytest.raises(pyjwt.InvalidIssuerError):

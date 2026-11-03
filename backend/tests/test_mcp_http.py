@@ -6,9 +6,14 @@ FastMCP HTTP transport.
 """
 
 import json
+import time
+import types
 from unittest.mock import patch
 
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +55,11 @@ def test_mcp_without_authorization_returns_401(client):
     body = r.json()
     assert body["error"] == "unauthorized"
     assert "Authorization" in body["detail"]
-    assert r.headers.get("www-authenticate", "").lower().startswith("bearer")
+    challenge = r.headers.get("www-authenticate", "")
+    assert challenge.lower().startswith("bearer")
+    assert 'realm="meeting-ops-mcp"' in challenge
+    assert 'resource_metadata="' in challenge
+    assert 'error="invalid_token"' not in challenge
 
 
 def test_mcp_with_invalid_bearer_returns_401(client):
@@ -61,19 +70,18 @@ def test_mcp_with_invalid_bearer_returns_401(client):
     )
     assert r.status_code == 401
     assert r.json()["error"] == "unauthorized"
+    assert 'error="invalid_token"' in r.headers.get("www-authenticate", "")
 
 
-def test_mcp_with_non_pat_bearer_returns_401(client):
-    """A JWT-shaped bearer (no mops_pat_ prefix) is rejected on /mcp.
-
-    The hosted endpoint is intentionally PAT-only — JWTs belong to the
-    SPA path, not external AI clients.
-    """
-    r = client.get(
-        "/mcp",
-        headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x"},
-    )
+def test_mcp_with_non_kc_jwt_bearer_returns_401(client):
+    """A JWT-shaped bearer with no valid uchub signature is rejected."""
+    with patch("auth.oidc_sso.verify_kc_bearer_token", return_value=None):
+        r = client.get(
+            "/mcp",
+            headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x"},
+        )
     assert r.status_code == 401
+    assert 'error="invalid_token"' in r.headers.get("www-authenticate", "")
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +89,9 @@ def test_mcp_with_non_pat_bearer_returns_401(client):
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_options_preflight_for_claude_origin(client):
+def test_mcp_options_preflight_for_claude_origin(client, monkeypatch):
     """OPTIONS /mcp from claude.ai returns 204 with permissive CORS headers."""
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://claude.ai")
     r = client.options(
         "/mcp",
         headers={
@@ -99,19 +108,148 @@ def test_mcp_options_preflight_for_claude_origin(client):
     assert "authorization" in allow_headers.lower()
 
 
-def test_mcp_options_preflight_for_arbitrary_origin(client):
-    """OPTIONS from a user-installed-client origin still gets permissive CORS."""
+def test_mcp_options_preflight_for_wildcard_origin(client, monkeypatch):
+    """The explicit wildcard preserves the legacy echo-any-origin behavior."""
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "*")
     r = client.options(
         "/mcp",
         headers={"Origin": "https://my-custom-mcp-client.example"},
     )
     assert r.status_code in (204, 200)
-    # We echo the origin back rather than wildcarding — keeps future
-    # credentials: 'include' callers compatible without code changes.
     assert (
         r.headers.get("access-control-allow-origin")
         == "https://my-custom-mcp-client.example"
     )
+
+
+def test_mcp_options_rejects_disallowed_origin_before_auth(client, monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://allowed.example")
+    r = client.options(
+        "/mcp",
+        headers={
+            "Origin": "https://not-allowed.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "forbidden"
+    assert "access-control-allow-origin" not in r.headers
+    assert "www-authenticate" not in r.headers
+
+
+def test_mcp_trailing_slash_redirects_to_canonical_path(client):
+    r = client.get("/mcp/", follow_redirects=False)
+    assert r.status_code == 308
+    assert r.headers["location"].endswith("/mcp")
+
+
+def test_protected_resource_metadata_both_paths(client, monkeypatch):
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://meeting.example")
+    monkeypatch.setenv("KEYCLOAK_URL", "https://auth.example")
+    monkeypatch.setenv("KEYCLOAK_REALM", "uchub-test")
+
+    expected_resource = "https://meeting.example/mcp"
+    for path in (
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+    ):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/json")
+        assert r.headers["access-control-allow-origin"] == "*"
+        assert r.headers["cache-control"] == "public, max-age=3600"
+        document = r.json()
+        assert document["resource"] == expected_resource
+        assert document["authorization_servers"] == [
+            "https://auth.example/realms/uchub-test"
+        ]
+        assert document["bearer_methods_supported"] == ["header"]
+        assert document["scopes_supported"] == [
+            "openid", "profile", "email", "offline_access", "mcp"
+        ]
+        assert document["resource_name"] == "Meeting-Ops MCP"
+
+    options = client.options("/.well-known/oauth-protected-resource/mcp")
+    assert options.status_code == 204
+    assert options.headers["access-control-allow-origin"] == "*"
+
+
+@pytest.fixture()
+def signed_kc_token(monkeypatch):
+    """A locally signed access token served by a test JWKS client."""
+    from auth import oidc_sso
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    public_key = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    fake_jwks = types.SimpleNamespace(
+        get_signing_key_from_jwt=lambda _token: types.SimpleNamespace(key=public_key)
+    )
+    monkeypatch.setattr(oidc_sso, "_get_jwks_client", lambda: fake_jwks)
+    now = int(time.time())
+    return pyjwt.encode(
+        {
+            "iss": oidc_sso.KC_ISSUER,
+            "aud": oidc_sso.KC_CLIENT_ID,
+            "azp": oidc_sso.KC_CLIENT_ID,
+            "typ": "Bearer",
+            "sub": "fictional-subject-123",
+            "uc_uid": "fictional-uid-123",
+            "email": "oauth-tester@example.com",
+            "preferred_username": "oauth-tester",
+            "groups": [],
+            "scope": "openid profile email offline_access mcp",
+            "exp": now + 300,
+            "iat": now,
+        },
+        private_key,
+        algorithm="RS256",
+    )
+
+
+def test_mcp_accepts_signed_keycloak_access_token(client, signed_kc_token):
+    r = client.post(
+        "/mcp",
+        json=_initialize_payload(),
+        headers={
+            "Authorization": f"Bearer {signed_kc_token}",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    assert r.status_code in (200, 202), r.text
+    body = _decode_response(r)
+    assert body is not None
+    assert body.get("result", {}).get("serverInfo", {}).get("name") == "Meeting-Ops"
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"sub": "admin", "uc_uid": "opaque-subject"},
+        {"sub": "opaque-subject", "uc_uid": "admin"},
+    ],
+)
+def test_keycloak_stable_identity_reuses_existing_local_user(client, claims):
+    """Opaque claims may match an existing local identity, never provision one."""
+    from auth.dependencies import resolve_keycloak_user
+    from auth.models import User
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.username == "admin").one()
+        resolved = resolve_keycloak_user(db, claims)
+        assert resolved is not None
+        assert resolved.id == existing.id
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
