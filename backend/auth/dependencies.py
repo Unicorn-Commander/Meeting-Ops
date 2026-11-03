@@ -27,7 +27,7 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def _first_email(*candidates: Optional[str]) -> Optional[str]:
     for value in candidates:
-        if value and "@" in value:
+        if isinstance(value, str) and "@" in value:
             return value.strip()
     return None
 
@@ -98,6 +98,67 @@ def _get_sso_groups(request: Request) -> list[str]:
         or ""
     )
     return parse_group_list(g.strip() for g in raw_groups.split(",") if g.strip())
+
+
+def resolve_keycloak_user(db: Session, claims: dict) -> Optional[User]:
+    """Resolve a verified Keycloak access token through the REST user path.
+
+    The normal uchub token carries an email claim, so it uses the same
+    ``AuthService.get_or_create_sso_user`` mapping as oauth2-proxy and the
+    native OIDC callback. Some clients expose only the stable ``uc_uid``/``sub``
+    identity; those can authenticate an already-linked local username/email,
+    but never cause a new account to be provisioned from an opaque subject.
+    """
+    if not isinstance(claims, dict):
+        return None
+
+    raw_groups = claims.get("groups") or []
+    if isinstance(raw_groups, str):
+        raw_groups = [raw_groups]
+    groups = parse_group_list(str(group) for group in raw_groups if group)
+
+    kc_email = _first_email(
+        claims.get("email"),
+        claims.get("uc_uid"),
+        claims.get("ucuid"),
+        claims.get("preferred_username"),
+        claims.get("upn"),
+        claims.get("sub"),
+    )
+    if kc_email:
+        return AuthService.get_or_create_sso_user(
+            db,
+            email=kc_email,
+            username=(
+                claims.get("preferred_username")
+                if isinstance(claims.get("preferred_username"), str)
+                else None
+            ),
+            full_name=_display_name_from_claims(claims),
+            is_superuser=is_global_admin(groups),
+            groups=groups,
+        )
+
+    # A realm may issue a stable subject without an email claim. Meeting-Ops
+    # has no external-subject column, so only an existing explicit link is
+    # eligible; treating an arbitrary subject as an email would create an
+    # unresolvable account and could not reuse REST workspace membership.
+    stable_ids = []
+    for claim_name in ("uc_uid", "ucuid", "sub", "preferred_username"):
+        value = claims.get(claim_name)
+        if isinstance(value, str) and value.strip():
+            stable_ids.append(value.strip().lower())
+    for identity in stable_ids:
+        user = (
+            db.query(User)
+            .filter(User.email == identity)
+            .first()
+            or db.query(User).filter(User.username == identity).first()
+        )
+        if user and user.is_active:
+            return user
+    return None
+
 
 async def get_current_user_optional(
     request: Request,
@@ -181,7 +242,7 @@ async def get_current_user_optional(
         try:
             user = resolve_pat(db, plaintext=token)
         except Exception:
-            logger.exception("PAT resolution failed for prefix=%s", token[:12])
+            logger.exception("PAT resolution failed")
             user = None
 
     # Try JWT token
@@ -211,29 +272,20 @@ async def get_current_user_optional(
             logger.exception("uchub bearer verification errored")
             kc_claims = None
         if kc_claims:
-            kc_email = _first_email(
-                kc_claims.get("email"), kc_claims.get("preferred_username")
+            kc_groups = parse_group_list(
+                [kc_claims.get("groups")]
+                if isinstance(kc_claims.get("groups"), str)
+                else (kc_claims.get("groups") or [])
             )
-            if kc_email:
-                kc_groups = parse_group_list(kc_claims.get("groups") or [])
-                request.state.sso_groups = kc_groups
-                try:
-                    user = AuthService.get_or_create_sso_user(
-                        db,
-                        email=kc_email,
-                        username=kc_claims.get("preferred_username"),
-                        full_name=_display_name_from_claims(kc_claims),
-                        is_superuser=is_global_admin(kc_groups),
-                        groups=kc_groups,
-                    )
-                except Exception:
-                    logger.exception(
-                        "uchub bearer auto-provision failed for email=%s", kc_email
-                    )
-                    user = None
-            else:
+            request.state.sso_groups = kc_groups
+            try:
+                user = resolve_keycloak_user(db, kc_claims)
+            except Exception:
+                logger.exception("uchub bearer user resolution failed")
+                user = None
+            if not user:
                 logger.warning(
-                    "uchub bearer verified but carried no usable email claim; keys=%s",
+                    "uchub bearer verified but carried no local identity mapping; keys=%s",
                     list(kc_claims.keys()),
                 )
 

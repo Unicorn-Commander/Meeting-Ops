@@ -22,7 +22,21 @@ https://meeting-ops.unicorncommander.ai/mcp
 
 Self-hosted: substitute your own domain. The path is always `/mcp`.
 
-## 1. Generate a Personal Access Token
+## 1. OAuth or a Personal Access Token
+
+Hosted clients can sign in with your Unicorn Commander account (OAuth) or
+paste a token. The OAuth flow starts from the endpoint's protected-resource
+discovery document and uses the configured `uchub` Keycloak realm; no header
+needs to be copied into the client.
+
+For Claude Code, the OAuth form is:
+
+```bash
+claude mcp add --transport http meeting-ops https://meeting-ops.unicorncommander.ai/mcp
+```
+
+The PAT form remains available for clients that do not use OAuth. Generate a
+user-scoped token as follows:
 
 1. Sign in to [Meeting-Ops Settings](https://meeting-ops.unicorncommander.ai/settings).
 2. Open the **Personal Access Tokens** tab.

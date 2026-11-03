@@ -285,13 +285,10 @@ app = FastAPI(
 
 _cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
 
-# Hosted MCP endpoint is browser-installable from any AI client. The
-# known-good clients (Claude Web, Cursor) sit on their own origins; user-
-# installed clients can be anything. The endpoint is bearer-auth-only
-# (no cookies, no credentials), so a permissive Origin regex is safe.
-# Add the .* allow-origin regex when not explicitly pinned via env. When
-# CORS_ORIGINS *is* explicitly set, callers are expected to add their
-# trusted MCP origins to that list themselves.
+# Hosted MCP has its own CORS middleware below. Keep the regular app CORS
+# policy separate: MCP_ALLOWED_ORIGINS controls browser-installed MCP clients
+# and may be set to * only when a deployment deliberately wants the legacy
+# echo-any-origin behavior.
 _default_origin_regex = (
     r"^https?://(localhost|127\.0\.0\.1|"
     r"10\.\d+\.\d+\.\d+|"
@@ -318,14 +315,11 @@ app.add_middleware(RequestIdMiddleware)
 from middleware.http_metrics import HttpMetricsMiddleware
 app.add_middleware(HttpMetricsMiddleware)
 
-# Hosted MCP endpoint bypass for CORS gating. CORSMiddleware above
-# enforces app-wide CORS, but the MCP endpoint accepts ANY origin
-# (browser-installed AI clients carry the Origin of whatever app the
-# user opened them from — claude.ai, cursor.sh, but also a long tail of
-# custom clients). Adding this AFTER the CORS middleware means it runs
-# FIRST on the request path (Starlette middleware is LIFO), so OPTIONS
-# preflight + CORS headers on /mcp are handled here and CORSMiddleware
-# never sees them. Non-/mcp paths fall through untouched.
+# Hosted MCP endpoint bypass for CORS gating. CORSMiddleware above enforces
+# app-wide CORS; the MCP-specific middleware handles its allow-list, OPTIONS
+# preflight, and response headers before auth. Adding this AFTER the CORS
+# middleware means it runs FIRST on the request path (Starlette middleware is
+# LIFO). Non-/mcp paths fall through untouched.
 try:
     from api.mcp_http import McpCorsBypassMiddleware
     app.add_middleware(McpCorsBypassMiddleware)

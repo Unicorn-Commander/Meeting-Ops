@@ -5,12 +5,11 @@ Mounts the shared FastMCP server (defined in
 external AI clients (Claude Desktop, Cursor, Cline, Continue, Zed,
 ChatGPT Desktop, etc.) can connect without cloning the repo.
 
-Auth: every request must carry ``Authorization: Bearer mops_pat_<...>``.
-The token is validated against the existing PAT store (the SAME path
-used by the JWT-or-PAT dependency at ``auth.dependencies``). On success,
-the resolved PAT is pinned to a contextvar for the duration of the
-request so the shared tool code can forward it to the backend REST API
-and inherit per-user RBAC for free.
+Auth: every request must carry ``Authorization: Bearer <credential>``.
+User-scoped ``mops_pat_<...>`` PATs and verified uchub Keycloak access tokens
+are accepted. The resolved local user and bearer credential are pinned to
+contextvars for the duration of the request so the shared tool code can
+forward it to the backend REST API and inherit per-user RBAC for free.
 
 The hosted transport is gated by ``MCP_HOSTED_ENABLED`` (default true).
 When false, ``mount_mcp_app`` is a no-op and ``/mcp`` 404s.
@@ -22,11 +21,14 @@ surface MCP availability at a glance.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.responses import Response
 
 
 logger = logging.getLogger(__name__)
@@ -36,14 +38,20 @@ logger = logging.getLogger(__name__)
 # the trailing path internals.
 _MOUNT_PATH = "/mcp"
 
-# Origins explicitly allowed for browser-installed MCP clients. The
-# wildcard catches arbitrary user-installed clients; the named entries
-# are documentation for the known-good targets. We do NOT send
-# credentials on the MCP endpoint (bearer-only), so a permissive Origin
-# allowlist is safe.
+# Browser clients known to use the hosted MCP endpoint. The app's configured
+# origins are added below; ``MCP_ALLOWED_ORIGINS=*`` is the explicit opt-in for
+# the pre-existing echo-any-origin behavior.
 _ALLOWED_ORIGIN_HINTS = (
     "https://claude.ai",
+    "https://claude.com",
     "https://cursor.sh",
+    "https://chatgpt.com",
+)
+
+_PRM_ROOT_PATH = "/.well-known/oauth-protected-resource"
+_PRM_MCP_PATH = f"{_PRM_ROOT_PATH}{_MOUNT_PATH}"
+_MCP_RESOURCE_DOCUMENTATION = (
+    "https://unicorncommander.ai/platform/bring-your-own-ai"
 )
 
 
@@ -68,28 +76,127 @@ def mcp_health_status() -> str:
     return _state.get("status", "disabled")
 
 
+def _normalize_origin(value: str | None) -> str | None:
+    """Return an origin without path/query/userinfo, or None if invalid."""
+    raw = (value or "").strip()
+    if not raw or raw == "*":
+        return raw or None
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _configured_mcp_origins() -> set[str]:
+    """Build the MCP browser-origin allow-list from deployment config."""
+    configured = os.getenv("MCP_ALLOWED_ORIGINS", "")
+    configured_values = {
+        origin
+        for value in configured.split(",")
+        if (origin := _normalize_origin(value))
+    }
+    if "*" in configured_values:
+        return {"*"}
+
+    allowed = set(_ALLOWED_ORIGIN_HINTS)
+    for env_name in ("PUBLIC_BASE_URL", "APP_PUBLIC_URL", "CORS_ORIGINS"):
+        for value in os.getenv(env_name, "").split(","):
+            origin = _normalize_origin(value)
+            if origin and origin != "*":
+                allowed.add(origin)
+    allowed.update(configured_values)
+    return allowed
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    normalized = _normalize_origin(origin)
+    if not normalized:
+        return False
+    allowed = _configured_mcp_origins()
+    return "*" in allowed or normalized in allowed
+
+
+def _public_base_url(scope: dict | None = None) -> str:
+    """Resolve the externally visible app origin without hard-coding a host."""
+    for env_name in ("PUBLIC_BASE_URL", "APP_PUBLIC_URL"):
+        configured = os.getenv(env_name, "").strip().rstrip("/")
+        if configured:
+            parsed = urlsplit(configured)
+            if parsed.scheme in {"http", "https"} and parsed.netloc and not (
+                parsed.username or parsed.password
+            ) and parsed.path in ("", "/") and not parsed.query and not parsed.fragment:
+                return f"{parsed.scheme.lower()}://{parsed.netloc}".rstrip("/")
+
+    scope = scope or {}
+    raw_headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in scope.get("headers", [])
+    }
+    forwarded_host = raw_headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    host = forwarded_host or raw_headers.get("host", "").strip()
+    if not host:
+        server = scope.get("server") or ("localhost", 80)
+        host = str(server[0])
+        if server[1] not in (80, 443):
+            host = f"{host}:{server[1]}"
+    proto = (
+        raw_headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        or str(scope.get("scheme", "http")).lower()
+    )
+    if proto not in {"http", "https"}:
+        proto = "https"
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _keycloak_issuer() -> str:
+    """Derive the PRM authorization server from the existing KC env names."""
+    explicit = os.getenv("KEYCLOAK_ISSUER", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    base = os.getenv("KEYCLOAK_URL", "https://auth.unicorncommander.ai").rstrip("/")
+    realm = os.getenv("KEYCLOAK_REALM", "uchub").strip("/") or "uchub"
+    return f"{base}/realms/{realm}"
+
+
+def _protected_resource_document(scope: dict | None = None) -> dict:
+    base_url = _public_base_url(scope)
+    return {
+        "resource": f"{base_url}{_MOUNT_PATH}",
+        "authorization_servers": [_keycloak_issuer()],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["openid", "profile", "email", "offline_access", "mcp"],
+        "resource_name": "Meeting-Ops MCP",
+        "resource_documentation": _MCP_RESOURCE_DOCUMENTATION,
+    }
+
+
 # ── ASGI middleware: PAT auth + ContextVar pinning ─────────────────────
 
 
 class _PATAuthMiddleware:
-    """Minimal ASGI middleware that gates the mounted FastMCP app on PATs.
+    """ASGI middleware that gates the mounted FastMCP app on bearer auth.
 
     Wraps the streamable-HTTP ASGI sub-app produced by FastMCP. On every
     HTTP request:
 
-    1. Pull ``Authorization: Bearer mops_pat_...`` from the headers.
-    2. Resolve the PAT via the existing ``auth.pat.resolve_pat`` helper
-       (same code path as the JWT-or-PAT dependency, so behavior stays
-       in lockstep).
-    3. Pin the validated PAT onto the shared ``set_pat`` contextvar and
-       force the backend URL to localhost (the MCP tools call the same
-       FastAPI app they're mounted on — no round-trip outside the
-       container).
-    4. Reset the contextvar after the inner app finishes, even on error.
+    1. Resolve a user-scoped PAT or a verified uchub Keycloak access token
+       through the same auth helpers used by REST.
+    2. Pin the bearer and resolved local user onto contextvars, and force the
+       backend URL to localhost (the MCP tools call the same FastAPI app).
+    3. Reset every contextvar after the inner app finishes, even on error.
 
     Preflight (CORS ``OPTIONS``) requests are answered directly without
-    auth so browser-installed MCP clients (Claude Web, Cursor) can probe
-    the endpoint.
+    auth so browser-installed MCP clients can probe the endpoint. A browser
+    Origin outside the configured allow-list is rejected before auth.
     """
 
     def __init__(self, inner_app):
@@ -108,8 +215,11 @@ class _PATAuthMiddleware:
         method = scope.get("method", "GET").upper()
         origin = headers.get("origin")
 
-        # Preflight: respond with the permissive CORS headers and bail
-        # before any auth.
+        if not _origin_allowed(origin):
+            await self._send_cors_forbidden(send)
+            return
+
+        # Preflight: respond before any auth.
         if method == "OPTIONS":
             await self._send_cors_preflight(send, origin)
             return
@@ -117,43 +227,66 @@ class _PATAuthMiddleware:
         # Extract bearer
         auth = headers.get("authorization", "")
         token = ""
-        if auth.lower().startswith("bearer "):
+        bearer_present = auth.lower().startswith("bearer ")
+        if bearer_present:
             token = auth[7:].strip()
 
-        # Import lazily so the api/mcp_http import doesn't pull in
-        # database modules during conftest's reload dance.
+        # Import lazily so the api/mcp_http import doesn't pull in database
+        # modules during conftest's reload dance.
         from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat
         from database.database import SessionLocal
 
-        if not token or not token.startswith(PAT_PREFIX):
+        if not token:
             await self._send_401(
                 send,
                 origin,
-                "Missing or malformed Authorization header. Expected "
-                "'Authorization: Bearer mops_pat_...'.",
+                "Missing or malformed Authorization header.",
+                token_presented=bearer_present,
+                scope=scope,
             )
             return
 
         user = None
-        db = SessionLocal()
-        try:
+        if token.startswith(PAT_PREFIX):
+            db = SessionLocal()
             try:
-                user = resolve_pat(db, plaintext=token)
+                try:
+                    user = resolve_pat(db, plaintext=token)
+                except Exception:
+                    logger.exception("PAT resolution failed")
+                    user = None
+            finally:
+                db.close()
+        elif token.count(".") == 2:
+            # Keycloak verification performs blocking JWKS I/O on a cache miss;
+            # keep that work off the event loop. The helper returns only
+            # verified claims and the REST-identical local user mapping.
+            try:
+                from auth.dependencies import resolve_keycloak_user
+                from auth.oidc_sso import verify_kc_bearer_token
+
+                claims = await asyncio.to_thread(verify_kc_bearer_token, token)
+                if claims:
+                    db = SessionLocal()
+                    try:
+                        user = resolve_keycloak_user(db, claims)
+                    finally:
+                        db.close()
             except Exception:
-                logger.exception("PAT resolution failed for prefix=%s", token[:12])
+                logger.exception("Keycloak bearer resolution failed")
                 user = None
-        finally:
-            db.close()
 
         if not user:
             await self._send_401(
                 send,
                 origin,
-                "Invalid or revoked Personal Access Token.",
+                "Invalid, expired, or unrecognized bearer token.",
+                token_presented=True,
+                scope=scope,
             )
             return
 
-        # Pin PAT + backend URL onto the shared contextvars for the
+        # Pin the bearer, local user, and backend URL onto contextvars for the
         # duration of this request, then dispatch to FastMCP. Tools read
         # those contextvars to forward calls back into the same backend
         # API (over localhost) on behalf of the authenticated user.
@@ -162,9 +295,12 @@ class _PATAuthMiddleware:
             set_pat,
             reset_backend_url,
             reset_pat,
+            set_mcp_user,
+            reset_mcp_user,
         )
 
         pat_token = set_pat(token)
+        user_token = set_mcp_user(user)
         backend_url = os.getenv("MCP_BACKEND_URL", "http://localhost:9050")
         backend_token = set_backend_url(backend_url)
 
@@ -180,6 +316,7 @@ class _PATAuthMiddleware:
         finally:
             reset_pat(pat_token)
             reset_backend_url(backend_token)
+            reset_mcp_user(user_token)
 
     async def _send_cors_preflight(self, send, origin: str | None) -> None:
         headers = _cors_headers(origin) + [
@@ -192,14 +329,49 @@ class _PATAuthMiddleware:
         })
         await send({"type": "http.response.body", "body": b""})
 
-    async def _send_401(self, send, origin: str | None, detail: str) -> None:
+    async def _send_cors_forbidden(self, send) -> None:
+        import json as _json
+
+        body = _json.dumps({
+            "error": "forbidden",
+            "detail": "Origin is not allowed for the MCP endpoint.",
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"vary", b"Origin"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _send_401(
+        self,
+        send,
+        origin: str | None,
+        detail: str,
+        *,
+        token_presented: bool,
+        scope: dict,
+    ) -> None:
         import json as _json
 
         body = _json.dumps({"error": "unauthorized", "detail": detail}).encode("utf-8")
+        resource_metadata = (
+            f"{_public_base_url(scope)}{_PRM_MCP_PATH}"
+        )
+        challenge = (
+            'Bearer realm="meeting-ops-mcp", '
+            f'resource_metadata="{resource_metadata}"'
+        )
+        if token_presented:
+            challenge += ', error="invalid_token"'
         headers = _cors_headers(origin) + [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode("ascii")),
-            (b"www-authenticate", b'Bearer realm="meeting-ops-mcp"'),
+            (b"www-authenticate", challenge.encode("latin-1")),
         ]
         await send({
             "type": "http.response.start",
@@ -210,30 +382,29 @@ class _PATAuthMiddleware:
 
 
 def _cors_headers(origin: str | None) -> list[tuple[bytes, bytes]]:
-    """Build the permissive CORS headers used by every MCP response.
+    """Build CORS headers after the caller has passed the origin allow-list."""
 
-    Echoing the caller's Origin (instead of a wildcard) keeps the
-    response compatible with future ``credentials: 'include'`` callers
-    without us changing behavior. For unknown origins we still echo —
-    we're bearer-auth-only, so origin isn't a trust boundary here.
-    """
-
-    allow_origin = (origin or "*").encode("latin-1")
-    return [
-        (b"access-control-allow-origin", allow_origin),
+    allow_origin = "*"
+    if origin:
+        # Keep the exact browser Origin in the response; normalization is only
+        # for comparison, and browsers require the echoed value to match.
+        allow_origin = origin
+    headers = [
+        (b"access-control-allow-origin", allow_origin.encode("latin-1")),
         (b"access-control-allow-methods", b"GET, POST, OPTIONS, DELETE"),
         (
             b"access-control-allow-headers",
-            b"Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id, "
-            b"Accept, Last-Event-ID",
+            b"Authorization, Content-Type, Accept, Mcp-Session-Id, "
+            b"Mcp-Protocol-Version, Last-Event-ID",
         ),
         (
             b"access-control-expose-headers",
-            b"MCP-Session-Id, MCP-Protocol-Version",
+            b"Mcp-Session-Id",
         ),
         (b"access-control-max-age", b"600"),
         (b"vary", b"Origin"),
     ]
+    return headers
 
 
 def _augment_headers_with_cors(start_message: dict, origin: str | None) -> dict:
@@ -245,6 +416,56 @@ def _augment_headers_with_cors(start_message: dict, origin: str | None) -> dict:
     start_message = dict(start_message)
     start_message["headers"] = filtered + cors
     return start_message
+
+
+def _prm_headers() -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Accept, Content-Type, Authorization",
+        "Cache-Control": "public, max-age=3600",
+    }
+
+
+async def _protected_resource_metadata(request: Request) -> JSONResponse:
+    """RFC 9728 document; deliberately unauthenticated."""
+    return JSONResponse(
+        _protected_resource_document(request.scope),
+        headers=_prm_headers(),
+    )
+
+
+async def _protected_resource_options() -> Response:
+    return Response(status_code=204, headers=_prm_headers())
+
+
+async def _mcp_trailing_slash_redirect() -> RedirectResponse:
+    return RedirectResponse(url=_MOUNT_PATH, status_code=308)
+
+
+def _register_mcp_oauth_routes(app: FastAPI) -> None:
+    """Register public discovery routes and the canonical MCP redirect."""
+    # Register the slash redirect before the exact canonical route.
+    app.add_api_route(
+        f"{_MOUNT_PATH}/",
+        _mcp_trailing_slash_redirect,
+        methods=["GET", "POST", "DELETE"],
+        include_in_schema=False,
+    )
+    for path in (_PRM_ROOT_PATH, _PRM_MCP_PATH):
+        app.add_api_route(
+            path,
+            _protected_resource_metadata,
+            methods=["GET"],
+            include_in_schema=False,
+        )
+        app.add_api_route(
+            path,
+            _protected_resource_options,
+            methods=["OPTIONS"],
+            include_in_schema=False,
+        )
 
 
 # ── Mount entry point ──────────────────────────────────────────────────
@@ -273,10 +494,17 @@ def mount_mcp_app(app: FastAPI) -> None:
         # so the lifespan can rebuild it on each start (the underlying
         # session manager is single-use). See open_mcp_lifespan().
         wrapped = _PATAuthMiddleware(_LazyInnerApp())
-        # FastMCP's streamable_http_app already owns the path "/mcp"
-        # internally. Mount it at "/" of our sub-tree so the public URL
-        # ends up as "/mcp" exactly once.
-        app.mount(_MOUNT_PATH, _MountedAtRoot(wrapped))
+        _register_mcp_oauth_routes(app)
+        # FastMCP's streamable_http_app owns the literal path "/mcp"
+        # internally. Use an exact ASGI route rather than Starlette's Mount:
+        # Mount would redirect the bare canonical /mcp to /mcp/, while the
+        # public contract and PRM document use /mcp without a trailing slash.
+        app.add_route(
+            _MOUNT_PATH,
+            _MountedAtRoot(wrapped),
+            methods=["GET", "POST", "DELETE"],
+            include_in_schema=False,
+        )
 
         _state["status"] = "ok"
         logger.info(
@@ -346,10 +574,8 @@ class _MountedAtRoot:
             root_path = scope.get("root_path", "") or ""
             if root_path.endswith(_MOUNT_PATH):
                 scope["root_path"] = root_path[: -len(_MOUNT_PATH)]
-            # Force the path to /mcp regardless of trailing-slash
-            # variants. FastMCP's only route is /mcp; we never want the
-            # parent Starlette to issue a 307 redirect to /mcp/ which
-            # would then 404.
+            # Force the canonical path to /mcp. The parent app redirects the
+            # public /mcp/ spelling before this adapter is reached.
             scope["path"] = "/mcp"
             scope["raw_path"] = b"/mcp"
         await self._inner(scope, receive, send)
@@ -360,19 +586,21 @@ class McpCorsBypassMiddleware:
 
     The main app's :class:`fastapi.middleware.cors.CORSMiddleware` is
     configured for the SPA's known origins (LAN, claude.ai, cursor.sh).
-    The MCP endpoint is browser-installable from arbitrary AI clients,
-    so we need a permissive Origin policy that doesn't loosen the rest
-    of the app. This middleware:
+    The MCP endpoint is browser-installable from hosted AI clients, so it
+    needs its own configured Origin policy without loosening the rest of the
+    app. This middleware:
 
     * Returns CORS preflight (OPTIONS) for /mcp synchronously, before
       any downstream router runs.
     * Stamps CORS headers onto every non-preflight /mcp response so the
       browser-installed clients can read the body.
+    * Rejects a disallowed browser Origin with 403 before bearer auth, so the
+      response cannot become a token-probing path.
     * Passes through any non-/mcp request untouched.
 
     Added to the FastAPI app AFTER the main CORSMiddleware so it runs
     FIRST on each request (Starlette middleware is LIFO). The net effect:
-    /mcp gets the permissive policy below; everything else continues to
+    /mcp gets the configured policy below; everything else continues to
     use the strict app-wide CORS policy.
     """
 
@@ -395,6 +623,23 @@ class McpCorsBypassMiddleware:
         }
         origin = headers.get("origin")
         method = scope.get("method", "GET").upper()
+
+        if not _origin_allowed(origin):
+            body = (
+                b'{"error":"forbidden","detail":"Origin is not allowed '
+                b'for the MCP endpoint."}'
+            )
+            await send({
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"vary", b"Origin"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
 
         if method == "OPTIONS":
             preflight_headers = _cors_headers(origin) + [

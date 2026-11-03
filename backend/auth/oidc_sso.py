@@ -41,11 +41,21 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth/sso/uc", tags=["sso"])
 
-# Reuse the backend's existing Keycloak config (set in the prod compose).
+# Reuse the backend's existing Keycloak config (set in the deployment env).
+# ``MEETING_OPS_KEYCLOAK_CLIENT_ID`` (or this repo's existing
+# ``MEETING_OPS_KC_CLIENT_ID``) is accepted as an explicit app-scoped override;
+# the existing ``KEYCLOAK_CLIENT_ID`` remains the normal setting.
 _KC_BASE = os.getenv("KEYCLOAK_URL", "https://auth.unicorncommander.ai").rstrip("/")
 _KC_REALM = os.getenv("KEYCLOAK_REALM", "uchub")
-KC_ISSUER = f"{_KC_BASE}/realms/{_KC_REALM}"
-KC_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "meeting-ops-prod")
+KC_ISSUER = (
+    os.getenv("KEYCLOAK_ISSUER") or f"{_KC_BASE}/realms/{_KC_REALM}"
+).strip().rstrip("/")
+KC_CLIENT_ID = (
+    os.getenv("MEETING_OPS_KEYCLOAK_CLIENT_ID")
+    or os.getenv("KEYCLOAK_CLIENT_ID")
+    or os.getenv("MEETING_OPS_KC_CLIENT_ID")
+    or "meeting-ops-prod"
+)
 KC_CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
 # JWKS endpoint for verifying the id_token signature (RS256). Keycloak serves
 # the realm's public signing keys here; PyJWKClient fetches + caches them.
@@ -139,14 +149,25 @@ def _safe_return_to(rt: Optional[str]) -> str:
 # credentials. Native apps (the iOS client) do standards OIDC straight against
 # Keycloak and present the realm access token — there's no oauth2-proxy header
 # and no app session cookie on that path, so the API must trust the realm
-# token itself. Keep this list tight: it's an auth surface.
-ACCEPTED_BEARER_CLIENT_IDS = frozenset(
-    c.strip()
-    for c in os.getenv(
-        "KEYCLOAK_ACCEPTED_CLIENT_IDS", f"{KC_CLIENT_ID},meeting-ops-ios"
-    ).split(",")
-    if c.strip()
-)
+# token itself. Keep this list tight: it's an auth surface. The expected-
+# audiences override is additive so a DCR/client-scope audience can be enabled
+# without replacing the existing Meeting-Ops client id.
+def _configured_bearer_client_ids() -> frozenset[str]:
+    configured = os.getenv("KEYCLOAK_ACCEPTED_CLIENT_IDS")
+    client_ids = {KC_CLIENT_ID}
+    if configured is None:
+        client_ids.add("meeting-ops-ios")
+    else:
+        client_ids.update(c.strip() for c in configured.split(",") if c.strip())
+    client_ids.update(
+        c.strip()
+        for c in os.getenv("KEYCLOAK_EXPECTED_AUDIENCES", "").split(",")
+        if c.strip()
+    )
+    return frozenset(client_ids)
+
+
+ACCEPTED_BEARER_CLIENT_IDS = _configured_bearer_client_ids()
 
 
 def verify_kc_bearer_token(token: str) -> Optional[dict]:
@@ -184,8 +205,9 @@ def verify_kc_bearer_token(token: str) -> Optional[dict]:
         return None
     aud = claims.get("aud")
     aud_list = aud if isinstance(aud, list) else ([aud] if aud else [])
-    if claims.get("azp") not in ACCEPTED_BEARER_CLIENT_IDS and not (
-        ACCEPTED_BEARER_CLIENT_IDS & set(aud_list)
+    accepted_audiences = _configured_bearer_client_ids()
+    if claims.get("azp") not in accepted_audiences and not (
+        accepted_audiences & {value for value in aud_list if isinstance(value, str)}
     ):
         logger.warning(
             "uchub bearer rejected: azp=%s aud=%s not in accepted client ids",
@@ -262,7 +284,7 @@ async def uc_sso_callback(
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         if tr.status_code != 200:
-            logger.error("UC SSO token exchange failed: %s %s", tr.status_code, tr.text[:300])
+            logger.error("UC SSO token exchange failed: status=%s", tr.status_code)
             return _login_error("token_exchange_failed")
         token_response = tr.json()
         id_token = token_response.get("id_token") or ""
