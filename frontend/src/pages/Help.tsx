@@ -879,8 +879,9 @@ function OperatorTier() {
               <span className="text-zinc-100">Personal Access Tokens</span> —
               issued from{' '}
               <span className="text-zinc-100">Settings → Personal Access Tokens</span>
-              , these are scoped, revocable credentials for programmatic and
-              MCP access that act as a specific user. Treat them like passwords.
+              , these are revocable credentials for programmatic and MCP access
+              that act as a specific user and carry that user's permissions.
+              Treat them like passwords.
             </span>
           </li>
         </ul>

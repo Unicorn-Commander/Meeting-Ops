@@ -4,6 +4,16 @@ import { vi } from 'vitest';
 
 import PersonalAccessTokens from '../components/settings/PersonalAccessTokens';
 
+interface TestToken {
+  id: number;
+  name: string;
+  token_prefix: string;
+  last_used_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
+  plaintext?: string;
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return {
     ok: status >= 200 && status < 300,
@@ -16,7 +26,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('PersonalAccessTokens', () => {
-  let tokens: any[];
+  let tokens: TestToken[];
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -37,7 +47,7 @@ describe('PersonalAccessTokens', () => {
           id: 2,
           name: 'Cursor',
           token_prefix: 'mops_pat_DEF',
-          plaintext: 'mops_pat_DEFGHIJKLMNOPQRSTUVWXYZ234567',
+          plaintext: 'fixture-only-plaintext',
           last_used_at: null,
           created_at: '2026-05-28T00:01:00Z',
           revoked_at: null,
@@ -52,7 +62,11 @@ describe('PersonalAccessTokens', () => {
         return jsonResponse({}, 204);
       }
       if (url.includes('/api/auth/pats')) {
-        return jsonResponse(tokens.map(({ plaintext, ...token }) => token));
+        return jsonResponse(tokens.map((token) => {
+          const safeToken = { ...token };
+          delete safeToken.plaintext;
+          return safeToken;
+        }));
       }
       return jsonResponse({}, 404);
     });
@@ -88,14 +102,39 @@ describe('PersonalAccessTokens', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Create$/i }));
 
     expect(await screen.findByText(/Copy this token now/i)).toBeInTheDocument();
-    expect(screen.getByText('mops_pat_DEFGHIJKLMNOPQRSTUVWXYZ234567')).toBeInTheDocument();
+    expect(screen.getByText('fixture-only-plaintext')).toBeInTheDocument();
+    expect(screen.getAllByText('fixture-only-plaintext')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: /^Copy$/i }));
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-        'mops_pat_DEFGHIJKLMNOPQRSTUVWXYZ234567'
+        'fixture-only-plaintext'
       );
     });
+  });
+
+  it('shows an OAuth form line for every PAT preset', async () => {
+    render(<PersonalAccessTokens />);
+    await screen.findByText('Claude Desktop');
+
+    fireEvent.click(screen.getByRole('button', { name: /New Token/i }));
+    fireEvent.change(screen.getByLabelText(/Token name/i), {
+      target: { value: 'Cursor' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Create$/i }));
+    await screen.findByText(/Copy this token now/i);
+
+    for (const preset of [
+      'Claude Desktop',
+      'Cursor',
+      'Continue',
+      'Zed',
+      'Cline / Roo Code',
+      'Self-hosted (stdio)',
+    ]) {
+      fireEvent.click(screen.getByRole('tab', { name: preset }));
+      expect(screen.getByText(/OAuth sign-in \(recommended\)/i)).toBeInTheDocument();
+    }
   });
 
   it('revokes a token', async () => {
