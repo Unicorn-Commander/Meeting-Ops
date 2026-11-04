@@ -11,6 +11,7 @@ import {
 import { config } from '../../config';
 import { Dialog } from '../ui/Dialog';
 import { track } from '../../utils/posthog';
+import ConnectYourAiPanel from './ConnectYourAiPanel';
 
 // Hosted MCP base URL surfaced after token creation. Default to the
 // current origin so a self-hosted instance gets the right URL; allow
@@ -18,14 +19,17 @@ import { track } from '../../utils/posthog';
 // without copying the SPA to that domain.
 const HOSTED_MCP_URL = (
   (import.meta as ImportMeta & { env: Record<string, string | undefined> })
-    .env?.VITE_HOSTED_MCP_URL || `${window.location.origin}/mcp`
+    .env?.VITE_HOSTED_MCP_URL ||
+  (typeof window !== 'undefined' ? `${window.location.origin}/mcp` : '/mcp')
 );
+const TOKEN_PLACEHOLDER = 'mops_pat_…';
 
 type ClientId = 'claude' | 'cursor' | 'continue' | 'zed' | 'cline' | 'stdio';
 
 interface ClientPreset {
   id: ClientId;
   label: string;
+  oauthLine: (url: string) => string;
   snippet: (pat: string) => string;
   language: 'json' | 'yaml';
 }
@@ -34,6 +38,7 @@ const CLIENT_PRESETS: ClientPreset[] = [
   {
     id: 'claude',
     label: 'Claude Desktop',
+    oauthLine: (url) => `claude mcp add --transport http meeting-ops ${url}`,
     language: 'json',
     snippet: (pat) => `{
   "mcpServers": {
@@ -49,6 +54,7 @@ const CLIENT_PRESETS: ClientPreset[] = [
   {
     id: 'cursor',
     label: 'Cursor',
+    oauthLine: (url) => `OAuth URL: ${url}`,
     language: 'json',
     snippet: (pat) => `// .cursor/mcp.json
 {
@@ -65,6 +71,7 @@ const CLIENT_PRESETS: ClientPreset[] = [
   {
     id: 'continue',
     label: 'Continue',
+    oauthLine: (url) => `OAuth URL: ${url}`,
     language: 'yaml',
     snippet: (pat) => `# ~/.continue/config.yaml
 mcpServers:
@@ -76,6 +83,7 @@ mcpServers:
   {
     id: 'zed',
     label: 'Zed',
+    oauthLine: (url) => `OAuth URL: ${url}`,
     language: 'json',
     snippet: (pat) => `// ~/.config/zed/settings.json
 {
@@ -92,6 +100,7 @@ mcpServers:
   {
     id: 'cline',
     label: 'Cline / Roo Code',
+    oauthLine: (url) => `OAuth URL: ${url}`,
     language: 'json',
     snippet: (pat) => `// VS Code settings.json
 {
@@ -108,6 +117,7 @@ mcpServers:
   {
     id: 'stdio',
     label: 'Self-hosted (stdio)',
+    oauthLine: (url) => `Hosted OAuth URL: ${url}`,
     language: 'json',
     snippet: (pat) => `{
   "mcpServers": {
@@ -230,7 +240,9 @@ export default function PersonalAccessTokens() {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
+      <ConnectYourAiPanel />
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-sm text-zinc-400">
@@ -385,6 +397,12 @@ export default function PersonalAccessTokens() {
                   Hosted endpoint:{' '}
                   <code className="font-mono text-fuchsia-300">{HOSTED_MCP_URL}</code>
                 </p>
+                <p className="mt-2 text-xs text-zinc-400">
+                  OAuth sign-in (recommended):{' '}
+                  <code className="font-mono text-fuchsia-300">
+                    {activePreset.oauthLine(HOSTED_MCP_URL)}
+                  </code>
+                </p>
                 <div
                   className="mt-3 flex flex-wrap gap-1 border-b border-zinc-800"
                   role="tablist"
@@ -408,8 +426,11 @@ export default function PersonalAccessTokens() {
                   ))}
                 </div>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-300">
-{activePreset.snippet(created.plaintext)}
+{activePreset.snippet(TOKEN_PLACEHOLDER)}
                 </pre>
+                <p className="mt-2 text-xs text-zinc-500">
+                  Token preset: replace <code className="font-mono">{TOKEN_PLACEHOLDER}</code> with the one-time token above.
+                </p>
                 <p className="mt-2 text-xs text-zinc-500">
                   Hosted MCP works without a clone — point your client at{' '}
                   <code className="font-mono">{HOSTED_MCP_URL}</code> with the
