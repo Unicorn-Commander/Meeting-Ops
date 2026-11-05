@@ -162,6 +162,8 @@ will work. Set the server URL to `https://<your-host>/mcp` and add an
 | `get_analytics(time_range?)` | Session counts, speaker stats, recent trends. |
 | `get_meeting_insights(session_id)` | AI keywords, topics, sentiment, action items. |
 
+`session_id` accepts a full UUID, an integer id, or an unambiguous 8–31 hex-character prefix of that UUID, resolved only inside the caller's organization.
+
 ### Tool (server-side recording import)
 
 `import_recording(source_url | local_path, title?, tags?)` accepts exactly one
