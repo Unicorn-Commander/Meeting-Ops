@@ -45,6 +45,7 @@ from services.mcp_cross_app import (
     empty_cross_app_references,
     render_cross_app_section,
 )
+from services.summary_grounding import dedupe_participants, render_cited_item
 from services.transcript_pagination import (
     DEFAULT_MAX_CHARS,
     MAX_MAX_CHARS,
@@ -534,15 +535,28 @@ async def get_meeting_details(session_id: str) -> str:
             if summary.get("bullets"):
                 lines.append("\n## Key Points")
                 for b in summary["bullets"]:
-                    lines.append(f"- {b}")
+                    lines.append(f"- {render_cited_item(b, plain=True)}")
             if summary.get("decisions"):
                 lines.append("\n## Decisions")
                 for d in summary["decisions"]:
-                    lines.append(f"- {d}")
-            if summary.get("action_items"):
+                    lines.append(f"- {render_cited_item(d, plain=True)}")
+            actions = summary.get("actions") or summary.get("action_items")
+            if actions:
                 lines.append("\n## Action Items")
-                for a in summary["action_items"]:
-                    lines.append(f"- {a}")
+                for a in actions:
+                    lines.append(f"- {render_cited_item(a, plain=True)}")
+            participants = dedupe_participants(summary.get("participants"))
+            if participants:
+                names = []
+                for participant in participants:
+                    if isinstance(participant, dict):
+                        name = participant.get("name") or participant.get("display_name")
+                    else:
+                        name = participant
+                    if name:
+                        names.append(str(name))
+                if names:
+                    lines.append("\n## Participants\n" + ", ".join(names))
         elif isinstance(summary, str):
             try:
                 parsed = json.loads(summary)
@@ -783,15 +797,15 @@ async def get_meeting_insights(session_id: str) -> str:
         lines.append("\n## Action Items")
         for a in actions:
             if isinstance(a, dict):
-                lines.append(f"- {a.get('task', a)}")
+                lines.append(f"- {render_cited_item(a, plain=True)}")
             else:
-                lines.append(f"- {a}")
+                lines.append(f"- {render_cited_item(a, plain=True)}")
 
-    decisions = data.get("decisions", [])
+    decisions = data.get("decisions") or data.get("key_decisions", [])
     if decisions:
         lines.append("\n## Decisions")
         for d in decisions:
-            lines.append(f"- {d}")
+            lines.append(f"- {render_cited_item(d, plain=True)}")
 
     if len(lines) <= 2:
         return f"No AI insights available for session {session_id}. The meeting may not have been processed yet."

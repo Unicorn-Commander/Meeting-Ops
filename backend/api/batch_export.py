@@ -23,6 +23,7 @@ from auth.models import Organization, User
 from auth.tier import gate_feature_for_caller
 from database.models import RecordingSession
 from services.meeting_provenance import organization_timezone
+from services.summary_grounding import dedupe_participants, render_cited_item
 from utils.time import stored_business_date
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
@@ -833,11 +834,7 @@ def _get_summary_data(session: RecordingSession) -> Dict[str, Any]:
         "actions": [],
         "decisions": [],
         "minutes": "",
-        "participants": (
-            session.participants
-            if isinstance(getattr(session, "participants", None), list)
-            else []
-        ),
+        "participants": dedupe_participants(getattr(session, "participants", None)),
         "title": session.title or session.name or "Untitled Meeting",
     }
 
@@ -1346,7 +1343,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
         ]]
         for action in summary_data["actions"]:
             if isinstance(action, dict):
-                action_text = action.get("action", str(action))
+                action_text = render_cited_item(action)
                 owner = action.get("owner", "")
                 status = action.get("status", "todo")
                 due = action.get("due_date", "")
@@ -1386,7 +1383,7 @@ def export_to_pdf(session: RecordingSession, options: ExportOptions) -> bytes:
     if summary_data["decisions"]:
         story.append(Paragraph("Important Decisions", styles["SectionHeading"]))
         for decision in summary_data["decisions"]:
-            safe = str(decision).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            safe = str(render_cited_item(decision)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             story.append(Paragraph(f"\u2713  {safe}", styles["BulletText"]))
         story.append(Spacer(1, 8))
 
@@ -1654,7 +1651,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
 
         for action in summary_data["actions"]:
             if isinstance(action, dict):
-                task = action.get("action", str(action))
+                task = render_cited_item(action)
                 owner = action.get("owner", "")
                 status = action.get("status", "Pending")
                 due_date = action.get("due_date", "")
@@ -1679,7 +1676,7 @@ def export_to_docx(session: RecordingSession, options: ExportOptions) -> bytes:
     if summary_data["decisions"]:
         doc.add_heading("Important Decisions", level=2)
         for decision in summary_data["decisions"]:
-            doc.add_paragraph(str(decision), style="List Bullet")
+            doc.add_paragraph(render_cited_item(decision), style="List Bullet")
 
     # --- Meeting Minutes (always, when the summarizer wrote them) ---
     minutes_blocks = _minutes_blocks(summary_data.get("minutes"))
@@ -1881,7 +1878,8 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
                 if priority:
                     suffix.append(f"Priority: {priority}")
                 tail = f" ({', '.join(suffix)})" if suffix else ""
-                lines.append(f"- [ ] {text}{tail}")
+                cited_text = render_cited_item(a)
+                lines.append(f"- [ ] {cited_text}{tail}")
         lines.append("")
 
     decisions = fs.get("decisions") or fs.get("key_decisions") or []
@@ -1892,7 +1890,7 @@ def export_to_markdown(session: RecordingSession, options: ExportOptions) -> str
             if isinstance(d, str):
                 lines.append(f"- {d}")
             elif isinstance(d, dict):
-                lines.append(f"- {d.get('text') or d.get('decision') or json.dumps(d)}")
+                lines.append(f"- {render_cited_item(d)}")
         lines.append("")
 
     questions = fs.get("questions") or fs.get("open_questions") or fs.get("follow_ups") or []

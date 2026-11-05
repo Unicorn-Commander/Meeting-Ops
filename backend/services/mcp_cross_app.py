@@ -224,6 +224,29 @@ def _gather_text(session: dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
+def _transcript_text(session: dict[str, Any]) -> str:
+    """Return transcript-only text for grounding inferred project names."""
+    chunks: list[str] = []
+    simple = session.get("transcript_simple")
+    if isinstance(simple, str) and simple.strip():
+        chunks.append(simple)
+
+    diarized = session.get("transcript_diarized")
+    if isinstance(diarized, dict):
+        segments = diarized.get("segments")
+        if isinstance(segments, list):
+            chunks.extend(
+                str(segment.get("text") or "")
+                for segment in segments
+                if isinstance(segment, dict) and segment.get("text")
+            )
+
+    transcript = session.get("transcript")
+    if isinstance(transcript, str) and transcript.strip():
+        chunks.append(transcript)
+    return "\n".join(chunks)
+
+
 # ── Populator ──────────────────────────────────────────────────────────
 
 
@@ -332,7 +355,11 @@ def build_cross_app_references(session: dict[str, Any]) -> dict[str, list[Any]]:
             })
 
     blob = _gather_text(session)
-    for candidate in _scan_text_for_projects(blob):
+    # Inferred project mentions are grounded to transcript text whenever the
+    # session exposes it. The summary/title fallback preserves the legacy
+    # behavior for old payloads that never carried a transcript column.
+    project_blob = _transcript_text(session) or blob
+    for candidate in _scan_text_for_projects(project_blob):
         key = f"name:{candidate.lower()}"
         if key in seen_project_keys:
             continue

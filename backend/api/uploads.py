@@ -2380,10 +2380,12 @@ MEETING_OPS_SUMMARIZER_SYSTEM_PROMPT = """You are an expert executive assistant 
 Critical rules you must follow:
 1. Only include information explicitly stated in the transcript. Never fabricate details.
 2. If an action item owner or deadline is not mentioned, write "Not specified."
-3. Use direct quotes only when the speaker's exact words appear in the transcript.
+3. Use direct quotes only when the speaker's exact words appear in the transcript. Every decision and action item must carry one or more cites with the exact quote and its transcript start_s/end_s.
 4. Attribute all statements and decisions to the specific speaker who made them.
 5. Format your output with clear markdown structure using headers, lists, and tables.
-6. Be thorough but concise - include all substantive points without padding."""
+6. Be thorough but concise - include all substantive points without padding.
+7. A generic diarized label such as "Speaker 4" is a speaker, not a participant, unless voice matching supplied that person's name.
+8. List a project only when its name appears verbatim in the transcript."""
 
 
 # The user-prompt scaffold. Speaker context (if any) plus the transcript
@@ -2391,6 +2393,14 @@ Critical rules you must follow:
 MEETING_OPS_SUMMARIZER_STYLE_PROMPT = """Analyze the following meeting transcript and produce comprehensive, structured meeting notes.
 
 {speaker_context}
+
+The transcript lines include a [mm:ss-mm:ss] time span and speaker label. For every
+decision and every commitment/action item, add a `cites` list containing one or
+more objects exactly shaped as {{"start_s": 0, "end_s": 4, "speaker": "Name or Speaker N",
+"quote": "verbatim transcript words"}}. Each quote must be a contiguous, verbatim
+span of no more than 160 characters from the transcript. Use the numeric seconds
+represented by the time span. Do not cite a paraphrase. A generic "Speaker N" is
+not a participant unless a voice match named that speaker.
 
 Output the following sections in order. Include ALL substantive information from the transcript.
 
@@ -2424,6 +2434,12 @@ Select up to 5 notable quotes that capture important positions, commitments, or 
 ## Open Questions
 - [Any unresolved items that need follow-up]
 
+## Participants
+- List named people identified by the transcript or a voice match once each. Do not list generic Speaker N labels here.
+
+## Projects
+- List only project names that appear verbatim in the transcript. If none, write "None identified."
+
 IMPORTANT: If a section has no genuine content in the transcript, write "None identified." under that heading — never invent, pad, or infer items to fill a section. Quote only words that actually appear in the transcript.
 
 ---
@@ -2436,11 +2452,14 @@ After the markdown sections above, emit a single fenced JSON block with the same
 ```json
 {{"executive": "...",
   "bullets": ["topic 1: point", "topic 2: point", ...],
-  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "..."}}],
-  "decisions": ["decision (decided by Speaker)", ...],
+  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "...", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
+  "decisions": [{{"text": "decision (decided by Speaker)", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}, ...],
+  "participants": [{{"name": "Named Person", "speaker_id": "optional voice id"}}],
+  "projects": ["verbatim project name", ...],
   "questions": ["..."],
   "quotes": [{{"text": "...", "speaker": "...", "context": "..."}}],
   "next_steps": ["..."],
+  "unverified": [],
   "minutes": "the full markdown output above as a single string",
   "title": "short descriptive title for this meeting"}}
 ```
@@ -2454,6 +2473,12 @@ After the markdown sections above, emit a single fenced JSON block with the same
 MEETING_OPS_MEMO_PROMPT = """Summarize the following short recording (a brief meeting or a single-speaker memo).
 
 {speaker_context}
+
+For every commitment or decision, include a `cites` list with objects shaped as
+{{"start_s": 0, "end_s": 4, "speaker": "Name or Speaker N", "quote": "verbatim
+transcript words"}}. Quotes must be contiguous, verbatim transcript spans of no
+more than 160 characters. Generic Speaker N labels are speakers, not participants,
+unless a voice match named them.
 
 Output exactly these sections:
 
@@ -2479,11 +2504,14 @@ about and any outcome. NEVER put a person's name, a speaker label, or the title 
 ```json
 {{"executive": "the 2-4 sentence summary from the Summary section above",
   "bullets": ["point", ...],
-  "actions": [{{"action": "...", "owner": "...", "priority": "medium", "deadline": "Not specified"}}],
-  "decisions": [],
+  "actions": [{{"action": "...", "owner": "...", "priority": "medium", "deadline": "Not specified", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
+  "decisions": [{{"text": "...", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
+  "participants": [{{"name": "Named Person", "speaker_id": "optional voice id"}}],
+  "projects": [],
   "questions": [],
   "quotes": [],
   "next_steps": [],
+  "unverified": [],
   "minutes": "the full markdown output above as a single string",
   "title": "short descriptive title"}}
 ```
@@ -2527,8 +2555,7 @@ def _direct_summarizer_provider():
 
 
 
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-_BARE_JSON_RE = re.compile(r"(\{(?:[^{}]|\{[^{}]*\})*\})", re.DOTALL)
+_FENCED_JSON_START_RE = re.compile(r"```(?:json)?\s*", re.DOTALL | re.IGNORECASE)
 _SUMMARY_SECTION_RE = re.compile(
     r"##+\s*(?:Executive\s+)?Summary\s*\n+(.+?)(?=\n##+\s|\n```|\Z)",
     re.DOTALL | re.IGNORECASE,
@@ -2556,20 +2583,41 @@ def _parse_summarizer_json(text: str, *, fallback_title: str) -> dict[str, Any]:
     something readable.
     """
     text = text or ""
-    for pattern in (_FENCED_JSON_RE, _BARE_JSON_RE):
-        for match in pattern.finditer(text):
-            blob = match.group(1)
-            try:
-                data = json.loads(blob)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                return data
+    decoder = json.JSONDecoder()
+
+    # ``.*?``-style fenced regexes stop at the first nested ``}``, which is
+    # exactly where the new per-item cites objects occur. Let the JSON decoder
+    # balance nested arrays/objects instead.
+    for match in _FENCED_JSON_START_RE.finditer(text):
+        start = text.find("{", match.end())
+        if start < 0:
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
+
+    # Older providers return bare JSON. Try every object start so prose such
+    # as ``thinking... {not JSON}`` cannot prevent a later valid object.
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
     return {
         "executive": text.strip() or "Summary generation returned no content.",
         "bullets": [],
         "actions": [],
         "decisions": [],
+        "participants": [],
+        "projects": [],
+        "unverified": [],
         "title": fallback_title,
     }
 
@@ -2669,7 +2717,7 @@ def _chunk_segments(
     still summarize it; only the byte cap of one call is exceeded, by design,
     to keep speaker turns intact.
     """
-    from services.speaker_labels import build_attributed_transcript
+    from services.summary_grounding import render_timestamped_segments
 
     # Keep only segments with real text; preserve order (callers pass the
     # diarized order, which build_attributed_transcript also relies on).
@@ -2687,11 +2735,23 @@ def _chunk_segments(
     def _emit(segs: list[dict[str, Any]]) -> None:
         if not segs:
             return
-        text, speakers = build_attributed_transcript(segs, label_map)
+        text, speakers = render_timestamped_segments(segs, label_map)
         if not text.strip():
             return
-        starts = [float(s.get("start") or 0) for s in segs]
-        ends = [float(s.get("end") or s.get("start") or 0) for s in segs]
+        starts = [
+            float(s.get("start_s", s.get("start")) or 0)
+            for s in segs
+        ]
+        ends = [
+            float(
+                s.get(
+                    "end_s",
+                    s.get("end", s.get("start_s", s.get("start"))),
+                )
+                or 0
+            )
+            for s in segs
+        ]
         chunks.append({
             "index": len(chunks),
             "text": text,
@@ -2742,7 +2802,7 @@ MEETING_OPS_MAP_PROMPT = """You are analyzing ONE PORTION (chunk {n} of {total},
 Rules:
 - Use ONLY information explicitly stated in this chunk. Never fabricate.
 - Attribute every point, decision, and quote to the speaker who said it, exactly as labeled in the transcript. Never output machine codes like SPEAKER_00.
-- Quote only words that actually appear below. If a section has nothing, return an empty list.
+- Quote only words that actually appear below. For every decision and action item, copy a contiguous quote of no more than 160 characters into a `cites` list with its numeric start_s/end_s and speaker. If a section has nothing, return an empty list.
 
 ---
 TRANSCRIPT (chunk {n} of {total}):
@@ -2753,8 +2813,8 @@ Output ONLY a single fenced JSON block (no prose before or after) with this exac
 
 ```json
 {{"key_points": ["point (Speaker Name)", ...],
-  "decisions": ["decision (decided by Speaker)", ...],
-  "action_items": [{{"task": "concrete commitment", "assignee": "real name or speaker label"}}],
+  "decisions": [{{"text": "decision (decided by Speaker)", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
+  "action_items": [{{"task": "concrete commitment", "assignee": "real name or speaker label", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
   "quotes": [{{"text": "exact words from this chunk", "speaker": "Speaker Name"}}],
   "open_questions": ["..."],
   "notable": ["any other substantive context worth carrying forward"]}}
@@ -2774,6 +2834,7 @@ MEETING_OPS_REDUCE_PROMPT = """You are synthesizing the FINAL notes for a long m
 Synthesize a SINGLE coherent set of meeting notes spanning the whole meeting:
 - Merge and DEDUPLICATE points, decisions, action items, and quotes that recur across chunks (the chunks overlap slightly, so the same item may appear more than once — report it once).
 - Preserve speaker attribution exactly as given in the digests. Never output machine codes like SPEAKER_00, and never invent speakers or details not present in the digests.
+- Carry each decision and action item's `cites` from the supporting digest, preserving its numeric start_s/end_s, speaker, and verbatim quote. Never fabricate a cite.
 - Order topics and events as they unfolded across the meeting (the digests are in order).
 
 Output the following sections in order. Include ALL substantive information from the digests.
@@ -2820,8 +2881,8 @@ After the markdown sections above, emit a single fenced JSON block with the same
 ```json
 {{"executive": "...",
   "bullets": ["topic 1: point", "topic 2: point", ...],
-  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "..."}}],
-  "decisions": ["decision (decided by Speaker)", ...],
+  "actions": [{{"action": "...", "owner": "...", "priority": "high|medium|low", "deadline": "...", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}],
+  "decisions": [{{"text": "decision (decided by Speaker)", "cites": [{{"start_s": 0, "end_s": 4, "speaker": "...", "quote": "..."}}]}}, ...],
   "questions": ["..."],
   "quotes": [{{"text": "...", "speaker": "...", "context": "..."}}],
   "next_steps": ["..."],
@@ -3012,7 +3073,12 @@ async def _summarize_session(
     # — so the model had to GUESS who said what, and raw pyannote codes
     # (SPEAKER_00) leaked straight into summaries. Raw codes are normalized
     # to "Speaker N" here even if the session predates label normalization.
-    from services.speaker_labels import build_attributed_transcript, normalized_label_map
+    from services.speaker_labels import normalized_label_map
+    from services.summary_grounding import (
+        dedupe_participants,
+        ground_summary,
+        render_timestamped_segments,
+    )
 
     transcript = ""
     speakers_seen: list[str] = []
@@ -3026,7 +3092,7 @@ async def _summarize_session(
     if isinstance(diarized, dict) and diarized.get("segments"):
         segments = diarized.get("segments") or []
         label_map = normalized_label_map([s.get("speaker") or "" for s in segments])
-        transcript, speakers_seen = build_attributed_transcript(segments, label_map)
+        transcript, speakers_seen = render_timestamped_segments(segments, label_map)
     if not transcript.strip():
         transcript = session.transcript_simple or ""
     if not transcript.strip():
@@ -3255,12 +3321,39 @@ async def _summarize_session(
     gate_summary_lists(
         analysis, source=f"uploads.summarize session={session.id}"
     )
+    # Ground the model's fact-bearing lists against the COMPLETE transcript,
+    # not the capped prompt body. A fabricated quote is never allowed into a
+    # decision/commitment list; it is retained under ``unverified`` with the
+    # reason for audit/debugging but is not presented as a fact.
+    stored_participants = session.participants if isinstance(session.participants, list) else []
+    generated_participants = analysis.get("participants")
+    participant_source = list(stored_participants)
+    if isinstance(generated_participants, list):
+        participant_source.extend(generated_participants)
+    analysis = ground_summary(
+        analysis,
+        transcript,
+        participants=participant_source,
+        speakers=speakers_seen,
+    )
+    analysis["participants"] = dedupe_participants(analysis.get("participants"))
     session.summary = json.dumps(analysis)
+    stored_actions = (
+        analysis.get("actions")
+        or analysis.get("action_items")
+        or analysis.get("commitments")
+        or []
+    )
     session.final_summary = {
         "executive": _exec,
         "bullets": analysis.get("bullets", []),
-        "actions": analysis.get("actions", []),
+        "actions": stored_actions,
+        "action_items": stored_actions,
         "decisions": analysis.get("decisions", []),
+        "participants": analysis.get("participants", []),
+        "projects": analysis.get("projects", []),
+        "topics": analysis.get("topics", []),
+        "unverified": analysis.get("unverified", []),
         "questions": analysis.get("questions", []),
         "quotes": analysis.get("quotes", []),
         "next_steps": analysis.get("next_steps", []),

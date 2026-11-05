@@ -419,19 +419,24 @@ def _visible_clause(
 def _participants_payload(session: DBRecordingSession) -> List[dict]:
     """Coerce the JSONB column into a clean response list. Tolerates legacy
     NULLs and stray non-list values without 500ing the caller."""
-    raw = session.participants
-    if not isinstance(raw, list):
-        return []
+    from services.summary_grounding import dedupe_participants
+
+    raw = dedupe_participants(session.participants)
     out: List[dict] = []
     for p in raw:
         if not isinstance(p, dict):
             continue
-        out.append({
+        row = {
             "id": str(p.get("id") or ""),
             "name": str(p.get("name") or ""),
             "email": p.get("email") or None,
             "role": p.get("role") or None,
-        })
+        }
+        for key in ("speaker_id", "speaker", "raw_label"):
+            if p.get(key):
+                row[key] = str(p[key])
+                break
+        out.append(row)
     return out
 
 
