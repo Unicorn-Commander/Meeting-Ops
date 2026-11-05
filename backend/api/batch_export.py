@@ -174,7 +174,9 @@ async def update_report_branding(
 ) -> ReportBrandingView:
     """Persist a small, database-backed white-label lockup per workspace."""
     _require_report_brand_admin(active_org, current_user)
-    organization = active_org.organization
+    organization = db.get(Organization, active_org.organization.id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     settings = dict(organization.settings or {})
     report = _organization_report_settings(organization)
 
