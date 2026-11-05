@@ -2394,13 +2394,14 @@ MEETING_OPS_SUMMARIZER_STYLE_PROMPT = """Analyze the following meeting transcrip
 
 {speaker_context}
 
-The transcript lines include a [mm:ss-mm:ss] time span and speaker label. For every
-decision and every commitment/action item, add a `cites` list containing one or
-more objects exactly shaped as {{"start_s": 0, "end_s": 4, "speaker": "Name or Speaker N",
-"quote": "verbatim transcript words"}}. Each quote must be a contiguous, verbatim
-span of no more than 160 characters from the transcript. Use the numeric seconds
-represented by the time span. Do not cite a paraphrase. A generic "Speaker N" is
-not a participant unless a voice match named that speaker.
+Each transcript line starts with [start-end], its time span in whole seconds, then
+the speaker label. For every decision and every commitment/action item, add a `cites`
+list containing one or more objects exactly shaped as {{"start_s": 0, "end_s": 4,
+"speaker": "Name or Speaker N", "quote": "verbatim transcript words"}}. Each quote must
+be a contiguous, verbatim span of no more than 160 characters of what was said. Use the
+line's numbers for start_s and end_s. Never put the bracketed numbers or a speaker label
+inside a quote. Do not cite a paraphrase. A generic "Speaker N" is not a participant
+unless a voice match named that speaker.
 
 Output the following sections in order. Include ALL substantive information from the transcript.
 
@@ -2697,6 +2698,19 @@ def _fmt_clock(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+# What one "[3754-3759] Speaker Name: " prefix costs. Measured on a 164-minute
+# call: uncounted, a longer prefix took 14,000-token chunks to 35,600 real tokens,
+# past both model contexts in the route (24,576 and 32,768).
+_SEGMENT_PREFIX_TOKENS = 14
+# Digest JSON now carries a cite per decision and action item.
+_MAP_MAX_TOKENS = 6000
+# How many times one chunk may be halved after an oversized or unreadable answer.
+_MAP_SPLIT_DEPTH = 2
+_DIGEST_LIST_KEYS = (
+    "key_points", "decisions", "action_items", "quotes", "open_questions", "notable",
+)
+
+
 def _chunk_segments(
     segments: list[dict[str, Any]],
     label_map: Optional[dict[str, str]],
@@ -2726,7 +2740,9 @@ def _chunk_segments(
         return []
 
     def _seg_tokens(seg: dict[str, Any]) -> int:
-        return _estimate_tokens(seg.get("text") or "")
+        # The budget is what the model reads, not just the words: every line
+        # also carries its "[start-end] Speaker: " prefix.
+        return _estimate_tokens(seg.get("text") or "") + _SEGMENT_PREFIX_TOKENS
 
     chunks: list[dict[str, Any]] = []
     cur: list[dict[str, Any]] = []
@@ -2803,6 +2819,7 @@ Rules:
 - Use ONLY information explicitly stated in this chunk. Never fabricate.
 - Attribute every point, decision, and quote to the speaker who said it, exactly as labeled in the transcript. Never output machine codes like SPEAKER_00.
 - Quote only words that actually appear below. For every decision and action item, copy a contiguous quote of no more than 160 characters into a `cites` list with its numeric start_s/end_s and speaker. If a section has nothing, return an empty list.
+- Each transcript line starts with [start-end] in whole seconds, then the speaker label. Use those numbers for start_s and end_s. Never put the bracketed numbers or a speaker label inside a quote.
 
 ---
 TRANSCRIPT (chunk {n} of {total}):
@@ -2949,55 +2966,90 @@ async def _summarize_mapreduce(
     }
     sem = asyncio.Semaphore(3)
 
-    async def _map_one(chunk: dict[str, Any]) -> Optional[dict[str, Any]]:
+    async def _map_text(
+        chunk: dict[str, Any], body: str, depth: int = 0
+    ) -> Optional[dict[str, list[Any]]]:
         prompt = MEETING_OPS_MAP_PROMPT.format(
             n=chunk["index"] + 1,
             total=total,
             start=_fmt_clock(chunk["start"]),
             end=_fmt_clock(chunk["end"]),
             speaker_context=speaker_context,
-            transcript=chunk["text"],
+            transcript=body,
         )
         if style_prefix:
             prompt = f"{style_prefix}\n\n{prompt}"
+        failure: Optional[str] = None
+        splittable = False
+        data: Any = None
         try:
             async with sem:
                 text = await asyncio.wait_for(
                     llm.chat(
                         system_prompt=system_prompt,
                         user_prompt=prompt,
-                        max_tokens=4096,
+                        max_tokens=_MAP_MAX_TOKENS,
                         temperature=0.6,
                         extra_params=extra,
                     ),
                     timeout=300,
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("map-reduce: chunk %d/%d LLM call failed: %s", chunk["index"] + 1, total, exc)
+            failure = f"LLM call failed: {exc}"
+            # A request past the model's context fails the same way every time.
+            # A smaller one fits; an outage is not helped by asking twice as often.
+            splittable = "400" in str(exc) or "context" in str(exc).lower()
+        else:
+            data = _parse_summarizer_json(text, fallback_title="")
+            # The parser's fallback shape has no digest keys. Unreadable output,
+            # usually JSON cut off at max_tokens, is not coverage of this chunk.
+            if not (isinstance(data, dict) and ("key_points" in data or "action_items" in data)):
+                failure = "answer was not a readable digest"
+                splittable = True
+        if failure is not None:
+            lines = body.split("\n")
+            if splittable and depth < _MAP_SPLIT_DEPTH and len(lines) >= 4:
+                middle = len(lines) // 2
+                logger.warning(
+                    "map-reduce: chunk %d/%d %s; splitting %d lines in two",
+                    chunk["index"] + 1, total, failure, len(lines),
+                )
+                left, right = await asyncio.gather(
+                    _map_text(chunk, "\n".join(lines[:middle]), depth + 1),
+                    _map_text(chunk, "\n".join(lines[middle:]), depth + 1),
+                )
+                if left is None or right is None:
+                    return None
+                return {k: left[k] + right[k] for k in _DIGEST_LIST_KEYS}
+            logger.warning("map-reduce: chunk %d/%d %s", chunk["index"] + 1, total, failure)
             return None
-        data = _parse_summarizer_json(text, fallback_title="")
         from services.action_item_quality import gate_summary_lists
-        if isinstance(data, dict):
-            gate_summary_lists(
-                data,
-                source=f"uploads.map_chunk chunk={chunk['index']}",
-            )
+        gate_summary_lists(
+            data,
+            source=f"uploads.map_chunk chunk={chunk['index']}",
+        )
+        digest = {k: data.get(k) or [] for k in _DIGEST_LIST_KEYS}
+        digest["open_questions"] = data.get("open_questions") or data.get("questions") or []
+        return digest
+
+    async def _map_one(chunk: dict[str, Any]) -> Optional[dict[str, Any]]:
+        digest = await _map_text(chunk, chunk["text"])
+        if digest is None:
+            return None
         return {
             "index": chunk["index"],
             "range": f"{_fmt_clock(chunk['start'])}–{_fmt_clock(chunk['end'])}",
             "speakers": chunk.get("speakers") or [],
-            "key_points": data.get("key_points") or [],
-            "decisions": data.get("decisions") or [],
-            "action_items": data.get("action_items") or [],
-            "quotes": data.get("quotes") or [],
-            "open_questions": data.get("open_questions") or data.get("questions") or [],
-            "notable": data.get("notable") or [],
+            **digest,
         }
 
     results = await asyncio.gather(*(_map_one(c) for c in chunks))
     digests = [r for r in results if r is not None]
     if not digests:
         raise RuntimeError("map-reduce produced no usable chunk digests")
+    if not any(d[k] for d in digests for k in _DIGEST_LIST_KEYS):
+        # Reducing nothing yields a confident summary of nothing.
+        raise RuntimeError("map-reduce produced only empty chunk digests")
     digests.sort(key=lambda d: d["index"])
 
     # Coverage: which chunks the map step dropped (LLM failure / unparseable).
@@ -3077,7 +3129,10 @@ async def _summarize_session(
     from services.summary_grounding import (
         dedupe_participants,
         ground_summary,
+        render_cited_item,
         render_timestamped_segments,
+        spoken_text,
+        stamp_cites_from_segments,
     )
 
     transcript = ""
@@ -3301,6 +3356,22 @@ async def _summarize_session(
         from services.providers.impl_llm import LLMUnavailable
 
         raise LLMUnavailable("Summary generation returned no content")
+    # A run that covered only part of the meeting must not replace one that
+    # covered all of it: the title, the decisions and the action items would all
+    # go with it. Leave what is there, say so, and let the next run try again.
+    previous_md = session.processing_metadata or {}
+    if (
+        truncated
+        and previous_md.get("summary_input_hash")
+        and not previous_md.get("summary_truncated")
+    ):
+        logger.warning(
+            "Keeping the complete summary for session=%s: this run covered only "
+            "part of the transcript (missing: %s)",
+            session.id,
+            ", ".join(summary_missing_ranges or []) or "past the length cap",
+        )
+        return
     analysis = _parse_summarizer_json(text, fallback_title=session.title or "")
     # executive must be a real summary sentence — never empty and never a bare
     # name/title (the memo prompt occasionally dropped the speaker's name or
@@ -3332,11 +3403,19 @@ async def _summarize_session(
         participant_source.extend(generated_participants)
     analysis = ground_summary(
         analysis,
-        transcript,
+        spoken_text(segments) if segments else transcript,
         participants=participant_source,
         speakers=speakers_seen,
     )
+    if segments:
+        stamp_cites_from_segments(analysis, segments)
     analysis["participants"] = dedupe_participants(analysis.get("participants"))
+    # Every reader of `decisions` takes a list of strings: SessionDetails renders
+    # each one as a React child, ai_chat joins them, federation trims them. Keep
+    # that contract, with the markers in the text and the cited objects beside it.
+    grounded_decisions = analysis.get("decisions") or []
+    analysis["decisions_cited"] = [d for d in grounded_decisions if isinstance(d, dict)]
+    analysis["decisions"] = [render_cited_item(d) for d in grounded_decisions]
     session.summary = json.dumps(analysis)
     stored_actions = (
         analysis.get("actions")
@@ -3350,6 +3429,7 @@ async def _summarize_session(
         "actions": stored_actions,
         "action_items": stored_actions,
         "decisions": analysis.get("decisions", []),
+        "decisions_cited": analysis.get("decisions_cited", []),
         "participants": analysis.get("participants", []),
         "projects": analysis.get("projects", []),
         "topics": analysis.get("topics", []),

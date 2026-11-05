@@ -18,7 +18,7 @@ from auth.organization import ActiveOrganization
 from auth.models import User
 from auth.tier import gate_feature_for_caller
 from services.providers import get_provider_registry
-from services.summary_grounding import ground_summary
+from services.summary_grounding import ground_summary, render_cited_item
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
@@ -305,8 +305,9 @@ async def _generate_ai_insights(
         transcript,
     )
     action_items = [ActionItem(**item) for item in grounded.get("action_items", [])]
-    key_decisions = grounded.get("key_decisions", [])
-    follow_ups = grounded.get("follow_ups", [])
+    # The Sessions page and the mobile view read these as text.
+    key_decisions = [render_cited_item(d) for d in grounded.get("key_decisions", [])]
+    follow_ups = [render_cited_item(f) for f in grounded.get("follow_ups", [])]
     unverified = grounded.get("unverified", [])
 
     # Topics from keyword categories
@@ -562,7 +563,7 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
                 system_prompt=(
                     "You extract commitments from meeting transcripts. Return ONLY a JSON array.\n"
                     + COMMITMENT_EXTRACTION_RULES
-                    + "\nEach item must also include cites: a list of objects with start_s, end_s, speaker, and a verbatim quote of no more than 160 characters."
+                    + "\nEach item must also include cites: a list of objects with speaker and a verbatim quote of no more than 160 characters."
                 ),
                 user_prompt=(
                     "Extract COMMITMENTS from this meeting transcript: who will do what, by when. "
@@ -572,14 +573,15 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
                     "vague non-commitments, or restatements of the meeting topic.\n\n"
                     f"{transcript[:12000]}"
                 ),
-                max_tokens=500,
+                max_tokens=1500,
                 temperature=0.3,
             )
             if raw.strip():
                 import re
-                match = re.search(r'\[.*?\]', raw, re.DOTALL)
-                if match:
-                    items = json.loads(match.group(0))
+                # Items now nest a cites array, so the first "]" is not the end.
+                start = raw.find('[')
+                if start >= 0:
+                    items, _ = json.JSONDecoder().raw_decode(raw[start:])
                     from services.action_item_quality import apply_quality_gate
                     gated = apply_quality_gate(
                         [item for item in items if isinstance(item, dict)],
@@ -620,7 +622,7 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
                 svc.chat_sync,
                 system_prompt=(
                     "You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object. "
-                    "Each decision or commitment must carry cites with start_s, end_s, speaker, and a verbatim quote of no more than 160 characters."
+                    "Each decision or commitment must carry cites with speaker and a verbatim quote of no more than 160 characters."
                 ),
                 user_prompt=(
                     "Extract key decisions and follow-up items from this meeting. "
@@ -628,7 +630,7 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
                     "and follow_ups (array of objects with text and cites).\n\n"
                     f"{transcript[:12000]}"
                 ),
-                max_tokens=300,
+                max_tokens=1500,
                 temperature=0.3,
             )
             if raw.strip():
