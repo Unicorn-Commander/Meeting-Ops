@@ -46,6 +46,10 @@ from services.mcp_cross_app import (
     render_cross_app_section,
 )
 from services.summary_grounding import dedupe_participants, render_cited_item
+from services.mcp_session_resolve import (
+    is_session_id_prefix,
+    resolve_session_id_prefix,
+)
 from services.transcript_pagination import (
     DEFAULT_MAX_CHARS,
     MAX_MAX_CHARS,
@@ -257,7 +261,67 @@ def _unwrap_list_payload(data: Any) -> tuple[list[dict[str, Any]], bool]:
     return [], False
 
 
+def _caller_organization_id(db) -> int | None:
+    """Active org the exact session path uses when the request has no org header.
+
+    The hosted MCP loopback sends only the bearer token. A user pinned by
+    that middleware is reloaded here — its session is already closed.
+    """
+    from auth.models import User
+    from auth.pat import TOKEN_PREFIX as PAT_PREFIX, resolve_pat_record
+
+    user = None
+    pinned = get_mcp_user()
+    pinned_id = getattr(pinned, "id", None) if pinned is not None else None
+    if pinned_id is not None:
+        user = db.query(User).filter(User.id == pinned_id).first()
+    if user is None:
+        token = _pat_var.get()
+        if token and token.startswith(PAT_PREFIX):
+            # Do not stamp last_used: the HTTP middleware already did.
+            pat = resolve_pat_record(db, plaintext=token, update_last_used=False)
+            if pat is not None and pat.scope == "user":
+                user = pat.user
+    if user is None:
+        return None
+    try:
+        active = _resolve_mcp_active_organization(db, user, None)
+    except HTTPException:
+        return None
+    organization = getattr(active, "organization", None)
+    return getattr(organization, "id", None)
+
+
+def _prepare_session_id(session_id: str) -> tuple[str, str | None]:
+    """Return ``(id for the existing API path, ambiguous-prefix error)``.
+
+    Full UUIDs and integer ids skip the database. Zero prefix matches return
+    the original id so ``_api`` still raises the existing not-found text.
+    """
+    if not is_session_id_prefix(session_id):
+        return session_id, None
+
+    from database.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        organization_id = _caller_organization_id(db)
+        if organization_id is None:
+            return session_id, None
+        resolved = resolve_session_id_prefix(db, organization_id, session_id)
+    finally:
+        db.close()
+    return resolved.session_id, resolved.error
+
+
 async def _propose(action: str, payload: dict[str, Any]) -> str:
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str):
+        resolved, prefix_error = _prepare_session_id(session_id)
+        if prefix_error:
+            return prefix_error
+        if resolved != session_id:
+            payload = {**payload, "session_id": resolved}
     data = await _api(
         "post",
         "/api/agent-actions/propose",
@@ -507,8 +571,11 @@ async def get_meeting_details(session_id: str) -> str:
     the handles into full records.
 
     Args:
-        session_id: The session ID (UUID or integer ID) of the meeting
+        session_id: Session id — full UUID, integer id, or an unambiguous 8–31 hex prefix
     """
+    session_id, prefix_error = _prepare_session_id(session_id)
+    if prefix_error:
+        return prefix_error
     data = await _api("get", f"/api/simple/recording-sessions/{session_id}")
 
     title = data.get("title") or data.get("name", "Untitled")
@@ -596,13 +663,16 @@ async def get_meeting_transcript(
     and cases against sibling MCP servers.
 
     Args:
-        session_id: The session ID (UUID or integer ID) of the meeting
+        session_id: Session id — full UUID, integer id, or an unambiguous 8–31 hex prefix
         max_chars: Maximum transcript characters per page (default 10000,
                    hard ceiling 200000)
         offset: Segment index to start at (or character offset for a blob-only
                 transcript)
         format: ``text`` (default) or ``segments`` for structured JSON
     """
+    session_id, prefix_error = _prepare_session_id(session_id)
+    if prefix_error:
+        return prefix_error
     data = await _api("get", f"/api/simple/recording-sessions/{session_id}")
 
     title = data.get("title") or data.get("name", "Untitled")
@@ -650,9 +720,12 @@ async def chat_with_meeting(session_id: str, message: str) -> str:
     """Ask a question about a specific meeting using AI chat.
 
     Args:
-        session_id: The session ID of the meeting
+        session_id: Session id — full UUID, integer id, or an unambiguous 8–31 hex prefix
         message: Your question about the meeting
     """
+    session_id, prefix_error = _prepare_session_id(session_id)
+    if prefix_error:
+        return prefix_error
     data = await _api(
         "post",
         f"/api/ai-chat/sessions/{session_id}/messages",
@@ -754,8 +827,11 @@ async def get_meeting_insights(session_id: str) -> str:
     """Get AI-generated insights for a specific meeting.
 
     Args:
-        session_id: The session ID of the meeting
+        session_id: Session id — full UUID, integer id, or an unambiguous 8–31 hex prefix
     """
+    session_id, prefix_error = _prepare_session_id(session_id)
+    if prefix_error:
+        return prefix_error
     data = await _api(
         "get",
         f"/api/simple/recording-sessions/{session_id}/insights",
@@ -838,8 +914,11 @@ async def get_cross_app_hints(session_id: str) -> str:
         }
 
     Args:
-        session_id: The session ID (UUID or integer ID) of the meeting
+        session_id: Session id — full UUID, integer id, or an unambiguous 8–31 hex prefix
     """
+    session_id, prefix_error = _prepare_session_id(session_id)
+    if prefix_error:
+        return prefix_error
     try:
         data = await _api("get", f"/api/simple/recording-sessions/{session_id}")
     except Exception:
@@ -937,7 +1016,7 @@ async def propose_create_session(
 
 @mcp.tool()
 async def propose_rename_session(session_id: str, title: str) -> str:
-    """Propose renaming a session. Requires user confirmation before mutation."""
+    """Propose renaming a session. session_id may be a UUID, an integer, or an unambiguous 8–31 hex prefix. Requires user confirmation before mutation."""
     return await _propose(
         "rename_session",
         {"session_id": session_id, "title": title},
@@ -946,19 +1025,19 @@ async def propose_rename_session(session_id: str, title: str) -> str:
 
 @mcp.tool()
 async def propose_add_tag(session_id: str, tag: str) -> str:
-    """Propose adding a tag to a session. Requires user confirmation before mutation."""
+    """Propose adding a tag to a session. session_id may be a UUID, an integer, or an unambiguous 8–31 hex prefix. Requires user confirmation before mutation."""
     return await _propose("add_tag", {"session_id": session_id, "tag": tag})
 
 
 @mcp.tool()
 async def propose_remove_tag(session_id: str, tag: str) -> str:
-    """Propose removing a tag from a session. Requires user confirmation before mutation."""
+    """Propose removing a tag from a session. session_id may be a UUID, an integer, or an unambiguous 8–31 hex prefix. Requires user confirmation before mutation."""
     return await _propose("remove_tag", {"session_id": session_id, "tag": tag})
 
 
 @mcp.tool()
 async def propose_trigger_reprocess(session_id: str) -> str:
-    """Propose triggering server reprocessing. Requires user confirmation."""
+    """Propose triggering server reprocessing. session_id may be a UUID, an integer, or an unambiguous 8–31 hex prefix. Requires user confirmation."""
     return await _propose("trigger_reprocess", {"session_id": session_id})
 
 
@@ -968,7 +1047,7 @@ async def propose_draft_followup_email(
     recipient_name: str = "",
     notes: str = "",
 ) -> str:
-    """Propose drafting a follow-up email. Requires confirmation before returning the draft."""
+    """Propose drafting a follow-up email. session_id may be a UUID, an integer, or an unambiguous 8–31 hex prefix. Requires confirmation before returning the draft."""
     payload: dict[str, Any] = {"session_id": session_id}
     if recipient_name:
         payload["recipient_name"] = recipient_name
