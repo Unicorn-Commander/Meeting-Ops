@@ -156,7 +156,9 @@ jobs:
               | grep -Ev '(^|/)(conftest|_summarization_lease_child|test_related_sessions|test_search_analytics|test_tts)\.py$'
           )
           for test_file in "${test_files[@]}"; do
-            python3 -m pytest -p no:cacheprovider "$test_file" -q
+            # pytest exit 5 = nothing collected (a module that skips itself on
+            # this runner). That is not a failure of the gate.
+            python3 -m pytest -p no:cacheprovider "$test_file" -q || { rc=$?; [ "$rc" -eq 5 ] || exit "$rc"; }
           done
 
       - name: Action-item order checks
