@@ -5,7 +5,7 @@ Uses real speaker data from transcription segments and LLM for analysis.
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import asyncio
 import logging
@@ -18,6 +18,7 @@ from auth.organization import ActiveOrganization
 from auth.models import User
 from auth.tier import gate_feature_for_caller
 from services.providers import get_provider_registry
+from services.summary_grounding import ground_summary
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/simple/recording-sessions", tags=["insights"])
@@ -50,6 +51,13 @@ class ActionItemQuality(BaseModel):
     confidence: float
 
 
+class SummaryCitation(BaseModel):
+    start_s: Optional[float] = None
+    end_s: Optional[float] = None
+    speaker: str = ""
+    quote: str
+
+
 class ActionItem(BaseModel):
     id: str
     text: str
@@ -59,6 +67,7 @@ class ActionItem(BaseModel):
     completed: bool = False
     category: str = "general"
     quality: Optional[ActionItemQuality] = None
+    cites: List[SummaryCitation] = Field(default_factory=list)
 
 class KeywordTrend(BaseModel):
     word: str
@@ -82,8 +91,9 @@ class MeetingInsightsResponse(BaseModel):
     sentiment: Dict[str, float]
     duration: int
     topics: List[str]
-    key_decisions: List[str]
-    follow_ups: List[str]
+    key_decisions: List[Any]
+    follow_ups: List[Any]
+    unverified: List[Dict[str, Any]] = Field(default_factory=list)
 
 @router.get("/{session_id}/insights", response_model=MeetingInsightsResponse)
 async def get_meeting_insights(
@@ -132,6 +142,7 @@ async def get_meeting_insights(
                 topics=[],
                 key_decisions=[],
                 follow_ups=[],
+                unverified=[],
             )
         
         # Build full transcript text using the real speaker column
@@ -275,6 +286,29 @@ async def _generate_ai_insights(
     # ---- Key decisions and follow-ups via LLM ----
     key_decisions, follow_ups = await _extract_decisions(transcript, db, org_id)
 
+    # The insights endpoint predates the canonical final-summary writer, but
+    # it is still a user-visible summary surface. Apply the same citation
+    # post-check before returning/caching it so fabricated quotes never appear
+    # as decisions or commitments in this path either.
+    action_payload = []
+    for item in action_items:
+        row = item.model_dump(exclude_defaults=True)
+        if not row.get("cites"):
+            row.pop("cites", None)
+        action_payload.append(row)
+    grounded = ground_summary(
+        {
+            "action_items": action_payload,
+            "key_decisions": key_decisions,
+            "follow_ups": follow_ups,
+        },
+        transcript,
+    )
+    action_items = [ActionItem(**item) for item in grounded.get("action_items", [])]
+    key_decisions = grounded.get("key_decisions", [])
+    follow_ups = grounded.get("follow_ups", [])
+    unverified = grounded.get("unverified", [])
+
     # Topics from keyword categories
     topics = list(set(k["word"] for k in keywords[:10]))
 
@@ -288,6 +322,7 @@ async def _generate_ai_insights(
         topics=topics[:5],
         key_decisions=key_decisions[:5],
         follow_ups=follow_ups[:5],
+        unverified=unverified,
     )
 
 
@@ -308,7 +343,9 @@ async def _generate_summary(transcript: str, db: Session, org_id: Optional[int])
                     "action items. Keep the language clear and direct."
                 ),
                 user_prompt=(
-                    "Summarize this meeting transcript:\n\n" + transcript[:16000]
+                    "Summarize this meeting transcript. Keep decisions and commitments "
+                    "grounded in the transcript; do not invent quotes.\n\n"
+                    + transcript[:16000]
                 ),
                 max_tokens=500,
                 temperature=0.5,
@@ -525,10 +562,11 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
                 system_prompt=(
                     "You extract commitments from meeting transcripts. Return ONLY a JSON array.\n"
                     + COMMITMENT_EXTRACTION_RULES
+                    + "\nEach item must also include cites: a list of objects with start_s, end_s, speaker, and a verbatim quote of no more than 160 characters."
                 ),
                 user_prompt=(
                     "Extract COMMITMENTS from this meeting transcript: who will do what, by when. "
-                    "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low). "
+                    "Return ONLY a JSON array of objects with keys: text, assignee, priority (high/medium/low), cites. "
                     "assignee is a real name when the transcript has one; otherwise the speaker label. "
                     "Do not include navigation, meeting mechanics, personal errands, third-party to-dos, "
                     "vague non-commitments, or restatements of the meeting topic.\n\n"
@@ -561,6 +599,7 @@ async def _extract_action_items(transcript: str, db: Session, org_id: Optional[i
                             completed=False,
                             category="meeting",
                             quality=quality,
+                            cites=item.get("cites") or [],
                         ))
                     if results:
                         return results
@@ -579,11 +618,14 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
         try:
             raw = await asyncio.to_thread(
                 svc.chat_sync,
-                system_prompt="You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object.",
+                system_prompt=(
+                    "You extract decisions and follow-ups from meeting transcripts. Return ONLY a JSON object. "
+                    "Each decision or commitment must carry cites with start_s, end_s, speaker, and a verbatim quote of no more than 160 characters."
+                ),
                 user_prompt=(
                     "Extract key decisions and follow-up items from this meeting. "
-                    "Return ONLY a JSON object with two keys: decisions (array of strings) "
-                    "and follow_ups (array of strings).\n\n"
+                    "Return ONLY a JSON object with two keys: decisions (array of objects with text and cites) "
+                    "and follow_ups (array of objects with text and cites).\n\n"
                     f"{transcript[:12000]}"
                 ),
                 max_tokens=300,
@@ -595,9 +637,9 @@ async def _extract_decisions(transcript: str, db: Session, org_id: Optional[int]
                 if match:
                     parsed = json.loads(match.group(0))
                     if isinstance(parsed.get("decisions"), list):
-                        key_decisions = [str(d) for d in parsed["decisions"][:5]]
+                        key_decisions = parsed["decisions"][:5]
                     if isinstance(parsed.get("follow_ups"), list):
-                        follow_ups = [str(f) for f in parsed["follow_ups"][:5]]
+                        follow_ups = parsed["follow_ups"][:5]
         except Exception as e:
             logger.warning(f"LLM decision extraction failed: {e}")
 
