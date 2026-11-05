@@ -31,10 +31,11 @@ import contextvars
 import json
 import logging
 import os
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import HTTPException
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -43,6 +44,11 @@ from services.mcp_cross_app import (
     build_cross_app_references,
     empty_cross_app_references,
     render_cross_app_section,
+)
+from services.transcript_pagination import (
+    DEFAULT_MAX_CHARS,
+    MAX_MAX_CHARS,
+    paginate_transcript,
 )
 
 
@@ -558,62 +564,61 @@ async def get_meeting_details(session_id: str) -> str:
 
 
 @mcp.tool()
-async def get_meeting_transcript(session_id: str, max_chars: int = 10000) -> str:
+async def get_meeting_transcript(
+    session_id: str,
+    max_chars: Annotated[int, Field(ge=1, le=MAX_MAX_CHARS)] = DEFAULT_MAX_CHARS,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    format: Literal["text", "segments"] = "text",
+) -> str:
     """Get the transcript for a specific meeting.
 
-    Returns the transcript plus cross-app reference hints (Contact-Ops /
-    Project-Ops / Crisis-Ops) so AI clients can resolve mentioned people,
-    projects, and cases against sibling MCP servers.
+    Text pages contain complete timestamped speaker segments and a continuation
+    trailer when more content remains. ``format="segments"`` returns JSON with
+    the segment records and pagination metadata. Segment offsets are segment
+    indexes; legacy blob-only transcripts use character offsets instead.
+
+    Text pages also include cross-app reference hints (Contact-Ops / Project-
+    Ops / Crisis-Ops) so AI clients can resolve mentioned people, projects,
+    and cases against sibling MCP servers.
 
     Args:
         session_id: The session ID (UUID or integer ID) of the meeting
-        max_chars: Maximum characters to return (default 10000)
+        max_chars: Maximum transcript characters per page (default 10000,
+                   hard ceiling 200000)
+        offset: Segment index to start at (or character offset for a blob-only
+                transcript)
+        format: ``text`` (default) or ``segments`` for structured JSON
     """
     data = await _api("get", f"/api/simple/recording-sessions/{session_id}")
 
     title = data.get("title") or data.get("name", "Untitled")
 
-    transcript = data.get("transcript_simple", "")
-    if not transcript:
-        diarized = data.get("transcript_diarized")
-        if diarized and isinstance(diarized, dict):
-            segments = diarized.get("segments", [])
-            lines = []
-            for seg in segments:
-                speaker = seg.get("speaker", "Speaker")
-                text = seg.get("text", "")
-                if text:
-                    lines.append(f"{speaker}: {text}")
-            transcript = "\n".join(lines)
+    page = paginate_transcript(
+        data,
+        max_chars=max_chars,
+        offset=offset,
+        format=format,
+    )
 
-    if not transcript:
-        raw = data.get("transcript", "")
-        if raw:
-            try:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(parsed, dict) and "text" in parsed:
-                    transcript = parsed["text"]
-                elif isinstance(parsed, dict) and "segments" in parsed:
-                    transcript = " ".join(
-                        s.get("text", "") for s in parsed["segments"]
-                    )
-                else:
-                    transcript = str(parsed)
-            except (json.JSONDecodeError, TypeError):
-                transcript = str(raw)
+    if format == "segments":
+        payload = {
+            "segments": page["segments"],
+            "total_segments": page["total_segments"],
+            "next_offset": page["next_offset"],
+            "truncated": page["truncated"],
+            "duration_s": page["duration_s"],
+        }
+        # A blob has no segment records, but exposing its rendered page keeps
+        # the structured call useful and makes the character-offset fallback
+        # lossless for clients that request JSON explicitly.
+        if page["blob_only"] and page["has_transcript"]:
+            payload["text"] = page["text"]
+        return json.dumps(payload, ensure_ascii=False)
 
-    if not transcript:
+    if not page["has_transcript"]:
         return f"No transcript available for meeting '{title}' ({session_id})."
 
-    max_chars = max(100, min(100000, max_chars))
-    if len(transcript) > max_chars:
-        transcript = (
-            transcript[:max_chars]
-            + f"\n\n... [Truncated at {max_chars} characters. "
-            f"Full transcript is {len(transcript)} characters.]"
-        )
-
-    out = f"# Transcript: {title}\n\n{transcript}"
+    out = f"# Transcript: {title}\n\n{page['text']}"
 
     try:
         refs = build_cross_app_references(data)

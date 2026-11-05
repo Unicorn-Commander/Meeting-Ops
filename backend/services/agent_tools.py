@@ -33,12 +33,18 @@ from services.graph_augmented_retrieval import (
     resolve_graph_augmentation_enabled,
 )
 from services.agent_actions import propose_action
+from services.transcript_pagination import (
+    DEFAULT_MAX_CHARS,
+    MAX_MAX_CHARS,
+    paginate_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
 _MAX_SEARCH_LIMIT = 20
 _MAX_LIST_LIMIT = 50
-_MAX_TRANSCRIPT_CHARS = 24000
+_MAX_TRANSCRIPT_CHARS = MAX_MAX_CHARS
+_MAX_CHAT_TRANSCRIPT_CHARS = 24000
 _DEFAULT_SEARCH_LIMIT = 5
 
 
@@ -105,6 +111,29 @@ def _extract_transcript_text(session: DBRecordingSession) -> str:
         except (json.JSONDecodeError, TypeError):
             return str(raw)
     return ""
+
+
+def _load_stored_transcript_segments(
+    db: Session, session: DBRecordingSession
+) -> list[Transcription]:
+    """Load legacy transcription rows when the session JSON has no segments."""
+    session_pk = getattr(session, "id", None)
+    if session_pk is None:
+        return []
+    try:
+        query = db.query(Transcription).filter(
+            Transcription.session_id == session_pk
+        )
+        metadata = getattr(session, "processing_metadata", None) or {}
+        order_column = (
+            Transcription.id
+            if metadata.get("manual_content")
+            else Transcription.start_time
+        )
+        return query.order_by(order_column).all()
+    except Exception:  # noqa: BLE001 - legacy rows must not break transcript reads
+        logger.debug("Could not load stored transcript segments", exc_info=True)
+        return []
 
 
 def _extract_summary(session: DBRecordingSession) -> dict[str, Any]:
@@ -342,17 +371,43 @@ async def get_meeting_transcript_impl(
     org_id: int,
     *,
     session_id: str,
-    max_chars: int = 10000,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    offset: int = 0,
+    format: str = "text",
 ) -> dict[str, Any]:
-    """Return the transcript text for a single meeting (truncated to
-    ``max_chars`` to keep the tool result tractable)."""
+    """Return one page of a meeting transcript.
+
+    Structured transcripts paginate by segment index and the legacy flat-text
+    fallback paginates by character offset. Both formats use the shared MCP
+    renderer so the hosted and in-app tools cannot silently diverge.
+    """
     session = _resolve_session(db, org_id, session_id)
     if not session:
         return {"error": f"Session '{session_id}' not found in this organization."}
 
-    max_chars = max(500, min(_MAX_TRANSCRIPT_CHARS, int(max_chars or 10000)))
-    transcript = _extract_transcript_text(session)
-    if not transcript:
+    stored_segments = _load_stored_transcript_segments(db, session)
+    page = paginate_transcript(
+        session,
+        max_chars=max_chars,
+        offset=offset,
+        format=format,
+        fallback_segments=stored_segments,
+    )
+
+    if format == "segments":
+        result = {
+            **_session_brief(session),
+            "segments": page["segments"],
+            "total_segments": page["total_segments"],
+            "next_offset": page["next_offset"],
+            "truncated": page["truncated"],
+            "duration_s": page["duration_s"],
+        }
+        if page["blob_only"] and page["has_transcript"]:
+            result["text"] = page["text"]
+        return result
+
+    if not page["has_transcript"]:
         return {
             **_session_brief(session),
             "transcript": "",
@@ -360,13 +415,14 @@ async def get_meeting_transcript_impl(
             "note": "No transcript is available for this meeting yet.",
         }
 
-    truncated = len(transcript) > max_chars
-    body = transcript[:max_chars] if truncated else transcript
     return {
         **_session_brief(session),
-        "transcript": body,
-        "transcript_chars": len(transcript),
-        "truncated": truncated,
+        "transcript": page["text"],
+        "transcript_chars": page["transcript_chars"],
+        "truncated": page["truncated"],
+        "total_segments": page["total_segments"],
+        "next_offset": page["next_offset"],
+        "duration_s": page["duration_s"],
     }
 
 
@@ -413,10 +469,10 @@ async def chat_with_meeting_impl(
             parts.append("Decisions: " + "; ".join(str(d) for d in summary["decisions"]))
         summary_text = "\n".join(parts)
 
-    transcript_clip = transcript[: _MAX_TRANSCRIPT_CHARS]
+    transcript_clip = transcript[: _MAX_CHAT_TRANSCRIPT_CHARS]
     truncated_note = (
-        f"\n\n[Transcript truncated to first {_MAX_TRANSCRIPT_CHARS} characters]"
-        if len(transcript) > _MAX_TRANSCRIPT_CHARS
+        f"\n\n[Transcript truncated to first {_MAX_CHAT_TRANSCRIPT_CHARS} characters]"
+        if len(transcript) > _MAX_CHAT_TRANSCRIPT_CHARS
         else ""
     )
 
@@ -786,9 +842,11 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "get_meeting_transcript",
             "description": (
-                "Fetch the transcript text for one meeting. Use when the user "
+                "Fetch one page of a meeting transcript. Use when the user "
                 "asks for quotes, exact wording, or details that aren't in "
-                "the summary."
+                "the summary. Text pages carry timestamps, speaker names, and "
+                "an exact continuation offset; request format=segments for "
+                "structured JSON."
             ),
             "parameters": {
                 "type": "object",
@@ -800,12 +858,27 @@ MEETING_RAG_TOOLS: list[dict[str, Any]] = [
                     "max_chars": {
                         "type": "integer",
                         "description": (
-                            "Maximum transcript characters to return "
-                            "(default 10000)."
+                            "Maximum transcript characters per page "
+                            "(default 10000; hard ceiling 200000)."
                         ),
-                        "minimum": 500,
+                        "minimum": 1,
                         "maximum": _MAX_TRANSCRIPT_CHARS,
                         "default": 10000,
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": (
+                            "Segment index to start at; blob-only transcripts "
+                            "use a character offset instead."
+                        ),
+                        "minimum": 0,
+                        "default": 0,
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["text", "segments"],
+                        "description": "Return timestamped text or structured segment JSON.",
+                        "default": "text",
                     },
                 },
                 "required": ["session_id"],

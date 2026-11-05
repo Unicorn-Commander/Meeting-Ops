@@ -157,7 +157,7 @@ will work. Set the server URL to `https://<your-host>/mcp` and add an
 | `ask_about_meetings(question, limit?)` | RAG: ask a question, get an answer cited from your transcripts. |
 | `list_meetings(status?, limit?, offset?)` | List recording sessions; filter by status. |
 | `get_meeting_details(session_id)` | Title, status, duration, summary, decisions, action items. |
-| `get_meeting_transcript(session_id, max_chars?)` | The transcript text, truncated if very long. |
+| `get_meeting_transcript(session_id, max_chars?, offset?, format?)` | Timestamped speaker text in complete segment pages (10,000 characters by default, 200,000 hard ceiling); continue with the returned segment offset, or request `format="segments"` for JSON records and pagination metadata. |
 | `chat_with_meeting(session_id, message)` | AI chat scoped to a single meeting's full context. |
 | `get_analytics(time_range?)` | Session counts, speaker stats, recent trends. |
 | `get_meeting_insights(session_id)` | AI keywords, topics, sentiment, action items. |
