@@ -314,6 +314,39 @@ async def test_source_lifecycle_requires_workspace_bearer_and_sends_bounded_ids(
 
 
 @pytest.mark.asyncio
+async def test_reject_triage_proposal_uses_rest_route_and_stale_reason():
+    from services.projectops_client import ProjectOpsClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"status": "REJECTED"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ProjectOpsClient(
+        base_url="https://projectops.example.test/api/v1",
+        _client=http,
+    )
+
+    result = await client.reject_triage_proposal(
+        proposal_id="proposal-41",
+        reason="replaced by re-summary of session 1485",
+        reason_preset="stale",
+        bearer_override="fixture-bearer",
+    )
+
+    assert result == {"status": "REJECTED"}
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/v1/triage/proposals/proposal-41/reject"
+    assert json.loads(requests[0].content) == {
+        "reasonPreset": "stale",
+        "reason": "replaced by re-summary of session 1485",
+    }
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_triage_submit_accepts_workspace_bearer_without_legacy_credentials():
     from services.projectops_client import ProjectOpsClient
 
