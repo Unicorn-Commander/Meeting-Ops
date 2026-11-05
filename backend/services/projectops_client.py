@@ -58,6 +58,7 @@ import re
 import time
 from datetime import date, datetime
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -518,6 +519,49 @@ class ProjectOpsClient:
             )
         data = await self._request_with_retries(
             "PATCH", f"/tasks/{task_id}/status", json={"status": status}
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def reject_triage_proposal(
+        self,
+        *,
+        proposal_id: str,
+        reason: str,
+        reason_preset: str = "stale",
+        bearer_override: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Reject one pending Project-Ops triage proposal.
+
+        Project-Ops exposes this as the normal human triage route.  The
+        current REST controller persists ``reason`` and ignores the
+        MCP-only ``reasonPreset`` classification, so send both fields while
+        keeping the exact audit reason in the REST field.
+        """
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            raise ProjectOpsClientError("triage proposal id is required")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProjectOpsClientError("triage proposal rejection reason is required")
+        if not isinstance(reason_preset, str) or not reason_preset.strip():
+            raise ProjectOpsClientError("triage proposal reason preset is required")
+        override = (
+            bearer_override.strip()
+            if isinstance(bearer_override, str) and bearer_override.strip()
+            else None
+        )
+        if not self.is_live and override is None:
+            raise ProjectOpsClientError(
+                "reject_triage_proposal called while not configured "
+                "(no bearer_override, PROJECTOPS_API_KEY, or KC credentials)"
+            )
+        safe_id = quote(proposal_id.strip(), safe="")
+        data = await self._request_with_retries(
+            "POST",
+            f"/triage/proposals/{safe_id}/reject",
+            json={
+                "reasonPreset": reason_preset.strip(),
+                "reason": reason.strip(),
+            },
+            bearer_override=override,
         )
         return data if isinstance(data, dict) else {}
 

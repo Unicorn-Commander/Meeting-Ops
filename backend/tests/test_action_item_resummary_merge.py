@@ -66,6 +66,18 @@ class _Session:
         self.ai_insights = ai_insights
 
 
+class _ProjectOpsClient:
+    def __init__(self, *, error=None):
+        self.calls = []
+        self.error = error
+
+    async def reject_triage_proposal(self, **kwargs):
+        if self.error is not None:
+            raise self.error
+        self.calls.append(kwargs)
+        return {"status": "REJECTED"}
+
+
 def _summary(*actions):
     return {"actions": list(actions)}
 
@@ -295,6 +307,95 @@ def test_untouched_machine_item_missing_from_the_new_summary_is_removed():
     fresh = [row for row in db.rows if row.text == "Book the studio"]
     assert len(fresh) == 1 and fresh[0].id is None and fresh[0].status == "todo"
     assert fresh[0].source == "final_summary"
+
+
+def test_removed_machine_item_with_pending_project_ops_proposal_is_retired():
+    stale = _machine(
+        23,
+        "Order the parts",
+        owner="Ada",
+        project_ops_proposal_id="proposal-stale",
+        project_ops_link_state="proposed",
+    )
+    db = _FakeDB([stale])
+    client = _ProjectOpsClient()
+
+    assert persist_action_items(
+        db,
+        _Session(_summary({"action": "Book the studio", "owner": "Mei"})),
+        project_ops_client=client,
+    ) == 2
+
+    assert stale in db.rows and stale not in db.deleted
+    assert stale.project_ops_link_state == "retired"
+    assert [call["proposal_id"] for call in client.calls] == ["proposal-stale"]
+    assert client.calls[0]["reason_preset"] == "stale"
+    assert client.calls[0]["reason"] == "replaced by re-summary of session 42"
+
+
+def test_human_row_with_pending_project_ops_proposal_is_untouched():
+    human = _machine(
+        24,
+        "Keep the hand-written plan",
+        project_ops_proposal_id="proposal-human",
+        project_ops_link_state="proposed",
+    )
+    human.source = "manual"
+    db = _FakeDB([human])
+    client = _ProjectOpsClient()
+
+    persist_action_items(
+        db,
+        _Session(_summary()),
+        project_ops_client=client,
+    )
+
+    assert db.rows == [human]
+    assert human.project_ops_link_state == "proposed"
+    assert client.calls == []
+
+
+def test_approved_project_ops_row_is_untouched_and_not_retired():
+    approved = _machine(
+        25,
+        "Keep the approved task",
+        project_ops_proposal_id="proposal-approved",
+        project_ops_task_id="task-approved",
+        project_ops_link_state="approved_linked",
+    )
+    db = _FakeDB([approved])
+    client = _ProjectOpsClient()
+
+    persist_action_items(
+        db,
+        _Session(_summary()),
+        project_ops_client=client,
+    )
+
+    assert db.rows == [approved]
+    assert approved.project_ops_link_state == "approved_linked"
+    assert client.calls == []
+
+
+def test_project_ops_down_does_not_fail_summary_persistence():
+    stale = _machine(
+        26,
+        "Remove the obsolete item",
+        project_ops_proposal_id="proposal-down",
+        project_ops_link_state="proposed",
+    )
+    db = _FakeDB([stale])
+    client = _ProjectOpsClient(error=RuntimeError("upstream unavailable"))
+
+    assert persist_action_items(
+        db,
+        _Session(_summary({"action": "Add the replacement item"})),
+        project_ops_client=client,
+    ) == 2
+
+    assert stale in db.rows
+    assert stale.project_ops_link_state == "retired"
+    assert any(row.text == "Add the replacement item" for row in db.rows)
 
 
 def test_second_persist_does_not_duplicate_rows_or_change_ids():

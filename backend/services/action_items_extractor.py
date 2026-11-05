@@ -31,6 +31,7 @@ Returns a list of dicts with the shape consumed by the new
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime
@@ -321,7 +322,61 @@ def _apply_machine_update(row: Any, item: dict, sort_order: int) -> None:
     row.raw_payload = _with_stamps(row, item["raw_payload"])
 
 
-def persist_action_items(db, session) -> int:
+def _retire_project_ops_proposal(
+    proposal_id: str,
+    session_id: Any,
+    project_ops_client: Any = None,
+) -> None:
+    """Best-effort rejection for a proposal orphaned by a re-summary.
+
+    ``persist_action_items`` is synchronous because several legacy summary
+    paths call it from both sync and async code.  Run immediately when no
+    event loop exists; otherwise schedule the bounded async client call on the
+    caller's loop so Project-Ops cannot fail the summary request.
+    """
+    reason = f"replaced by re-summary of session {session_id}"
+
+    async def _reject() -> None:
+        active_client = project_ops_client
+        owns_client = active_client is None
+        try:
+            if active_client is None:
+                from services.projectops_client import ProjectOpsClient
+
+                active_client = ProjectOpsClient()
+            await active_client.reject_triage_proposal(
+                proposal_id=proposal_id,
+                reason=reason,
+                reason_preset="stale",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "projectops proposal retirement failed session=%s proposal=%s error=%s",
+                session_id,
+                proposal_id,
+                type(exc).__name__,
+            )
+        finally:
+            if owns_client and active_client is not None:
+                try:
+                    await active_client.aclose()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "projectops proposal retirement client close failed "
+                        "session=%s proposal=%s",
+                        session_id,
+                        proposal_id,
+                    )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_reject())
+    else:
+        loop.create_task(_reject())
+
+
+def persist_action_items(db, session, *, project_ops_client: Any = None) -> int:
     """Merge a fresh extraction into the session's action-item rows.
 
     Human-owned rows are never deleted or overwritten. An untouched
@@ -339,7 +394,9 @@ def persist_action_items(db, session) -> int:
     The human row still consumes a leftover with its text, which stops
     the same sentence being inserted again.
 
-    Returns how many rows the session has after the merge. The caller
+    A removed/replaced machine row with a pending Project-Ops proposal is
+    retained as a ``retired`` tombstone and its proposal is rejected
+    best-effort. Approved/rejected/retired links remain untouched. The caller
     commits; this function only flushes.
     """
     # Local import keeps the extractor importable from alembic
@@ -410,12 +467,27 @@ def persist_action_items(db, session) -> int:
         else:
             machine.append(row)
 
-    kept = updated = removed = preserved = 0
+    kept = updated = removed = preserved = retired = 0
+    proposal_retirements: set[str] = set()
     for row in machine:
         row_text = getattr(row, "text", "") or ""
         match = _take(row_text)
         if match is None:
             if _match_key(row_text) in rejected_keys:
+                preserved += 1
+                continue
+            link_state = getattr(row, "project_ops_link_state", "local_only")
+            if (
+                link_state in {"approved_linked", "rejected", "retired"}
+                or getattr(row, "project_ops_task_id", None)
+            ):
+                preserved += 1
+                continue
+            proposal_id = getattr(row, "project_ops_proposal_id", None)
+            if link_state == "proposed" and proposal_id:
+                row.project_ops_link_state = "retired"
+                proposal_retirements.add(str(proposal_id))
+                retired += 1
                 preserved += 1
                 continue
             db.delete(row)
@@ -448,13 +520,21 @@ def persist_action_items(db, session) -> int:
             inserted += 1
 
     db.flush()
+    for proposal_id in proposal_retirements:
+        _retire_project_ops_proposal(
+            proposal_id,
+            session.id,
+            project_ops_client=project_ops_client,
+        )
     logger.info(
-        "action_items: merged session=%s kept=%d updated=%d removed=%d inserted=%d preserved=%d",
+        "action_items: merged session=%s kept=%d updated=%d removed=%d "
+        "inserted=%d preserved=%d retired=%d",
         session.id,
         kept,
         updated,
         removed,
         inserted,
         preserved,
+        retired,
     )
     return kept + updated + inserted + preserved
