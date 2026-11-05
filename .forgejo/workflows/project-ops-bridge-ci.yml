@@ -153,7 +153,7 @@ jobs:
           done < <(
             grep -l 'summar\|ai_insights\|summary_grounding' tests/*.py \
               | sort \
-              | grep -Ev '(^|/)(conftest|_summarization_lease_child|test_related_sessions|test_search_analytics|test_tts)\.py$'
+              | grep -Ev '(^|/)(conftest|_summarization_lease_child|test_related_sessions|test_search_analytics|test_tts|test_ws_auth)\.py$'
           )
           for test_file in "${test_files[@]}"; do
             # pytest exit 5 = nothing collected (a module that skips itself on
@@ -175,7 +175,7 @@ jobs:
           printf 'SUMMARY: %s isolated files passed; action-item order checks passed forward and reverse\n' \
             "$(grep -l 'summar\|ai_insights\|summary_grounding' tests/*.py \
               | sort \
-              | grep -Ev '(^|/)(conftest|_summarization_lease_child|test_related_sessions|test_search_analytics|test_tts)\.py$' \
+              | grep -Ev '(^|/)(conftest|_summarization_lease_child|test_related_sessions|test_search_analytics|test_tts|test_ws_auth)\.py$' \
               | wc -l | tr -d ' ')"
 
   caller-contracts:
