@@ -10,8 +10,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from database.models import ActionItem
 from services.action_items_extractor import persist_action_items
+
+
+@pytest.fixture(autouse=True)
+def _app_first(app):
+    """Bind this module's ORM class after the session app reloads models."""
+    global ActionItem
+    from database.models import ActionItem as reloaded_action_item
+
+    ActionItem = reloaded_action_item
+    return app
 
 
 class _Query:
