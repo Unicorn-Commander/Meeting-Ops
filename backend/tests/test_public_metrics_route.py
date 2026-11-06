@@ -27,6 +27,16 @@ def test_public_traefik_router_does_not_publish_metrics():
         assert f"PathPrefix(`{prefix}`)" in rule
 
 
+
+def test_public_router_serves_the_mcp_protected_resource_metadata():
+    """RFC 9728 discovery for the hosted MCP OAuth door must reach the backend.
+
+    Both PRM paths live under this prefix; on the SPA router they answer HTML and
+    hosted MCP clients (claude.ai, ChatGPT, Claude Desktop) cannot sign in.
+    """
+    rule = _meet_prod_rule()
+    assert "PathPrefix(`/.well-known/oauth-protected-resource`)" in rule
+
 def test_metrics_comment_matches_native_oidc_production():
     text = (ROOT / "backend/main.py").read_text()
     start = text.index("# === Phase B.5: Prometheus /metrics endpoint ===")
