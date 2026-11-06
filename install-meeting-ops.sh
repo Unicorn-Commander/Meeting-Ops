@@ -13,7 +13,11 @@ API_URL="http://127.0.0.1:9050"
 WEB_URL="http://127.0.0.1:7777"
 
 cd "$SCRIPT_DIR"
-umask 077
+# Do not set umask 077 for the whole script. It used to sit above
+# `docker compose up --build` and any file this process created — including
+# a git checkout — landed mode 600. nginx then 403s /brand/*. The secret
+# env file still uses 077 inside create_env_file. The image forces brand
+# assets world-readable in frontend/Dockerfile.
 
 die() {
   echo "[ERROR] $*" >&2
@@ -44,6 +48,11 @@ read_env_value() {
 }
 
 create_env_file() {
+  # 077 only while the secret file is created, then restored. See the note
+  # above the old process-wide umask.
+  local previous_umask
+  previous_umask="$(umask)"
+  umask 077
   if [ -e "$ENV_FILE" ]; then
     [ -f "$ENV_FILE" ] || die "$ENV_FILE exists but is not a regular file"
     chmod 600 "$ENV_FILE"
@@ -51,6 +60,7 @@ create_env_file() {
       MEETING_OPS_ADMIN_USERNAME MEETING_OPS_ADMIN_EMAIL MEETING_OPS_ADMIN_PASSWORD; do
       [ -n "$(read_env_value "$key")" ] || die "$ENV_FILE is missing $key; remove it and rerun or add that value"
     done
+    umask "$previous_umask"
     return
   fi
 
@@ -77,6 +87,7 @@ MEETING_OPS_POSTGRES_PORT=5434
 MEETING_OPS_REDIS_PORT=6381
 EOF
   chmod 600 "$ENV_FILE"
+  umask "$previous_umask"
 }
 
 require_command openssl

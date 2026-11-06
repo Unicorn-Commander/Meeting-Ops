@@ -190,4 +190,10 @@ jobs:
         run: |
           python3 ci/test_amanuensis_cutover.py
           bash -n ci/test_amanuensis_images.sh deploy/cutover/amanuensis-images.sh
+          # /brand/* 403 was mode 600 surviving COPY. The image build fails
+          # closed if brand files are not world-readable; this grep fails the
+          # PR if that check is removed.
+          grep -q 'chmod -R a+rX /usr/share/nginx/html' frontend/Dockerfile
+          grep -q '/usr/share/nginx/html/brand' frontend/Dockerfile
+          bash -n install-meeting-ops.sh
           git diff --check

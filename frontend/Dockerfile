@@ -69,6 +69,17 @@ FROM nginx:alpine
 # Copy built files to nginx
 COPY --from=builder /app/dist /usr/share/nginx/html
 
+# /brand/* must be world-readable. Git stores these PNGs as 100644, but a
+# checkout under umask 077 (install-meeting-ops.sh sets that while it writes
+# secrets; a hardened deploy user has the same mask) creates them as mode 600.
+# COPY preserves the context mode, and the nginx worker is not root, so it
+# answers 403. oauth2-proxy already skips auth for /brand/ — this is mode, not
+# auth. chmod after COPY, then fail the build if any brand file is still
+# unreadable. a+rX adds read (and directory execute) without adding write.
+RUN chmod -R a+rX /usr/share/nginx/html \
+    && test -n "$(find /usr/share/nginx/html/brand -type f -print)" \
+    && test -z "$(find /usr/share/nginx/html/brand \( -type d ! -perm -001 -o -type f ! -perm -004 \) -print)"
+
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
