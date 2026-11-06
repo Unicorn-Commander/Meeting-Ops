@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from middleware.request_context import RequestIdMiddleware, configure_request_logging
+from middleware.metrics_auth import MetricsTokenAuth
 configure_request_logging()
 
 from services.sentry import init_sentry
@@ -376,11 +377,12 @@ except Exception as e:  # pragma: no cover - import-time failure
 
 # === Phase B.5: Prometheus /metrics endpoint ===
 # Mounted as an ASGI sub-app so prometheus_client owns the text-format
-# response + Content-Type header. The handler itself is unauthenticated.
+# response + Content-Type header. METRICS_TOKEN optionally adds a bearer
+# check inside the mount; unset preserves the current internal-scrape behavior.
 # The public native-OIDC host meeting-ops.unicorncommander.ai does not
 # route /metrics; that ring has no oauth2-proxy. Scrape it on the
 # internal network only.
-app.mount("/metrics", make_asgi_app())
+app.mount("/metrics", MetricsTokenAuth(make_asgi_app()))
 
 # === REQUIRED ROUTERS (fail fast if missing) ===
 _load_router(app, "auth", "auth.routes", required=True)
