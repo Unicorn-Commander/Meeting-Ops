@@ -191,20 +191,15 @@ def test_founding_grant_blocked_when_cohort_admin_closed(app, monkeypatch):
 
 def test_founding_status_endpoint_reports_capacity_and_open(app, client, monkeypatch):
     """/api/founding/status returns cohort + seats_taken + seats_total +
-    is_open for an authenticated caller."""
+    is_open. Public (no auth)."""
     from api import founding as founding_module
-    from auth.dependencies import get_current_user
 
     monkeypatch.setenv("FOUNDING_100_LIMIT", "100")
     # Bust the 60s cache to make the test deterministic.
     founding_module._status_cache.pop("meeting_ops_v1", None)
     founding_module._closed_cohorts_local.discard("meeting_ops_v1")
 
-    app.dependency_overrides[get_current_user] = lambda: object()
-    try:
-        r = client.get("/api/founding/status?cohort=meeting_ops_v1")
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
+    r = client.get("/api/founding/status?cohort=meeting_ops_v1")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["cohort"] == "meeting_ops_v1"

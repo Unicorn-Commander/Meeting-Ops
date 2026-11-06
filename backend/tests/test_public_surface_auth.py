@@ -8,7 +8,6 @@ PROTECTED_STATUS_ROUTES = (
     "/api/system/pipeline",
     "/api/system/audio-devices",
     "/api/audio-devices",
-    "/api/founding/status?cohort=meeting_ops_v1",
     "/api/live-transcription/status",
 )
 
@@ -24,3 +23,10 @@ def test_status_and_system_routes_require_auth(client, monkeypatch, path):
     response = client.get(path)
 
     assert response.status_code == 401, response.text
+
+
+def test_founding_status_stays_public(client):
+    # The Founding-100 marketing page (frontend/src/pages/Founding100.tsx) fetches
+    # this counter anonymously; it carries no tenant data, so it stays open.
+    response = client.get("/api/founding/status?cohort=meeting_ops_v1")
+    assert response.status_code == 200, response.text
