@@ -2,7 +2,8 @@
 Meeting-Ops Backend - Production main.py
 Clean router loading with status tracking and real timestamps.
 """
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -26,6 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from middleware.request_context import RequestIdMiddleware, configure_request_logging
+from middleware.metrics_auth import MetricsTokenAuth
 configure_request_logging()
 
 from services.sentry import init_sentry
@@ -276,12 +278,59 @@ async def lifespan(app: FastAPI):
             pass
 
 
+def _public_docs_enabled() -> bool:
+    """Return whether the interactive API documentation is explicitly enabled.
+
+    Production rings leave this unset. Keeping the check request-scoped also
+    makes the setting safe for test clients and local dev processes that set
+    environment variables before making a request.
+    """
+    return os.getenv("MEETING_OPS_PUBLIC_DOCS", "").strip() == "1"
+
+
 app = FastAPI(
     title="Meeting-Ops API",
     description="AI-powered meeting recording and transcription system",
     version="3.58.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # FastAPI's built-in docs routes are disabled so an unset flag is a real
+    # 404 rather than an auth challenge or a route that can enumerate the API.
+    # The guarded equivalents below preserve the normal docs experience when
+    # MEETING_OPS_PUBLIC_DOCS=1 is explicitly set.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_json():
+    """Serve the schema only when an operator explicitly enables public docs."""
+    if not _public_docs_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui():
+    """Serve Swagger UI only when public API docs are explicitly enabled."""
+    if not _public_docs_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - Swagger UI",
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_ui():
+    """Serve ReDoc only when public API docs are explicitly enabled."""
+    if not _public_docs_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - ReDoc",
+    )
 
 _cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
 
@@ -328,11 +377,12 @@ except Exception as e:  # pragma: no cover - import-time failure
 
 # === Phase B.5: Prometheus /metrics endpoint ===
 # Mounted as an ASGI sub-app so prometheus_client owns the text-format
-# response + Content-Type header. The handler itself is unauthenticated.
+# response + Content-Type header. METRICS_TOKEN optionally adds a bearer
+# check inside the mount; unset preserves the current internal-scrape behavior.
 # The public native-OIDC host meeting-ops.unicorncommander.ai does not
 # route /metrics; that ring has no oauth2-proxy. Scrape it on the
 # internal network only.
-app.mount("/metrics", make_asgi_app())
+app.mount("/metrics", MetricsTokenAuth(make_asgi_app()))
 
 # === REQUIRED ROUTERS (fail fast if missing) ===
 _load_router(app, "auth", "auth.routes", required=True)
@@ -553,12 +603,14 @@ except Exception as e:  # pragma: no cover - import-time failure
 @app.get("/")
 async def root():
     """Root endpoint"""
-    return {
+    payload = {
         "message": "Meeting-Ops API",
         "version": "3.50.0",
         "status": "running",
-        "docs": "/docs"
     }
+    if _public_docs_enabled():
+        payload["docs"] = "/docs"
+    return payload
 
 
 @app.get("/api/health")
@@ -675,8 +727,8 @@ async def get_status():
 
 
 @app.get("/api/audio-devices")
-async def get_audio_devices():
-    """Get list of available audio input devices"""
+async def get_audio_devices(current_user=Depends(get_current_user)):
+    """Get list of available audio input devices for an authenticated caller."""
     try:
         from services.working_audio_service import WorkingAudioService
         audio_service = WorkingAudioService()

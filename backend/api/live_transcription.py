@@ -25,8 +25,8 @@ class RetroactiveRequest(BaseModel):
     title: Optional[str] = None
 
 @router.get("/status")
-async def get_live_transcription_status():
-    """Get current live transcription status"""
+async def get_live_transcription_status(current_user=Depends(get_current_user)):
+    """Get current live transcription status for an authenticated caller."""
     return live_transcription_service.get_status()
 
 @router.post("/start")

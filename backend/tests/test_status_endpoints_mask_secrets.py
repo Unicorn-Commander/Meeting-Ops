@@ -173,7 +173,20 @@ def test_public_status_endpoints_mask_fixture_url_secrets(client, monkeypatch, p
         patch.dict(readiness._PROBES, fake_probes),
         patch.object(system_caps, "_probe_json", successful_pipeline_probe),
     ):
-        response = client.get(path)
+        if path == "/api/system/pipeline":
+            from auth.dependencies import get_current_user
+            from main import app
+
+            # The pipeline route is now auth-gated; use a dependency override
+            # so this test continues to exercise its response redaction without
+            # coupling the masking contract to the login flow.
+            app.dependency_overrides[get_current_user] = lambda: object()
+            try:
+                response = client.get(path)
+            finally:
+                app.dependency_overrides.pop(get_current_user, None)
+        else:
+            response = client.get(path)
 
     assert response.status_code == 200, response.text
     payload_text = json.dumps(response.json(), sort_keys=True)
