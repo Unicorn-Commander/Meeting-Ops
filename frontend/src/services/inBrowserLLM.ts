@@ -824,7 +824,10 @@ async function* generateWithTransformersJs(
 
   const { tokenizer, model } = loaded;
   const transformers = await loadTransformersModule();
-  const { TextStreamer } = transformers as { TextStreamer: any };
+  const { TextStreamer, InterruptableStoppingCriteria } = transformers as {
+    TextStreamer: any;
+    InterruptableStoppingCriteria: any;
+  };
 
   const messages = [
     { role: 'system', content: opts.systemPrompt },
@@ -832,11 +835,14 @@ async function* generateWithTransformersJs(
   ];
 
   // apply_chat_template returns token ids ready for generate().
-  // enable_thinking: false disables Qwen 3's <think> block at the
-  // template level. Other model templates ignore the flag.
+  // v4 (and v3) read `return_tensor` (boolean). `return_tensors: 'pt'`
+  // is the Python name and is forwarded into the chat template as a
+  // stray kwarg. enable_thinking: false disables Qwen 3's <think> block
+  // at the template level. Other model templates ignore the flag.
+  // return_dict stays explicit: v3 defaulted it to false, v4 to true.
   const inputs = tokenizer.apply_chat_template(messages, {
     add_generation_prompt: true,
-    return_tensors: 'pt',
+    return_tensor: true,
     return_dict: true,
     enable_thinking: false,
   });
@@ -875,15 +881,13 @@ async function* generateWithTransformersJs(
     },
   });
 
-  // Abort wiring — transformers.js generate() honors an interrupt callback
-  // via a stopping criterion. Simpler: track a flag and the streamer
-  // callback will get further calls regardless; we early-return out of
-  // the async iterator below.
+  // Abort wiring. Neither 3.8.1 nor 4.3.2 puts interrupt() on the model.
+  // generate() stops when an InterruptableStoppingCriteria flips.
+  // The iterator still returns early so the UI does not wait on the
+  // in-flight token.
+  const stopping = new InterruptableStoppingCriteria();
   const abortHandler = () => {
-    // Calling interrupt() short-circuits the model loop in 3.x+.
-    if (typeof (model as any).interrupt === 'function') {
-      try { (model as any).interrupt(); } catch { /* noop */ }
-    }
+    try { stopping.interrupt(); } catch { /* noop */ }
   };
   opts?.signal?.addEventListener('abort', abortHandler, { once: true });
 
@@ -899,6 +903,7 @@ async function* generateWithTransformersJs(
         temperature: 0.3,
         top_p: 0.9,
         streamer,
+        stopping_criteria: stopping,
       });
     } catch (err) {
       state.error = err instanceof Error ? err : new Error(String(err));
