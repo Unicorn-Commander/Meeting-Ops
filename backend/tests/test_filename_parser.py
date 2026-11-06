@@ -37,11 +37,11 @@ from utils.filename_parser import ParsedFilename, parse_filename
             "Call with Shafen Khan",
         ),
         (
-            "downloads__2026-05-14_161900__Harborline Capital.m4a",
+            "downloads__2026-05-14_161900__Northwind Harbor.m4a",
             "downloads",
             date(2026, 5, 14),
             time(16, 19, 0),
-            "Harborline Capital",
+            "Northwind Harbor",
         ),
     ],
 )

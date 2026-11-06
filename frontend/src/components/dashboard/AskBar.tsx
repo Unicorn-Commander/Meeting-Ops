@@ -133,7 +133,7 @@ export const AskBar: React.FC = () => {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder='Ask anything about your meetings — e.g. "What did we decide about Harborline financing?"'
+          placeholder='Ask anything about your meetings — e.g. "What did we decide about Northwind Harbor financing?"'
           className="min-w-0 flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
           disabled={pending}
         />

@@ -355,7 +355,7 @@ if __name__ == "__main__":
         "notes__2024-11-05_233322__Call with Nate Ellison.m4a",
         "notes__2024-11-14_183247__Call with John Rahman.m4a",
         "downloads__2026-05-16_212900__Call with Shafen Khan.m4a",
-        "downloads__2026-05-14_161900__Harborline Capital.m4a",
+        "downloads__2026-05-14_161900__Northwind Harbor.m4a",
         # Pattern 1 — title with parentheses.
         "notes__2025-03-04_091500__Doug (Crash).m4a",
         # Pattern 2 — ISO prefix with " - ".
