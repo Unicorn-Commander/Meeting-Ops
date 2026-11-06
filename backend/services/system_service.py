@@ -13,11 +13,18 @@ try:
     import netifaces
 except Exception:  # pragma: no cover - environment-dependent
     netifaces = None
+try:
+    # Optional: only test_authentik_connection() speaks HTTP. The hosted
+    # summarizer CI image does not install aiohttp. A hard import here skips
+    # websocket_auto_summary, and Starlette's not-found handler then closes
+    # /ws/transcription-auto with 1000 instead of the 1008 policy close.
+    import aiohttp
+except Exception:  # pragma: no cover - environment-dependent
+    aiohttp = None
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
 import asyncio
-import aiohttp
 
 from models.system_settings import (
     AudioDevice, AllSettings, NetworkInfo,
@@ -405,6 +412,12 @@ class SystemService:
         redirect_uri: str
     ) -> AuthentikTestResponse:
         """Test Authentik connection."""
+        if aiohttp is None:
+            return AuthentikTestResponse(
+                success=False,
+                message="Authentik client unavailable",
+                details=None,
+            )
         try:
             # Test connection to Authentik
             async with aiohttp.ClientSession() as session:
