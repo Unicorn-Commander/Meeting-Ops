@@ -110,6 +110,43 @@ def test_ws_transcription_auto_rejects_without_token(client):
     _expect_closed_1008(client, f"/ws/transcription-auto/{sid}")
 
 
+def test_transcription_auto_router_imports_without_aiohttp():
+    """1008 is required. The hosted runner saw 1000 because aiohttp was
+    missing, system_service failed to import, and the route was not mounted.
+    Starlette's not-found handler closes an unknown websocket with 1000.
+    The socket must still exist so the unauthenticated close stays 1008.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = """
+import sys
+class _Block:
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "aiohttp" or fullname.startswith("aiohttp."):
+            raise ModuleNotFoundError(fullname)
+        return None
+sys.meta_path.insert(0, _Block())
+import api.websocket_auto_summary as mod
+paths = [getattr(route, "path", "") for route in mod.router.routes]
+assert "/ws/transcription-auto/{session_id}" in paths, paths
+"""
+    env = os.environ.copy()
+    env["ENVIRONMENT"] = "test"
+    env["DATABASE_URL"] = "sqlite:///:memory:"
+    backend = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(backend),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
 def test_ws_tts_progress_rejects_without_token(client):
     _expect_closed_1008(client, f"/ws/tts/{_uuid.uuid4()}")
 

@@ -84,16 +84,16 @@ def _seed_org_with_sessions():
     linked = RecordingSession(
         session_id=linked_session_id,
         name="Linked meeting",
-        title="Harborline loans restructure",
+        title="Northwind Harbor loans restructure",
         status="completed",
         duration=75.0,
         created_at=now,
         started_at=now,
         ended_at=now,
         transcript_simple="We reviewed loan restructuring options with Shafen.",
-        summary="Harborline loans restructure with Shafen.",
+        summary="Northwind Harbor loans restructure with Shafen.",
         final_summary={
-            "executive": "Harborline loans restructure with Shafen.",
+            "executive": "Northwind Harbor loans restructure with Shafen.",
             "bullets": ["Loan restructuring"],
             "decisions": ["Proceed with loan analysis"],
             "action_items": [],
@@ -237,7 +237,7 @@ def _make_fake_brigade_client(seed_id: int, linked_id: int):
                             "distance": 1,
                             "properties": {
                                 "id": linked_id,
-                                "title": "Harborline loans restructure",
+                                "title": "Northwind Harbor loans restructure",
                                 "org_id": 1,
                             },
                         }
@@ -310,7 +310,7 @@ def test_augment_meeting_search_expands_linked_meeting(monkeypatch, graph_aug_ct
 
     assert result["enabled"] is True
     assert result["results"][0]["session_id"] == graph_aug_ctx["linked_session_id"]
-    assert result["results"][0]["title"] == "Harborline loans restructure"
+    assert result["results"][0]["title"] == "Northwind Harbor loans restructure"
     assert result["results"][0]["graph_bonus"] > 0
     assert "graph_evidence" in result["results"][0]
     assert "Linked meetings" in result["results"][0]["graph_evidence"]["graph_block"]
@@ -346,7 +346,7 @@ def test_ask_about_meetings_includes_graph_block(monkeypatch, graph_aug_ctx):
 
     assert result["answer"] == "Canned answer"
     assert "Graph context for" in captured["system_prompt"]
-    assert "Harborline loans restructure" in captured["system_prompt"]
+    assert "Northwind Harbor loans restructure" in captured["system_prompt"]
 
 
 # ---------------------------------------------------------------------------

@@ -13,11 +13,18 @@ try:
     import netifaces
 except Exception:  # pragma: no cover - environment-dependent
     netifaces = None
+try:
+    # Optional: only test_authentik_connection() speaks HTTP. The hosted
+    # summarizer CI image does not install aiohttp. A hard import here skips
+    # websocket_auto_summary, and Starlette's not-found handler then closes
+    # /ws/transcription-auto with 1000 instead of the 1008 policy close.
+    import aiohttp
+except Exception:  # pragma: no cover - environment-dependent
+    aiohttp = None
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
 import asyncio
-import aiohttp
 
 from models.system_settings import (
     AudioDevice, AllSettings, NetworkInfo,
@@ -28,13 +35,17 @@ logger = logging.getLogger(__name__)
 
 # Settings file location. Env-overridable; defaults beside this backend rather than
 # an absolute path from one machine (this ran mkdir() on /home/ucadmin at import).
-SETTINGS_FILE = Path(
-    os.getenv(
-        "SYSTEM_SETTINGS_FILE",
-        str(Path(__file__).resolve().parents[1] / "config" / "system_settings.json"),
+# Resolved on each call so tests can point SYSTEM_SETTINGS_FILE at tmp_path after
+# import. A checkout run used to save through the tracked config file.
+def settings_path() -> Path:
+    configured = os.getenv("SYSTEM_SETTINGS_FILE")
+    path = (
+        Path(configured)
+        if configured
+        else Path(__file__).resolve().parents[1] / "config" / "system_settings.json"
     )
-)
-SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class SystemService:
@@ -44,8 +55,9 @@ class SystemService:
     def load_settings() -> AllSettings:
         """Load all settings from file or return defaults."""
         try:
-            if SETTINGS_FILE.exists():
-                with open(SETTINGS_FILE, 'r') as f:
+            path = settings_path()
+            if path.exists():
+                with open(path, 'r') as f:
                     data = json.load(f)
                     return AllSettings(**data)
             else:
@@ -61,7 +73,8 @@ class SystemService:
     def save_settings(settings: AllSettings) -> bool:
         """Save settings to file."""
         try:
-            with open(SETTINGS_FILE, 'w') as f:
+            path = settings_path()
+            with open(path, 'w') as f:
                 json.dump(settings.dict(), f, indent=2)
             logger.info("Settings saved successfully")
             return True
@@ -399,6 +412,12 @@ class SystemService:
         redirect_uri: str
     ) -> AuthentikTestResponse:
         """Test Authentik connection."""
+        if aiohttp is None:
+            return AuthentikTestResponse(
+                success=False,
+                message="Authentik client unavailable",
+                details=None,
+            )
         try:
             # Test connection to Authentik
             async with aiohttp.ClientSession() as session:

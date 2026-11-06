@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import types
+from pathlib import Path
 
 # Create temp SQLite DB and set env BEFORE pytest collects anything else.
 _db_fd, _db_path = tempfile.mkstemp(prefix="meeting_ops_test_", suffix=".db")
@@ -28,6 +29,16 @@ os.environ["MEDIA_STORAGE_DISABLED"] = "1"
 # no test touches Redis/Arq. Production flips this on (default true) to use the
 # bounded fair queue + daily soft cap.
 os.environ["REPROCESS_ARQ_ENABLED"] = "false"
+
+# SystemService.save_settings writes JSON. A superuser POST /api/simple/settings
+# of {} used to replace backend/config/system_settings.json with model defaults
+# (aiProvider ollama, hostname, DNS, wifi, npuPowerMode, authentik). Point the
+# process at a temp file before any import. Per-test tmp_path overrides this.
+_settings_fd, _settings_path = tempfile.mkstemp(prefix="meeting_ops_settings_", suffix=".json")
+os.close(_settings_fd)
+os.environ["SYSTEM_SETTINGS_FILE"] = _settings_path
+_tracked_settings_path = Path(__file__).resolve().parents[1] / "config" / "system_settings.json"
+_tracked_settings_bytes = _tracked_settings_path.read_bytes()
 
 
 # Ensure backend root is on sys.path
@@ -123,6 +134,22 @@ _patch_json_processors(ARRAY)
 
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _system_settings_use_tmp_path(tmp_path, monkeypatch):
+    """Each test saves system settings under tmp_path, not the tracked file."""
+    monkeypatch.setenv("SYSTEM_SETTINGS_FILE", str(tmp_path / "system_settings.json"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _tracked_system_settings_unchanged_after_suite():
+    """Fail the run if any test rewrote backend/config/system_settings.json."""
+    yield
+    after = _tracked_settings_path.read_bytes()
+    assert after == _tracked_settings_bytes, (
+        "backend/config/system_settings.json changed during the test suite"
+    )
 
 
 @pytest.fixture

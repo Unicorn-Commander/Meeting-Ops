@@ -12,6 +12,11 @@
 // Price copy is single-sourced from constants/pricing.ts. Browser-first moat
 // language: this is the upsell for SERVER-side features. Free is on-device by
 // design — see compute-economics.md.
+//
+// The panel is an opaque navy-900 card with gold-50 text. fuchsia/violet are
+// remapped to gold/navy, so the old 10% wash was a light tint, and white text
+// on it was unreadable on the session page (bg-gray-50 inside the dark shell).
+// The same solid card stays readable on the dark Sessions list.
 
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -78,12 +83,12 @@ export const UpgradeBanner: React.FC = () => {
 
   return (
     <div
-      className="relative mb-4 flex flex-col gap-2 rounded-xl border border-fuchsia-400/30 bg-gradient-to-r from-fuchsia-500/10 via-violet-500/10 to-fuchsia-500/10 p-3 text-sm text-zinc-100 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:p-4"
+      className="relative mb-4 flex flex-col gap-2 rounded-xl border border-gold-500/40 bg-navy-900 p-3 text-sm text-gold-50 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:p-4"
       role="region"
       aria-label={isWorkspaceGate ? 'Upgrade workspace' : 'Upgrade to Pro'}
     >
       <div className="flex items-start gap-3 sm:items-center">
-        <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-fuchsia-300 sm:mt-0" />
+        <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-gold-300 sm:mt-0" />
         {isWorkspaceGate ? (
           <p className="leading-6">
             <strong className="font-semibold text-white">
@@ -101,11 +106,11 @@ export const UpgradeBanner: React.FC = () => {
               </strong>{' '}
               Higher-accuracy transcription, speaker diarization, AI chat, cross-device sync. Cancel anytime.
             </p>
-            <p className="mt-1 text-xs text-zinc-400">
+            <p className="mt-1 text-xs text-gold-200">
               By upgrading you agree to the{' '}
               <Link
                 to="/terms"
-                className="text-fuchsia-200 underline-offset-4 hover:underline"
+                className="text-gold-200 underline decoration-gold-400/70 underline-offset-4 hover:text-white"
               >
                 Terms &amp; refund policy
               </Link>
@@ -135,7 +140,7 @@ export const UpgradeBanner: React.FC = () => {
           type="button"
           aria-label="Dismiss upgrade banner"
           onClick={handleDismiss}
-          className="rounded-md p-1 text-zinc-400 transition hover:bg-white/10 hover:text-white"
+          className="rounded-md p-1 text-gold-200 transition hover:bg-white/10 hover:text-white"
         >
           <X className="h-4 w-4" />
         </button>
