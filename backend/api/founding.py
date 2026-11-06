@@ -3,9 +3,8 @@
 Two routes:
 
   GET  /api/founding/status?cohort=meeting_ops_v1
-      Public (no auth), 60-second cached. Returns the current cohort
-      capacity + the count of seats already taken so the public
-      /founding-100 marketing page can render "X / 100 seats filled".
+      Authenticated, 60-second cached. Returns the current cohort capacity
+      + the count of seats already taken for the in-app founding view.
       Body: {cohort, seats_taken, seats_total, is_open}
 
   POST /api/admin/founding/close
@@ -39,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.dependencies import require_admin
+from auth.dependencies import get_current_user, require_admin
 from auth.models import User
 from database.database import get_db
 
@@ -127,7 +126,7 @@ def _set_cohort_closed(cohort: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Public status
+# Authenticated status
 # ---------------------------------------------------------------------------
 
 
@@ -151,12 +150,14 @@ def _count_seats(db: Session, cohort: str) -> int:
 async def founding_status(
     cohort: str = _FOUNDING_DEFAULT_COHORT,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> FoundingStatusResponse:
-    """Public cohort status — used by the /founding-100 landing page.
+    """Return cohort status for an authenticated caller.
 
-    No auth. Cached 60s in-process to absorb landing-page bursts. The
-    response is a tight {cohort, seats_taken, seats_total, is_open} so
-    no PII ever leaks (no user IDs, no emails)."""
+    The response remains a tight {cohort, seats_taken, seats_total, is_open}
+    so no PII ever leaks (no user IDs, no emails). It is cached 60s in-process
+    to absorb bursts from authenticated clients.
+    """
     now = time.time()
     cached = _status_cache.get(cohort)
     if cached is not None and now - cached[0] < _STATUS_CACHE_TTL_SECONDS:

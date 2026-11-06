@@ -13,7 +13,10 @@ import os
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from auth.dependencies import get_current_user
+from auth.models import User
 
 from utils.url_redaction import redact_url
 
@@ -26,8 +29,8 @@ def _local_audio_disabled() -> bool:
 
 
 @router.get("/capabilities")
-async def get_capabilities() -> dict:
-    """Static host capability flags (no probes)."""
+async def get_capabilities(current_user: User = Depends(get_current_user)) -> dict:
+    """Static host capability flags for an authenticated caller."""
     local_audio = not _local_audio_disabled()
     return {
         "local_audio": local_audio,
@@ -52,14 +55,17 @@ async def _probe_json(url: str, timeout: float = 3.0) -> Optional[dict]:
 
 
 @router.get("/pipeline")
-async def get_pipeline_status() -> dict[str, Any]:
+async def get_pipeline_status(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """Live snapshot of the configured inference pipeline.
 
     Reports the actual STT engine, diarization backend, and LLM model the
     backend is wired to RIGHT NOW. Used by the Live Recording status panel
     to render real labels instead of UC-1 legacy hardcodes.
 
-    No auth required — status info only, no secrets in the response.
+    Requires an authenticated caller because the response includes backend
+    topology, configured model names, and service endpoint metadata.
     """
     parakeet_url = os.getenv("PARAKEET_SERVER_URL", "http://meet-parakeet-svc:8881")
     # WHISPER_SERVER_URL is empty by default since 2026-05-19 — only probe if

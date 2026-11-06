@@ -725,8 +725,8 @@ async def get_status():
 
 
 @app.get("/api/audio-devices")
-async def get_audio_devices():
-    """Get list of available audio input devices"""
+async def get_audio_devices(current_user=Depends(get_current_user)):
+    """Get list of available audio input devices for an authenticated caller."""
     try:
         from services.working_audio_service import WorkingAudioService
         audio_service = WorkingAudioService()
