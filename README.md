@@ -30,6 +30,13 @@
   <img src="docs/screenshots/dashboard.webp" width="1200" alt="Meeting-Ops dashboard showing recent meetings, action items, and the ask bar">
 </p>
 
+## Watch the demo
+
+<p align="center">
+  <a href="https://unicorncommander.com/products/meeting-ops"><img src="https://unicorncommander.com/media/products/meeting-ops/demo-poster.jpg" width="100%" alt="Meeting-Ops demo video: click to watch on the product page"></a>
+</p>
+<p align="center"><sub>59 seconds on a synthetic meeting. Narrated in a machine voice rendered on our own hardware. <a href="https://unicorncommander.com/products/meeting-ops">Watch it on the product page</a>.</sub></p>
+
 ## What is Meeting-Ops?
 
 Meeting-Ops is a self-hosted workspace for recording meetings, processing audio into transcripts and summaries, and keeping decisions and action items attached to the source conversation. Agents can search, analyze, and propose follow-up work; a person confirms before a proposal changes data. Where the browser exposes WebGPU, privacy mode keeps recording bytes, transcripts, summary slices, and summaries in IndexedDB. The workspace path is organization-scoped and persisted by the backend. Meeting-Ops is part of Unicorn Commander. Optional paths in this repository call Brigade, Project-Ops, and Contact-Ops when those integrations are configured.
