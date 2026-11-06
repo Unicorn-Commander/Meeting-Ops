@@ -30,7 +30,7 @@ def test_selfhost_files_exist() -> None:
 def test_quickstart_is_the_clone_and_installer_path() -> None:
     readme = _text(ROOT / "README.md")
     assert (
-        "git clone https://github.com/Unicorn-Commander/meeting-ops-community.git"
+        "git clone https://github.com/Unicorn-Commander/Meeting-Ops.git"
         in readme
     )
     assert "./install-meeting-ops.sh" in readme
