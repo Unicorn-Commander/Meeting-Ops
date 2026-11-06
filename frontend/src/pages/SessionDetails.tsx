@@ -344,9 +344,13 @@ export const SessionDetails: React.FC = () => {
   // affordance exists. `cross_device_sync` gates the "this session is
   // synced to your workspace" affordance on Local Sessions /
   // SessionDetails.
-  const { hasFeature } = useTierFeatures();
+  const { hasFeature, limitedBy } = useTierFeatures();
   const brigadeIntegrationEnabled = hasFeature('brigade_integration');
   const crossDeviceSyncEnabled = hasFeature('cross_device_sync');
+  // The page-level UpgradeBanner is the one upsell for a gated account or
+  // workspace. Feature cards below stay hidden while that gate is on, so a
+  // free viewer does not get a second (or third) panel on this page.
+  const accountUpsell = Boolean(limitedBy('canonical_reprocess'));
   // v3.19. window.confirm() replacement on the local-session delete
   // path — destructive, irreversible action that should look + behave
   // like the rest of the app's confirmations (a11y, themed, focus
@@ -2230,6 +2234,13 @@ export const SessionDetails: React.FC = () => {
     formatDate,
   };
 
+  const showGraphUpsell = !accountUpsell && !brigadeIntegrationEnabled;
+  const showSyncUpsell =
+    !accountUpsell &&
+    !showGraphUpsell &&
+    !crossDeviceSyncEnabled &&
+    Boolean(session.is_local);
+
   return (
     <>
     {session.metadata?.manual_content?.version === 1 &&
@@ -3221,7 +3232,7 @@ export const SessionDetails: React.FC = () => {
                 `brigade_integration` we still want them to know the
                 affordance exists — otherwise the feature is invisible
                 to free tier. */}
-            {!brigadeIntegrationEnabled && (
+            {showGraphUpsell && (
               <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 text-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
@@ -3248,7 +3259,7 @@ export const SessionDetails: React.FC = () => {
             {/* v3.19 cross-device-sync upgrade (audit §5). Free tier
                 local sessions live only in this browser — surface what
                 Pro adds so users understand the difference. */}
-            {!crossDeviceSyncEnabled && session.is_local && (
+            {showSyncUpsell && (
               <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 text-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
