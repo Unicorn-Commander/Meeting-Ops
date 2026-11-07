@@ -23,8 +23,7 @@ import { Link } from 'react-router-dom';
 import { Sparkles, X } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTierFeatures } from '../hooks/useTierFeatures';
-import { beginProCheckout } from '../utils/checkout';
-import { PRO_MONTHLY_PRICE_WITH_PERIOD } from '../constants/pricing';
+import { SUITE_NAME, SUITE_SOLO_PRICE_WITH_PERIOD, SUITE_PRICING_URL } from '../constants/pricing';
 
 const DISMISS_KEY = 'meet:upgrade-banner:dismissed';
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -85,7 +84,7 @@ export const UpgradeBanner: React.FC = () => {
     <div
       className="relative mb-4 flex flex-col gap-2 rounded-xl border border-gold-500/40 bg-navy-900 p-3 text-sm text-gold-50 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:p-4"
       role="region"
-      aria-label={isWorkspaceGate ? 'Upgrade workspace' : 'Upgrade to Pro'}
+      aria-label={isWorkspaceGate ? 'Upgrade workspace' : 'Hosted Meeting-Ops plans'}
     >
       <div className="flex items-start gap-3 sm:items-center">
         <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-gold-300 sm:mt-0" />
@@ -102,9 +101,9 @@ export const UpgradeBanner: React.FC = () => {
           <div className="leading-6">
             <p>
               <strong className="font-semibold text-white">
-                Upgrade to Pro — {PRO_MONTHLY_PRICE_WITH_PERIOD}.
+                Hosted Meeting-Ops comes with {SUITE_NAME} Solo, {SUITE_SOLO_PRICE_WITH_PERIOD}.
               </strong>{' '}
-              Higher-accuracy transcription, speaker diarization, AI chat, cross-device sync. Cancel anytime.
+              Higher-accuracy transcription, speaker diarization, AI chat, cross-device sync, plus every other app in the suite. Cancel anytime.
             </p>
             <p className="mt-1 text-xs text-gold-200">
               By upgrading you agree to the{' '}
@@ -128,13 +127,14 @@ export const UpgradeBanner: React.FC = () => {
             Upgrade workspace
           </Link>
         ) : (
-          <button
-            type="button"
-            onClick={() => beginProCheckout('upgrade_banner')}
+          <a
+            href={SUITE_PRICING_URL}
+            target="_blank"
+            rel="noopener noreferrer"
             className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-100"
           >
-            Upgrade to Pro
-          </button>
+            See plans
+          </a>
         )}
         <button
           type="button"

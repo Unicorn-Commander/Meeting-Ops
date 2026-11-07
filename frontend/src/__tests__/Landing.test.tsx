@@ -41,6 +41,15 @@ describe('Landing', () => {
       screen.getByText(/pay only for the heavy lifting/i),
     ).toBeInTheDocument();
 
+    // 2026-11-06: the standalone $22 Pro tier is retired; hosted Meeting-Ops is
+    // part of the Unicorn Commander plans and the page must say so.
+    expect(screen.queryByText(/\$22/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$216/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/\$49/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole('button', { name: /see unicorn commander plans/i }),
+    ).toBeInTheDocument();
+
     // Invite funnel — email capture + the "Continue" full-path CTA to /signup.
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
     expect(

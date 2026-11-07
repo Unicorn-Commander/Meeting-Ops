@@ -2,7 +2,7 @@
 // -----------------------------------------------------------------------------
 // This is the reliable in-app entry point for buying Pro and for managing an
 // existing subscription:
-//   - Free / non-subscriber  → "Upgrade to Pro" (price from pricing.ts) → Stripe Checkout.
+//   - Free / non-subscriber  → hosted Meeting-Ops is part of the Unicorn Commander plans → storefront pricing page (2026-11-06).
 //   - Existing subscriber     → "Manage subscription"     → Stripe Billing Portal
 //                               (the cancel / refund / update-card surface).
 //
@@ -25,14 +25,14 @@ import {
   fetchSubscription,
   type SubscriptionState,
 } from '../../services/billingApi';
+import { isPaidTier, manageSubscription } from '../../utils/checkout';
 import {
-  beginProCheckout,
-  isPaidTier,
-  manageSubscription,
-} from '../../utils/checkout';
-import { PRO_MONTHLY_PRICE_WITH_PERIOD } from '../../constants/pricing';
+  SUITE_NAME,
+  SUITE_SOLO_PRICE_WITH_PERIOD,
+  SUITE_PRICING_URL,
+} from '../../constants/pricing';
 
-const PRO_FEATURES = [
+const HOSTED_FEATURES = [
   'Server pass: studio transcripts + speaker diarization',
   'Polished AI summaries with action items & decisions',
   'Cross-meeting AI chat + semantic search',
@@ -101,7 +101,8 @@ export default function BillingSettings() {
   const handleUpgrade = async () => {
     setBusy(true);
     try {
-      await beginProCheckout('settings_billing');
+      // Hosted Meeting-Ops is sold as part of the Unicorn Commander plans (2026-11-06).
+      window.location.assign(SUITE_PRICING_URL);
     } finally {
       // On success we've already navigated away; this only matters if the
       // helper toasted an error and we stayed on the page.
@@ -212,15 +213,15 @@ export default function BillingSettings() {
           <div className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-fuchsia-300" />
             <h3 className="text-base font-semibold text-white">
-              Upgrade to Pro — {PRO_MONTHLY_PRICE_WITH_PERIOD}
+              Hosted Meeting-Ops: part of {SUITE_NAME} Solo, {SUITE_SOLO_PRICE_WITH_PERIOD}
             </h3>
           </div>
           <p className="mt-1 text-sm text-zinc-300">
             Add the GPU server pass and the intelligence layer across your whole
-            library.
+            library, together with every other {SUITE_NAME} app.
           </p>
           <ul className="mt-4 space-y-2 text-sm text-zinc-200">
-            {PRO_FEATURES.map((f) => (
+            {HOSTED_FEATURES.map((f) => (
               <li key={f} className="flex items-start gap-2.5">
                 <Check className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
                 <span>{f}</span>
@@ -238,7 +239,7 @@ export default function BillingSettings() {
             ) : (
               <Sparkles className="h-4 w-4" />
             )}
-            Upgrade to Pro
+            See {SUITE_NAME} plans
           </button>
           <TermsNote />
         </div>
