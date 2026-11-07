@@ -594,8 +594,7 @@ const FEATURES: Feature[] = [
       'See how a decision evolved conversation by conversation',
       'AI agents can query it over MCP, with permission',
     ],
-    // knowledge-graph.png has not been captured yet (PO a0cb0e50); the placeholder card renders until it is.
-    src: '',
+    src: 'knowledge-graph',
     slug: '/knowledge',
     alt: 'Meeting-Ops knowledge graph connecting people, topics, and decisions across meetings',
     icon: <Fingerprint className="h-5 w-5" />,
