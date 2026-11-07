@@ -59,10 +59,14 @@ import {
 import { config } from '../config';
 import LegalFooter from '../components/LegalFooter';
 import { track } from '../utils/posthog';
-import { beginProCheckout, hasStoredAuthToken } from '../utils/checkout';
 import {
-  PRO_MONTHLY_PRICE_DISPLAY,
-  PRO_MONTHLY_PRICE_WITH_PERIOD,
+  SUITE_NAME,
+  SUITE_SOLO_PRICE_DISPLAY,
+  SUITE_SOLO_PRICE_WITH_PERIOD,
+  SUITE_TEAM_PRICE_WITH_PERIOD,
+  SUITE_TEAM_SEATS,
+  SUITE_EXTRA_SEAT_WITH_PERIOD,
+  SUITE_PRICING_URL,
 } from '../constants/pricing';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
@@ -95,8 +99,6 @@ const btnPrimary =
 const btnSecondary =
   'inline-flex items-center justify-center gap-2 rounded-xl bg-white/5 px-5 py-3 text-sm font-medium text-zinc-100 ring-1 ring-white/15 transition hover:bg-white/10 hover:ring-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-navy-950 motion-reduce:transition-none';
 
-const ghostLink =
-  'group inline-flex items-center gap-1.5 text-sm font-medium text-zinc-300 transition hover:text-white focus-visible:outline-none focus-visible:text-white';
 
 /** A static-skyline / breathing audio waveform — the page's "heartbeat". */
 const WAVE = [
@@ -484,6 +486,7 @@ type Feature = {
   title: string;
   body: string;
   bullets: string[];
+  /** Screenshot name under /screenshots; empty while no capture exists (a placeholder card renders). */
   src: string;
   slug: string;
   alt: string;
@@ -637,7 +640,7 @@ const CAPABILITIES: Array<{ icon: React.ReactNode; title: string; body: string }
 const FAQS: Array<{ q: string; a: React.ReactNode }> = [
   {
     q: 'Where does the processing actually happen?',
-    a: 'Live transcription and summaries run on-device, in your browser, using local models. In Privacy Mode, your audio never leaves your machine. If you opt into the Pro server pass, by default it runs on GPUs we operate — not handed off to a third-party AI.',
+    a: 'Live transcription and summaries run on-device, in your browser, using local models. In Privacy Mode, your audio never leaves your machine. If you opt into the hosted server pass, by default it runs on GPUs we operate — not handed off to a third-party AI.',
   },
   {
     q: 'Do you train your models on my meetings?',
@@ -653,7 +656,7 @@ const FAQS: Array<{ q: string; a: React.ReactNode }> = [
   },
   {
     q: 'What’s free, and what costs money?',
-    a: `The full live experience is free, forever: on-device transcription, rolling summaries, and your complete session history — no card required. Pro (${PRO_MONTHLY_PRICE_WITH_PERIOD}) adds the server pass, polished AI summaries, cross-meeting chat, semantic search, and the knowledge graph.`,
+    a: `The full live experience is free, forever: on-device transcription, rolling summaries, and your complete session history, no card required. Hosted Meeting-Ops (the server pass, polished AI summaries, cross-meeting chat, semantic search and the knowledge graph) is part of ${SUITE_NAME}: Solo is ${SUITE_SOLO_PRICE_WITH_PERIOD} for one seat, Team workspace is ${SUITE_TEAM_PRICE_WITH_PERIOD} for ${SUITE_TEAM_SEATS} seats, and either one covers every ${SUITE_NAME} app, not just Meeting-Ops. There is no separate Meeting-Ops subscription any more.`,
   },
   {
     q: 'How accurate is the transcription?',
@@ -744,6 +747,63 @@ const Lightbox: React.FC<{ src: string; alt: string; onClose: () => void }> = ({
 // Feature row — a text column + a framed (clickable) screenshot, alternating
 // ---------------------------------------------------------------------------
 
+/**
+ * Stand-in for a feature whose product screenshot has not been captured yet:
+ * a schematic of the person-centric graph in the same dark frame, so the row
+ * never renders a broken image. Replace with a FramedShot once the capture
+ * lands in /screenshots.
+ */
+const GraphPlaceholder: React.FC<{ label: string }> = ({ label }) => {
+  const nodes: Array<{ name: string; kind: string; cls: string }> = [
+    { name: 'Dana', kind: 'person', cls: 'left-[12%] top-[22%]' },
+    { name: 'Ben', kind: 'person', cls: 'left-[66%] top-[16%]' },
+    { name: 'Priya', kind: 'person', cls: 'left-[40%] top-[70%]' },
+    { name: 'Pricing', kind: 'topic', cls: 'left-[38%] top-[36%]' },
+    { name: 'Q1 launch', kind: 'topic', cls: 'left-[70%] top-[58%]' },
+    { name: 'Ship monthly only', kind: 'decision', cls: 'left-[14%] top-[62%]' },
+  ];
+  const tone: Record<string, string> = {
+    person: 'bg-gold-500/15 text-gold-200 ring-gold-500/40',
+    topic: 'bg-white/[0.06] text-zinc-200 ring-white/15',
+    decision: 'bg-emerald-500/15 text-emerald-200 ring-emerald-500/40',
+  };
+  return (
+    <div
+      role="img"
+      aria-label={label}
+      className="relative aspect-[1986/953] w-full overflow-hidden rounded-2xl bg-navy-950 shadow-2xl ring-1 ring-white/10"
+    >
+      <div className="absolute inset-x-0 top-0 flex items-center gap-2 border-b border-white/5 bg-white/[0.02] px-4 py-2.5">
+        <span className="h-2.5 w-2.5 rounded-full bg-white/10" />
+        <span className="h-2.5 w-2.5 rounded-full bg-white/10" />
+        <span className="h-2.5 w-2.5 rounded-full bg-gold-500/60" />
+        <span className="ml-3 rounded-md bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-zinc-500">
+          meeting-ops.app/knowledge
+        </span>
+      </div>
+      <svg aria-hidden="true" className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {[
+          ['16,27', '42,40'], ['70,21', '42,40'], ['44,74', '42,40'], ['42,40', '18,66'],
+          ['70,21', '74,62'], ['44,74', '74,62'], ['18,66', '44,74'],
+        ].map(([a, b]) => (
+          <line key={a + b} x1={a.split(',')[0]} y1={a.split(',')[1]} x2={b.split(',')[0]} y2={b.split(',')[1]} stroke="rgba(212,175,55,0.28)" strokeWidth="0.35" />
+        ))}
+      </svg>
+      {nodes.map((n) => (
+        <span
+          key={n.name}
+          className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full px-3 py-1 text-xs font-medium ring-1 ${tone[n.kind]} ${n.cls}`}
+        >
+          {n.name}
+        </span>
+      ))}
+      <p className="absolute bottom-3 left-4 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+        people · topics · decisions · follow-ups
+      </p>
+    </div>
+  );
+};
+
 const FeatureRow: React.FC<{
   f: Feature;
   onEnlarge: (src: string, alt: string) => void;
@@ -764,7 +824,7 @@ const FeatureRow: React.FC<{
                   : 'bg-gold-500/15 text-gold-300 ring-1 ring-gold-500/30'
               }`}
             >
-              {f.tier}
+              {f.tier === 'free' ? 'free' : 'hosted'}
             </span>
           )}
         </div>
@@ -786,13 +846,17 @@ const FeatureRow: React.FC<{
           f.imageRight ? 'lg:order-2' : 'lg:order-1'
         } order-first lg:order-none`}
       >
-        <FramedShot
-          src={f.src}
-          slug={f.slug}
-          alt={f.alt}
-          gold={f.gold}
-          onEnlarge={onEnlarge}
-        />
+        {f.src ? (
+          <FramedShot
+            src={f.src}
+            slug={f.slug}
+            alt={f.alt}
+            gold={f.gold}
+            onEnlarge={onEnlarge}
+          />
+        ) : (
+          <GraphPlaceholder label={f.alt} />
+        )}
       </div>
     </div>
   </Reveal>
@@ -821,18 +885,12 @@ export const Landing: React.FC = () => {
     el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
   }, []);
 
-  // Pro CTA — real checkout. Stripe Checkout needs a JWT, so an anonymous
-  // visitor is routed to /signup?intent=pro (hash router); a signed-in visitor
-  // goes straight to Checkout. Auth is read from the stored token rather than
-  // AuthContext so this page stays decoupled from the provider (it renders for
-  // anonymous marketing visitors and in tests without an AuthProvider).
-  const handleGetPro = useCallback(() => {
-    track('landing_pro_cta', {});
-    if (hasStoredAuthToken()) {
-      void beginProCheckout('landing');
-    } else {
-      window.location.hash = '/signup?intent=pro';
-    }
+  // Hosted CTA — since 2026-11-06 hosted Meeting-Ops is sold as part of the
+  // Unicorn Commander plans (Solo / Team workspace), never on its own. The
+  // storefront's pricing page picks the plan and runs checkout for the whole suite.
+  const handleGetHosted = useCallback(() => {
+    track('landing_pro_cta', { destination: 'suite_pricing' });
+    window.location.assign(SUITE_PRICING_URL);
   }, []);
 
   // ── Invite funnel (UNCHANGED behaviour — covered by Landing.test.tsx) ──
@@ -968,9 +1026,9 @@ export const Landing: React.FC = () => {
               </span>
               <span className="text-zinc-600">·</span>
               <span className="text-sm text-zinc-300">
-                Add server intelligence for{' '}
+                Hosted intelligence with {SUITE_NAME} from{' '}
                 <span className="font-semibold text-gold-300">
-                  {PRO_MONTHLY_PRICE_WITH_PERIOD}
+                  {SUITE_SOLO_PRICE_WITH_PERIOD}
                 </span>
               </span>
               <span className="text-sm text-zinc-500 transition group-hover:text-gold-300">
@@ -1341,7 +1399,7 @@ export const Landing: React.FC = () => {
               <SectionHeader
                 eyebrow="Pricing"
                 title="Free forever. Pay only for the heavy lifting."
-                sub="The live, on-device experience is free for good. Pro adds the GPU server pass and the intelligence layer across your whole library."
+                sub={`The live, on-device experience is free for good. Hosted Meeting-Ops, the GPU server pass and the intelligence layer across your whole library, comes with every ${SUITE_NAME} plan, together with the rest of the suite.`}
               />
             </Reveal>
 
@@ -1393,16 +1451,21 @@ export const Landing: React.FC = () => {
                   <span className="absolute -top-3 right-6 rounded-full bg-gold-500 px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-navy-950">
                     Most popular
                   </span>
-                  <h3 className="font-display text-xl font-semibold text-white">Pro</h3>
+                  <h3 className="font-display text-xl font-semibold text-white">Hosted</h3>
                   <p className="mt-1 text-sm text-zinc-400">
-                    Studio-quality output and an AI that knows your whole library.
+                    Studio-quality output and an AI that knows your whole library. Part of{' '}
+                    {SUITE_NAME}.
                   </p>
                   <div className="mt-5 flex items-end gap-2">
                     <span className="font-display text-5xl font-semibold tabular-nums text-white">
-                      {PRO_MONTHLY_PRICE_DISPLAY}
+                      {SUITE_SOLO_PRICE_DISPLAY}
                     </span>
-                    <span className="pb-1 text-sm text-zinc-500">/month</span>
+                    <span className="pb-1 text-sm text-zinc-500">/month, Solo</span>
                   </div>
+                  <p className="mt-2 text-sm text-zinc-400">
+                    Team workspace {SUITE_TEAM_PRICE_WITH_PERIOD} for {SUITE_TEAM_SEATS} seats, then{' '}
+                    {SUITE_EXTRA_SEAT_WITH_PERIOD}. One subscription covers every {SUITE_NAME} app.
+                  </p>
                   <ul className="mt-6 space-y-3 text-sm text-zinc-200">
                     {[
                       'Everything in Free',
@@ -1410,6 +1473,7 @@ export const Landing: React.FC = () => {
                       'Polished AI summaries with action items & decisions',
                       'Cross-meeting AI chat + semantic search',
                       'Person-centric knowledge graph',
+                      `Every other ${SUITE_NAME} app, hosted, in the same plan`,
                     ].map((b) => (
                       <li key={b} className="flex items-start gap-2.5">
                         <Check className="mt-0.5 h-4 w-4 shrink-0 text-gold-400" />
@@ -1420,14 +1484,14 @@ export const Landing: React.FC = () => {
                   <div className="mt-auto pt-8">
                     <button
                       type="button"
-                      onClick={handleGetPro}
+                      onClick={handleGetHosted}
                       className={`${btnPrimary} w-full`}
                     >
-                      Get Pro
+                      See {SUITE_NAME} plans
                       <ArrowRight className="h-4 w-4" />
                     </button>
                     <p className="mt-3 text-center text-xs text-zinc-500">
-                      Cancel anytime · We never sell or train on your data ·{' '}
+                      Billed by {SUITE_NAME} · Cancel anytime · We never sell or train on your data ·{' '}
                       <a
                         href="#/terms"
                         className="text-gold-300 underline-offset-4 hover:underline"

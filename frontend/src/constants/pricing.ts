@@ -81,3 +81,19 @@ export const PRO_ANNUAL_SAVING_USD =
 
 /** e.g. "$48" — the real annual saving, computed from the two real prices. */
 export const PRO_ANNUAL_SAVING_DISPLAY = `$${PRO_ANNUAL_SAVING_USD}`;
+
+// 2026-11-07: the standalone Pro tier ($22/$216) was RETIRED on 2026-11-06 (inactive in the
+// console on both rings, archived in Stripe; nobody was ever charged). Hosted Meeting-Ops, the
+// server pass plus the intelligence layer, is part of the Unicorn Commander plans. The PRO_*
+// values above stay only so nothing fails to compile; no surface may sell them.
+export const SUITE_NAME = 'Unicorn Commander';
+export const SUITE_SOLO_PRICE_USD = 49;
+export const SUITE_TEAM_PRICE_USD = 149;
+export const SUITE_TEAM_SEATS = 5;
+export const SUITE_EXTRA_SEAT_PRICE_USD = 25;
+export const SUITE_SOLO_PRICE_DISPLAY = `$${SUITE_SOLO_PRICE_USD}`;
+export const SUITE_SOLO_PRICE_WITH_PERIOD = `${SUITE_SOLO_PRICE_DISPLAY}/mo`;
+export const SUITE_TEAM_PRICE_DISPLAY = `$${SUITE_TEAM_PRICE_USD}`;
+export const SUITE_TEAM_PRICE_WITH_PERIOD = `${SUITE_TEAM_PRICE_DISPLAY}/mo`;
+export const SUITE_EXTRA_SEAT_WITH_PERIOD = `$${SUITE_EXTRA_SEAT_PRICE_USD} a seat/mo`;
+export const SUITE_PRICING_URL = 'https://unicorncommander.ai/pricing';

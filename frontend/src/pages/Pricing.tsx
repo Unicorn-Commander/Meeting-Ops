@@ -1,45 +1,29 @@
-import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { ArrowRight, Check, ExternalLink, Sparkles } from 'lucide-react';
 import { track } from '../utils/posthog';
 import { useAuth } from '../contexts/AuthContext';
+import { isPaidTier, manageSubscription } from '../utils/checkout';
 import {
-  beginProCheckout,
-  isPaidTier,
-  manageSubscription,
-} from '../utils/checkout';
-import {
-  PRO_MONTHLY_PRICE_DISPLAY,
-  PRO_MONTHLY_PRICE_WITH_PERIOD,
-  PRO_ANNUAL_PRICE_DISPLAY,
-  PRO_ANNUAL_PRICE_WITH_PERIOD,
-  PRO_ANNUAL_PRICE_PER_MONTH_WITH_PERIOD,
-  PRO_ANNUAL_SAVING_DISPLAY,
+  SUITE_NAME,
+  SUITE_SOLO_PRICE_DISPLAY,
+  SUITE_SOLO_PRICE_WITH_PERIOD,
+  SUITE_TEAM_PRICE_DISPLAY,
+  SUITE_TEAM_PRICE_WITH_PERIOD,
+  SUITE_TEAM_SEATS,
+  SUITE_EXTRA_SEAT_WITH_PERIOD,
+  SUITE_PRICING_URL,
 } from '../constants/pricing';
 import LegalFooter from '../components/LegalFooter';
 
 /**
- * In-app pricing page. Previously this route hard-redirected to the external
- * Unicorn Commander storefront; it now renders a real Free vs Pro view whose
- * Pro CTA drives the LIVE in-app checkout:
- *   - anonymous visitor  → /signup?intent=pro (Stripe Checkout requires auth)
- *   - signed-in, non-Pro → beginProCheckout('pricing_page', cycle) → Stripe Checkout
- *   - signed-in, Pro     → manageSubscription() → Stripe Billing Portal
- *
- * All Pro pricing copy is single-sourced from constants/pricing.ts. The amount
- * actually charged is resolved server-side by the backend checkout endpoint.
- *
- * BILLING CYCLE (added 2026-08-08 with the $22 / $216 reprice)
- * The annual price used to exist in Stripe and in the backend resolver
- * (billing_cycle='annual' → STRIPE_PRO_ANNUAL_PRICE_ID) with NO UI able to
- * reach it, so the app could not advertise it: an advertised price a customer
- * cannot buy is the same defect as a wrong one. The toggle below closes that
- * gap, so $216/yr is now both shown and buyable from the same control.
- *
- * The saving is COMPUTED in constants/pricing.ts from the two real prices
- * ($22 x 12 = $264, minus $216 = $48). It is not a struck-through list price
- * and there is no anchor: nobody has ever been charged any Meeting-Ops price,
- * so a "was/now" here would be a fabricated discount.
+ * In-app pricing page. It renders Free vs Hosted. Since 2026-11-06 hosted
+ * Meeting-Ops (server pass + the intelligence layer) is sold only as part of
+ * the Unicorn Commander plans (Solo / Team workspace); the standalone Pro tier
+ * ($22 / $216) is retired and archived in Stripe. The Hosted CTA therefore
+ * sends visitors to the storefront pricing page, which runs checkout for the
+ * whole suite. A signed-in paid tier keeps its billing-portal link. All copy
+ * is single-sourced from constants/pricing.ts.
  */
 
 const FREE_FEATURES = [
@@ -49,47 +33,36 @@ const FREE_FEATURES = [
   'No credit card, no time limit',
 ];
 
-const PRO_FEATURES = [
+const HOSTED_FEATURES = [
   'Everything in Free',
   'Server pass: studio transcripts + speaker diarization',
   'Polished AI summaries with action items & decisions',
   'Cross-meeting AI chat + semantic search',
   'Person-centric knowledge graph',
+  `Every other ${SUITE_NAME} app, hosted, in the same plan`,
 ];
 
 export const Pricing: React.FC = () => {
-  const navigate = useNavigate();
   const { isAuthenticated, tier } = useAuth();
   const isPro = isAuthenticated && isPaidTier(tier);
-  const [cycle, setCycle] = useState<'monthly' | 'annual'>('monthly');
-  const annual = cycle === 'annual';
 
   useEffect(() => {
     track('pricing_viewed', { authenticated: isAuthenticated, tier: tier ?? 'anonymous' });
   }, [isAuthenticated, tier]);
 
-  const handlePro = () => {
-    if (!isAuthenticated) {
-      // Checkout needs a JWT — send anonymous visitors to signup first.
-      // The cycle is deliberately NOT passed: Signup treats ?intent=pro as
-      // presentational only and nothing resumes checkout afterwards, so a
-      // ?cycle= param would be a promise no code keeps. The signed-in user
-      // picks the cycle again here, on the control that actually drives it.
-      navigate('/signup?intent=pro');
-      return;
-    }
+  // Since 2026-11-06 hosted Meeting-Ops is sold only as part of the Unicorn
+  // Commander plans; the storefront picks Solo or Team and runs checkout for
+  // the whole suite. Existing paid tiers keep their billing-portal link.
+  const handleHosted = () => {
     if (isPro) {
       void manageSubscription();
       return;
     }
-    void beginProCheckout('pricing_page', cycle);
+    track('pricing_suite_cta', { authenticated: isAuthenticated });
+    window.location.assign(SUITE_PRICING_URL);
   };
 
-  const proCtaLabel = !isAuthenticated
-    ? 'Get Pro'
-    : isPro
-      ? 'Manage subscription'
-      : 'Upgrade to Pro';
+  const hostedCtaLabel = isPro ? 'Manage subscription' : `See ${SUITE_NAME} plans`;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -128,45 +101,10 @@ export const Pricing: React.FC = () => {
               Free forever. Pay only for the heavy lifting.
             </h1>
             <p className="mt-4 text-base leading-7 text-zinc-400">
-              The live, on-device experience is free for good. Pro adds the GPU
-              server pass and the intelligence layer across your whole library.
+              The live, on-device experience is free for good. Hosted Meeting-Ops, the GPU
+              server pass and the intelligence layer across your whole library, comes with
+              every {SUITE_NAME} plan, together with the rest of the suite.
             </p>
-          </div>
-
-          {/* Billing-cycle toggle. Drives BOTH the number shown and the price
-              the server resolves, so the two can never disagree. */}
-          <div className="mt-8 flex justify-center">
-            <div
-              role="radiogroup"
-              aria-label="Billing cycle"
-              className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.03] p-1"
-            >
-              <button
-                type="button"
-                role="radio"
-                aria-checked={!annual}
-                onClick={() => setCycle('monthly')}
-                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
-                  !annual ? 'bg-white/10 text-white' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                Monthly
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={annual}
-                onClick={() => setCycle('annual')}
-                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
-                  annual ? 'bg-white/10 text-white' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                Annual
-                <span className="ml-1.5 text-xs font-normal text-fuchsia-300">
-                  save {PRO_ANNUAL_SAVING_DISPLAY}/yr
-                </span>
-              </button>
-            </div>
           </div>
 
           <div className="mx-auto mt-8 grid max-w-3xl gap-6 md:grid-cols-2">
@@ -207,30 +145,28 @@ export const Pricing: React.FC = () => {
               </div>
             </div>
 
-            {/* Pro */}
+            {/* Hosted (part of Unicorn Commander) */}
             <div className="relative flex h-full flex-col rounded-3xl border border-fuchsia-500/40 bg-zinc-900 p-8 shadow-[0_0_60px_-15px_rgba(217,70,239,0.25)]">
               <span className="absolute -top-3 right-6 rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500 px-3 py-1 text-[10px] font-semibold uppercase tracking-widest text-white">
-                Most popular
+                Part of {SUITE_NAME}
               </span>
-              <h2 className="text-xl font-semibold text-white">Pro</h2>
+              <h2 className="text-xl font-semibold text-white">Hosted</h2>
               <p className="mt-1 text-sm text-zinc-400">
                 Studio-quality output and an AI that knows your whole library.
               </p>
               <div className="mt-5 flex items-end gap-2">
                 <span className="text-5xl font-semibold tabular-nums text-white">
-                  {annual ? PRO_ANNUAL_PRICE_DISPLAY : PRO_MONTHLY_PRICE_DISPLAY}
+                  {SUITE_SOLO_PRICE_DISPLAY}
                 </span>
-                <span className="pb-1 text-sm text-zinc-500">
-                  {annual ? '/year' : '/month'}
-                </span>
+                <span className="pb-1 text-sm text-zinc-500">/month, Solo</span>
               </div>
               <p className="mt-2 text-sm text-zinc-400">
-                {annual
-                  ? `Billed once a year. That works out to ${PRO_ANNUAL_PRICE_PER_MONTH_WITH_PERIOD}, ${PRO_ANNUAL_SAVING_DISPLAY} less than twelve months at ${PRO_MONTHLY_PRICE_WITH_PERIOD}.`
-                  : `Billed monthly. Paying yearly instead is ${PRO_ANNUAL_PRICE_WITH_PERIOD}, which is ${PRO_ANNUAL_SAVING_DISPLAY} less over the same twelve months.`}
+                Team workspace {SUITE_TEAM_PRICE_DISPLAY}/month for {SUITE_TEAM_SEATS} seats, then{' '}
+                {SUITE_EXTRA_SEAT_WITH_PERIOD}. Billed monthly by {SUITE_NAME}; one subscription covers
+                every app in the suite.
               </p>
               <ul className="mt-6 space-y-3 text-sm text-zinc-200">
-                {PRO_FEATURES.map((f) => (
+                {HOSTED_FEATURES.map((f) => (
                   <li key={f} className="flex items-start gap-2.5">
                     <Check className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-400" />
                     <span>{f}</span>
@@ -240,24 +176,19 @@ export const Pricing: React.FC = () => {
               <div className="mt-auto pt-8">
                 <button
                   type="button"
-                  onClick={handlePro}
+                  onClick={handleHosted}
                   className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-fuchsia-500/20 transition hover:from-fuchsia-400 hover:to-violet-400"
                 >
                   {isPro ? <ExternalLink className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />}
-                  {proCtaLabel}
+                  {hostedCtaLabel}
                 </button>
                 <p className="mt-3 text-center text-xs text-zinc-500">
-                  By upgrading you agree to our{' '}
+                  {SUITE_SOLO_PRICE_WITH_PERIOD} Solo or {SUITE_TEAM_PRICE_WITH_PERIOD} Team workspace, cancel
+                  anytime. Checkout and billing run on the {SUITE_NAME} storefront under its{' '}
                   <Link to="/terms" className="text-fuchsia-300 underline-offset-4 hover:underline">
                     Terms
-                  </Link>{' '}
-                  &amp;{' '}
-                  <Link to="/terms" className="text-fuchsia-300 underline-offset-4 hover:underline">
-                    refund policy
                   </Link>
-                  .{' '}
-                  {annual ? PRO_ANNUAL_PRICE_WITH_PERIOD : PRO_MONTHLY_PRICE_WITH_PERIOD}, cancel
-                  anytime.
+                  .
                 </p>
               </div>
             </div>
