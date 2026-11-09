@@ -95,10 +95,20 @@ class LiteLLMProvider:
         endpoint: str = "",
         model: str = "Qwen3.6-35B-A3B-Vision",
         thinking: bool = False,
+        *,
+        route: Optional[str] = None,
+        org_id: Optional[int] = None,
+        feature: Optional[str] = None,
+        user_id: Optional[int | str] = None,
     ):
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/") if endpoint else DEFAULT_LITELLM_ENDPOINT
         self.model = model
+        self.route = route
+        self.org_id = org_id
+        self.feature = feature or route or "llm"
+        self.user_id = user_id
+        self.org_route = bool(route and org_id is not None)
         # When False (default), suppress the <think>...</think> block that
         # Qwen 3.5+ and some Gemma 4 chat templates emit by default. Flip
         # True for reasoning-heavy tasks where you want the trace.
@@ -142,6 +152,16 @@ class LiteLLMProvider:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.org_route:
+            headers.update(
+                {
+                    "X-UC-Org-Id": str(self.org_id),
+                    "X-UC-App": "meeting-ops",
+                    "X-UC-Feature": self.feature,
+                }
+            )
+            if self.user_id is not None:
+                headers["X-UC-User-Id"] = str(self.user_id)
         return headers
 
     async def chat(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7, extra_params: Optional[dict] = None) -> str:
@@ -167,8 +187,9 @@ class LiteLLMProvider:
         except LLMUnavailable:
             raise
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+            label = "Gateway LLM" if self.org_route else "LLM"
             raise LLMUnavailable(
-                f"LLM request failed: {redact_text(str(exc))}"
+                f"{label} request failed: {redact_text(str(exc))}"
             ) from exc
 
     def chat_sync(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 500, temperature: float = 0.7, extra_params: Optional[dict] = None) -> str:
@@ -192,8 +213,16 @@ class LiteLLMProvider:
                         response.status_code,
                         redact_text(response.text[:200]),
                     )
+                    if self.org_route:
+                        raise LLMUnavailable(
+                            f"Gateway LLM request failed: HTTP {response.status_code}"
+                        )
                     return ""
         except Exception as e:
+            if self.org_route:
+                raise LLMUnavailable(
+                    f"Gateway LLM request failed: {redact_text(str(e))}"
+                ) from e
             logger.error("LLM sync call failed: %s", redact_text(str(e)))
             return ""
 
@@ -219,8 +248,9 @@ class LiteLLMProvider:
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 continue
         except httpx.HTTPError as exc:
+            label = "Gateway LLM" if self.org_route else "LLM"
             raise LLMUnavailable(
-                f"LLM stream failed: {redact_text(str(exc))}"
+                f"{label} stream failed: {redact_text(str(exc))}"
             ) from exc
 
     async def health(self) -> dict:
