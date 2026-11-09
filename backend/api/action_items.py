@@ -21,7 +21,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from auth.dependencies import get_current_organization, get_current_user
 from auth.models import User
@@ -245,6 +245,15 @@ async def list_action_items(
     query = (
         db.query(ActionItem, RecordingSession)
         .join(RecordingSession, ActionItem.session_id == RecordingSession.id)
+        .options(
+            load_only(
+                RecordingSession.id,
+                RecordingSession.session_id,
+                RecordingSession.title,
+                RecordingSession.name,
+                RecordingSession.created_at,
+            )
+        )
         .filter(
             ActionItem.organization_id == org_id,
             RecordingSession.organization_id == org_id,
