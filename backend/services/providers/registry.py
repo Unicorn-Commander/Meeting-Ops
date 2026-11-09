@@ -5,7 +5,16 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt_api_key
+from .org_route import (
+    OrgGatewayKey,
+    OrgGatewayKeyProvider,
+    OrgRouteError,
+    gateway_base_url,
+    get_org_gateway_key_provider,
+    org_route_enabled,
+)
 from .protocols import LLMProvider, EmbeddingsProvider, STTProvider, TTSProvider, RerankingProvider, DiarizationProvider
+from .usage import UsageReporter, get_usage_reporter
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +52,64 @@ DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL") or "Qwen/Qwen3-Reranker-0.6
 
 
 class ProviderRegistry:
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        gateway_key_provider: Optional[OrgGatewayKeyProvider] = None,
+        usage_reporter: Optional[UsageReporter] = None,
+    ):
         self._db = db
         self._settings_cache: dict[tuple[int, str], Optional[dict]] = {}
+        self._ignored_settings_notices: set[tuple[int, str]] = set()
+        self._gateway_key_provider = gateway_key_provider or get_org_gateway_key_provider()
+        self._usage_reporter = usage_reporter or get_usage_reporter()
+
+    def _notice_ignored_settings(self, org_id: int, service_kind: str, settings: dict) -> None:
+        """Explain once per registry why the old org row is not being used."""
+        if not settings or (org_id, service_kind) in self._ignored_settings_notices:
+            return
+        self._ignored_settings_notices.add((org_id, service_kind))
+        logger.warning(
+            "OrgProviderSettings ignored for org_id=%s service_kind=%s: "
+            "MEETING_OPS_USE_ORG_ROUTE is enabled and the org gateway route "
+            "is the single provider source",
+            org_id,
+            service_kind,
+        )
+
+    @staticmethod
+    def _coerce_gateway_key(value: Any) -> str:
+        if isinstance(value, OrgGatewayKey):
+            key = value.key
+        elif isinstance(value, str):
+            key = value
+        elif isinstance(value, dict):
+            key = value.get("key") or value.get("gateway_key") or value.get("gatewayKey")
+        else:
+            key = getattr(value, "key", None)
+        if not key:
+            raise OrgRouteError("Gateway key fetch failed: provider returned no key")
+        return str(key)
+
+    def _gateway_context(self, org_id: int, service_kind: str) -> tuple[str, str]:
+        """Resolve the gateway URL and org/app-scoped bearer."""
+        endpoint = gateway_base_url()
+        try:
+            key = self._coerce_gateway_key(self._gateway_key_provider.get_key(int(org_id)))
+        except OrgRouteError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise OrgRouteError(
+                f"Gateway key fetch failed for org_id={int(org_id)} service_kind={service_kind}"
+            ) from exc
+        return endpoint, key
+
+    @staticmethod
+    def _llm_feature(task: str, route: str) -> str:
+        if route == "concierge":
+            return "chat"
+        return "summary" if task in {"quality", "fast"} else "batch"
 
     def _get_settings(self, org_id: int, service_kind: str) -> dict:
         cache_key = (org_id, service_kind)
@@ -78,6 +142,14 @@ class ProviderRegistry:
         return settings
 
     def get_api_key(self, org_id: int, service_kind: str) -> str:
+        if org_route_enabled() and service_kind in (
+            "llm",
+            "stt",
+            "tts",
+            "embeddings",
+        ):
+            _endpoint, key = self._gateway_context(org_id, service_kind)
+            return key
         settings = self._get_settings(org_id, service_kind)
         encrypted = settings.get("api_key_encrypted", "")
         if encrypted:
@@ -100,6 +172,10 @@ class ProviderRegistry:
         cannot resolve an org context but still need to probe upstream
         availability. Honors LLM_MODEL_{FAST,QUALITY,CHAT} env vars.
         """
+        if org_route_enabled():
+            raise OrgRouteError(
+                "Gateway route requires an organization id; default LLM is unavailable"
+            )
         env_key = {
             "fast": "LLM_MODEL_FAST",
             "quality": "LLM_MODEL_QUALITY",
@@ -127,6 +203,8 @@ class ProviderRegistry:
         *,
         model_override: Optional[str] = None,
         thinking_override: Optional[bool] = None,
+        feature: Optional[str] = None,
+        user_id: Optional[int | str] = None,
     ) -> Any:
         """Resolve the active LLM provider for an org+task.
 
@@ -152,6 +230,28 @@ class ProviderRegistry:
         None defaults to False (suppress <think> tags).
         """
         settings = self._get_settings(org_id, "llm")
+        if org_route_enabled():
+            self._notice_ignored_settings(org_id, "llm", settings)
+            route = "concierge" if task in {"chat", "concierge"} else "batch"
+            endpoint, api_key = self._gateway_context(org_id, "llm")
+            if model_override:
+                logger.info(
+                    "LLM model override ignored for org_id=%s: gateway route=%s is authoritative",
+                    org_id,
+                    route,
+                )
+            from .impl_llm import LiteLLMProvider
+
+            return LiteLLMProvider(
+                api_key=api_key,
+                endpoint=endpoint,
+                model=route,
+                thinking=False,
+                route=route,
+                org_id=org_id,
+                feature=feature or self._llm_feature(task, route),
+                user_id=user_id,
+            )
         per_org_provider = settings.get("provider_name")
         per_org_endpoint = settings.get("endpoint_url")
         per_org_model = settings.get("model_name", "")
@@ -225,8 +325,28 @@ class ProviderRegistry:
             logger.warning(f"Unknown LLM provider '{provider_name}', falling back to LiteLLM")
             return LiteLLMProvider(api_key=api_key, endpoint=endpoint, model=model, thinking=thinking)
 
-    def get_embeddings(self, org_id: int) -> Any:
+    def get_embeddings(
+        self,
+        org_id: int,
+        *,
+        feature: Optional[str] = None,
+        user_id: Optional[int | str] = None,
+    ) -> Any:
         settings = self._get_settings(org_id, "embeddings")
+        if org_route_enabled():
+            self._notice_ignored_settings(org_id, "embeddings", settings)
+            endpoint, api_key = self._gateway_context(org_id, "embeddings")
+            from .impl_embeddings import InfinityProvider
+
+            return InfinityProvider(
+                api_key=api_key,
+                endpoint=endpoint,
+                model="embed",
+                route="embed",
+                org_id=org_id,
+                feature=feature or "embedding",
+                user_id=user_id,
+            )
         provider_name = settings.get("provider_name") or "infinity"
         endpoint = settings.get("endpoint_url") or DEFAULT_INFINITY_EMBEDDING_ENDPOINT
         api_key = self.get_api_key(org_id, "embeddings")
@@ -261,6 +381,9 @@ class ProviderRegistry:
         *,
         provider_override: Optional[str] = None,
         model_override: Optional[str] = None,
+        feature: Optional[str] = None,
+        user_id: Optional[int | str] = None,
+        work_id: Optional[str] = None,
     ) -> Any:
         """Resolve the org's configured STT provider.
 
@@ -278,13 +401,30 @@ class ProviderRegistry:
         route through Whisper while the org default stays Parakeet (or
         vice versa).
         """
+        settings = self._get_settings(org_id, "stt")
+        if org_route_enabled():
+            self._notice_ignored_settings(org_id, "stt", settings)
+            endpoint, api_key = self._gateway_context(org_id, "stt")
+            from .impl_stt import OpenAITranscriptionProvider
+
+            return OpenAITranscriptionProvider(
+                endpoint=endpoint,
+                model="voice",
+                api_key=api_key,
+                route="voice",
+                org_id=org_id,
+                feature=feature or "stt",
+                user_id=user_id,
+                usage_reporter=self._usage_reporter,
+                work_id=work_id,
+            )
+
         # Default to Parakeet: it runs ~3x faster than whisper-large-v3-turbo
         # on the same hardware, returns word-level timestamps natively
         # (whisper.cpp only does segment-level), and gives the upload
         # pipeline a cleaner shape for the diarization merge. The legacy
         # meet-whisper container was retired 2026-05-19 once the cloud
         # deploy moved STT off bigboy's RTX 6000.
-        settings = self._get_settings(org_id, "stt")
         provider_name = (
             provider_override
             or settings.get("provider_name")
@@ -330,8 +470,31 @@ class ProviderRegistry:
             model=model or "whisper.cpp-large-v3-turbo",
         )
 
-    def get_tts(self, org_id: int) -> Any:
+    def get_tts(
+        self,
+        org_id: int,
+        *,
+        feature: Optional[str] = None,
+        user_id: Optional[int | str] = None,
+        work_id: Optional[str] = None,
+    ) -> Any:
         settings = self._get_settings(org_id, "tts")
+        if org_route_enabled():
+            self._notice_ignored_settings(org_id, "tts", settings)
+            endpoint, api_key = self._gateway_context(org_id, "tts")
+            from .impl_tts import KokoroProvider
+
+            return KokoroProvider(
+                endpoint=endpoint,
+                voice="af_bella",
+                api_key=api_key,
+                route="voice",
+                org_id=org_id,
+                feature=feature or "tts",
+                user_id=user_id,
+                usage_reporter=self._usage_reporter,
+                work_id=work_id,
+            )
         provider_name = settings.get("provider_name") or "kokoro"
         api_key = self.get_api_key(org_id, "tts")
         endpoint_override = settings.get("endpoint_url") or ""

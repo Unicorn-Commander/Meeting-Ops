@@ -11,6 +11,7 @@ in a follow-up.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional, TypedDict
 
@@ -20,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from auth.models import Organization
 from database.models import RecordingSession, UploadJob
+
+logger = logging.getLogger(__name__)
 
 
 class TierLimits(TypedDict):
@@ -137,6 +140,41 @@ def sum_monthly_audio_seconds(db: Session, org_id: int) -> float:
         )
         .scalar()
     )
+    # Quotas remain the enforcement source of truth. When org routing is on,
+    # also publish each recording as one idempotent usage unit so repeated
+    # quota/status reads do not create a second cap or a second charge.
+    from services.providers.org_route import org_route_enabled
+    if org_route_enabled():
+        from services.providers.usage import get_usage_reporter
+
+        rows = (
+            db.query(RecordingSession.id, RecordingSession.duration)
+            .filter(
+                RecordingSession.organization_id == org_id,
+                RecordingSession.created_at >= month_start,
+            )
+            .all()
+        )
+        reporter = get_usage_reporter()
+        for session_id, duration in rows:
+            hours = float(duration or 0.0) / 3600.0
+            if hours <= 0:
+                continue
+            try:
+                reporter.report(
+                    organization_id=org_id,
+                    metric="upload_audio_hours",
+                    quantity=hours,
+                    work_id=f"upload-audio:{org_id}:{session_id}",
+                    feature="upload",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Upload-hours usage report failed for org_id=%s session_id=%s: %s",
+                    org_id,
+                    session_id,
+                    exc,
+                )
     return float(total or 0.0)
 
 

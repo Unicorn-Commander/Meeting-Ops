@@ -29,6 +29,7 @@ from typing import Any, Optional
 import httpx
 
 from .protocols import STTProvider  # noqa: F401  (re-exported)
+from .usage import UsageReporter, audio_work_id, get_usage_reporter
 from utils.url_redaction import redact_text, redact_url
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ async def _post_audio_with_fallback(
     *,
     endpoint: str,
     route: str,
+    allow_fallback: bool = True,
     **kwargs: Any,
 ) -> tuple[httpx.Response | None, str | None]:
     """Try compatible endpoint bases in operator-configured order.
@@ -167,7 +169,7 @@ async def _post_audio_with_fallback(
         for value in os.getenv("MEETING_OPS_STT_FALLBACK_URLS", "").split(",")
         if value.strip()
     ]
-    if not fallbacks:
+    if not allow_fallback or not fallbacks:
         # Preserve legacy requests, results and logs exactly when not enabled.
         return await _post_audio_with_retry(url=f"{endpoint}{route}", **kwargs)
 
@@ -537,7 +539,16 @@ class LocalParakeetProvider:
                 error=f"Transcription service error {resp.status_code}: {detail}",
             )
 
-        payload = resp.json()
+        try:
+            payload = resp.json()
+        except (TypeError, ValueError) as exc:
+            if self.org_route:
+                return _empty_result(
+                    self.model,
+                    language or "en",
+                    error="Gateway STT returned an invalid response",
+                )
+            raise exc
         # Normalize. The svc already speaks the unified shape, but defensively
         # coerce the fields we depend on.
         segments = []
@@ -592,12 +603,58 @@ class OpenAITranscriptionProvider:
         model: str = "parakeet",
         api_key: str = "",
         return_word_timestamps: bool = True,
+        *,
+        route: str | None = None,
+        org_id: int | None = None,
+        feature: str | None = None,
+        user_id: int | str | None = None,
+        usage_reporter: UsageReporter | None = None,
+        work_id: str | None = None,
     ):
         # ``endpoint`` is the OpenAI base (…/v1); we POST {endpoint}/audio/transcriptions.
         self.endpoint = (endpoint or "").rstrip("/") or "http://unicorn-litellm:4000/v1"
-        self.model = model
+        self.route = route
+        self.model = route or model
         self.api_key = api_key
         self.return_word_timestamps = return_word_timestamps
+        self.org_id = org_id
+        self.feature = feature or ("stt" if route == "voice" else route or "stt")
+        self.user_id = user_id
+        self.org_route = bool(route and org_id is not None)
+        self.usage_reporter = usage_reporter or (
+            get_usage_reporter() if self.org_route else None
+        )
+        self.work_id = work_id
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.org_route:
+            headers.update(
+                {
+                    "X-UC-Org-Id": str(self.org_id),
+                    "X-UC-App": "meeting-ops",
+                    "X-UC-Feature": self.feature,
+                }
+            )
+            if self.user_id is not None:
+                headers["X-UC-User-Id"] = str(self.user_id)
+        return headers
+
+    def _report_audio_seconds(self, audio_path: str, duration: float) -> None:
+        if not self.org_route or not self.usage_reporter or duration <= 0:
+            return
+        try:
+            self.usage_reporter.report(
+                organization_id=int(self.org_id),
+                metric="stt_audio_seconds",
+                quantity=float(duration),
+                work_id=self.work_id or audio_work_id(audio_path),
+                feature=self.feature,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("STT usage report failed for org_id=%s: %s", self.org_id, exc)
 
     async def transcribe(
         self,
@@ -618,18 +675,16 @@ class OpenAITranscriptionProvider:
         if self.return_word_timestamps:
             # OpenAI word-level timestamps; the shim maps this to Parakeet's.
             data["timestamp_granularities[]"] = "word"
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
         resp, error = await _post_audio_with_fallback(
             endpoint=self.endpoint,
             route="/audio/transcriptions",
+            allow_fallback=not self.org_route,
             audio_path=audio_path,
             file_field="file",
             timeout=timeout,
             label="Gateway STT",
             data=data,
-            headers=headers or None,
+            headers=self._headers() or None,
         )
         if resp is None:
             return _empty_result(self.model, language or "en", error=error)
@@ -639,7 +694,11 @@ class OpenAITranscriptionProvider:
             logger.error("Gateway STT returned %s: %s", resp.status_code, detail)
             return _empty_result(
                 self.model, language or "en",
-                error=f"Transcription service error {resp.status_code}: {detail}",
+                error=(
+                    f"Gateway STT service error {resp.status_code}: {detail}"
+                    if self.org_route
+                    else f"Transcription service error {resp.status_code}: {detail}"
+                ),
             )
 
         payload = resp.json()
@@ -662,11 +721,13 @@ class OpenAITranscriptionProvider:
                 "confidence": float(w.get("confidence") or 0.99),
             })
         actual_model = payload.get("model") or self.model
+        duration = float(payload.get("duration") or 0.0)
+        self._report_audio_seconds(audio_path, duration)
         return {
             "text": (payload.get("text") or "").strip(),
             "segments": segments,
             "words": words,
-            "duration": float(payload.get("duration") or 0.0),
+            "duration": duration,
             "language": payload.get("language", language or "en") or (language or "en"),
             "confidence": float(payload.get("confidence") or 0.97),
             "model": actual_model,

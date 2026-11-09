@@ -3157,9 +3157,21 @@ async def _summarize_session(
 
     style = _SUMMARY_TEMPLATE_GUIDANCE.get(template, _SUMMARY_TEMPLATE_GUIDANCE["standard"])
 
-    # Per-upload override wins, then env-configured direct route, then the
-    # org's ProviderRegistry default.
-    direct = None if llm_model else _direct_summarizer_provider()
+    # With the org route enabled, ProviderRegistry is the endpoint source and
+    # the old direct summarizer URL is not consulted. Keep the selected
+    # provider in `direct` so the established summarizer prompt/cap behavior
+    # remains unchanged.
+    from services.providers.org_route import org_route_enabled
+    if org_route_enabled():
+        from services.providers.registry import get_provider_registry
+        direct = get_provider_registry(db).get_llm(
+            session.organization_id,
+            task="quality",
+            model_override=llm_model,
+            thinking_override=llm_thinking,
+        )
+    else:
+        direct = None if llm_model else _direct_summarizer_provider()
     if direct is not None:
         llm = direct
         # Use the deploy-doc system prompt verbatim when on the direct
