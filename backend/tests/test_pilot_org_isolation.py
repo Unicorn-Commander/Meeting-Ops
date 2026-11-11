@@ -305,7 +305,9 @@ def test_insights_transcript_and_media_reads_refuse_org_a(client, pilot_orgs):
         f"/api/simple/recording-sessions/{ctx['session_a']}/download/transcript",
         f"/api/simple/recording-sessions/{ctx['session_a']}/download/transcript/simple",
         f"/api/simple/recording-sessions/{ctx['session_a']}/download/audio",
+        f"/api/simple/recording-sessions/{ctx['session_a']}/download/summary/pdf",
         f"/api/simple/recording-sessions/{ctx['session_a']}/download/summary/md",
+        f"/api/simple/recording-sessions/{ctx['session_a']}/download/summary/docx",
         f"/api/recording-sessions/{ctx['session_a']}/export",
     ]
     for path in paths:
