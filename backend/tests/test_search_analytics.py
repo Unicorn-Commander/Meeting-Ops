@@ -175,8 +175,9 @@ class TestAnalytics:
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert "npu" in data
-        assert data["npu"]["enabled"] is True
+        assert "pipeline" in data
+        assert data["pipeline"]["live_inference"] == "browser"
+        assert data["pipeline"]["completion_pass"] == "server"
 
 
 # ---------------------------------------------------------------------------
