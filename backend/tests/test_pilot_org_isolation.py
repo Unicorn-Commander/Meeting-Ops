@@ -418,13 +418,15 @@ def test_missing_and_forged_org_context_never_expands_scope(client, pilot_orgs):
         assert response.status_code == 200, response.text
         _assert_clean(response.json(), ctx)
 
-    # include_all_my_orgs is still membership-scoped, not an all-tenants view.
-    all_my_orgs = client.get(
-        "/api/simple/recording-sessions?include_all_my_orgs=true",
-        headers=headers,
-    )
-    assert all_my_orgs.status_code == 200, all_my_orgs.text
-    _assert_clean(all_my_orgs.json(), ctx)
+    # Both membership-wide listing and the platform-admin flag stay scoped for
+    # a regular member. Neither may silently become an all-tenants view.
+    for query in ("?include_all_my_orgs=true", "?all_tenants=true"):
+        response = client.get(
+            f"/api/simple/recording-sessions{query}",
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        _assert_clean(response.json(), ctx)
 
 
 async def _mcp_call_as_b(app, token: str, function, *args, **kwargs):
