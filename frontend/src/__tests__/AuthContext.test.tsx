@@ -191,7 +191,7 @@ describe('AuthContext SSO probe (L6)', () => {
       );
     });
     expect(href()).toBe(`/oauth2/start?rd=${encodeURIComponent('/#/sessions')}`);
-    expect(store['mo-sso-start-attempted']).toBe('1');
+    expect(Number(store['mo-sso-start-attempted'])).toBeGreaterThan(0);
 
     // The provider is down; the visitor bounces back to the same route in
     // the SAME page life (the redirect never left the document). Reset the
@@ -199,7 +199,7 @@ describe('AuthContext SSO probe (L6)', () => {
     // probe must NOT fire a fresh attempt. This is exactly what the
     // ProtectedRoute render effect would do on the bounced-back visit.
     resetSsoAttemptGuard(); // clears the marker too, so re-set it first...
-    store['mo-sso-start-attempted'] = '1';
+    store['mo-sso-start-attempted'] = String(Date.now());
     // ...and clear ONLY the in-flight flag so the guard re-evaluates the marker.
     // (resetSsoAttemptGuard already cleared the flag; re-arming it is a no-op
     // because the marker is back, so a redirect would be suppressed.)
@@ -216,6 +216,6 @@ describe('AuthContext SSO probe (L6)', () => {
     // suppressed a second fresh attempt (a new attempt would have re-set it
     // via writeSsoDown, which is indistinguishable here, but the key point
     // is the guard read it and bailed before touching window.location).
-    expect(store['mo-sso-start-attempted']).toBe('1');
+    expect(Number(store['mo-sso-start-attempted'])).toBeGreaterThan(0);
   });
 });

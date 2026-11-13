@@ -84,7 +84,7 @@ describe('redirectToLogin one-attempt guard', () => {
   it('a pre-set down marker blocks the very first redirect', () => {
     stubLocation('#/sessions');
     const store = (window as unknown as { sessionStorage: Storage }).sessionStorage;
-    store.setItem('mo-sso-start-attempted', '1');
+    store.setItem('mo-sso-start-attempted', String(Date.now()));
 
     redirectToLogin();
     expect(href()).toBe('');
@@ -93,7 +93,7 @@ describe('redirectToLogin one-attempt guard', () => {
   it('resetSsoAttemptGuard lets a manual retry fire again', () => {
     stubLocation('#/sessions');
     const store = (window as unknown as { sessionStorage: Storage }).sessionStorage;
-    store.setItem('mo-sso-start-attempted', '1');
+    store.setItem('mo-sso-start-attempted', String(Date.now()));
 
     redirectToLogin();
     expect(href()).toBe('');
@@ -107,6 +107,16 @@ describe('redirectToLogin one-attempt guard', () => {
   it('explicit returnTo targets are honored', () => {
     stubLocation('#/');
     redirectToLogin('/#/sessions');
+    expect(href()).toBe(`/oauth2/start?rd=${encodeURIComponent('/#/sessions')}`);
+  });
+});
+
+describe('L6 loop guard across page loads', () => {
+  it('a marker older than the retry window no longer blocks a redirect', () => {
+    stubLocation('#/sessions');
+    const store = (window as unknown as { sessionStorage: Storage }).sessionStorage;
+    store.setItem('mo-sso-start-attempted', String(Date.now() - 10 * 60 * 1000));
+    redirectToLogin();
     expect(href()).toBe(`/oauth2/start?rd=${encodeURIComponent('/#/sessions')}`);
   });
 });

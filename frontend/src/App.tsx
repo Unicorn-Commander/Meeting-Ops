@@ -16,16 +16,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { PWAUpdate } from './components/PWAUpdate';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import { initPostHog, track, PENDING_CHECKOUT_KEY } from './utils/posthog';
-import { resetSsoAttemptGuard } from './utils/loginRedirect';
 import 'react-toastify/dist/ReactToastify.css';
 import './index.css';
-
-// Bureau CX L6: the one-attempt SSO-down marker is per document load: a
-// fresh load is a fresh chance (a later manual retry must work), so clear
-// it here at module load, before React renders anything. The marker is then
-// re-set only when a redirect attempt is actually made (see
-// utils/loginRedirect redirectToLogin).
-resetSsoAttemptGuard();
 
 function AppWithShortcuts() {
   useMeetingOpsShortcuts();

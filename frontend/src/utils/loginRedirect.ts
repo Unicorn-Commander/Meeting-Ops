@@ -26,6 +26,11 @@
 let inFlight = false;
 
 const SSO_DOWN_KEY = 'mo-sso-start-attempted';
+// The marker must survive the full-page round trip through the provider (a
+// failed start comes back as a NEW document), so it is a timestamp in
+// sessionStorage, not cleared at load. Within this window a second redirect is
+// suppressed; after it a manual retry works again.
+export const SSO_RETRY_WINDOW_MS = 2 * 60 * 1000;
 
 export function ssoStartUrl(target: string): string {
   return ssoStartUrlFor(target, isNativeOidcHost());
@@ -57,7 +62,8 @@ export function redirectToLogin(rd?: string): void {
 
 function readSsoDown(): boolean {
   try {
-    return sessionStorage.getItem(SSO_DOWN_KEY) === '1';
+    const at = Number(sessionStorage.getItem(SSO_DOWN_KEY));
+    return Number.isFinite(at) && at > 0 && Date.now() - at < SSO_RETRY_WINDOW_MS;
   } catch {
     return false;
   }
@@ -65,17 +71,16 @@ function readSsoDown(): boolean {
 
 function writeSsoDown(): void {
   try {
-    sessionStorage.setItem(SSO_DOWN_KEY, '1');
+    sessionStorage.setItem(SSO_DOWN_KEY, String(Date.now()));
   } catch {
     /* storage unavailable: the in-flight flag still prevents double-fire */
   }
 }
 
 /**
- * Drop the one-attempt marker. Called by the app bootstrap on a fresh
- * document load (so a later manual retry works) and by AuthContext when
- * the SSO probe discovers a live provider session (the redirect never
- * happened, so the marker must not block a real redirect later).
+ * Drop the one-attempt marker. Called by AuthContext when the SSO probe
+ * finds a live session, and by an explicit user retry. Never at page load:
+ * that would defeat the guard on the provider round trip.
  */
 export function resetSsoAttemptGuard(): void {
   inFlight = false;
