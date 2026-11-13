@@ -16,8 +16,16 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { PWAUpdate } from './components/PWAUpdate';
 import { useMeetingOpsShortcuts } from './hooks/useKeyboardShortcuts';
 import { initPostHog, track, PENDING_CHECKOUT_KEY } from './utils/posthog';
+import { resetSsoAttemptGuard } from './utils/loginRedirect';
 import 'react-toastify/dist/ReactToastify.css';
 import './index.css';
+
+// Bureau CX L6: the one-attempt SSO-down marker is per document load: a
+// fresh load is a fresh chance (a later manual retry must work), so clear
+// it here at module load, before React renders anything. The marker is then
+// re-set only when a redirect attempt is actually made (see
+// utils/loginRedirect redirectToLogin).
+resetSsoAttemptGuard();
 
 function AppWithShortcuts() {
   useMeetingOpsShortcuts();
@@ -54,6 +62,29 @@ function App() {
       });
     } catch {
       /* analytics must never break app boot */
+    }
+  }, []);
+
+  // Bureau CX L6: the SSO start bounces failures back here as
+  // #/login?sso_error=<reason> (native-OIDC path). Strip the parameter so a
+  // later reload of the same URL does not re-trigger a redirect attempt, and
+  // so the Login page's own ?verify= handling is not confused by it. The
+  // one-attempt marker (set by the redirect that produced this URL) is what
+  // actually prevents the loop; this is belt-and-suspenders for the URL
+  // itself.
+  useEffect(() => {
+    try {
+      const hash = window.location.hash || '';
+      if (!hash.includes('sso_error=')) return;
+      const qIndex = hash.indexOf('?');
+      if (qIndex === -1) return;
+      const path = hash.slice(0, qIndex);
+      const params = new URLSearchParams(hash.slice(qIndex + 1));
+      params.delete('sso_error');
+      const qs = params.toString();
+      window.location.replace(`${path}${qs ? `?${qs}` : ''}`);
+    } catch {
+      /* URL cleanup must never break app boot */
     }
   }, []);
 

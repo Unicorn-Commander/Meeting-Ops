@@ -78,6 +78,7 @@ function writeSsoDown(): void {
  * happened, so the marker must not block a real redirect later).
  */
 export function resetSsoAttemptGuard(): void {
+  inFlight = false;
   try {
     sessionStorage.removeItem(SSO_DOWN_KEY);
   } catch {
