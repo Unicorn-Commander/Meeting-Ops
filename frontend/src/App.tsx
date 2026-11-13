@@ -57,6 +57,29 @@ function App() {
     }
   }, []);
 
+  // Bureau CX L6: the SSO start bounces failures back here as
+  // #/login?sso_error=<reason> (native-OIDC path). Strip the parameter so a
+  // later reload of the same URL does not re-trigger a redirect attempt, and
+  // so the Login page's own ?verify= handling is not confused by it. The
+  // one-attempt marker (set by the redirect that produced this URL) is what
+  // actually prevents the loop; this is belt-and-suspenders for the URL
+  // itself.
+  useEffect(() => {
+    try {
+      const hash = window.location.hash || '';
+      if (!hash.includes('sso_error=')) return;
+      const qIndex = hash.indexOf('?');
+      if (qIndex === -1) return;
+      const path = hash.slice(0, qIndex);
+      const params = new URLSearchParams(hash.slice(qIndex + 1));
+      params.delete('sso_error');
+      const qs = params.toString();
+      window.location.replace(`${path}${qs ? `?${qs}` : ''}`);
+    } catch {
+      /* URL cleanup must never break app boot */
+    }
+  }, []);
+
   return (
     <ErrorBoundary scope="app">
       <Router>

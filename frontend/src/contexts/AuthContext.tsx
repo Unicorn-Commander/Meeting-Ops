@@ -5,6 +5,11 @@ import {
   type OrganizationMembership,
 } from '../utils/organization';
 import { setAuthRefreshHandler } from '../utils/installFetchInterceptor';
+import { hasAppRouteEntry } from '../utils/ssoEntry';
+import {
+  redirectToLogin,
+  resetSsoAttemptGuard,
+} from '../utils/loginRedirect';
 import { clearAllHydratedCaches, HYDRATED_CACHE_CLEAR_EVENT } from '../utils/cachedState';
 import { identify, resetIdentity, track } from '../utils/posthog';
 
@@ -317,6 +322,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     // Always probe /api/auth/me on mount so SSO sessions (oauth2-proxy
     // injects X-Auth-Request-Email server-side) are picked up even without
     // a JWT in localStorage.
+    //
+    // Bureau CX L6: a 401 here means the visitor holds no Meeting-Ops
+    // session. If they arrived on an APP route (a hash like /#/sessions,
+    // what the Ops-Center app cards link to), start the identity-provider
+    // redirect at once so a person already signed in to Unicorn Commander
+    // is not asked for a password and returns to the requested screen. The
+    // bare root stays public: a visitor with no session and no app route
+    // keeps the marketing page. The one-attempt guard in redirectToLogin
+    // caps the provider-down case at a single redirect, after which the
+    // plain "sign-in unavailable, retry" screen stays up (no loop).
     const probeSso = async () => {
       try {
         const r = await fetch(authApi('/api/auth/me'), {
@@ -329,7 +344,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
             const ssoUser = await r.json();
             setUser(ssoUser);
             identifyUser(ssoUser);
+            // A live provider session means the redirect never happened, so
+            // a marker left by a prior failed attempt must not block a real
+            // redirect later.
+            resetSsoAttemptGuard();
           } catch {}
+        } else if (r.status === 401 && hasAppRouteEntry()) {
+          redirectToLogin();
         }
       } catch {}
       setIsLoading(false);
